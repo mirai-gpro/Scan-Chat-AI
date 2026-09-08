@@ -1672,6 +1672,39 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/scan/scan_canonicalization_standard_format_design.md` | **戦略正本: 検査票→標準フォーマット正準化(2層戦略)**。①読取=native multimodal維持 / ②正準化=健診標準フォーマット(KMAT)への決定論マッピング新規 |
 | `docs/ai_reviews/` | Gemini/ChatGPT へのレビュー依頼・相談ドラフト集(開発経緯の記録。確定仕様は各 spec が正本) |
 
+## CI (2026-09-08 新設・`.github/workflows/ci.yml`)
+
+**既存の `verify:*` を PR で自動実行する。新しい検査をここに書き足さない** (二重管理しない)。
+それまで CI では 1 本も走っておらず (workflows は `sol-publisher.yml` のみ)、実際に
+**並行ブランチ `claude/ai-disease-prevention-report-v2-tjf4am` に `.report-prose { max-width: none }`**
+= 2026-09-06 の裁定 (45em) と逆方向の変更が残っていた。**このブランチは救出しない・再利用しない**
+(発注者判断 2026-09-08・分類 C 旧仕様)。
+
+| job | 中身 | 実測 | 状態 |
+|---|---|---|---|
+| `static-required` | astro check / build / **A 層 11 本** | 60s + npm ci | **required** |
+| `pwsh-verify` | B 層 6 本 (PowerShell 必須) | 未実測 | 初回 non-required |
+| `browser-screen` | **`verify:screen` 単独** | 12s | non-required → **優先して昇格** |
+| `browser-extended` | interview-ui / scan-pages / scan-upload | 83s | 当面 non-required |
+
+- **`verify:screen` を単独 job にしてある**のは、上記の回帰を落とせるのがこれだけで、
+  他のブラウザ検査の flaky で required 化を止められないようにするため。
+  実測: `45em → none` を注入すると「本文の行長が 836px で上限 720px を超えた」で落ちる。
+- **`verify:print` は入れない** (発注者判断)。`poppler-utils` がランナー未同梱で、和文フォント
+  (BIZ UDGothic) が無いと検査 ⓪ が「中国語フォントが埋め込まれている」で**必ず**落ちる
+  = 実ロジックでなく環境差で赤くなる。**廃止ではなく Phase 2 以降の保留項目。**
+- **`CHROMIUM_PATH` を CI で設定しない。** 各スクリプトは
+  `executablePath: CHROMIUM_PATH ?? '/opt/pw-browsers/chromium'` で試して**失敗したら
+  `chromium.launch()` へフォールバックする** (`verify-screen.mjs:64-68` ほか 3 本同形)。
+  無理に指すと Playwright が期待する版と食い違ったときに**フォールバックごと失敗する**(実測)。
+- **secret は 1 つも要らない**。秘密が要りそうな検査は**自分でダミー値を注入している**
+  (`verify-demecal-final-setup.mjs:430-433`)。24 本とも **localhost 以外へアクセスしない**。
+  権限は `contents: read` のみ・push も deployment もしない。
+- **ブランチ棚卸しの前に `git rev-parse --is-shallow-repository` を必ず見る。**
+  この作業環境は shallow clone で、そのまま測ると ahead/behind・merge-base・patch-id が
+  全部狂う (実測: 3 本が「共通祖先なし・未反映 199/276/220」→ `--unshallow` 後は全て ahead 0)。
+  **shallow のままブランチ救出の可否を判定しない。**
+
 ## コード / スタック
 - Astro v5 + TypeScript (SSR / Vercel)。UI=`.astro`、API=`src/pages/api/**.ts`、ロジック=`src/lib/`。
 - Supabase 2スキーマ (`customer`=PII / `diagnosis`=非PII)。マイグレーション=`supabase/migrations/`。

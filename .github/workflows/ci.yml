@@ -1,0 +1,193 @@
+# Scan-Chat-AI CI — 既存の `verify:*` を PR で自動実行する。
+#
+# 【なぜ作ったか】このリポジトリには退行検出の実績がある検査が 24 本あるのに、
+# **CI では 1 本も走っていなかった** (workflows は sol-publisher.yml のみ)。
+# 実際、2026-09-04 の並行ブランチに `.report-prose { max-width: none }` =
+# 2026-09-06 の裁定 (45em) と逆方向の変更が残っており、素朴に merge すると
+# 紙面の行長が巻き戻る状態だった。`verify:screen` はこれを機械で落とせる。
+#
+# 【新しい検査は作らない】既に在って「壊して落ちることを確認済み」のものを
+# 走らせるだけ。ここに検査ロジックを書き足さない (二重管理しない)。
+#
+# 【job を分けてある理由】required にできる安定した層を、まだ CI 実績の無い層で
+# 巻き添えにしないため。static-required だけが最初の品質ゲート。
+#
+#   static-required   … astro check / build / A 層 11 本   → 最初から required
+#   pwsh-verify       … B 層 6 本 (PowerShell 必須)         → 初回 non-required
+#   browser-screen    … verify:screen だけ                  → 安定後に優先して required
+#   browser-extended  … 残りのブラウザ検査 3 本             → 当面 non-required
+#
+# **`verify:print` は入れていない** (発注者判断 2026-09-08)。poppler-utils が
+# ランナー未同梱で、かつ和文フォント (BIZ UDGothic) が無いと検査 ⓪ が
+# 「中国語フォントが埋め込まれている」で必ず落ちる = 実ロジックでなく環境差で
+# 赤くなる。**廃止ではなく Phase 2 以降で専用環境を設計してから追加する保留項目。**
+#
+# 【権限】`contents: read` だけ。push も deployment もしない。
+# 検査は 24 本とも **localhost 以外へアクセスしない**ことを実測済みで、
+# **新規 secret は要らない** (秘密が要りそうな検査は自分でダミー値を注入している)。
+
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches:
+      - claude/awesome-carson-UeyUZ # 現在の既定ブランチ。main へ移行したら差し替える
+
+permissions:
+  contents: read
+
+# 同一 PR / ブランチの古い実行は取り消す。
+# (sol-publisher.yml は「投稿途中で切ると分からなくなる」ので cancel しないが、
+#  こちらは何も書き込まないので取り消して問題ない。)
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── 最初の品質ゲート (required) ────────────────────────────────
+  # 依存ゼロ・実測 約 80s。ここが赤ければ merge させない。
+  static-required:
+    name: static (required)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+
+      - name: astro check
+        run: npx astro check
+
+      - name: astro build
+        run: npx astro build
+
+      # A 層 = 純 Node。ブラウザも dev サーバも外部バイナリも要らない。
+      # 1 本ずつ step にしてあるのは、落ちたときにどれが落ちたか一目で分かるため。
+      - run: npm run verify:report-model
+      - run: npm run verify:sheet-contract
+      - run: npm run verify:demo-gate
+      - run: npm run verify:scan-upload-key
+      - run: npm run verify:scan-persist
+      - run: npm run verify:blood-csv
+      - run: npm run verify:blood-parser
+      - run: npm run verify:intake-scope
+      - run: npm run verify:ps1-order
+      - run: npm run verify:probe-bat-gate
+      - run: npm run verify:demecal-health
+
+  # ── PowerShell 必須の検査 (初回 non-required) ──────────────────
+  # ubuntu-24.04 ランナーには PowerShell 7.6.5 が同梱されている見込み
+  # (出典: actions/runner-images の Ubuntu2404-Readme)。ただし**このリポジトリの
+  # 検査として成功した実績がまだ無い**ので、required にはしない。
+  # pwsh が無い場合は各スクリプトが明示的に落ちる (黙って通らない)。
+  pwsh-verify:
+    name: pwsh verify (non-required)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+
+      - name: pwsh の在処を記録 (無ければここで落ちる)
+        run: pwsh --version
+
+      - run: npm run verify:demecal-flow
+      - run: npm run verify:demecal-range
+      - run: npm run verify:demecal-production
+      - run: npm run verify:demecal-installer
+      - run: npm run verify:demecal-scheduler
+      - run: npm run verify:demecal-final-setup
+
+  # ── verify:screen だけを単独 job に (優先して required 昇格) ───
+  # **今回の実回帰 (45em → none) を落とせるのはこれ。** 他のブラウザ検査と
+  # 同じ job に入れると、そちらの flaky で required にできなくなるので分けてある。
+  browser-screen:
+    name: browser / verify:screen (non-required → 昇格候補)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+
+      # 各スクリプトは `executablePath: CHROMIUM_PATH ?? '/opt/pw-browsers/chromium'` で
+      # まず起動を試み、**失敗したら `chromium.launch()` へフォールバックする**
+      # (`verify-screen.mjs:64-68` ほか 3 本とも同じ形)。既定のパスは作業環境固有で
+      # ランナーには存在しないので、**CHROMIUM_PATH は設定せずフォールバックに任せる。**
+      # ここで CHROMIUM_PATH を無理に指すと、Playwright が期待する版と食い違ったときに
+      # フォールバックごと失敗する (ローカルで実際に踏んだ)。
+      - name: Chromium を入れる
+        run: npx playwright install --with-deps chromium
+
+      - name: dev サーバを起動して待つ
+        run: |
+          ALLOW_UID_ENTRY=on npx astro dev --port 4321 > /tmp/dev.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://localhost:4321/report; then
+              echo "dev server up ($i s)"; exit 0
+            fi
+            sleep 1
+          done
+          echo "dev server did not come up"; tail -40 /tmp/dev.log; exit 1
+
+      - name: verify:screen
+        env:
+          VERIFY_URL: http://localhost:4321
+        run: npm run verify:screen
+
+      - name: dev サーバのログ (失敗時のみ)
+        if: failure()
+        run: tail -60 /tmp/dev.log
+
+  # ── 残りのブラウザ検査 (当面 non-required) ─────────────────────
+  # scan-upload は実測 66s と長いので、screen と同じ job に入れて
+  # required の待ち時間を伸ばさない。
+  browser-extended:
+    name: browser / extended (non-required)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+
+      - name: Chromium を入れる
+        run: npx playwright install --with-deps chromium
+
+      - name: dev サーバを起動して待つ
+        run: |
+          ALLOW_UID_ENTRY=on npx astro dev --port 4321 > /tmp/dev.log 2>&1 &
+          for i in $(seq 1 60); do
+            if curl -sf -o /dev/null http://localhost:4321/report; then
+              echo "dev server up ($i s)"; exit 0
+            fi
+            sleep 1
+          done
+          echo "dev server did not come up"; tail -40 /tmp/dev.log; exit 1
+
+      # CHROMIUM_PATH は設定しない (browser-screen と同じ理由 = フォールバックに任せる)。
+      - name: ブラウザ検査 3 本
+        env:
+          VERIFY_URL: http://localhost:4321
+        run: |
+          npm run verify:interview-ui
+          npm run verify:scan-pages
+          npm run verify:scan-upload
+
+      - name: dev サーバのログ (失敗時のみ)
+        if: failure()
+        run: tail -60 /tmp/dev.log
