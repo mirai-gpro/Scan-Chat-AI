@@ -20,7 +20,12 @@
  *   LAIF_S3_QUARANTINE_PREFIX 着弾プレフィックス（既定 'quarantine/'）
  */
 
-import { PutObjectCommand, ListObjectsV2Command, GetObjectCommand } from '@aws-sdk/client-s3';
+import {
+  PutObjectCommand,
+  ListObjectsV2Command,
+  GetObjectCommand,
+  HeadObjectCommand,
+} from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getS3Config, makeS3Client, type S3Config } from './s3';
 
@@ -200,7 +205,38 @@ export interface PortalUpload {
   filename: string | null;
 }
 
-/** 受領済み（quarantine/）の一覧。提出状況の表示と admin の取り込み待ち確認に使う。 */
+/**
+ * 元ファイル名を S3 のメタデータから復元する。
+ *
+ * アップロード時に `Metadata: { filename: ascii, 'filename-b64': b64 }` を載せている
+ * (`createUploadTicket`)。**非 ASCII は ascii 側で `_` に潰れている**ので、
+ * b64 (UTF-8 の base64) を優先する。
+ *
+ * SDK は返却時にメタデータのキーを小文字化するので `filename-b64` で引く。
+ */
+function filenameFromMetadata(meta: Record<string, string> | undefined): string | null {
+  if (!meta) return null;
+  const b64 = meta['filename-b64'];
+  if (b64) {
+    try {
+      const s = typeof Buffer !== 'undefined'
+        ? Buffer.from(b64, 'base64').toString('utf-8')
+        : decodeURIComponent(escape(atob(b64)));
+      if (s.trim()) return s;
+    } catch { /* 壊れていたら ascii 側へ落とす */ }
+  }
+  const ascii = meta.filename;
+  return ascii && ascii.trim() ? ascii : null;
+}
+
+/**
+ * 受領済み（quarantine/）の一覧。提出状況の表示と admin の取り込み待ち確認に使う。
+ *
+ * **元ファイル名は ListObjectsV2 では取れない**（メタデータを返さない）ため、
+ * 一覧に載せる分だけ HeadObject を並列で引く。`limit` 件しか叩かない。
+ * 1 件でも失敗したら**その行だけ filename: null** にして一覧自体は返す
+ * (提出状況が丸ごと出なくなる方が困る)。
+ */
 export async function listUploads(partner: string, limit = 20): Promise<PortalUpload[]> {
   const cfg = getPortalS3Config();
   if (!cfg) return [];
@@ -211,11 +247,21 @@ export async function listUploads(partner: string, limit = 20): Promise<PortalUp
     .filter((o) => o.Key && o.Key.endsWith('.pdf'))
     .sort((a, b) => (b.LastModified?.getTime() ?? 0) - (a.LastModified?.getTime() ?? 0))
     .slice(0, limit);
-  return items.map((o) => ({
-    key: o.Key!,
-    bytes: o.Size ?? 0,
-    uploaded_at: o.LastModified ? o.LastModified.toISOString() : null,
-    filename: null,
+
+  return Promise.all(items.map(async (o) => {
+    let filename: string | null = null;
+    try {
+      const head = await client.send(new HeadObjectCommand({ Bucket: cfg.bucket, Key: o.Key! }));
+      filename = filenameFromMetadata(head.Metadata as Record<string, string> | undefined);
+    } catch {
+      // 権限・一時障害・削除済みなど。一覧は返す。
+    }
+    return {
+      key: o.Key!,
+      bytes: o.Size ?? 0,
+      uploaded_at: o.LastModified ? o.LastModified.toISOString() : null,
+      filename,
+    };
   }));
 }
 
