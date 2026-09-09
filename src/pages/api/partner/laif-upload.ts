@@ -9,6 +9,7 @@
  * mode:
  *   'ticket'   … Presigned PUT を発行（ブラウザが S3 へ直接置く。アプリは中継しない）
  *   'list'     … quarantine/ の受領一覧（提出状況の表示・admin の取り込み待ち確認）
+ *   'revoke'   … 提出の取り消し（**論理削除**。quarantine/ → revoked/ へ退避するだけで消さない）
  *   'download' … 受領 1 件の Presigned GET（admin がスキャンへ回すため）
  *
  * ⚠️ 認証(§3 Passkey)・検疫(§6 GuardDuty)は未実装。
@@ -18,7 +19,7 @@
 import type { APIRoute } from 'astro';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 import {
-  createUploadTicket, listUploads, createDownloadUrl,
+  createUploadTicket, listUploads, createDownloadUrl, revokeUpload,
   isPortalUploadEnabled, normalizePartner,
   MAX_UPLOAD_BYTES, ACCEPTED_CONTENT_TYPE,
 } from '../../../lib/laif-portal';
@@ -75,6 +76,18 @@ export const POST: APIRoute = async ({ request }) => {
     } catch (err) {
       return json({ ok: false, error: 'list_failed', detail: String(err instanceof Error ? err.message : err) }, 502);
     }
+  }
+
+  if (mode === 'revoke') {
+    if (!isPortalUploadEnabled()) return json({ ok: false, error: 'portal_upload_disabled' }, 503);
+    const key = typeof body.key === 'string' ? body.key : '';
+    if (!key) return json({ ok: false, error: 'key is required' }, 400);
+    // 認可（誰が取り消せるか）は **wellfort-site 側のパスキーセッション**が見る。
+    // ここは Bearer ADMIN_API_KEY で守られた内部 API なので、キーの形と
+    // partner の一致だけを機械的に検査する（`revokeUpload` が完全一致で判定）。
+    const r = await revokeUpload(partner, key);
+    if (!r.ok) return json({ ok: false, error: r.error, detail: r.detail }, r.status);
+    return json({ ok: true, mode: 'revoke', partner, key, revoked_key: r.revokedKey });
   }
 
   if (mode === 'download') {

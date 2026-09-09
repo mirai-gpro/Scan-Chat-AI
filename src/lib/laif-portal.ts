@@ -18,6 +18,7 @@
  *   LAIF_PORTAL_UPLOAD        'on' で上り受付を有効化（既定 off＝503 を返す）
  *   LAIF_S3_BUCKET            上り専用バケット（未設定なら AWS_S3_BUCKET へフォールバック）
  *   LAIF_S3_QUARANTINE_PREFIX 着弾プレフィックス（既定 'quarantine/'）
+ *   LAIF_S3_REVOKED_PREFIX    取り消し（論理削除）の退避先（既定 'revoked/'）
  */
 
 import {
@@ -25,6 +26,8 @@ import {
   ListObjectsV2Command,
   GetObjectCommand,
   HeadObjectCommand,
+  CopyObjectCommand,
+  DeleteObjectCommand,
 } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getS3Config, makeS3Client, type S3Config } from './s3';
@@ -51,6 +54,12 @@ export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024;
 export const PRESIGN_EXPIRES_SEC = 900;
 
 const DEFAULT_QUARANTINE_PREFIX = 'quarantine/';
+/**
+ * 取り消し（論理削除）の退避先。**quarantine とは別のプレフィックス**にする。
+ * ライフサイクル規則を掛けるならこちらだけを対象にすること
+ * （`quarantine/` や Elith 納品の prefix に掛けると本番データが消える）。
+ */
+const DEFAULT_REVOKED_PREFIX = 'revoked/';
 
 function env(name: string): string | undefined {
   const m = (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.[name];
@@ -66,6 +75,7 @@ export function isPortalUploadEnabled(): boolean {
 
 export interface PortalS3Config extends S3Config {
   quarantinePrefix: string;
+  revokedPrefix: string;
 }
 
 /** 上り用の S3 設定。バケットは LAIF 専用 env を優先。 */
@@ -76,6 +86,7 @@ export function getPortalS3Config(): PortalS3Config | null {
     ...base,
     bucket: env('LAIF_S3_BUCKET') ?? base.bucket,
     quarantinePrefix: env('LAIF_S3_QUARANTINE_PREFIX') ?? DEFAULT_QUARANTINE_PREFIX,
+    revokedPrefix: env('LAIF_S3_REVOKED_PREFIX') ?? DEFAULT_REVOKED_PREFIX,
   };
 }
 
@@ -198,6 +209,23 @@ export async function createUploadTicket(req: UploadRequest): Promise<TicketResu
   };
 }
 
+/**
+ * 取り消し可能なキーか。**完全一致でしか通さない。**
+ * `{quarantinePrefix}{partner}/YYYY/MM/DD/{UUIDv4}.pdf` の形だけ。
+ *
+ * 部分一致（`startsWith`）にすると、同じバケットの **Elith 納品 JSON** や
+ * 他社の提出ぶんまで動かせてしまう。`.json` を通さないのも同じ理由。
+ */
+export function isQuarantineKey(quarantinePrefix: string, partner: string, key: string): boolean {
+  if (typeof key !== 'string' || key.length > 300) return false;
+  const esc = (s: string) => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  const re = new RegExp(
+    `^${esc(quarantinePrefix)}${esc(partner)}/\\d{4}/\\d{2}/\\d{2}/`
+    + '[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\\.pdf$',
+  );
+  return re.test(key);
+}
+
 export interface PortalUpload {
   key: string;
   bytes: number;
@@ -263,6 +291,60 @@ export async function listUploads(partner: string, limit = 20): Promise<PortalUp
       filename,
     };
   }));
+}
+
+/**
+ * 提出の取り消し（**論理削除**）。`quarantine/…` → `revoked/…` へ移すだけで、
+ * オブジェクトそのものは消さない。
+ *
+ * 【なぜ物理削除にしないか】ここに入るのは**検査結果 PDF**で、取り違えると復元できない。
+ * 「大元のファイルは LAiF 社にあるはず」（発注者 2026-09-09）なので UI の語は「取り消す」だが、
+ * 実装としては消さずに退避する。誤操作の復旧は S3 のキーを戻すだけで済む。
+ *
+ * 【キーは完全一致で検査する】部分一致にすると、同じバケットに同居している
+ * **Elith 納品 JSON を移動・削除できてしまう**（スキャンの直アップロードで同じ轍を踏んでいる。
+ * `CLAUDE.md`「`isScanUploadKey` が完全一致するものだけ通す」）。
+ * 呼び出し側の partner とキー中の partner が一致することも同時に見る。
+ *
+ * 【順序】**コピーが成功してから消す。** 逆にすると、コピーに失敗した瞬間に原本が消える。
+ * この順序なら、削除に失敗しても両方に残るだけ（一覧には出たままになる）＝失う側に倒れない。
+ */
+export async function revokeUpload(
+  partner: string, key: string,
+): Promise<{ ok: true; revokedKey: string } | { ok: false; status: number; error: string; detail?: string }> {
+  const cfg = getPortalS3Config();
+  if (!cfg) return { ok: false, status: 500, error: 's3_not_configured' };
+  const p = normalizePartner(partner);
+  if (p === 'unknown') return { ok: false, status: 400, error: 'bad_partner' };
+  if (!isQuarantineKey(cfg.quarantinePrefix, p, key)) {
+    return { ok: false, status: 400, error: 'invalid_key', detail: '取り消せるのは自社の提出ぶんだけです。' };
+  }
+  const revokedKey = cfg.revokedPrefix + key.slice(cfg.quarantinePrefix.length);
+  const client = makeS3Client(cfg);
+  try {
+    // CopySource は `bucket/key`。キーは isQuarantineKey が
+    // [0-9a-f-] / '/' / '.pdf' しか通さないので、エスケープの必要が無い。
+    await client.send(new CopyObjectCommand({
+      Bucket: cfg.bucket,
+      CopySource: `${cfg.bucket}/${key}`,
+      Key: revokedKey,
+      // 元ファイル名（filename / filename-b64）を保つ。REPLACE にすると消える。
+      MetadataDirective: 'COPY',
+    }));
+  } catch (err) {
+    const name = (err as { name?: string })?.name || '';
+    if (name === 'NoSuchKey' || name === 'NotFound') {
+      return { ok: false, status: 404, error: 'not_found', detail: 'すでに取り消されています。' };
+    }
+    return { ok: false, status: 502, error: 'copy_failed', detail: String((err as Error)?.message ?? err) };
+  }
+  try {
+    await client.send(new DeleteObjectCommand({ Bucket: cfg.bucket, Key: key }));
+  } catch (err) {
+    // 退避は済んでいるので**データは失っていない**。一覧に残るので運用で気づける。
+    return { ok: false, status: 502, error: 'delete_failed', detail: String((err as Error)?.message ?? err) };
+  }
+  return { ok: true, revokedKey };
 }
 
 /** 受領済み 1 件の presigned GET（admin がスキャンへ回すために取得する）。 */
