@@ -108,8 +108,41 @@ LAiF 正式フォーム `input_format_new_202312.xlsx`（シート `KM`）その
 
 ## 3. 認証・認可（人手運用の最適解）
 
+> **【訂正 2026-09-09・実装時に判明】「Supabase Auth＋Passkey」は成立しない。**
+> **Supabase Auth は WebAuthn / パスキーに対応していない。** 公式
+> (supabase.com/docs/guides/auth/auth-mfa) の MFA は **「App Authenticator (TOTP)」と
+> 「Phone Messaging」の 2 つだけ**で、WebAuthn / FIDO2 / パスキーの記載は無い。
+> 本節の以下の記述は 2026-08 時点の想定であり、**「Supabase Auth 経由で」の部分は誤り**。
+>
+> **→ 確定（発注者判断 2026-09-09）= WebAuthn を自前実装する。** 実装は wellfort-site 側:
+>   - `src/lib/partner-auth.ts`（検証ロジック）/ `src/pages/api/partner/auth/[action].ts`（API）
+>   - `src/pages/api/admin/partner-accounts.ts`（利用者・招待・端末失効・監査ログ）
+>   - `supabase/migrations/20260909000010_partner_portal_auth.sql`（`partner_*` 6 テーブル）
+>   - 検証 `npm run verify:partner-auth`
+>
+> **新規依存は入れていない。** 登録時の `attestationObject` は CBOR だが、ブラウザの
+> `AuthenticatorAttestationResponse.getPublicKey()` が **DER SubjectPublicKeyInfo** を返す
+> (MDN・Baseline widely available 2023-10) ため、`crypto.subtle.importKey('spki', …)` に
+> そのまま渡せる ＝ **CBOR/COSE のパーサを持たずに済む**。
+>
+> **切替は env `PARTNER_PORTAL_AUTH=on`。既定 off** ＝ 認証なしの従来動作。
+> マイグレーション適用とパスキー登録が済むまで LAiF の提出を止めないため。
+>
+> **RP ID は env `PARTNER_RP_ID`（既定 `wellfort.co.jp`）。**
+> **認証情報はこの値に紐づくので、後から変えると全員が登録し直しになる。**
+> `www.wellfort.co.jp` でも将来の `*.wellfort.co.jp` でも同じ鍵が使えるが、
+> **§0.3 が挙げる別ドメイン `partner.wellfort.jp` へ移す場合は再登録が必要**。
+> 本番の登録を始める前に、最終的なドメインを確定すること。
+>
+> **IdP フェデレーション（下記）は Supabase Auth の OAuth なので成立する**が、
+> LAiF の回答（§0 表 #2）が「社内 ID 基盤なし」なので今回は使わない。
+
 - **自前ID/PWログインは不採用**（2026の機微データ環境ではNG・脆弱性の温床）。
-- **Supabase Auth＋Passkey（WebAuthn）を既定**：LAiF担当者にPWを発行せず、初回にデバイス（Windows Hello/Touch ID/YubiKey等）を登録。**フィッシング耐性が高く漏洩概念が無い**。UXは生体認証1回。
+- ~~**Supabase Auth＋Passkey（WebAuthn）を既定**~~ → **上記のとおり自前実装**：LAiF担当者にPWを発行せず、初回にデバイス（Windows Hello/Touch ID/YubiKey等）を登録。**フィッシング耐性が高く漏洩概念が無い**。UXは生体認証1回。
+  - **生体認証・PIN の両方に対応**（LAiF 要望 2026-09）。実装は `userVerification: 'required'` のみを課し、
+    `authenticatorAttachment` で機種を絞らない。**Windows Hello の PIN も Touch ID も同じ UV フラグを立てる**ので、
+    どちらか一方に限定しないことがそのまま「両対応」になる。逆に platform 限定にすると
+    セキュリティキー（§0.1 の予備手段）を締め出す。
 - **短命セッション**＋（PWレスで代替されるが）必要に応じ**MFA**。
 - **IdP フェデレーション（推奨・LAiF環境次第）**：LAiFが Microsoft 365 / Google Workspace を使うなら、Supabase Auth 経由で **Entra ID / Google Workspace の企業SSO** に寄せる（アカウント管理をLAiF側IdPに委譲＝退職者失効等が自動）。優先度：Entra ID ＞ Google Workspace ＞ Auth0/Clerk/WorkOS ＞ Supabase単体。
 - **IP制限（ゼロトラストの一層）**：**Vercel Edge Middleware** で送信元IPが**LAiF事前登録帯域**か検査。さらに S3 側でも `aws:SourceIp` 条件（§4）。
@@ -125,9 +158,15 @@ LAiF 正式フォーム `input_format_new_202312.xlsx`（シート `KM`）その
 > - **実装時に踏んだ罠**: AWS SDK v3 は既定で **署名時に空ボディの CRC32 を計算して URL に載せる**ため
 >   （`x-amz-checksum-crc32=AAAAAA==`）、実ファイルを PUT した瞬間に S3 がチェックサム不一致で拒否する。
 >   presigned PUT では `requestChecksumCalculation: 'WHEN_REQUIRED'` を必ず指定すること。
-> - **未実装**: §3 認証(Supabase Auth + Passkey)・§6 GuardDuty 検疫・§8 EventBridge。
->   認証が無い間はこの口が**公開の書き込み口**になるため、**env `LAIF_PORTAL_UPLOAD=on` のときだけ有効**（既定 off＝503）。
->   **本番公開の前に §3 を実装すること。**
+> - **実装済（2026-09-09）**: §3 認証 = **WebAuthn パスキーの自前実装**（Supabase Auth は非対応・§3 の訂正枠を参照）。
+>   wellfort-site `src/lib/partner-auth.ts` ほか。**env `PARTNER_PORTAL_AUTH=on` で有効・既定 off**。
+>   off の間はこの口が**公開の書き込み口**のままなので、`LAIF_PORTAL_UPLOAD=on` と合わせて運用に注意する。
+> - **実装済（2026-09-09）**: 受領一覧に**元ファイル名・容量・提出日時**を出す（`listUploads` が `HeadObject` で
+>   メタデータから原名を復元）。**同名ファイルはエラーにして送らない**（キーは UUID なので上書きにならず、
+>   同名 PDF が 2 件並んで取り違えるため）。
+> - **未実装**: §6 GuardDuty 検疫・§8 EventBridge。
+>   提出済みファイルの**「取り消す」（論理削除）**も未実装 —
+>   認証が入るまでは「誰でも消せる口」になるため、§3 の on 化を待って入れる。
 
 ### 4.0 有効化に必要な設定（実測 2026-08-27・これが揃わないと動かない）
 
