@@ -194,8 +194,28 @@ export async function submitKitSelfReport(input: {
  * 行を作るだけで**本番 Web アプリの管理者になれてしまう**（`/admin` 系と `?u=` の代理表示が
  * 開く）。ここは顧客の解決だけを担い、権限は一切運ばない。
  */
-const EDGE_BASE_STAGING = () => import.meta.env.HP_EDGE_STAGING_BASE_URL as string | undefined;
-const SECRET_STAGING = () => import.meta.env.RESOLVE_SHARED_SECRET_STAGING as string | undefined;
+/*
+ * **`import.meta.env` だけで読まないこと (実測 2026-09-10)。**
+ *
+ * Vite は `import.meta.env.FOO` を**ビルド時に定数へ畳み込む**。ビルド時点で
+ * 未定義の変数は `undefined` に固定されるため、`!!undefined` → **`return false` が
+ * 焼き付いた関数**が出来上がり、**後から Vercel に env を入れても永久に効かない**。
+ * 実際にそうなった (デプロイ済み成果物が `isHpEdgeStagingConfigured(){return false}`)。
+ *
+ * → `src/lib/supabase.ts` の `envOf()` / `dashboard.astro:51` と**同じ二段読み**にする。
+ *   SSR は Node ランタイムなので `process.env` から実行時に読める。
+ */
+function envOfStaging(name: 'HP_EDGE_STAGING_BASE_URL' | 'RESOLVE_SHARED_SECRET_STAGING'): string {
+  const v = (import.meta.env as Record<string, string | undefined>)[name];
+  if (v) return v;
+  if (typeof process !== 'undefined' && process.env) {
+    return (process.env as Record<string, string | undefined>)[name] ?? '';
+  }
+  return '';
+}
+
+const EDGE_BASE_STAGING = () => envOfStaging('HP_EDGE_STAGING_BASE_URL') || undefined;
+const SECRET_STAGING = () => envOfStaging('RESOLVE_SHARED_SECRET_STAGING') || undefined;
 
 /** ステージング顧客の解決が構成済みか。**未設定が既定**。 */
 export function isHpEdgeStagingConfigured(): boolean {
