@@ -46,6 +46,8 @@ await page.route('**/api/scan', async (route) => {
 });
 
 await page.goto(`${BASE}/scan`, { waitUntil: 'networkidle' });
+// dev サーバの astro-dev-toolbar が画面下端のボタンへのクリックを横取りする (本番には無い)。
+await page.addStyleTag({ content: 'astro-dev-toolbar{display:none!important}' }).catch(() => {});
 
 /**
  * ブラウザ内でファイルを作って #scan-file に流し込む。
@@ -86,9 +88,11 @@ async function upload({ name, type, w, h, bytes, quality = 1.0 }) {
   await page.waitForTimeout(4000);
   /*
    * 複数ページ化 (2026-09-04) で、ファイルを選んだだけでは送信されなくなった。
-   * 「この写真でよろしいですか」→「これで読み取る」→「全てを送信」まで進めて初めて
-   * `/api/scan` へ POST する。**この検査が見たいのは「何が線に乗るか」**なので、
-   * 画面がそこまで来ていたら押し切る (来ていなければ何もしない = 送らない検査も生きる)。
+   * 「全てを送信」まで進めて初めて `/api/scan` へ POST する。
+   * **この検査が見たいのは「何が線に乗るか」**なので、画面がそこまで来ていたら
+   * 押し切る (来ていなければ何もしない = 送らない検査も生きる)。
+   * アップロードは**一覧へ直行する**ようになった (発注者指示 2026-09-10) ので
+   * `confirm-done` は出ない。**両方試す** — 撮影経路が混じっても通るように。
    */
   const advance = async (id) => {
     const el = await page.$(`#${id}`);
@@ -99,7 +103,8 @@ async function upload({ name, type, w, h, bytes, quality = 1.0 }) {
     await page.waitForTimeout(1500);
     return true;
   };
-  if (await advance('confirm-done')) await advance('review-send');
+  await advance('confirm-done');
+  await advance('review-send');
   await page.waitForTimeout(2500);
   return {
     size: await page.evaluate(() => window.__lastFileSize),

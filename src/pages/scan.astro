@@ -65,11 +65,18 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
         >
           <AppIcon name="attachment" size={32} />
           <span class="text-base">ファイルをアップロード</span>
-          <span class="text-xs font-normal text-white/85">PDF / JPEG / PNG / WebP / HEIC<span class="text-white/65"> (最大 10 MB)</span></span>
+          <span class="text-xs font-normal text-white/85">PDF / JPEG / PNG / WebP / HEIC<span class="text-white/65"> (最大 10 MB・複数選択可)</span></span>
         </label>
+        {/*
+          **`multiple` が要る** (2026-09-10 発注者報告)。
+          複数ページの検査票は 1 回のダイアログでまとめて選べるのが自然で、
+          これが無いと 1 枚選ぶたびにダイアログを開き直すことになる。
+          受け取り側 (change ハンドラ) も `files[0]` ではなく全件を順に積む。
+        */}
         <input
           id="scan-file"
           type="file"
+          multiple
           class="hidden"
           accept="application/pdf,image/jpeg,image/png,image/webp,image/heic,image/heif"
         />
@@ -302,9 +309,14 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
         </div>
       </div>
 
+      {/*
+        アイコンは経路によらず中立なものにしてある (`refresh` / `next`)。
+        カメラのアイコンを出すと、アップロードで入れた 1 枚の「撮り直す」が
+        カメラを名乗ることになるため。ラベルだけを JS で入れ替える。
+      */}
       <div class="grid grid-cols-2 gap-2">
         <button id="confirm-retake" type="button" class="btn-pair btn-graph">
-          <AppIcon name="camera" size={18} />撮り直す
+          <AppIcon name="refresh" size={18} /><span id="confirm-retake-label">撮り直す</span>
         </button>
         <button id="confirm-next" type="button" class="btn-pair btn-data">
           <AppIcon name="next" size={18} />次の用紙
@@ -321,9 +333,15 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
     </section>
 
     <!-- ============================================================== -->
-    <!-- パネル: review（全ページの最終確認 → まとめて送信）               -->
+    <!-- パネル: review（全ページの確認 → まとめて送信）                   -->
     <!-- 唯一の確定点。ここを押すまで 1 枚も読み取らない。                  -->
     <!-- **1 枚ずつの取り消しは置かない** (前のページへ戻らない方針)。      -->
+    <!--                                                                -->
+    <!-- **アップロードはここが確認画面** (発注者指示 2026-09-10)。        -->
+    <!-- 複数選択できるようになったので、選んだ全部をこの一覧で見せて       -->
+    <!-- 「送信」か「選び直す」の 2 択にする (1 枚ずつの確認は挟まない)。   -->
+    <!-- 撮影は 1 枚ごとの確認 (panel-confirm) を残す — ピント・画角は      -->
+    <!-- その場で見ないと撮り直せないため。                               -->
     <!-- ============================================================== -->
     <section id="panel-review" class="flex flex-1 flex-col gap-4" hidden>
       <div class="flex items-center justify-between gap-3">
@@ -340,15 +358,48 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
         この内容で読み取ります。読み取りは全ページまとめて行うため、少し時間がかかります。
       </p>
 
-      {/* 送るものを目で確かめるための一覧。押せる要素は置かない (1 枚だけの取り消しはしない)。 */}
+      {/*
+        読み込めなかったファイルの控え。複数選択で 1 つだけ大きすぎた場合などに、
+        **黙って捨てずに**名前と理由を出す。色だけに頼らずアイコン+文字も添える。
+      */}
+      <div
+        id="review-skipped"
+        class="flex items-start gap-2 rounded-xl border border-status-watch bg-status-watch-bg px-3 py-2 text-sm text-status-watch"
+        hidden
+      >
+        <AppIcon name="watch" size={18} class="mt-0.5 shrink-0" />
+        <p id="review-skipped-text"></p>
+      </div>
+
+      {/*
+        送るものを目で確かめるための一覧。押せる要素は置かない (1 枚だけの取り消しはしない)。
+        **ファイル名を必ず出す** — PDF はプレビューを作れないので、名前が唯一の手がかり。
+      */}
       <ul id="review-thumbs" class="flex flex-wrap gap-2"></ul>
 
       <div class="mt-auto flex flex-col gap-2">
         <button id="review-send" class="btn-primary !py-4 text-lg">
           <AppIcon name="send" size={20} /> 全てを送信
         </button>
-        <button id="review-add" type="button" class="btn-pair btn-data">
-          <AppIcon name="camera" size={18} />用紙を追加する
+        {/*
+          選び直し。**ファイルだけの一覧のときに出す** (撮影した紙まで一緒に
+          捨てることにならないように)。出ている間は上の「最初からやり直す」を
+          隠す — 同じことをする入口を 2 つ並べない。
+        */}
+        <button id="review-repick" type="button" class="btn-pair btn-graph" hidden>
+          <AppIcon name="refresh" size={18} />ファイルを選び直す
+        </button>
+        {/*
+          追加は**手段を選ばせる**。1 つのボタンにするとカメラかファイルの
+          どちらかを名乗ることになり、もう片方で入れた人が行き止まりになる。
+          カメラ側は `touch-only` (要件 F-A5「PC はカメラスキャン非対応」) なので
+          PC では「ファイルを追加」1 つだけが出る。
+        */}
+        <button id="review-add-camera" type="button" class="btn-pair btn-graph touch-only">
+          <AppIcon name="camera" size={18} />カメラで撮影
+        </button>
+        <button id="review-add-file" type="button" class="btn-pair btn-data">
+          <AppIcon name="attachment" size={18} />ファイルを追加
         </button>
       </div>
 
@@ -495,14 +546,20 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
   }
 
   /* ──────────────────────────────────────────────────────────────
-   * 複数ページのスキャン (発注者指示 2026-09-04)
+   * 複数ページのスキャン (発注者指示 2026-09-04 / 2026-09-10 にアップロード側を変更)
    *
-   *   撮影 / アップロード → **1 枚ごとに確認** → 撮り直す / 次の用紙 / これで全部
-   *                       → 最終確認 → **全てを送信** (ここで初めて読み取る)
+   *   撮影       → **1 枚ごとに確認** → 撮り直す / 次の用紙 / これで全部
+   *                → 一覧 → **全てを送信** (ここで初めて読み取る)
+   *   アップロード → **選んだ全部をそのまま一覧へ** (1 枚ごとの確認は挟まない)
+   *                → 全てを送信 / ファイルを選び直す
    *
+   * ・**アップロードで 1 枚ごとの確認を挟まない** (発注者指示 2026-09-10)。
+   *   複数選択できるようになったので、選んだものはファイル名つきの一覧で
+   *   まとめて見せ、「これで良ければ送信 / 違えば選び直し」の 2 択にする。
+   *   撮影だけは 1 枚ごとの確認を残す — ピント・画角はその場で見ないと撮り直せない。
    * ・**確定点は「全てを送信」1 か所だけ。** それまで 1 枚も /api/scan へ送らない
    * ・**前のページには戻らない。** 撮り直せるのは今の 1 枚だけで、
-   *   それ以前をやり直す手段は「最初からやり直す」のみ
+   *   それ以前をやり直す手段は「最初からやり直す」「ファイルを選び直す」のみ
    * ・読み取りは 1 画像 = 1 リクエストで順に回す (Vercel 60 秒制限。CLAUDE.md)
    * ────────────────────────────────────────────────────────────── */
   const pages = new ScanPageList();
@@ -512,12 +569,62 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
    */
   let camera: import('../scripts/camera-scan').CameraScanController | null = null;
 
-  /** 1 枚積んで確認画面へ。撮影・アップロードの共通の入口。 */
-  function pushPageAndConfirm(src: Parameters<typeof pages.add>[0], name: string | null): void {
-    pages.add(src, name);
+  /**
+   * カメラを使える端末か。**判定は CSS の `.touch-only` と同じ `(pointer: coarse)`**
+   * にそろえる (要件 F-A5「PC はカメラスキャン非対応」・global.css)。
+   * ここがずれると「画面に出ていないカメラが JS から起動する」ことになる。
+   */
+  function cameraAvailable(): boolean {
+    return window.matchMedia?.('(pointer: coarse)').matches ?? false;
+  }
+
+  /**
+   * 「次の用紙」「撮り直す」で使う手段。**いま確認中の 1 枚を入れた経路に合わせる**
+   * (2026-09-10 発注者報告: PC でファイルを選んだあと「次」を押すとカメラが起動していた)。
+   * PC はカメラ非対応なので、撮影由来でもファイルへ落とす。
+   */
+  function currentMethod(): 'camera' | 'file' {
+    if (!cameraAvailable()) return 'file';
+    return pages.last?.origin === 'file' ? 'file' : 'camera';
+  }
+
+  /**
+   * 「ファイルを選び直す」で開いたダイアログか。**古い分を捨てるのは新しいファイルが
+   * 届いてから** — ダイアログを閉じただけ (キャンセル) で選択が消えると、
+   * 選び直しの途中で全部失うことになる。次の change で必ず降ろす。
+   */
+  let replaceAllOnNextPick = false;
+
+  /** ファイル選択ダイアログを開く。**click ハンドラから同期で呼ぶこと** (ユーザー操作の延長でしか開かない)。 */
+  function openFilePicker(replaceAll = false): void {
+    replaceAllOnNextPick = replaceAll;
+    $<HTMLInputElement>('scan-file').click();
+  }
+
+  /** カメラを開始する。video の表示復帰もここで必ず行う (アップロード経路が隠したままにしない)。 */
+  async function startCamera(): Promise<void> {
+    replaceAllOnNextPick = false;
+    show('active');
+    $('scan-video').hidden = false;
+    await camera?.start();
+  }
+
+  /**
+   * いま確認中 (= 最後に積んだ) の 1 枚を確認画面に描く。積む処理とは分けてある。
+   * **通常はカメラ経路だけがここへ来る** (アップロードは一覧へ直行・2026-09-10)。
+   * それでも経路の分岐は残す — 将来ここへファイルの 1 枚が来たときに、
+   * PC でカメラが起動する元のバグへ戻らないようにするため。
+   */
+  function renderConfirm(): void {
+    const page = pages.last;
+    if (!page) {
+      // 1 枚も無い状態で確認画面を出さない (撮り直しで最後の 1 枚を捨てたとき)。
+      show('ready');
+      return;
+    }
     const img = $<HTMLImageElement>('confirm-image');
     const nop = $('confirm-nopreview');
-    const preview = src.previewDataUrl ?? (src.kind === 'pdf' ? null : src.dataUrl);
+    const preview = page.previewDataUrl ?? (page.kind === 'pdf' ? null : page.dataUrl);
 
     $('confirm-page-label').textContent = `${pages.length} 枚目`;
     if (preview) {
@@ -529,20 +636,36 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
       img.hidden = true;
       img.removeAttribute('src');
       nop.hidden = false;
-      $('confirm-nopreview-name').textContent = name ?? '';
+      $('confirm-nopreview-name').textContent = page.name ?? '';
     }
+    // ボタンの名乗りを実際の動作に合わせる (カメラを開かないのに「撮り直す」と言わない)。
+    $('confirm-retake-label').textContent = currentMethod() === 'file' ? '選び直す' : '撮り直す';
+
     camera?.stop();
     show('confirm');
   }
 
-  /** 最終確認画面。送るものを目で確かめてもらう。 */
-  function showReview(): void {
+  /** 1 枚積んで確認画面へ。撮影の入口 (アップロードは複数まとめて積むので別経路)。 */
+  function pushPageAndConfirm(
+    src: Parameters<typeof pages.add>[0],
+    name: string | null,
+    origin: Parameters<typeof pages.add>[2],
+  ): void {
+    pages.add(src, name, origin);
+    renderConfirm();
+  }
+
+  /**
+   * 送る前の確認画面。**アップロードはここが確認画面**なので、
+   * サムネイルだけでなく**ファイル名も必ず出す** (PDF は名前しか手がかりが無い)。
+   */
+  function showReview(skipped: string[] = []): void {
     $('review-count').textContent = String(pages.length);
     const list = $('review-thumbs');
     list.innerHTML = '';
     pages.all.forEach((pg, i) => {
       const li = document.createElement('li');
-      li.className = 'flex w-20 flex-col items-center gap-1';
+      li.className = 'flex w-28 flex-col items-center gap-1';
       const thumb = pg.previewDataUrl ?? (pg.kind === 'pdf' ? null : pg.dataUrl);
       if (thumb) {
         const im = document.createElement('img');
@@ -560,8 +683,32 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
       cap.className = 'text-sm text-slate-600';
       cap.textContent = `${i + 1} 枚目`;
       li.appendChild(cap);
+
+      // ファイル名。撮影は名前を持たないので経路を書く (空欄にして黙らせない)。
+      const nameEl = document.createElement('span');
+      nameEl.className = 'w-full break-all text-center text-sm text-slate-700';
+      nameEl.textContent = pg.name ?? 'カメラ撮影';
+      if (pg.name) nameEl.title = pg.name;
+      li.appendChild(nameEl);
+
       list.appendChild(li);
     });
+
+    const note = $('review-skipped');
+    note.hidden = skipped.length === 0;
+    $('review-skipped-text').textContent = skipped.length
+      ? `次のファイルは追加できませんでした: ${skipped.join(' / ')}`
+      : '';
+
+    /*
+     * 「ファイルを選び直す」は**ファイルだけの一覧のとき**に出す
+     * (撮影した紙まで巻き込んで捨てないため)。出している間は
+     * 「最初からやり直す」を隠す — 同じことをする入口を 2 つ並べない。
+     */
+    const allFromFile = pages.length > 0 && pages.all.every((pg) => pg.origin === 'file');
+    $('review-repick').hidden = !allFromFile;
+    $('review-restart').hidden = allFromFile;
+
     $('review-progress').hidden = true;
     $<HTMLButtonElement>('review-send').disabled = pages.length === 0;
     camera?.stop();
@@ -570,7 +717,9 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
 
   /** 最初からやり直す。撮った分を全部捨てる (確認を挟む)。 */
   function restartAll(): void {
-    if (pages.length > 0 && !confirm(`撮影した ${pages.length} 枚を破棄して、最初からやり直します。よろしいですか？`)) return;
+    // アップロードでもここへ来るので「撮影した」とは書かない (実態と合わせる)。
+    if (pages.length > 0 && !confirm(`${pages.length} 枚を破棄して、最初からやり直します。よろしいですか？`)) return;
+    replaceAllOnNextPick = false;
     pages.clear();
     lastSourceFileName = null;
     camera?.stop();
@@ -582,9 +731,10 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
     const total = pages.length;
     if (total === 0) return;
     const sendBtn = $<HTMLButtonElement>('review-send');
-    const addBtn = $<HTMLButtonElement>('review-add');
+    // 追加は 2 つある (カメラ / ファイル)。送信中はどちらも押させない。
+    const addBtns = ['review-add-camera', 'review-add-file'].map((id) => $<HTMLButtonElement>(id));
     sendBtn.disabled = true;
-    addBtn.disabled = true;
+    addBtns.forEach((b) => { b.disabled = true; });
     $('review-progress').hidden = false;
 
     const results = [];
@@ -602,7 +752,7 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
     if (results.length === 0) {
       $('error-message').textContent = '読み取れませんでした。撮り直してお試しください。';
       sendBtn.disabled = false;
-      addBtn.disabled = false;
+      addBtns.forEach((b) => { b.disabled = false; });
       show('error');
       return;
     }
@@ -759,7 +909,7 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
        */
       onShot: (dataUrl) => {
         lastSourceFileName = null;
-        pushPageAndConfirm({ dataUrl, kind: 'image' }, null);
+        pushPageAndConfirm({ dataUrl, kind: 'image' }, null, 'camera');
       },
       onAnalyze: (result) => {
         void renderResult(result);
@@ -773,63 +923,94 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
     });
 
     // ── 1 枚ごとの確認 ──
+    // **入れた経路と同じ手段で続ける**。以前はどちらも無条件に
+    // `controller.start()` を呼んでいたため、PC でファイルを選んだ人にも
+    // カメラが起動し (=カメラが無いので失敗しエラー画面)、スマホでは
+    // 実際にカメラが開いていた (2026-09-10 発注者報告)。
     $('confirm-retake').addEventListener('click', async () => {
-      pages.dropLast();          // 撮り直すのは「いまの 1 枚」だけ
-      show('active');
-      $('scan-video').hidden = false;
-      await controller.start();
+      const method = currentMethod();
+      pages.dropLast();          // 撮り直す (選び直す) のは「いまの 1 枚」だけ
+      if (method === 'file') {
+        // 先に 1 枚戻した画面を出してからダイアログを開く。
+        // **閉じただけ (キャンセル) でも表示と枚数が食い違わない**ようにするため。
+        renderConfirm();
+        openFilePicker();
+        return;
+      }
+      await startCamera();
     });
     $('confirm-next').addEventListener('click', async () => {
-      show('active');
-      $('scan-video').hidden = false;
-      await controller.start();
+      if (currentMethod() === 'file') { openFilePicker(); return; }
+      await startCamera();
     });
     $('confirm-done').addEventListener('click', () => showReview());
     $('confirm-restart').addEventListener('click', () => restartAll());
 
     // ── 最終確認 ──
-    $('review-add').addEventListener('click', async () => {
-      show('active');
-      $('scan-video').hidden = false;
-      await controller.start();
-    });
+    // ここは**手段を選ばせる** (カメラで入れた人もファイルで足せる。逆も同じ)。
+    $('review-add-camera').addEventListener('click', () => void startCamera());
+    $('review-add-file').addEventListener('click', () => openFilePicker());
+    // 選び直し。**押した時点では捨てない** — 新しいファイルが届いてから入れ替える。
+    $('review-repick').addEventListener('click', () => openFilePicker(true));
     $('review-restart').addEventListener('click', () => restartAll());
     $('review-send').addEventListener('click', () => void sendAll());
 
-    $('scan-start').addEventListener('click', async () => {
-      show('active');
-      await controller.start();
-    });
+    $('scan-start').addEventListener('click', () => void startCamera());
 
-    // ファイルアップロード経路 (PDF / 画像)
+    /*
+     * ファイルアップロード経路 (PDF / 画像)。**選んだ全件を順に積み、一覧へ直行する**
+     * (発注者指示 2026-09-10)。1 枚ごとの確認は挟まない — 複数選べる以上、
+     * まとめて名前つきで見せて「送信 / 選び直す」を選ばせる方が短い。
+     */
     $<HTMLInputElement>('scan-file').addEventListener('change', async (e) => {
       const target = e.target as HTMLInputElement;
-      const file = target.files?.[0];
-      if (!file) return;
+      const files = Array.from(target.files ?? []);
       target.value = ''; // 同じファイルの再選択を許可
+      const replaceAll = replaceAllOnNextPick;
+      replaceAllOnNextPick = false;
+      if (files.length === 0) return;
 
       // 上限 (10 MB) の判定と、Vercel のボディ上限に収めるための縮小は
       // scan-upload.ts に集約してある (受け付ける上限と送れる上限は別物)。
-      try {
-        const prepared = await prepareScanUpload(file);
-        // ファイル経由はカメラ起動なしで panel-active を表示し、video エリアは非表示にする
-        show('active');
-        $('scan-video').hidden = true;
-        lastSourceFileName = file.name; // 書き出しファイル名に組み込む
-        // アップロードも撮影と同じページ列へ積む (発注者指示)。ここでは解析しない。
-        lastSourceFileName = file.name;
-        pushPageAndConfirm(prepared, prepared.note ? `${file.name}・${prepared.note}` : file.name);
-      } catch (err) {
-        $('error-message').textContent =
-          err instanceof UploadTooLargeError ? err.message : String(err);
-        show('error');
+      type Prepared = Awaited<ReturnType<typeof prepareScanUpload>>;
+      const added: { src: Prepared; name: string }[] = [];
+      const skipped: string[] = [];
+      for (const file of files) {
+        // **選んだ順に 1 件ずつ**。並列にすると積む順が崩れて紙の順番が入れ替わる。
+        try {
+          const prepared = await prepareScanUpload(file);
+          added.push({ src: prepared, name: prepared.note ? `${file.name}・${prepared.note}` : file.name });
+          lastSourceFileName = file.name; // 書き出しファイル名に組み込む
+        } catch (err) {
+          // 1 件落ちても残りは積む。**黙って捨てない**ので名前と理由を控えて一覧に出す。
+          skipped.push(`${file.name}（${err instanceof UploadTooLargeError ? err.message : String(err)}）`);
+        }
       }
+      if (added.length === 0) {
+        // 1 件も読めなかった。**選び直しの途中でも元の選択は捨てない**。
+        if (pages.length === 0) {
+          $('error-message').textContent = skipped.join('\n');
+          show('error');
+          return;
+        }
+        showReview(skipped);
+        return;
+      }
+      // 捨てるのは新しい選択が揃ってから (キャンセルで全部失わないように)。
+      if (replaceAll) pages.clear();
+      added.forEach((a) => pages.add(a.src, a.name, 'file'));
+      showReview(skipped);
     });
 
+    /*
+     * 結果画面の「もう一度撮影する」。ここも PC ではカメラが起動して必ず失敗していた
+     * (上の「次の用紙」と同じ欠陥)。PC はカメラ非対応なのでファイル選択へ回し、
+     * **押した先で起きることに名乗りを合わせる**。
+     */
+    if (!cameraAvailable()) $('scan-retake').textContent = 'もう一度ファイルを選ぶ';
     $('scan-retake').addEventListener('click', async () => {
-      show('active');
-      $('scan-video').hidden = false; // ファイル経由で隠していた場合の復旧
-      await controller.start();
+      if (!cameraAvailable()) { openFilePicker(); return; }
+      await startCamera();
     });
 
     $('error-retry').addEventListener('click', () => {

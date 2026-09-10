@@ -3,7 +3,10 @@
  * 読み取る (発注者指示 2026-09-04)。
  *
  * 【流れ】
- *   撮影 or アップロード → **1 枚ごとにプレビュー** → 撮り直す / 次の用紙 / 完了
+ *   撮影       → **1 枚ごとにプレビュー** → 撮り直す / 次の用紙 / 完了
+ *   アップロード → **選んだ全部をそのまま一覧へ** (1 枚ごとの確認は挟まない・
+ *                 発注者指示 2026-09-10。複数選択できるので名前つきの一覧で
+ *                 「送信 / 選び直す」を選ばせる方が短い)
  *   完了 → ここに溜めた全ページを順に `/api/scan` へ投げ、結果を 1 つに束ねる
  *
  * 【なぜ「順に」なのか】
@@ -18,11 +21,20 @@
 
 import type { AnalyzeResult, AnalyzeSource, RegionResult } from './camera-scan';
 
+/**
+ * この 1 枚がどの経路で入ったか。
+ * 「次の用紙」「撮り直す」を**入れたときと同じ手段で続ける**ために要る
+ * (これが無いと、アップロードした人にもカメラが起動する)。
+ */
+export type ScanPageOrigin = 'camera' | 'file';
+
 export interface ScanPage extends AnalyzeSource {
   /** 表示・削除用の一意キー。 */
   id: string;
   /** アップロード由来ならファイル名。撮影なら null。 */
   name: string | null;
+  /** 追加経路。名前の有無から推測しない (PDF/画像とも名前は付くため)。 */
+  origin: ScanPageOrigin;
 }
 
 /** ページ列。scan.astro が 1 つだけ持つ。 */
@@ -40,8 +52,8 @@ export class ScanPageList {
     return this.pages[this.pages.length - 1] ?? null;
   }
 
-  add(src: AnalyzeSource, name: string | null = null): ScanPage {
-    const page: ScanPage = { ...src, id: crypto.randomUUID(), name };
+  add(src: AnalyzeSource, name: string | null, origin: ScanPageOrigin): ScanPage {
+    const page: ScanPage = { ...src, id: crypto.randomUUID(), name, origin };
     this.pages.push(page);
     return page;
   }
