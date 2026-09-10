@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 版 | 0.1（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離） |
+| 版 | **0.2**（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離。v0.2 の変更点は §30） |
 | 対象システム | **wellfort-site**（管理画面 UI・管理者認証・ブラウザとのやり取り）／ **Scan-Chat-AI**（ZIP 受付処理・分類・解析・ジョブ状態・ウェルネス年齢・Elith JSON 生成・S3） |
 | 同系統の先行仕様 | `docs/lab/wellfort_admin_lab_upload_spec.md`（**責務分界の正**。§3 配置場所／§6-1 Bearer API Key） |
 | 上位・関連 | `docs/elith/elith_s3_data_handoff_spec.md`（納品パス・命名）／`docs/elith/elith_assembly_wrapping_spec.md`／`docs/elith/elith_masking_definition.md`／`docs/scan/health_age_caba_v5.4_spec.md`／`docs/scan/health_age_simple_v7.0_spec.md`／`docs/lab/lab_data_pipeline_master_spec.md` |
@@ -124,7 +124,14 @@ ZIP → 人物単位へ整理 → データ種別を判定 → 既存の専門�
 | ファイル数上限 | **2,000**（`MAX_ENTRIES`） | 同上 |
 | 1 ファイル上限 | **80 MB**（`MAX_ENTRY_BYTES`） | Genoplan 208 ページ PDF を通す |
 | ネスト深度上限 | **8**（`MAX_DEPTH`） | 同上 |
-| 許可拡張子 | `.pdf` / `.xlsx` / `.xls` / `.docx` / `.csv` | 指示書 §2 の実構成 |
+| 許可拡張子 | `.pdf` / `.xlsx` / `.docx` / `.csv` | 指示書 §2 の実構成 |
+
+**`.xls`（旧 Excel 97-2003）は Phase 1 の解析対象から外す（v0.2 で明記）。**
+`.xls` は **OLE2 複合ドキュメントで ZIP/XML ではない**（`.xlsx` とはファイル形式が別物）ため、
+`.xlsx` の読み方をそのまま適用できない。**受入対象から外し、検出したら
+`unsupported_file` として一覧に出す**（§5.5。黙って捨てない）。
+Phase 1 で `.xls` を読む必要が出たら、§5.3 の選定と**同じ手順で別途決める**
+（`.xlsx` 用に選んだライブラリが `.xls` も読めるとは限らない）。
 
 ### 5.2 ブラウザ → S3（presigned PUT・**Vercel を本体が通らない**）
 
@@ -163,21 +170,62 @@ ZIP → 人物単位へ整理 → データ種別を判定 → 既存の専門�
   （`docs/operations/S3原本ストレージ_構築手順書.md`）で、**PII を含む ZIP を置くと削除できなくなる**（§28-O2）。
 - **【AWS 側の作業が 1 つ要る】** `ad-hoc-uploads/` のライフサイクル失効ルール（§24.4）。
 
-### 5.3 ZIP の読み方（依存ライブラリを足さない・決定）
+### 5.3 ZIP / XLSX の読み方（**未決定。Phase D 着手前に 3 案を比較して決める**）
 
-`package.json` 実測: `jszip` / `adm-zip` / `unzipper` / `yauzl` / `xlsx` / `exceljs` は**いずれも 0 件**。
+> **【v0.2 で「自作」の決定を撤回】** v0.1 は「`package.json` にライブラリが 0 件だから自作」と書いたが、
+> **依存が入っていないことは依存を足してはいけない根拠ではない**（発注者指摘 2026-09-10）。
+> **医療関連データを扱うので、独自 ZIP parser を第一選択にしない。**
+> ここは決定仕様から外し、**Phase D 着手前に実測で比較して決める**。
 
-**決定 = 最小 ZIP リーダを自作する**（`src/lib/zip-reader.ts`）。
+#### 5.3.1 比較する 3 案
 
-- 展開は **Central Directory を正**とする（Local File Header だけを信用しない）。
-- 圧縮方式は **stored(0) と deflate(8) のみ**。他は `unsupported_file`。
-  - サーバ: `zlib.inflateRawSync`（実測: 利用可）
-  - ブラウザ: `DecompressionStream('deflate-raw')`（実測: この Node にも存在。**ブラウザ実機は要確認**→§28-O4）
-- **XLSX も ZIP なので同じリーダで読める**（§11.1）。これが自作を選ぶ最大の理由。
-- **S3 上の ZIP は Range GET で部分取得する。**
-  ① 末尾を Range GET → EOCD（+ ZIP64 EOCD）→ Central Directory を読む
-  ② エントリごとに**そのエントリの範囲だけ** Range GET して展開
-  → **160 MB を関数のメモリに載せない**・**エントリ単位で再開できる**。
+| 案 | ZIP | XLSX |
+|---|---|---|
+| **案 L**（ライブラリ） | 既存ライブラリ | 既存ライブラリ |
+| **案 H**（ハイブリッド） | 既存ライブラリ | 既存ライブラリ（ZIP とは別のもの可） |
+| **案 M**（最小自作） | 自作 | 自作（ZIP 基盤を共用） |
+
+※ 案 L と案 H は「同じライブラリで両方賄うか / 別々に選ぶか」の違い。
+**候補ライブラリ名は挙げない**（実在・保守状況・ライセンス・脆弱性履歴を**引いてから**名指しする＝CLAUDE.md R2）。
+
+#### 5.3.2 比較の観点（**この 8 つで評価する**）
+
+| # | 観点 | 見るもの |
+|---|---|---|
+| 1 | **セキュリティ** | 既知の脆弱性履歴（Zip Slip・ZIP 爆弾・パス traversal）／**現在も保守されているか**（最終リリース日・未解決 issue）／依存の深さ（推移的依存の数＝攻撃面）／ライセンス |
+| 2 | **メモリ** | **エントリ単位のストリーム読取ができるか**（全体をバッファに載せない API があるか）。§5.3.3 の要件を満たせるか |
+| 3 | **ZIP64** | 4 GB 超・65,535 エントリ超の EOCD64 / Zip64 extra field に対応しているか（**512 MB 上限でも Zip64 で作られた ZIP は来得る**） |
+| 4 | **data descriptor** | general purpose bit 3（サイズ・CRC が Local Header でなく後置される形式）を扱えるか。**ストリーム生成された ZIP で普通に出る** |
+| 5 | **文字コード** | UTF-8 フラグ（bit 11）を見るか／立っていないときに CP932 を解釈できるか（§5.4） |
+| 6 | **保守性** | 自作した場合に**誰が仕様追随の責任を持つか**。ライブラリなら更新を受け取れる |
+| 7 | **Vercel 対応** | Node ランタイムで動くか／バンドルサイズ（関数サイズ上限）／ネイティブ依存の有無（**ネイティブ拡張は避ける**） |
+| 8 | **XLSX の必要機能** | 共有文字列・inline string・**日付書式（`numFmt`）の判定**・1904 年方式・列順非依存の読み取りが**できるか**（§11.1 の要件） |
+
+#### 5.3.3 案によらず満たすべき要件（**ここは決定仕様**）
+
+1. **展開は Central Directory を正とする**（Local File Header だけを信用しない）。
+2. **エントリ単位で読む。ZIP 全体を一度にメモリへ載せない。**
+   - サーバ: S3 の **Range GET** で ①末尾（EOCD / Zip64 EOCD → Central Directory）
+     ②必要なエントリの範囲だけ、を取得する。
+   - ブラウザ: **`File.slice()` による部分読み**（§11.5）。
+3. **§24.3 の ZIP security を、選んだ手段の外側でも自分で検査する。**
+   ライブラリが守ってくれることを前提にしない（Zip Slip・絶対パス・symlink・
+   総容量・エントリ数・1 ファイル容量・深度・拡張子・マジックバイト）。
+4. **サイズ上限は展開前に Central Directory の宣言値で判定**し、
+   **展開中も実バイト数を数えて宣言値を超えたら中断**する（宣言値の詐称対策）。
+5. 対応しない圧縮方式は `unsupported_file` として**一覧に出す**（黙って捨てない）。
+
+#### 5.3.4 決め方（Phase D 着手前）
+
+1. 候補ライブラリを**実在確認**（npm の最終公開日・ライセンス・既知脆弱性・推移的依存数）。
+2. §5.3.2 の 8 観点で表を埋める。**埋まらない欄は「未確認」と書く**（推測で埋めない）。
+3. **結果を本節に追記して「決定」に格上げし、そのうえで Phase D に入る。**
+4. **既定の姿勢 = 案 L / 案 H を優先。案 M（自作）は、①②が満たせるライブラリが無い、
+   または脆弱性・保守停止で採れない、と示せたときだけ採る。**
+
+**現時点で確認できている環境事実（実測。案の優劣ではない）**:
+`zlib.inflateRawSync` が使える（Node v22）／`DecompressionStream` が Node 側に存在する
+（**ブラウザ実機は未確認**→§28-O4）／`TextDecoder('shift_jis')` が使える（§5.4）。
 
 ### 5.4 ファイル名の文字コード
 
@@ -194,6 +242,8 @@ ZIP の general purpose bit 11（UTF-8 フラグ）を見る。
 | `__MACOSX/` 配下・`.DS_Store` | 無視 | 一般的な ZIP のごみ |
 | ディレクトリエントリ | 無視（構造の把握にのみ使う） | — |
 | サイズ 0 のファイル | `unsupported_file` として一覧に出す（黙って捨てない） | 指示書 §22 |
+| **`.xls`（旧 Excel 97-2003）** | **`unsupported_file` として一覧に出す**（人物へは割り当てるが解析しない） | §5.1。OLE2 複合ドキュメントで ZIP/XML ではない |
+| 許可拡張子以外 | 同上 | §5.1 |
 
 ### 5.6 ZIP 直下の参考資料
 
@@ -227,7 +277,9 @@ ZIP 直下（人物フォルダの外）にあるファイルは **`batch_refere
 
 | 列 | 内容 |
 |---|---|
-| `subject_no` | 画面表示用の連番（`No.01` …）。**フォルダ名そのものは保存しない** |
+| `subject_no` | 画面表示用の連番（`No.01` …）。**フォルダ名そのものは保存しない**（採番規則は §6.2.2） |
+| `subject_fp` | **内容由来の非可逆 fingerprint**（§6.2.1）。再開時に人物と `client_id` を結び直す**唯一のキー**。材料はファイルの content SHA-256 だけで、**氏名・フォルダ名・ファイル名を含まない** |
+| `subject_fp_source` | `auto` / `manual`（分類を手で直したか。§6.2.4） |
 | `client_id` | 採番した UUID |
 | `identity_status` | `confirmed` / `needs_review` / `unresolved` |
 | `identity_reason` | 食い違いの**種類**だけ（例 `dob_mismatch:2`）。**値そのものは書かない** |
@@ -237,6 +289,82 @@ ZIP 直下（人物フォルダの外）にあるファイルは **`batch_refere
 **氏名・生年月日・社員番号・メールは DB に保存しない。** 照合は展開直後のメモリ内でのみ行う。
 長期保存が必要と判断された場合は、既存の PII データ設計（`customer` スキーマ）を確認したうえで
 別途決めること。**`diagnosis` スキーマへ無断で追加しない**（CLAUDE.md「PII / データ分離」）。
+
+### 6.2 再開時に「この人物 = この client_id」を取り違えない仕組み（v0.2 で追加）
+
+**問題**: 氏名もフォルダ名も保存しないので、ブラウザ再読込 → ZIP 再選択のあと
+**「いま画面に出ている人物」と「DB の `client_id`」を結び直す手がかりが無い**。
+`subject_no`（表示連番）だけで結ぶと、**分類を修正した回や ZIP が別物だった回に静かに入れ替わる**。
+
+**採る形 = 内容由来の非可逆 fingerprint で結び直す。**
+
+#### 6.2.1 `subject_fp` の定義（**原文を一切保存しない**）
+
+```
+subject_fp = SHA-256(  そのフォルダに属するファイルの content SHA-256 を
+                       16 進小文字で昇順ソートし、"\n" で連結した文字列  )
+```
+
+- 材料は **ファイルの中身のハッシュだけ**。
+  **フォルダ名・ファイル名・氏名・生年月日を一切使わない**ので、
+  **fingerprint から PII を引き出す経路が原理的に無い**（辞書攻撃の対象にならない）。
+  秘密鍵（HMAC）も要らない。
+- 材料の `sha256` は **`ad_hoc_diagnosis_files.sha256` として既に保存する値**（§23.3）＝新しい保存物を増やさない。
+- **昇順ソート**するので、ZIP のエントリ順や読み取り順が変わっても同じ値になる。
+- 同じ ZIP を選び直せば**バイトが同じ＝必ず同じ値**になる。
+
+#### 6.2.2 `subject_no`（表示連番）の決め方
+
+**Central Directory の出現順**で採番する（`No.01` …）。
+同じ ZIP なら Central Directory の並びも同じなので**再選択で同じ番号になる**。
+**フォルダ名は保存しないが、順番を決めるのに一度使うだけなら原文を残す必要がない。**
+`subject_no` は**表示のためだけ**に使い、**結び直しには使わない**（§6.2.3）。
+
+#### 6.2.3 再開の手順（**推測で結ばない**）
+
+1. **まず ZIP が同一か確認する。** 再選択された ZIP の SHA-256 が
+   `ad_hoc_diagnosis_batches.source_sha256` と一致しなければ、**そこで止める**
+   （「このバッチとは別の ZIP です」と出す。**別 ZIP を同じバッチの続きとして扱わない**）。
+2. 一致したら、Central Directory と各エントリから `subject_fp` を**計算し直す**。
+3. `(batch_id, subject_fp)` で `ad_hoc_diagnosis_subjects` を引く。
+   - **ヒット** → その行の `client_id` を使う。これが唯一の結び直し経路。
+   - **ヒットしない** → **推測で近い人物へ寄せない。**
+     `identity_status = 'needs_review'` にして
+     **「DB 上のどの人物にも一致しませんでした」**と画面に出し、管理者が判断する。
+4. **DB 側に在るのに再計算側に現れなかった人物**も同じく画面に出す（黙って消さない）。
+
+#### 6.2.4 分類を修正したとき
+
+管理者が STEP 2 でファイルの人物割り当てを直すと、その人物の**ファイル集合が変わる＝`subject_fp` も変わる**。
+
+- **編集の時点で `subject_fp` を再計算して更新する**（`client_id` は変えない）。
+  → 以後の再開は**編集後の fp** で引ける。
+- `subject_fp_source` に `auto` / `manual` を持ち、**手で動かした人物が分かる**ようにする（§21 の監査にも残す）。
+
+#### 6.2.5 衝突と例外
+
+| 事象 | 扱い |
+|---|---|
+| 同一バッチ内で `subject_fp` が衝突（**ファイル集合がバイト単位で完全一致する 2 人**） | `UNIQUE (batch_id, subject_fp)` で検出し、**両方を `needs_review`**（`identity_reason = 'fp_collision'`）。**自動で片方に寄せない** |
+| 人物フォルダにファイルが 0 件 | `subject_fp` を作れない → `identity_status = 'unresolved'`。人物として立てるが処理対象にしない |
+| ZIP が壊れて一部エントリを読めない | その人物の fp が変わるので**ヒットしない** → §6.2.3-3 の `needs_review` に落ちる（**誤って別人へ結ばない**） |
+
+#### 6.2.6 ブラウザ側
+
+- ブラウザは「画面の人物 ↔ `client_id`」を**メモリにしか持たない**。
+- 再選択のたびに §6.2.3 で**サーバから結び直してもらう**。
+  **ブラウザが覚えていた対応関係を再利用しない**（古い対応で上書きする事故を構造的に防ぐ）。
+- **`localStorage` / `sessionStorage` / IndexedDB に人物の対応を保存しない**（PII の残留を作らない）。
+
+#### 6.2.7 検証（§25.2）
+
+- 同じ ZIP を 2 回読ませて **`subject_fp` が完全一致**すること。
+- **エントリ順を入れ替えた同内容の ZIP** でも一致すること（昇順ソートが効いている）。
+- **1 バイト違う ZIP** では `source_sha256` の段階で止まること。
+- **1 ファイルだけ人物間で入れ替えた ZIP** で、両方が `needs_review` になり
+  **どちらの `client_id` も別人へ付け替わらない**こと。
+- **`subject_fp` の材料に氏名・フォルダ名・ファイル名が混ざっていないこと**
+  （混ぜる実装を注入すると落ちる形で固定する）。
 
 ---
 
@@ -369,16 +497,19 @@ Elith へ渡す JSON の PII 規則は `docs/elith/elith_masking_definition.md` 
 
 ### 11.1 健診 XLSX → `HealthCheckupData`
 
-**新規 parser**: `src/lib/xlsx-reader.ts`（汎用シート読取）＋ `src/lib/health-checkup-xlsx.ts`（写像）。
+**構成**: 「シートを読む層」＋ `src/lib/health-checkup-xlsx.ts`（写像）。
+**シートを読む層の実現手段（ライブラリか自作か）は §5.3 で未決定**。
+どちらになっても**写像側のインターフェースは変えない**ように、
+`readSheet(bytes) → { headers: string[]; rows: Cell[][] }` の形で切っておく。
 
-**XLSX の読み方（決定論・依存追加なし）**
-- XLSX は ZIP。§5.3 のリーダで次を読む:
-  `xl/workbook.xml`（シート名・`r:id`・`date1904` フラグ）/ `xl/_rels/workbook.xml.rels` /
+**XLSX の読み方に求める機能（**手段によらず必要**・§5.3.2 の観点 8）**
+- 読む対象: `xl/workbook.xml`（シート名・`r:id`・`date1904` フラグ）/ `xl/_rels/workbook.xml.rels` /
   `xl/sharedStrings.xml` / `xl/worksheets/sheet*.xml` / `xl/styles.xml`（`numFmt` の日付判定）。
 - セル型: `t="s"`（共有文字列）/ `t="inlineStr"` / `t="str"` / `t="b"` / 既定（数値）。
 - **日付**: 数値セルのうち、`s`（style index）→ `cellXfs` → `numFmtId` が日付書式なら**シリアル値→日付**へ。
   1900 年方式の**うるう年バグ（1900-02-29 が存在する）**を織り込む。`date1904` が真なら 1904 年方式。
   文字列日付（`2026/03/29` 等）も受ける。**Excel 日付型 / 文字列日付型の両方に対応**（指示書 §15）。
+- **`.xls`（旧形式）は対象外**（§5.1）。
 
 **写像の要件（指示書 §15）**
 - **PII 列（社員番号・漢字氏名・生年月日）を `measurements` に混入させない。** 変換時のみ利用する。
@@ -401,7 +532,9 @@ Elith へ渡す JSON の PII 規則は `docs/elith/elith_masking_definition.md` 
 
 ### 11.3 問診 XLSX → `LifestyleQuestionnaireData`
 
-**新規 parser**: `src/lib/questionnaire-xlsx.ts`。読取は §11.1 と同じ `xlsx-reader.ts`。
+**新規 parser**: `src/lib/questionnaire-xlsx.ts`。シートを読む層は §11.1 と共用する。
+**この parser は O5（§28.2）が解消するまで着手しない**（発注者指示 2026-09-10）。
+62 列 → 既存問診スキーマの mapping を**推測で作らない**。健診・遺伝子側と共通の基盤までは先行してよい。
 
 - 出力は **既存 `src/lib/interview-export.ts` の `buildElithInterviewJson()` / `buildElithInterviewBundle()`
   が作るものと同じ構造**にする。**新しい独自 JSON 形式を作らない**（指示書 §7）。
@@ -434,15 +567,40 @@ Elith へ渡す JSON の PII 規則は `docs/elith/elith_masking_definition.md` 
 - **同じ PDF を再処理した場合、`(file_sha256, page_no)` でキャッシュを使う**（§19.3）。
 - **既存プロンプトを重複定義しない。**
 
-**ブラウザがページ画像を作るための PDF バイト列の入手（決定）**
-- **既定 = ブラウザが選択時の ZIP をメモリに保持**し、`DecompressionStream('deflate-raw')` で
-  必要な PDF だけを取り出して pdf.js に渡す（**AWS 側の追加作業なし**）。
-- **ブラウザを再読込した場合**、DB の状態（どのページまで終わったか）は復元されるが、
-  PDF のバイト列は失われる。→ 画面に
+**ブラウザがページ画像を作るための PDF バイト列の入手（v0.2 で修正）**
+
+**【禁止】ZIP 全体を `ArrayBuffer` 化してメモリに置くこと。**
+**【禁止】展開後のファイル群を同時に保持すること。**
+上限は 512 MB（§5.1）で実物も 160 MB 級なので、どちらもブラウザのメモリを溢れさせる。
+
+**採る形 = 必要な PDF エントリだけを、そのつど部分読みして展開する。**
+
+- ブラウザは `<input type=file>` が返す **`File` オブジェクトの参照だけ**を保持する。
+  `File` は**ディスク上の実体への参照**で、`File.slice(start, end)` は
+  **その範囲だけの `Blob`** を返す（読むまで中身はメモリに載らない）。
+  これがサーバ側の **S3 Range GET と同じ役割**を果たす。
+- 手順（サーバ側 §5.3.3-2 と同型）:
+  1. `file.slice(file.size - N)` で末尾を読み、EOCD（+ Zip64 EOCD）→ **Central Directory だけ**を得る。
+     以後 Central Directory（エントリ名・offset・サイズ）だけを保持する。
+  2. ページ画像化したい PDF について、`file.slice(offset, offset + compressedSize)` で
+     **そのエントリの範囲だけ**を読む。
+  3. `deflate` なら `DecompressionStream('deflate-raw')` で展開し、pdf.js へ渡す。
+  4. **その PDF の処理が終わったら参照を捨てる**（次の PDF を読む前に解放する）。
+- **同時にメモリへ載せてよいのは「Central Directory」＋「処理中の 1 エントリ」だけ。**
+  複数の PDF を先読みしない。
+- pdf.js には **1 ファイルずつ渡し、`pdf.destroy()` 相当で解放してから次へ**進む。
+  ページ画像も 1 枚ずつ作って送信し、次を作る前に捨てる。
+- **再読込した場合**、DB の状態（どのページまで終わったか）は復元されるが、
+  `File` の参照は失われる。→ 画面に
   **「続きから処理するには同じ ZIP をもう一度選んでください」**と出し、
-  **SHA-256 が一致すれば同じバッチの続きから**再開する（**再アップロードはしない**）。
+  **ZIP の SHA-256 が一致すれば同じバッチの続きから**再開する（**再アップロードはしない**）。
+  人物と `client_id` の再対応は §6.2 の fingerprint で行う。
+  - SHA-256 の計算も**全体をメモリに載せずに** `file.stream()` を逐次読みして進める。
 - **S3 から presigned GET でブラウザへ渡す案は採らない。** バケットの CORS は現在 `PUT` のみで、
   `GET` を足す運用変更が要る（CLAUDE.md「`GET` も足さない」）。必要になったら §28-O4 で判断する。
+- **検証（§25.2）**: 大きな ZIP を通したときに
+  **ピークメモリが「Central Directory ＋ 最大エントリ 1 件」の桁に収まる**ことを実測で見る。
+  「全体を `arrayBuffer()` する」実装に戻すと落ちること（退行注入）も確認する。
 
 ---
 
@@ -761,7 +919,8 @@ overwrite export / retry。
 
 - **HTTP API 同士を Scan-Chat-AI 内部から呼ばない。** 既存 `elith-scan` / `elith-genetic-merge` /
   `health-age` / `elith-assemble` の処理は**共通 lib へ切り出して再利用**する（指示書 §13）。
-- 切り出す先: `src/lib/ad-hoc-diagnosis/*.ts`（`zip-reader` / `classify` / `parsers` / `pipeline` / `state`）。
+- 切り出す先: `src/lib/ad-hoc-diagnosis/*.ts`（`archive`（§5.3 の手段をここに隠す） / `classify` /
+  `parsers` / `pipeline` / `state` / `fingerprint`（§6.2））。
 
 ---
 
@@ -784,10 +943,14 @@ overwrite export / retry。
 
 ### 23.2 `diagnosis.ad_hoc_diagnosis_subjects`
 
-`id` / `batch_id` / `subject_no` / `client_id` / `diagnostic_id` /
+`id` / `batch_id` / `subject_no` / **`subject_fp`** / **`subject_fp_source`** / `client_id` / `diagnostic_id` /
 `identity_status` / `identity_reason` / `sex` / `age` / `status` / `created_at` / `updated_at`
 
-**氏名は保存しない**（§6.1）。
+**UNIQUE (batch_id, subject_fp)** — 衝突は §6.2.5 のとおり `needs_review` で検出する
+（**自動で片方へ寄せない**）。
+
+**氏名・生年月日・社員番号・フォルダ名・元ファイル名は保存しない**（§6.1 / §8.1）。
+`subject_fp` は**内容ハッシュだけから作る**ので、この列から PII を引き出す経路は無い（§6.2.1）。
 
 ### 23.3 `diagnosis.ad_hoc_diagnosis_files`
 
@@ -901,15 +1064,20 @@ overwrite export / retry。
 
 ### 25.2 Unit（`npm run verify:ad-hoc-*`・サーバ不要）
 
-ZIP 安全展開 / 分類 / 健診 XLSX parser / 問診 XLSX parser / identity check /
+ZIP 安全展開 / 分類 / 健診 XLSX parser / 問診 XLSX parser（**O5 解消後**） / identity check /
 duplicate 判定 / date parse（Excel シリアル・1900 うるう年バグ・`date1904`・文字列日付） /
-age 算出 / PII masking / state transition。
+age 算出 / PII masking / state transition /
+**部分読み（§11.5 のピークメモリ）** / **`subject_fp` の再現性と非 PII 性（§6.2.7）**。
 
 **「壊して落ちること」を必ず確認する**（この種の検査は静かに壊れるため。CLAUDE.md の
 `verify:demo-gate` / `verify:scan-upload-key` と同じ規律）。とくに:
 - **PII masking**: 保存物・応答・ログのどこにも氏名 / DOB が出ないこと。
   → `hashEmail` を壊すと落ちる形（`verify:demo-gate`）を真似て、**実際に動かして**検査する。
 - **Zip Slip**: `../` を通す実装にすると落ちること。
+- **部分読み**: ZIP 全体を `arrayBuffer()` する実装に戻すと**ピークメモリの検査が落ちる**こと（§11.5）。
+- **`subject_fp`**: 材料に氏名・フォルダ名・ファイル名を混ぜる実装を注入すると落ちること（§6.2.7）。
+- **再開の結び直し**: `subject_fp` でなく `subject_no` で結ぶ実装に戻すと、
+  「1 ファイルだけ人物間で入れ替えた ZIP」で**別人の `client_id` に付いてしまい落ちる**こと。
 
 ### 25.3 Integration
 
@@ -968,7 +1136,8 @@ health age check / schema validation / **dry-run export**。
 
 ### 27.3 新規実装
 
-`src/lib/zip-reader.ts` / `src/lib/xlsx-reader.ts` / `src/lib/health-checkup-xlsx.ts` /
+ZIP / XLSX を読む層（**手段は §5.3 で未決定**。ライブラリなら薄いラッパ 1 枚） /
+`src/lib/health-checkup-xlsx.ts` /
 `src/lib/questionnaire-xlsx.ts` / `src/lib/ad-hoc-diagnosis/{classify,state,pipeline,keys}.ts` /
 `src/pages/api/admin/ad-hoc-diagnosis/*.ts` / migration 1 本 /
 （wellfort-site 側）`src/pages/admin/ad-hoc-diagnosis.astro` + `src/pages/api/admin/ad-hoc-diagnosis/*.ts`
@@ -992,7 +1161,8 @@ Scan-Chat-AI に既存する `src/pages/admin/*` は**今回の前例として�
 |---|---|---|---|
 | **O2** | **臨時バッチの原本を 10 年保管（Object Lock）の対象にするか。** 原本用バケットは削除不可なので、氏名・DOB を含むファイルを入れると消せない | 保管ポリシー | **保存しない**（`retain_originals=false`）。受け皿だけ用意 |
 | **O3** | **元ファイル名を DB に保存するか。** 氏名が含まれ得る（指示書 §10）。保存しないと現場が原本を追いにくい | 運用性 vs PII | **保存しない**（`{分類}_{連番}{拡張子}` に置換） |
-| **O4** | **ブラウザの `DecompressionStream('deflate-raw')` 実機対応**と、代替として **S3 の CORS に `GET` を足すか**（CLAUDE.md は「`GET` も足さない」） | 遺伝子 PDF のページ画像化経路 | ブラウザ内展開。**再読込後は ZIP を選び直す**（§11.5） |
+| **O4** | **ブラウザで「必要なエントリだけ部分展開」が実機で成立するか**（`File.slice()` ＋ `DecompressionStream('deflate-raw')`、または §5.3 で選ぶライブラリの部分読み API）。代替として **S3 の CORS に `GET` を足すか**（CLAUDE.md は「`GET` も足さない」） | 遺伝子 PDF のページ画像化経路 | ブラウザ内で**部分読み**（§11.5。**全体展開は禁止**）。**再読込後は ZIP を選び直す** |
+| **O8** | **ZIP / XLSX を読む手段（案 L / 案 H / 案 M）。** v0.1 の「依存追加ゼロだから自作」は撤回済み（§5.3） | Phase D の実装全体 | **未決定。Phase D 着手前に §5.3.2 の 8 観点で比較して決める。既定の姿勢は案 L / 案 H を優先し、独自 ZIP parser を第一選択にしない** |
 | **O5** | **問診 XLSX / PDF の実列・実レイアウト。** サンプル ZIP が本作業環境に無く、**私は列名を実測していない** | 問診の写像表・`test_date` の正 | 問診 XLSX は**マッピング表を実物で確定してから**。問診 PDF の人物は **`needs_review`** |
 | **O6** | `10名の情報.xlsx` の `実施日` の意味 | `bundle_date` の自動決定 | **転用しない**（§14.4） |
 | **O7** | Elith 側に既存 manifest 定義があるか | §15.4 | 定義があればそれに合わせる。無ければ §15.4 の最小形 |
@@ -1008,7 +1178,8 @@ Scan-Chat-AI に既存する `src/pages/admin/*` は**今回の前例として�
 | A | 調査（git / docs / DB / 既存 API / originals / Elith 出力 / health age） | 触れない |
 | **B** | **本仕様書の作成・保存** | 触れない |
 | C | DB migration（**ファイル作成のみ**） | **適用禁止** |
-| D | parser / lib（ZIP・分類・XLSX・state）を単体で実装 + unit 検査 | 触れない |
+| **D-0** | **§5.3 の 3 案比較 → ZIP / XLSX の手段を決定し §5.3 を「決定」へ格上げ**（**これが済むまで D に入らない**） | 触れない |
+| D | parser / lib（archive・分類・XLSX・state・fingerprint）を単体で実装 + unit 検査。**問診 parser は O5 が解消するまで着手しない**（共通基盤までは先行可） | 触れない |
 | E | Scan-Chat-AI 側 管理 API | 触れない |
 | F | wellfort-site 側 6 ステップ UI + 中継 API | 触れない |
 | G | 既存 Elith / HealthAge との接続 | 触れない |
@@ -1021,4 +1192,5 @@ Scan-Chat-AI に既存する `src/pages/admin/*` は**今回の前例として�
 
 | 版 | 日付 | 内容 |
 |---|---|---|
-| 0.1 | 2026-09-10 | 初版。発注者指示書（臨時診断バッチ）を受けて Phase B として作成。**責務境界は 2026-09-10 の発注者確定（UI=wellfort-site / 処理=Scan-Chat-AI）を反映**し、指示書初版の「Scan-Chat-AI に UI」は §28.1 に訂正記録として残した。ZIP は presigned PUT・依存追加なしの自作 ZIP/XLSX リーダ・`GATING_FORMAT_IDS` 不変・案件別 `required_formats` を決定。未確定 6 件を §28.2 に分離。 |
+| **0.2** | 2026-09-10 | **発注者レビューで 3 点を修正。** ①**ZIP/XLSX の自作リーダを「決定仕様」から外した** — 「`package.json` に無いから自作」は依存追加禁止の根拠にならない、という指摘。§5.3 を「案 L(ライブラリ) / 案 H / 案 M(最小自作) を **8 観点**（セキュリティ・メモリ・ZIP64・data descriptor・文字コード・保守性・Vercel 対応・XLSX 必要機能）で比較して **Phase D 着手前に決める**」へ書き換え、**医療関連データなので独自 ZIP parser を第一選択にしない**と明記。手段によらず満たす要件（Central Directory を正 / エントリ単位で読む / ZIP security は自分でも検査 / サイズは宣言値と実バイトの両方で判定）は決定仕様として残した。あわせて**`.xls` を受入対象から外した**（OLE2 で ZIP/XML ではない → `unsupported_file` として一覧に出す） ②**ブラウザ側の ZIP 全体メモリ展開を禁止**。`File.slice()` で **Central Directory ＋ 処理中の 1 エントリだけ**を載せる形へ（サーバの S3 Range GET と同型）。SHA-256 も逐次計算。ピークメモリを実測で見張る ③**§6.2 を新設**: 再開時に「この人物 = この client_id」を取り違えない仕組み。**内容ハッシュだけから作る非可逆 `subject_fp`**（氏名・フォルダ名・ファイル名を材料にしない＝PII を引き出す経路が無い・秘密鍵も不要）で結び直し、**ヒットしなければ推測で寄せず `needs_review`**。`UNIQUE (batch_id, subject_fp)` で衝突も検出する。§6.1 / §23.2 に列を追加し、§29 に **Phase D-0（手段の決定）** を挿入。 |
+| 0.1 | 2026-09-10 | 初版。発注者指示書（臨時診断バッチ）を受けて Phase B として作成。**責務境界は 2026-09-10 の発注者確定（UI=wellfort-site / 処理=Scan-Chat-AI）を反映**し、指示書初版の「Scan-Chat-AI に UI」は §28.1 に訂正記録として残した。ZIP は presigned PUT・`GATING_FORMAT_IDS` 不変・案件別 `required_formats` を決定（**ZIP/XLSX の読み方は v0.2 で未決定へ差し戻した**）。未確定 6 件を §28.2 に分離。 |
