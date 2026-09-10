@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 版 | **0.2**（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離。v0.2 の変更点は §30） |
+| 版 | **0.3**（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離。変更点は §30） |
 | 対象システム | **wellfort-site**（管理画面 UI・管理者認証・ブラウザとのやり取り）／ **Scan-Chat-AI**（ZIP 受付処理・分類・解析・ジョブ状態・ウェルネス年齢・Elith JSON 生成・S3） |
 | 同系統の先行仕様 | `docs/lab/wellfort_admin_lab_upload_spec.md`（**責務分界の正**。§3 配置場所／§6-1 Bearer API Key） |
 | 上位・関連 | `docs/elith/elith_s3_data_handoff_spec.md`（納品パス・命名）／`docs/elith/elith_assembly_wrapping_spec.md`／`docs/elith/elith_masking_definition.md`／`docs/scan/health_age_caba_v5.4_spec.md`／`docs/scan/health_age_simple_v7.0_spec.md`／`docs/lab/lab_data_pipeline_master_spec.md` |
@@ -119,7 +119,7 @@ ZIP → 人物単位へ整理 → データ種別を判定 → 既存の専門�
 | 項目 | 値 | 根拠 |
 |---|---|---|
 | 形式 | `application/zip`（`.zip`） | — |
-| 上限サイズ | **512 MB**（`MAX_ZIP_BYTES`） | 指示書 §22「約160MB級」に対する余裕。署名に固定するので超過は S3 が拒否 |
+| 上限サイズ | **512 MB**（`MAX_ZIP_BYTES`） | 指示書 §22「約160MB級」に対する余裕。**超過の検知は §5.2.1 の多層**（署名任せにしない） |
 | 展開後の総容量上限 | **1.5 GB**（`MAX_TOTAL_UNCOMPRESSED`） | ZIP 爆弾対策 |
 | ファイル数上限 | **2,000**（`MAX_ENTRIES`） | 同上 |
 | 1 ファイル上限 | **80 MB**（`MAX_ENTRY_BYTES`） | Genoplan 208 ページ PDF を通す |
@@ -147,8 +147,9 @@ Phase 1 で `.xls` を読む必要が出たら、§5.3 の選定と**同じ手�
                   { batchId, url, key, headers, expiresIn }
 4. wellfort-site → ブラウザへは **url / headers / expiresIn / batchId だけ**返す
                   （key も返してよいが、以後クライアントから key を受け取らない＝§24.2）
-5. ブラウザ → S3 へ直接 PUT（Content-Type と Content-Length は署名に固定済み）
+5. ブラウザ → S3 へ直接 PUT（Content-Type は署名対象。**サイズは §5.2.1 の多層で守る**）
 6. ブラウザ → wellfort-site POST /api/admin/ad-hoc-diagnosis/{batchId}/classify
+   → Scan-Chat-AI は**まず HeadObject で実サイズを検証**してから展開に入る（§5.2.1 ②）
 ```
 
 **安全性（`/api/scan` で踏んだ罠と同型の対策）**
@@ -156,9 +157,44 @@ Phase 1 で `.xls` を読む必要が出たら、§5.3 の選定と**同じ手�
 1. **キーはサーバが採番する。** クライアントは PUT 先を選べない。
 2. 形は `{prefix}ad-hoc-uploads/{batch_id}/source.zip` に**完全一致**（`isAdHocZipKey`。部分一致にしない）。
 3. `batch_id` は UUID v4（推測不能）。
-4. **Content-Type（`application/zip`）と ContentLength を署名に固定**する。
+4. **Content-Type（`application/zip`）を署名対象に含める。**
+   **ContentLength が署名で固定されるかは未確認**（v0.3 で断定を撤回。§5.2.1）。
 5. 期限 **15 分**（`PRESIGN_EXPIRES_SEC`）。
 6. **`.json` を許可拡張子に入れない**（Elith 納品 JSON を読ませない・書かせないため）。
+
+#### 5.2.1 サイズの防御は多層にする（v0.3・発注者指摘）
+
+**v0.2 の「Content-Length も署名に固定され、違うサイズなら S3 自身が拒否する」は撤回する。**
+
+**実測（`src/lib/scan-upload-ticket.ts`）**:
+- `PutObjectCommand` に `ContentLength: bytes` を渡している（`:127`）。
+- しかし `getSignedUrl` の第 3 引数は
+  **`{ expiresIn, signableHeaders: new Set(['content-type']) }`**（`:129`）＝
+  **明示している署名対象は `content-type` だけ**。
+- クライアントへ返す `headers` も **`{ 'content-type': contentType }` のみ**（`:132`）で、
+  **Content-Length を送れとは指示していない**（ブラウザが本文から自動で付ける）。
+- 同ファイルのコメント（`:21-22` / `:127` / `:158`）は「ContentLength も署名に固定」と書いているが、
+  **`signableHeaders` の実装と食い違っている。この文書はコメントを根拠にしない。**
+
+→ **署名だけに頼らない。次の 3 層で守る。**
+
+| 層 | いつ | 何をする | 効果 |
+|---|---|---|---|
+| **① ticket 発行時** | presigned URL を出す前 | クライアント申告の `contentLength` が `MAX_ZIP_BYTES`（§5.1）以下か検査。超えていれば**URL を出さない** | 明らかな超過をそもそも通さない |
+| **② アップロード後** | `classify` の冒頭 | **S3 に `HeadObject` して実バイト数を見る**。`MAX_ZIP_BYTES` 超なら `413` でバッチを `failed` にし、**そのオブジェクトを削除する** | **申告と実物の食い違いをここで必ず捕まえる**（署名の挙動に依存しない） |
+| **③ ZIP 解析時** | Central Directory 読取時と展開中 | 宣言値の合計が `MAX_TOTAL_UNCOMPRESSED` / `MAX_ENTRIES` / `MAX_ENTRY_BYTES` を超えたら中断。**展開中も実バイト数を数えて宣言値超過で中断**（§5.3.3-4） | 圧縮率の詐称（ZIP 爆弾）を止める |
+
+**②が本命**。①はクライアント申告なので信用しない。③は「小さく見せかけた ZIP」への備え。
+先行例として `scan-upload-ticket.ts:158-161` が**読み出し側でもサイズを見ている**
+（コメントは「署名で固定してあるが念のため」だが、**実際にはこちらが主防御**）。
+
+**Phase D-0 または upload-ticket 実装時に実測して確定する 3 点**（§28.2-O9）:
+1. `getSignedUrl` が返す URL の **`X-Amz-SignedHeaders` に `content-length` が入るか**。
+2. **ブラウザの `fetch`/`XHR` で `Content-Length` を明示できるか**
+   （fetch は禁止ヘッダ扱いで設定できない可能性がある。**未確認**）。
+3. **申告と違うサイズの PUT を S3 が本当に拒否するか**（実際に試す）。
+
+結果がどうであれ**②は残す**（署名で守れていたとしても二重で困らない）。
 
 **置き場所（決定）**: Elith 用バケット `AWS_S3_BUCKET` の**一時領域** `{AWS_S3_PREFIX}ad-hoc-uploads/`。
 - 理由: `scan-uploads/` が既に**同じバケットの一時領域**として運用されており（CLAUDE.md・2026-09-04 実測）、
@@ -278,7 +314,7 @@ ZIP 直下（人物フォルダの外）にあるファイルは **`batch_refere
 | 列 | 内容 |
 |---|---|
 | `subject_no` | 画面表示用の連番（`No.01` …）。**フォルダ名そのものは保存しない**（採番規則は §6.2.2） |
-| `subject_fp` | **内容由来の非可逆 fingerprint**（§6.2.1）。再開時に人物と `client_id` を結び直す**唯一のキー**。材料はファイルの content SHA-256 だけで、**氏名・フォルダ名・ファイル名を含まない** |
+| `subject_fp` | **内容由来の非可逆 fingerprint**（§6.2.1）。再開時の**照合用の検索キー**（**一意識別子ではない**・§6.2.5.1）。材料はファイルの content SHA-256 だけで、**氏名・フォルダ名・ファイル名を含まない** |
 | `subject_fp_source` | `auto` / `manual`（分類を手で直したか。§6.2.4） |
 | `client_id` | 採番した UUID |
 | `identity_status` | `confirmed` / `needs_review` / `unresolved` |
@@ -326,11 +362,15 @@ subject_fp = SHA-256(  そのフォルダに属するファイルの content SHA
    `ad_hoc_diagnosis_batches.source_sha256` と一致しなければ、**そこで止める**
    （「このバッチとは別の ZIP です」と出す。**別 ZIP を同じバッチの続きとして扱わない**）。
 2. 一致したら、Central Directory と各エントリから `subject_fp` を**計算し直す**。
-3. `(batch_id, subject_fp)` で `ad_hoc_diagnosis_subjects` を引く。
-   - **ヒット** → その行の `client_id` を使う。これが唯一の結び直し経路。
-   - **ヒットしない** → **推測で近い人物へ寄せない。**
-     `identity_status = 'needs_review'` にして
-     **「DB 上のどの人物にも一致しませんでした」**と画面に出し、管理者が判断する。
+3. `(batch_id, subject_fp)` で `ad_hoc_diagnosis_subjects` を引き、**ヒット件数で判定する**
+   （v0.3 で明確化。**`subject_fp` は一意ではない** = §6.2.5）。
+
+   | ヒット件数 | 判定 | 動作 |
+   |---|---|---|
+   | **0 件** | `unmatched` | **推測で近い人物へ寄せない。** `identity_status = 'needs_review'`（`identity_reason = 'unmatched'`）にして**「DB 上のどの人物にも一致しませんでした」**と出し、管理者が判断する |
+   | **1 件** | `match` | その行の `client_id` を使う。**これが唯一の自動結び直し経路** |
+   | **2 件以上** | `fp_collision` | **該当する subject を全件** `identity_status = 'needs_review'`（`identity_reason = 'fp_collision'`）にする。**どれか 1 つを自動で選ばない** |
+
 4. **DB 側に在るのに再計算側に現れなかった人物**も同じく画面に出す（黙って消さない）。
 
 #### 6.2.4 分類を修正したとき
@@ -345,9 +385,27 @@ subject_fp = SHA-256(  そのフォルダに属するファイルの content SHA
 
 | 事象 | 扱い |
 |---|---|
-| 同一バッチ内で `subject_fp` が衝突（**ファイル集合がバイト単位で完全一致する 2 人**） | `UNIQUE (batch_id, subject_fp)` で検出し、**両方を `needs_review`**（`identity_reason = 'fp_collision'`）。**自動で片方に寄せない** |
+| 同一バッチ内で `subject_fp` が衝突（**ファイル集合がバイト単位で完全一致する 2 人**） | **仕様上あり得ることとして認める**（v0.3）。`subject_fp` に UNIQUE 制約は**置かない**（§6.2.5.1）。再開時のヒットが 2 件以上になった場合、**該当 subject を全件 `needs_review`**（`identity_reason = 'fp_collision'`）にする。**自動で片方に寄せない** |
 | 人物フォルダにファイルが 0 件 | `subject_fp` を作れない → `identity_status = 'unresolved'`。人物として立てるが処理対象にしない |
 | ZIP が壊れて一部エントリを読めない | その人物の fp が変わるので**ヒットしない** → §6.2.3-3 の `needs_review` に落ちる（**誤って別人へ結ばない**） |
+
+##### 6.2.5.1 なぜ `UNIQUE (batch_id, subject_fp)` を置かないか（v0.3・発注者指示）
+
+v0.2 は `UNIQUE (batch_id, subject_fp)` を置いていたが、**同じ節の「衝突したら両方を
+`needs_review` として残す」と矛盾していた** — UNIQUE があると
+**2 人目の INSERT がそもそも失敗し、「両方残す」が実行できない**。
+
+→ **`subject_fp` は「再開時の照合用の検索キー」であって一意識別子ではない**、と位置づけを確定する。
+**同一 fp が複数人物に存在し得ることを仕様として認める。**
+
+```sql
+-- 一意制約ではなく通常 INDEX
+CREATE INDEX ... ON diagnosis.ad_hoc_diagnosis_subjects (batch_id, subject_fp);
+```
+
+- 衝突は**制約で防ぐのではなく、検索件数で検出して管理者へ出す**（§6.2.3 の表）。
+- **`subject_no` は表示用だが、同一バッチ内で重複させる意味が無いので
+  `UNIQUE (batch_id, subject_no)` は維持する。**
 
 #### 6.2.6 ブラウザ側
 
@@ -363,6 +421,9 @@ subject_fp = SHA-256(  そのフォルダに属するファイルの content SHA
 - **1 バイト違う ZIP** では `source_sha256` の段階で止まること。
 - **1 ファイルだけ人物間で入れ替えた ZIP** で、両方が `needs_review` になり
   **どちらの `client_id` も別人へ付け替わらない**こと。
+- **fp が同じ subject を 2 行 INSERT できること**（UNIQUE を置き直す退行で落ちる）。
+  そのうえで再開時に**2 件ヒット → 全件 `fp_collision`** になること。
+- ヒット **0 件**で `unmatched`・**1 件**で `match` になること（境界を 3 通りとも通す）。
 - **`subject_fp` の材料に氏名・フォルダ名・ファイル名が混ざっていないこと**
   （混ぜる実装を注入すると落ちる形で固定する）。
 
@@ -946,8 +1007,10 @@ overwrite export / retry。
 `id` / `batch_id` / `subject_no` / **`subject_fp`** / **`subject_fp_source`** / `client_id` / `diagnostic_id` /
 `identity_status` / `identity_reason` / `sex` / `age` / `status` / `created_at` / `updated_at`
 
-**UNIQUE (batch_id, subject_fp)** — 衝突は §6.2.5 のとおり `needs_review` で検出する
-（**自動で片方へ寄せない**）。
+**制約とインデックス（v0.3）**
+- **`subject_fp` は一意にしない。** `CREATE INDEX ... (batch_id, subject_fp)`（通常 INDEX）。
+  同一 fp が複数人物に存在し得ることを仕様として認め、**衝突は検索件数で検出する**（§6.2.3 / §6.2.5.1）。
+- **`UNIQUE (batch_id, subject_no)`** — 表示連番は同一バッチ内で重複させない。
 
 **氏名・生年月日・社員番号・フォルダ名・元ファイル名は保存しない**（§6.1 / §8.1）。
 `subject_fp` は**内容ハッシュだけから作る**ので、この列から PII を引き出す経路は無い（§6.2.1）。
@@ -1012,6 +1075,7 @@ overwrite export / retry。
 ### 24.2 presigned とキー検証
 
 §5.2 のとおり。加えて:
+- **サイズは署名に依存せず多層で守る**（§5.2.1）。とくに**アップロード後の `HeadObject` を必ず通す**。
 - **クライアントから S3 key を受け取らない。** `batchId` から**サーバが導出**する。
 - `isAdHocZipKey` / `isAdHocFileKey` は**完全一致**で検証する（部分一致にしない）。
 
@@ -1162,6 +1226,7 @@ Scan-Chat-AI に既存する `src/pages/admin/*` は**今回の前例として�
 | **O2** | **臨時バッチの原本を 10 年保管（Object Lock）の対象にするか。** 原本用バケットは削除不可なので、氏名・DOB を含むファイルを入れると消せない | 保管ポリシー | **保存しない**（`retain_originals=false`）。受け皿だけ用意 |
 | **O3** | **元ファイル名を DB に保存するか。** 氏名が含まれ得る（指示書 §10）。保存しないと現場が原本を追いにくい | 運用性 vs PII | **保存しない**（`{分類}_{連番}{拡張子}` に置換） |
 | **O4** | **ブラウザで「必要なエントリだけ部分展開」が実機で成立するか**（`File.slice()` ＋ `DecompressionStream('deflate-raw')`、または §5.3 で選ぶライブラリの部分読み API）。代替として **S3 の CORS に `GET` を足すか**（CLAUDE.md は「`GET` も足さない」） | 遺伝子 PDF のページ画像化経路 | ブラウザ内で**部分読み**（§11.5。**全体展開は禁止**）。**再読込後は ZIP を選び直す** |
+| **O9** | **presigned PUT で `Content-Length` が署名対象になるか / ブラウザから明示できるか / 違うサイズを S3 が拒否するか**（§5.2.1 の 3 点）。既存コードのコメントと `signableHeaders` の実装が食い違っている | サイズ防御の設計 | **署名に依存しない**。①ticket 発行時上限 ②アップロード後の `HeadObject` ③ZIP 解析時の展開上限 の**多層で守る**（§5.2.1） |
 | **O8** | **ZIP / XLSX を読む手段（案 L / 案 H / 案 M）。** v0.1 の「依存追加ゼロだから自作」は撤回済み（§5.3） | Phase D の実装全体 | **未決定。Phase D 着手前に §5.3.2 の 8 観点で比較して決める。既定の姿勢は案 L / 案 H を優先し、独自 ZIP parser を第一選択にしない** |
 | **O5** | **問診 XLSX / PDF の実列・実レイアウト。** サンプル ZIP が本作業環境に無く、**私は列名を実測していない** | 問診の写像表・`test_date` の正 | 問診 XLSX は**マッピング表を実物で確定してから**。問診 PDF の人物は **`needs_review`** |
 | **O6** | `10名の情報.xlsx` の `実施日` の意味 | `bundle_date` の自動決定 | **転用しない**（§14.4） |
@@ -1192,5 +1257,6 @@ Scan-Chat-AI に既存する `src/pages/admin/*` は**今回の前例として�
 
 | 版 | 日付 | 内容 |
 |---|---|---|
+| **0.3** | 2026-09-10 | **発注者レビューで 2 点を修正（Phase C 着手前）。** **A. `subject_fp` の UNIQUE 制約を撤回** — v0.2 は「衝突したら両方を `needs_review` で残す」と `UNIQUE (batch_id, subject_fp)` が**矛盾していた**（UNIQUE があると 2 人目の INSERT が失敗し「両方残す」が実行できない）。**`subject_fp` は再開時の照合用の検索キーであって一意識別子ではない**と位置づけを確定し、**同一 fp が複数人物に存在し得ることを仕様として認める**。制約を**通常 INDEX `(batch_id, subject_fp)`** へ変更し、再開時は**ヒット件数で判定**（0 件=`unmatched` / 1 件=`match` / **2 件以上=`fp_collision` で該当 subject を全件 `needs_review`**）。**`UNIQUE (batch_id, subject_no)` は維持**。**B. `Content-Length` の「署名固定」を未確認へ落とした** — 実測すると `scan-upload-ticket.ts:129` の `signableHeaders` は **`content-type` だけ**で、返す `headers` にも Content-Length は無い（`:132`）。同ファイルのコメント `:21-22`/`:127`/`:158` は「署名に固定」と書いているが**実装と食い違う**ので根拠にしない。→ 断定を撤回し、**サイズ防御を ①ticket 発行時上限 ②アップロード後 `HeadObject` の実サイズ検証 ③ZIP 解析時の展開上限 の多層**にした（**②が本命**・§5.2.1）。署名の実挙動 3 点は O9 として Phase D-0 / upload-ticket 実装時に実測する。 |
 | **0.2** | 2026-09-10 | **発注者レビューで 3 点を修正。** ①**ZIP/XLSX の自作リーダを「決定仕様」から外した** — 「`package.json` に無いから自作」は依存追加禁止の根拠にならない、という指摘。§5.3 を「案 L(ライブラリ) / 案 H / 案 M(最小自作) を **8 観点**（セキュリティ・メモリ・ZIP64・data descriptor・文字コード・保守性・Vercel 対応・XLSX 必要機能）で比較して **Phase D 着手前に決める**」へ書き換え、**医療関連データなので独自 ZIP parser を第一選択にしない**と明記。手段によらず満たす要件（Central Directory を正 / エントリ単位で読む / ZIP security は自分でも検査 / サイズは宣言値と実バイトの両方で判定）は決定仕様として残した。あわせて**`.xls` を受入対象から外した**（OLE2 で ZIP/XML ではない → `unsupported_file` として一覧に出す） ②**ブラウザ側の ZIP 全体メモリ展開を禁止**。`File.slice()` で **Central Directory ＋ 処理中の 1 エントリだけ**を載せる形へ（サーバの S3 Range GET と同型）。SHA-256 も逐次計算。ピークメモリを実測で見張る ③**§6.2 を新設**: 再開時に「この人物 = この client_id」を取り違えない仕組み。**内容ハッシュだけから作る非可逆 `subject_fp`**（氏名・フォルダ名・ファイル名を材料にしない＝PII を引き出す経路が無い・秘密鍵も不要）で結び直し、**ヒットしなければ推測で寄せず `needs_review`**。`UNIQUE (batch_id, subject_fp)` で衝突も検出する。§6.1 / §23.2 に列を追加し、§29 に **Phase D-0（手段の決定）** を挿入。 |
 | 0.1 | 2026-09-10 | 初版。発注者指示書（臨時診断バッチ）を受けて Phase B として作成。**責務境界は 2026-09-10 の発注者確定（UI=wellfort-site / 処理=Scan-Chat-AI）を反映**し、指示書初版の「Scan-Chat-AI に UI」は §28.1 に訂正記録として残した。ZIP は presigned PUT・`GATING_FORMAT_IDS` 不変・案件別 `required_formats` を決定（**ZIP/XLSX の読み方は v0.2 で未決定へ差し戻した**）。未確定 6 件を §28.2 に分離。 |
