@@ -175,3 +175,63 @@ export async function submitKitSelfReport(input: {
   }
   return payload.data;
 }
+
+// ---------------------------------------------------------------------------
+// ステージング顧客の解決 (総合テスト専用・env 2 本が揃ったときだけ動く)
+// ---------------------------------------------------------------------------
+/*
+ * **なぜ要るか。** 総合テストは **ステージングの EC で購入 → 本番の Web アプリでサインイン**
+ * という構成で行われる。顧客レコード (`public.customer_profiles`) は購入した環境にしか
+ * 出来ず、この経路 (`HP_EDGE_BASE_URL`) は **env 1 本で 1 プロジェクトしか指さない**ので、
+ * 本番を指している限り staging の顧客には構造的に届かない (`resolve.ts` の 1 段目が空振り)。
+ * → **staging の `resolve-customer` を追加で引く段**を用意する。
+ *
+ * **env 未設定なら null を返し、呼び出し側は何もしない (= 挙動不変)。**
+ * テストが終わったら env を外すだけで、この経路は完全に消える。
+ *
+ * 【重要】**`is_admin` は読まない。** `resolveCustomerWithAdmin` と違い、戻り値に管理者判定を
+ * 含めない。staging は検証用でアカウントを自由に作れるため、staging の `admin_users` に
+ * 行を作るだけで**本番 Web アプリの管理者になれてしまう**（`/admin` 系と `?u=` の代理表示が
+ * 開く）。ここは顧客の解決だけを担い、権限は一切運ばない。
+ */
+const EDGE_BASE_STAGING = () => import.meta.env.HP_EDGE_STAGING_BASE_URL as string | undefined;
+const SECRET_STAGING = () => import.meta.env.RESOLVE_SHARED_SECRET_STAGING as string | undefined;
+
+/** ステージング顧客の解決が構成済みか。**未設定が既定**。 */
+export function isHpEdgeStagingConfigured(): boolean {
+  return !!EDGE_BASE_STAGING();
+}
+
+/**
+ * **ステージングの** `resolve-customer` で email から顧客を解決する。
+ *
+ * - 未構成 / 未連携 / 退会 は `null`。
+ * - **`is_admin` は意図的に捨てる**（上のコメント参照）。
+ * - 失敗は例外。呼び出し側が握って**サインインを止めない**こと。
+ */
+export async function resolveStagingCustomerByEmail(email: string): Promise<ResolvedCustomer | null> {
+  const base = EDGE_BASE_STAGING();
+  if (!base) return null;
+  const normalized = email.trim().toLowerCase();
+  if (!normalized) return null;
+
+  const res = await fetch(`${base}/functions/v1/resolve-customer`, {
+    method: 'POST',
+    headers: {
+      'content-type': 'application/json',
+      ...(SECRET_STAGING() ? { 'x-resolve-secret': SECRET_STAGING()! } : {}),
+    },
+    body: JSON.stringify({ email: normalized }),
+  });
+  if (!res.ok) throw new Error(`resolve-customer(staging) HTTP ${res.status}`);
+  const payload = (await res.json().catch(() => null)) as
+    | { success: boolean; data: ResolvedCustomer | null; error?: string }
+    | null;
+  if (!payload?.success) throw new Error(payload?.error ?? 'resolve-customer(staging) failed');
+  if (!payload.data?.diagnostic_user_id) return null;
+  // **顧客の識別子と表示名 (姓) だけを通す。** is_admin は読まない。
+  return {
+    diagnostic_user_id: payload.data.diagnostic_user_id,
+    display_name: payload.data.display_name ?? null,
+  };
+}

@@ -1,6 +1,11 @@
 import type { APIRoute } from 'astro';
 import { getServerSupabase } from '../../../lib/supabase';
-import { isHpEdgeConfigured, resolveCustomerWithAdmin } from '../../../lib/hp-edge';
+import {
+  isHpEdgeConfigured,
+  isHpEdgeStagingConfigured,
+  resolveCustomerWithAdmin,
+  resolveStagingCustomerByEmail,
+} from '../../../lib/hp-edge';
 import { VIEWER_COOKIE, signViewer, viewerCookieOptions } from '../../../lib/viewer';
 import { isAdminEmailAsync } from '../../../lib/admin-auth';
 import { linkDemoEmail, resolveDemoUidByEmail } from '../../../lib/demo-accounts';
@@ -41,6 +46,14 @@ export const POST: APIRoute = async ({ request, cookies }) => {
   let bareName: string | null = null;
   /** 管理者リスト (Wellfort 側 `admin_users`) に載っているか。解決と同じ応答で受け取る。 */
   let isAdmin = false;
+  /**
+   * **どの経路で uid が決まったか。** 応答とログに残す。
+   *
+   * 総合テストで staging の顧客を通す段を足したので (下記)、**本番の顧客と
+   * テストの顧客が同じ `app_users` に並ぶ**。後から棚卸しできるように、
+   * 「どこ由来か」を必ず残す。**PII は含まない**。
+   */
+  let resolvedFrom: 'production' | 'staging' | 'local' | 'demo' | null = null;
 
   /** ローカルの `customer_profiles` で解決する (HP Edge 未構成 / 呼び出し失敗時の受け皿)。 */
   const resolveLocally = async (): Promise<{ error: Response } | null> => {
@@ -54,6 +67,7 @@ export const POST: APIRoute = async ({ request, cookies }) => {
     if (profile?.diagnostic_user_id) {
       diagnosticUserId = profile.diagnostic_user_id;
       bareName = profile.family_name;
+      resolvedFrom = 'local';
     }
     return null;
   };
@@ -83,6 +97,7 @@ export const POST: APIRoute = async ({ request, cookies }) => {
     if (outcome?.customer) {
       diagnosticUserId = outcome.customer.diagnostic_user_id;
       bareName = outcome.customer.display_name;
+      resolvedFrom = 'production';
     } else {
       /*
        * **Wellfort 側に顧客レコードが無くてもサインインを止めない (2026-08-30)。**
@@ -121,8 +136,50 @@ export const POST: APIRoute = async ({ request, cookies }) => {
    * `linkedUid` を渡すのが要点。**渡さないと毎回新しい uid を作って UNIQUE 違反になる**
    * (しかも保存は下の `linkDemoEmail` なので、500 で止まると永久に保存されず毎回壊れる)。
    */
+  /*
+   * **ステージングの顧客を通す (総合テスト専用・env 2 本が揃ったときだけ)。**
+   *
+   * 総合テストは **staging の EC で購入 → 本番の Web アプリでサインイン** という
+   * 環境を跨いだ構成で行う。顧客レコード (`public.customer_profiles`) は購入した
+   * 環境にしか出来ず、上の 1 段目は `HP_EDGE_BASE_URL` が指す **1 プロジェクトしか
+   * 見ない** (コードに環境切替は無い) ので、本番を指している限り staging の顧客には
+   * 構造的に届かない。2 段目の `resolveLocally()` も、アプリ自身の
+   * `customer.customer_profiles` に**書く実装が存在しない** (seed 3 本のみ) ため
+   * seed 以外は必ず空振りする。→ ここで staging を引く。
+   *
+   * **デモ発行より前**に置く。後ろだと staging の顧客がデモ用 uid を掴んでしまう。
+   * また `uidIsAuthoritative` の判定より前に置くことで、staging 由来も
+   * **顧客DB由来 (authoritative)** として扱われ、下の束縛の張り替えで
+   * 「顧客DBが正」の分岐に乗る (デモ発行 uid と混同しない)。
+   *
+   * 【運ばないもの】**管理者判定は一切運ばない** (`resolveStagingCustomerByEmail` は
+   * `is_admin` を読まない)。staging はアカウントを自由に作れるので、権限を運ぶと
+   * **staging に行を作るだけで本番アプリの管理者になれてしまう**。
+   *
+   * 【失敗しても止めない】1 段目と同じく握って先へ進む (サインインを壊さない)。
+   */
+  if (!diagnosticUserId && isHpEdgeStagingConfigured()) {
+    try {
+      const staging = await resolveStagingCustomerByEmail(email);
+      if (staging) {
+        diagnosticUserId = staging.diagnostic_user_id;
+        bareName = staging.display_name;
+        resolvedFrom = 'staging';
+        console.warn(
+          `[auth/resolve] ステージングの顧客として解決しました (uid=${diagnosticUserId})。` +
+          ' 総合テスト用の経路です。テスト終了後に HP_EDGE_STAGING_BASE_URL を外してください。',
+        );
+      }
+    } catch (e) {
+      console.error('[auth/resolve] staging resolve-customer 失敗:', e instanceof Error ? e.message : e);
+    }
+  }
+
   const uidIsAuthoritative = diagnosticUserId !== null; // 顧客DB由来か (= デモ発行でないか)
-  if (!diagnosticUserId) diagnosticUserId = await resolveDemoUidByEmail(email, linkedUid);
+  if (!diagnosticUserId) {
+    diagnosticUserId = await resolveDemoUidByEmail(email, linkedUid);
+    if (diagnosticUserId) resolvedFrom = 'demo';
+  }
 
   // 未連携 (適格性なし)
   if (!diagnosticUserId) return json({ linked: false }, 200);
@@ -210,7 +267,8 @@ export const POST: APIRoute = async ({ request, cookies }) => {
   const token = await signViewer(diagnosticUserId, isAdmin || await isAdminEmailAsync(email));
   if (token) cookies.set(VIEWER_COOKIE, token, viewerCookieOptions());
 
-  return json({ linked: true, diagnosticUserId }, 200);
+  // `resolvedBy` は切り分け用 (PII 非含有)。**staging 由来かどうかがここで分かる**。
+  return json({ linked: true, diagnosticUserId, resolvedBy: resolvedFrom }, 200);
 };
 
 /**
