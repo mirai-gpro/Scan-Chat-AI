@@ -1746,6 +1746,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | **`docs/lab/demecal_unattended_spec.md`** | **【無人定期取得の正本 2026-08-31】** 発注者判断「最初から無人」。無人にしてよい根拠(`last_to` 単調前進=走らない日があっても取り漏れゼロ)/取り込み専用キー `LAB_INTAKE_API_KEY`(**未実装・ADMIN_API_KEY を PC に置かないため必須**)/実行ログAPI/秘密の保管(DPAPI)/タスク設定/監視(GitHub Actions を見張りにして通知基盤を作らない)/失敗時の挙動表/未確定と実装TODO |
 | `docs/subscription/subscription_management_feature_requirements.md` | サブスク契約管理 拡張 機能要件 (要件1〜4・データモデル・付録Bマトリクス) |
 | `docs/subscription/subscription_management_implementation_guide.md` | 上記の実装手順書 |
+| **`docs/subscription/検査キット_データモデル_仕様書.md`** | **【サブスク→検査キット→進捗 の背骨。ここに触る前に最初に読む】** 現在地(実測)と目標モデルの差の正本。**最新仕様の 7 テーブルは本番・staging とも実在 0 件**／**`app_bridge.kit_shipment` はキットでなく `orders` のミラー(1注文=1行・回の列なし)**／**同名別物が 2 つあり別 DB に在る**(`kit_shipment` 単数=使用中 / `kit_shipments` 複数=未使用)／`create-order` が決済前に `pending` で INSERT する仕様違反／`/kit` の 10 件表示の因果／埋め方 3 案 |
 | `docs/subscription/kit_lifecycle_and_handoff_management_spec.md` | **検査キット 出荷・進捗・データ受渡 統合管理仕様(サブスク駆動)**。プラン×キット×発送タイミング/タカセ定期出荷/ライフサイクル状態機械+AI問診促し/進捗駆動の各社受渡・Elith作成指示。**§4.1.1=LAiF上りCSV(AI疾病発症予測 入力フォーム 約158項目)の写像仕様＋生成フロー**(健診スキャン+AI問診+基本情報を集約=スキャンフローに足さない別export・整理番号/生年月日は要確認) |
 | `docs/lab/wellfort_admin_lab_upload_spec.md` | 管理UI: 検査結果ファイルアップロード仕様 |
 | `docs/lab/lab_integration_workflow.md` | 検査機関→ユーザー割当ワークフロー (PII 制約) |
