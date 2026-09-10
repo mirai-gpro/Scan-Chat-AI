@@ -12,7 +12,7 @@
 # 【job を分けてある理由】required にできる安定した層を、まだ CI 実績の無い層で
 # 巻き添えにしないため。static-required だけが最初の品質ゲート。
 #
-#   static-required   … astro check / build / A 層 11 本   → 最初から required
+#   static-required   … astro check / build / A 層 13 本   → 最初から required
 #   pwsh-verify       … B 層 6 本 (PowerShell 必須)         → 初回 non-required
 #   browser-screen    … verify:screen だけ                  → 安定後に優先して required
 #   browser-extended  … 残りのブラウザ検査 3 本             → 当面 non-required
@@ -78,6 +78,11 @@ jobs:
       - run: npm run verify:ps1-order
       - run: npm run verify:probe-bat-gate
       - run: npm run verify:demecal-health
+      # 臨時診断バッチ (2026-09-10 追加)。**サーバも S3 も DB も要らない**ので A 層。
+      # ZIP はその場で組んで読み直し、XLSX も最小の OOXML をコードで組む
+      # (バイナリを commit しないため)。
+      - run: npm run verify:ad-hoc-archive
+      - run: npm run verify:ad-hoc-parse
 
   # ── PowerShell 必須の検査 (初回 non-required) ──────────────────
   # ubuntu-24.04 ランナーには PowerShell 7.6.5 が同梱されている見込み
