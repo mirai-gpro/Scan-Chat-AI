@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 版 | **0.4**（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離。変更点は §30） |
+| 版 | **0.5**（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離。変更点は §30） |
 | 未確定の残り | **7 件**（O2 / O3 / O4 / O5 / O6 / O7 / O9・§28.2）。**O1 / O8 / O10 は解決済み**（§28.1） |
 | 対象システム | **wellfort-site**（管理画面 UI・管理者認証・ブラウザとのやり取り）／ **Scan-Chat-AI**（ZIP 受付処理・分類・解析・ジョブ状態・ウェルネス年齢・Elith JSON 生成・S3） |
 | 同系統の先行仕様 | `docs/lab/wellfort_admin_lab_upload_spec.md`（**責務分界の正**。§3 配置場所／§6-1 Bearer API Key） |
@@ -221,6 +221,15 @@ batch 行が出来るのは ticket 発行時点で**まだ PUT が済んでい�
 > - **案 M（自作）は不採用。** ①②を満たすライブラリが実在したため（§5.3.4-4 の条件を満たさない）。
 > - **SheetJS `xlsx`（および依存する `node-xlsx`）は採用不可。** 理由は §5.3.6。
 >
+> **v0.5 で足した 3 点（発注者指示 2026-09-10）**
+> - **ブラウザの SHA-256 = [`@noble/hashes`](https://www.npmjs.com/package/@noble/hashes) の incremental API**
+>   （`sha256.create()` → `update()` → `digest()`）。
+>   **ZIP 全体を `arrayBuffer()` 化して `crypto.subtle.digest()` へ渡すのは禁止**（§11.6）。
+> - **サーバ側の ZIP は custom `Reader` → AWS SDK `GetObjectCommand` の `Range`。
+>   HTTP presigned GET は使わない**（§5.3.7.1）。
+> - **`read-excel-file` は Scan-Chat-AI のサーバ側だけ**で使い、実物 XLSX で 5 点を実測する。
+>   **判定できないカスタム日付書式を勝手に日付化しない**（§5.3.8.1）。
+>
 > 根拠はすべて **2026-09-10 に一次資料から実測**（`registry.npmjs.org` / `api.osv.dev` /
 > 各プロジェクトの README・型定義）。**記憶で書いていない**（CLAUDE.md R2 / R3）。
 
@@ -372,6 +381,75 @@ XLSX は実体が ZIP なので「`@zip.js/zip.js` で開いてシート XML を
 - **`exceljs` へ切り替える条件**: 健診 XLSX が `read-excel-file` で読めない構造だった場合
   （結合セルをまたぐ見出し・複数シートの書式依存など）。**その場合も `xlsx` には戻らない。**
 
+#### 5.3.7.1 サーバ側は custom `Reader` を AWS SDK の Range GET へ繋ぐ（v0.5・発注者指示・**決定**）
+
+**【禁止】サーバ側で HTTP presigned GET を使うこと。** `HttpRangeReader` は使わない。
+
+**理由**: presigned GET を出すと ①**署名付き URL という新しい秘密**が増える
+（発行・期限・漏洩の管理が要る） ②Vercel → S3 が**素の HTTP 経由**になり、
+既存の資格情報（`AWS_ACCESS_KEY_ID` ほか・CLAUDE.md）で完結する経路から外れる
+③CLAUDE.md の「バケットの `GET` を CORS に足さない」と紛らわしくなる。
+**サーバ側は SDK でそのまま読めるので、URL を作る理由が無い。**
+
+**採る形 = `@zip.js/zip.js` の `Reader` を継承し、`readUint8Array(offset, length)` の中で
+AWS SDK の `GetObjectCommand` に `Range` を付けて呼ぶ。**
+
+```ts
+// Scan-Chat-AI: src/lib/ad-hoc-diagnosis/archive.ts（ZIP を触るのはこの中だけ・§5.3.7-5）
+class S3RangeReader extends Reader<string /* key */> {
+  size!: number;                       // init() で HeadObject の ContentLength を入れる
+  async init() { /* HeadObjectCommand → this.size */ }
+  async readUint8Array(offset: number, length: number): Promise<Uint8Array> {
+    const end = offset + length - 1;   // HTTP Range は「両端を含む」
+    const res = await client.send(new GetObjectCommand({
+      Bucket, Key: this.key, Range: `bytes=${offset}-${end}`,
+    }));
+    return await res.Body!.transformToByteArray();
+  }
+}
+```
+
+- **`Range` は両端を含む閉区間**（`bytes=0-99` は 100 バイト）。**`offset + length` をそのまま
+  終端に書くと 1 バイト多く読む** — ZIP の Central Directory の解釈がずれる原因になるので、
+  この 1 行だけは検証で固定する（§25.2）。
+- `transformToByteArray()` は**既存コードと同じ読み方**
+  （`scan-upload-ticket.ts:164` の `fetchScanUpload` が同じ形）＝**新しい流儀を持ち込まない**。
+- **`ZipReader` はブラウザ側と同じ**。差し替わるのは `Reader` の実装だけなので、
+  §24.3 の ZIP security 検査は**1 か所のまま**（§5.3.7-1 の狙いがここで効く）。
+- **`size` は `HeadObject` の `ContentLength`**。これは §5.2.1 ② で
+  `source_size` を確定させるのと**同じ呼び出しでよい**（2 度叩かない）。
+- **範囲外・欠損の扱い**: S3 が `416` を返す / 返却バイト数が要求と違う場合は
+  **黙って短いバッファを返さない**（ZIP パーサが壊れた構造として誤解釈する）。
+  例外にしてバッチを `failed` にする。
+
+#### 5.3.8.1 `read-excel-file` は Scan-Chat-AI のサーバ側だけで使う（v0.5・発注者指示）
+
+**ブラウザ側（wellfort-site）では使わない。** ブラウザが触るのは
+**ZIP の部分読み（`@zip.js/zip.js`）／SHA-256（`@noble/hashes`）／PDF のページ画像化（pdf.js）**
+の 3 つだけで、**XLSX の解釈はサーバへ寄せる**（§4 の責務境界どおり・検査値の解釈を 2 か所に置かない）。
+
+**実物の XLSX で必ず実測する 5 点（Phase D の入口・§5.3.9 の 4 を具体化）**
+
+| # | 見るもの | なぜ |
+|---|---|---|
+| 1 | **Excel の日付** | シリアル値が `Date` として返るか。**`test_date` は納品パス `date/{YYYY_MM_DD}`（§15）と 🎯 照合の両方を決める** |
+| 2 | **カスタム日付書式** | `numFmt` が組み込みでなくユーザー定義（`yyyy"年"m"月"d"日"` 等）のとき、日付と判定できるか |
+| 3 | **1900 / 1904 date system** | ブックが 1904 方式だと**全日付が 4 年ずれる**。どちらで解釈しているか |
+| 4 | **空欄と 0** | 空欄が `null`/`undefined`/`''` のどれで来るか、**0 と空欄が区別できるか**（区別できないと「未実施」と「値 0」が混ざる＝§5 の捏造ゼロに直結） |
+| 5 | **日本語ヘッダー** | 見出しの文字化け・全角空白・改行が入った見出しをどう返すか |
+
+**【重要】カスタム日付書式は自動判定できない場合がある。判定できないものを勝手に日付化しない（発注者指示）。**
+
+- ライブラリが `Date` を返した → **そのまま採る**。
+- ライブラリが**数値のまま返した** → **こちらでシリアル値を日付へ変換しない。**
+  数値のまま持ち、その項目は **`needs_review`** にして**管理者に確認させる**。
+  - 理由: シリアル値を日付に変換するには **1900/1904 のどちらか**を決める必要があり、
+    ブックの設定を読まずに決めれば**4 年ずれた日付を静かに作る**ことになる＝捏造。
+  - **`test_date` が確定しない人物は納品しない**（§15 のパスが決まらないため）。
+    **黙って今日の日付や別ファイルの日付を流用しない。**
+- **1〜5 の実測結果は §5.3.9 の下に追記する。** 実物が来るまでは**未確認のまま**にしておき、
+  「たぶんこう返る」と書かない（R1）。
+
 #### 5.3.9 Phase D で実測して確かめること（**まだ未確認**）
 
 **ライブラリを選んだだけで、動かして確かめてはいない。** 次を Phase D の最初に実測する。
@@ -380,9 +458,15 @@ XLSX は実体が ZIP なので「`@zip.js/zip.js` で開いてシート XML を
    （full-ICU が入っているか）。使えなければ CP932 の decode 表を自前で持つ（§5.4）。
 2. **ブラウザ実機で `BlobReader` が本当に部分読みになるか**（ピークメモリを実測・§11.5 / §28-O4）。
 3. **S3 Range GET を `Reader` として実装したときの往復回数と所要時間**（512 MB の ZIP で）。
-4. **`read-excel-file` が実物の健診 XLSX（39 列）を読めるか** — ただし**サンプル ZIP が本作業環境に無い**ので、
-   **実物での確認は投入時**（§0 の但し書きと同じ）。
+   実装の形は **§5.3.7.1 で決定済み**（custom `Reader` → `GetObjectCommand` の `Range`。
+   **presigned GET は使わない**）。ここで測るのは往復回数と時間だけ。
+4. **`read-excel-file` が実物の健診 XLSX（39 列）を読めるか** — **§5.3.8.1 の 5 点**
+   （Excel 日付 / カスタム日付書式 / 1900・1904 / 空欄と 0 / 日本語ヘッダー）を必ず測る。
+   ただし**サンプル ZIP が本作業環境に無い**ので、**実物での確認は投入時**（§0 の但し書きと同じ）。
+   **判定できなかったカスタム書式を勝手に日付化しない**（§5.3.8.1）。
 5. **バンドルサイズが Vercel の関数サイズ上限に収まるか**（§5.3.2-7）。
+6. **ブラウザの逐次 SHA-256（§11.6）が `crypto.subtle.digest()` と同値になるか**、
+   および**ピークメモリが chunk 1 個ぶんの桁に収まるか**。
 
 ### 5.4 ファイル名の文字コード
 
@@ -783,12 +867,69 @@ Elith へ渡す JSON の PII 規則は `docs/elith/elith_masking_definition.md` 
   **「続きから処理するには同じ ZIP をもう一度選んでください」**と出し、
   **ZIP の SHA-256 が一致すれば同じバッチの続きから**再開する（**再アップロードはしない**）。
   人物と `client_id` の再対応は §6.2 の fingerprint で行う。
-  - SHA-256 の計算も**全体をメモリに載せずに** `file.stream()` を逐次読みして進める。
+  - SHA-256 の計算も**全体をメモリに載せずに** `file.stream()` を逐次読みして進める（**§11.6**）。
 - **S3 から presigned GET でブラウザへ渡す案は採らない。** バケットの CORS は現在 `PUT` のみで、
   `GET` を足す運用変更が要る（CLAUDE.md「`GET` も足さない」）。必要になったら §28-O4 で判断する。
 - **検証（§25.2）**: 大きな ZIP を通したときに
   **ピークメモリが「Central Directory ＋ 最大エントリ 1 件」の桁に収まる**ことを実測で見る。
   「全体を `arrayBuffer()` する」実装に戻すと落ちること（退行注入）も確認する。
+
+### 11.6 ブラウザ側の SHA-256 は逐次計算する（v0.5・発注者指示）
+
+**【禁止】ZIP 全体を `file.arrayBuffer()` 化して `crypto.subtle.digest()` へ渡すこと。**
+
+**理由（API の形からの帰結）**: `SubtleCrypto.digest(algorithm, data)` は
+**`data` を 1 個の `BufferSource` として受け取り、その場でダイジェストを返す一発 API**で、
+**`update()` に相当する逐次インタフェースを持たない**。
+→ **`file.stream()` を読んでも `crypto.subtle` に渡せる形にするには結局全体を連結することになる**ので、
+「ストリームで読んでいるから省メモリ」にはならない。**上限 512 MB（§5.1）でこれをやると溢れる。**
+
+**採る形 = `@noble/hashes` の incremental API。**
+
+```ts
+// wellfort-site 側（ブラウザ）
+import { sha256 } from '@noble/hashes/sha2.js';   // ← 拡張子 .js まで含めて 1 文字も変えない（下記）
+
+const h = sha256.create();
+const reader = file.stream().getReader();
+for (;;) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  h.update(value);            // chunk ごとに update。chunk は使い終わったら捨てる
+}
+const digest = h.digest();     // Uint8Array(32) → 16 進小文字へ
+```
+
+**実測で確認した事実（2026-09-10・パッケージ本体の型定義から。記憶で書いていない）**
+
+| 項目 | 実測値 | 出典 |
+|---|---|---|
+| バージョン / ライセンス | **2.4.0 / MIT** | `registry.npmjs.org/@noble/hashes/latest` |
+| 直接依存 | **0** | 同上 |
+| 既知の脆弱性 | **0 件** | `api.osv.dev`（npm ecosystem） |
+| `engines` | `node >= 20.19.0` | 同上（**ビルド環境の Node がこれ未満だと入らない**） |
+| **import パス** | **`@noble/hashes/sha2.js`（`.js` 必須）** | `exports` に **`"./sha2.js"` は在るが `"./sha2"` は無い**（実測）。**拡張子を落とすと解決に失敗する** |
+| `create()` | `create(): T` | `package/utils.d.ts:504` |
+| `update()` | `update(buf: TArg<Uint8Array>): this` | 同 `:419` |
+| `digest()` | `digest(): TRet<Uint8Array>` | 同 `:430` |
+| 逐次利用の作例 | `const hash = sha256.create();` | 同 `:137` / `:154`（**パッケージ自身の JSDoc**） |
+
+**この 1 つの実装を 2 か所で使い回す（発注者指示）**
+
+| 使う場面 | 何のため |
+|---|---|
+| **① 初回 ticket 発行の前** | `source_sha256`（§23.1 は **NOT NULL**）を決める。**DB 設計は変更不要** — 逐次計算でも ticket を出す前に値が確定するため |
+| **② 再読込のあと** | 選び直された ZIP が**同じものか**を照合する（§6.2.3-1 / §11.5）。一致しなければそこで止める |
+
+**①②で別実装にしない。** 片方だけ違う計算をすると「同じ ZIP なのに一致しない」が起き、
+その症状は**再開が黙って新規バッチになる**という形で出る（人物と `client_id` の対応が切れる）。
+
+**検証（§25.2 に追加）**
+- 8 MB 級のファイルで **`crypto.subtle.digest()` の結果と 1 バイトも違わない**ことを突き合わせる
+  （逐次実装が正しいことの確認。**比較のためだけに使い、本番経路では使わない**）。
+- **ピークメモリ**が chunk 1 個ぶんの桁に収まること。
+- **退行注入**: `arrayBuffer()` + `crypto.subtle.digest()` に差し替えると
+  **ピークメモリの検査が落ちる**ことを確認する（結果は一致してしまうので、値だけ見ても検出できない）。
 
 ---
 
@@ -1358,7 +1499,9 @@ health age check / schema validation / **dry-run export**。
 ### 27.3 新規実装
 
 ZIP / XLSX を読む層（**手段は §5.3 で決定＝`@zip.js/zip.js` + `read-excel-file`**。
-`src/lib/ad-hoc-diagnosis/archive.ts` が ZIP を、パーサ 1 枚が XLSX を隠す薄いラッパ） /
+`src/lib/ad-hoc-diagnosis/archive.ts` が ZIP を、パーサ 1 枚が XLSX を隠す薄いラッパ。
+**`archive.ts` は S3 Range の custom `Reader` も持つ**・§5.3.7.1） /
+（wellfort-site 側）**ブラウザの逐次 SHA-256**（`@noble/hashes`・§11.6）と ZIP の部分読み /
 `src/lib/health-checkup-xlsx.ts` /
 `src/lib/questionnaire-xlsx.ts` / `src/lib/ad-hoc-diagnosis/{classify,state,pipeline,keys}.ts` /
 `src/pages/api/admin/ad-hoc-diagnosis/*.ts` / migration 1 本 /
@@ -1434,6 +1577,7 @@ v0.3.1 は `actor_masked` + `actor_sha256` だけにしたため、**「誰が�
 | 版 | 日付 | 内容 |
 |---|---|---|
 | **0.4** | 2026-09-10 | **Phase D-0（ZIP/XLSX ライブラリの比較）を実施し §5.3 を「未決定」から「決定」へ格上げ。O8 CLOSE。** 候補 11 本を**一次資料から実測**（`registry.npmjs.org` / `api.osv.dev` / 各 README・`index.d.ts`）。**ZIP = `@zip.js/zip.js`**（直接依存 0・既知脆弱性 0・BSD-3-Clause・最終公開 2026-09-09。**ブラウザの `BlobReader` とサーバの Range GET を同じ `ZipReader` で賄えるので ZIP の解釈を 1 本に統一でき、§24.3 の検査も 1 か所で済む**。`filenameEncoding`/`decodeText` で CP932 も扱える）。**XLSX = `read-excel-file`**（MIT・既知脆弱性 0・最終公開 2026-08-10・ブラウザ/Node 両対応。**セル値を `Date` で返す**＝日付シリアル値の判定をライブラリが持つ。`test_date` は納品パスと 🎯 照合を決めるので自前判定で静かに 1 日ずらすわけにいかない）。**案 M（自作）は不採用**。**SheetJS `xlsx` / `node-xlsx` は採用不可** — `GHSA-5pgg-2g8v-p4x9`(HIGH) の advisory 本文が**「npm に修正版が存在しない」と明記**しており、実測でも npm は **0.18.5(2022-03-24) で停止**。もう 1 件 `GHSA-4r6h-8v6p-xvw6`(HIGH・Prototype Pollution) は**「細工されたファイルを読むとき」＝本機能そのもの**が該当（§5.3.6）。`adm-zip` も除外（`GHSA-vwc7-r8mq-g2x9` が `last_affected=0.6.0` ＝**最新版がまだ影響下で修正版が無い**）。`jszip` は全体メモリ展開で §11.5 に反するため不採用。**採用 2 本の弱点も隠さず記録**（`read-excel-file` の依存 4 本中 2 本が同一の単独メンテナ・v9 で API 破壊あり → 呼び出しをパーサ 1 枚に閉じ込める）。**まだ動かして確かめてはいない** — Phase D 冒頭で実測する 5 件を §5.3.9 に明記（full-ICU の有無・ブラウザ実機のピークメモリ・S3 Range の往復・実物 XLSX・バンドルサイズ）。 |
+| **0.5** | 2026-09-10 | **Phase D 着手前に、発注者指示で経路を 3 点 確定。** **A. ブラウザの SHA-256 を逐次計算へ（§11.6・新設）** — `SubtleCrypto.digest()` は **`BufferSource` を 1 個受け取る一発 API で `update()` を持たない**ので、`file.stream()` を読んでも結局全体を連結することになり省メモリにならない。→ **wellfort-site に `@noble/hashes` を追加**し `sha256.create()` → `update()` → `digest()` で計算する。**ZIP 全体を `arrayBuffer()` 化して `crypto.subtle.digest()` へ渡すのは禁止。** **①初回 ticket 発行前の `source_sha256` と ②再読込後の同一性照合を同じ実装で処理する**（別実装にすると「同じ ZIP なのに一致しない」が起き、**再開が黙って新規バッチになる**）。**`source_sha256 NOT NULL` の DB 設計は変更不要**（逐次でも ticket 前に確定する）。実測: 2.4.0 / MIT / 依存 0 / 既知脆弱性 0 / `engines: node>=20.19.0`、**import は `@noble/hashes/sha2.js` で `.js` 必須**（`exports` に `"./sha2"` は無い＝拡張子を落とすと解決失敗）、`create`/`update`/`digest` は `utils.d.ts:504/419/430`。 **B. サーバ側 ZIP は custom `Reader` → AWS SDK Range（§5.3.7.1・新設）** — **presigned GET は使わない**（署名付き URL という秘密を増やさない・既存の資格情報で完結する経路から外れない）。`readUint8Array(offset,length)` の中で `GetObjectCommand` に `Range: bytes=offset-(offset+length-1)` を付ける。**Range は両端を含む閉区間**なので終端に `offset+length` を書くと 1 バイト多く読み Central Directory の解釈がずれる=検証で固定。`ZipReader` はブラウザ側と同一なので **§24.3 の検査は 1 か所のまま**。`size` は §5.2.1 ② の `HeadObject` と同じ呼び出しで取る。 **C. `read-excel-file` はサーバ側だけ（§5.3.8.1・新設）** — ブラウザが触るのは ZIP 部分読み / SHA-256 / pdf.js の 3 つだけ。実物 XLSX で **Excel 日付 / カスタム日付書式 / 1900・1904 date system / 空欄と 0 / 日本語ヘッダー** の 5 点を必ず実測する。**カスタム日付書式は自動判定できない場合があるので、判定できないものを勝手に日付化しない** — 数値のまま持ち `needs_review` にする（シリアル値の変換は 1900/1904 の決め打ちが要り、**4 年ずれた日付を静かに作る**＝捏造）。**`test_date` が確定しない人物は納品しない**（今日の日付や別ファイルの日付を流用しない）。 |
 | **0.4** | 2026-09-10 | **発注者レビューで migration を DB 適用前に 3 点修正（Phase C 最終 PASS）。** **A. ZIP のサイズを申告値と実測値に分離**（§23.1）— **`declared_source_size`(NOT NULL) / `source_size`(NULL 可)**。理由は **batch 行が出来るのが ticket 発行時点で、まだ PUT が済んでいない**こと。1 列に混ぜると**申告値を実測値として保存する**ことになる。`source_size` は **classify 開始時の `HeadObject` で確定**させ、上限超過なら `failed` ＋一時 ZIP 削除。**申告値をここへ入れない**。 **B. 操作者識別の正を `actor_user_id`（uuid）にして O10 を CLOSE**（§21 / §22 / §23.1 / §28.1）— wellfort-site は既に `/auth/v1/user` で認証済みユーザーを取得している（`elith-scan.ts:34-39` と同形）ので、**`user.id` をサーバ側で注入**する。`actor_masked` は表示用・`actor_sha256` は任意の補助へ降格。**ブラウザ body の `actor_user_id` は信用しない。** `batches` にも `created_by_user_id` / `created_by_masked`。UUID は PII でなく後から `admin_users` で人に戻せる＝**追跡性と PII 非保存が両立**。 **C. `subject_fp` の表現を弱めた**（§6.2.1）— 「PII を引き出す経路が**原理的に無い**」は言い過ぎ。**平文の PII は含まないが、特定個人のファイル群に 1 対 1 で対応する照合用識別子**なので、**機微情報と同等に扱う**（ログに出さない・外部へ渡さない・納品 JSON に載せない）へ修正。 **検証**: scratch PostgreSQL 16 に**全 17 migration を白紙から適用 OK**・再適用も冪等・`ix_ad_hoc_subjects_batch_fp` が**非 UNIQUE**であること・**同一 batch 内の fp 衝突が 2 行とも INSERT できる**こと・`declared_source_size` NOT NULL / `source_size` が後から埋められること・`actor_user_id` / `created_by_user_id` が UUID を受けること・RLS force＋policy 0＋`anon`/`authenticated` に権限が無いことを実測。 |
 | **0.3.1** | 2026-09-10 | **Phase C（migration ファイル作成）で実装した形に §21 / §23 を同期。** ①**監査ログの `actor` を `actor_masked` + `actor_sha256` に変更** — §21 は「admin の email」と書いていたが、**Scan-Chat-AI 側にメールの現物を置かない**既存の規律（`demo.account_emails`・CLAUDE.md）に合わせた。**発注者確認事項**（§28.2-O10） ②`required_formats` / `optional_formats` を**別列**に ③`created_by` も `_masked` / `_sha256` の 2 列に ④`pages` に **`file_sha256` を非正規化**（キャッシュ参照 `(file_sha256, page_no)` を 1 索引で引くため・§19.3） ⑤`outputs` に **UNIQUE (subject_id, format_id)** を明記 ⑥`batches.source_sha256` は**一意にしない**（再投入は検知して警告するだけ・§19.1）ことを明記。 |
 | **0.3** | 2026-09-10 | **発注者レビューで 2 点を修正（Phase C 着手前）。** **A. `subject_fp` の UNIQUE 制約を撤回** — v0.2 は「衝突したら両方を `needs_review` で残す」と `UNIQUE (batch_id, subject_fp)` が**矛盾していた**（UNIQUE があると 2 人目の INSERT が失敗し「両方残す」が実行できない）。**`subject_fp` は再開時の照合用の検索キーであって一意識別子ではない**と位置づけを確定し、**同一 fp が複数人物に存在し得ることを仕様として認める**。制約を**通常 INDEX `(batch_id, subject_fp)`** へ変更し、再開時は**ヒット件数で判定**（0 件=`unmatched` / 1 件=`match` / **2 件以上=`fp_collision` で該当 subject を全件 `needs_review`**）。**`UNIQUE (batch_id, subject_no)` は維持**。**B. `Content-Length` の「署名固定」を未確認へ落とした** — 実測すると `scan-upload-ticket.ts:129` の `signableHeaders` は **`content-type` だけ**で、返す `headers` にも Content-Length は無い（`:132`）。同ファイルのコメント `:21-22`/`:127`/`:158` は「署名に固定」と書いているが**実装と食い違う**ので根拠にしない。→ 断定を撤回し、**サイズ防御を ①ticket 発行時上限 ②アップロード後 `HeadObject` の実サイズ検証 ③ZIP 解析時の展開上限 の多層**にした（**②が本命**・§5.2.1）。署名の実挙動 3 点は O9 として Phase D-0 / upload-ticket 実装時に実測する。 |
