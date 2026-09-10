@@ -267,6 +267,9 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
   (`sanitizeDelivery`) の全経路で同関数を通す (二重管理しない)。LLM に判定・整形はさせない。
   - 理由: 方式Aバッチ/assemble未実行の経路では**生スキャン出力がそのまま Elith 納品**になり得るため、
     整形は「書き出し時点」に置く (assemble任せにしない)。監査は raw_markdown + 元画像(S3) に保持。
+    **ここでいう scan は admin バッチ (`elith-scan`/`batch-scan-to-elith.mjs`) の経路**で、
+    元画像を S3 へ書くのはこちら。**ユーザーのスキャン (`/scan`) は原本画像を保存しない**
+    (下の「スキャンの画像の扱いと実行モデル」)。**2 つを混同しないこと。**
   - **定性結果の列サルベージ (Phase 0)**: `salvageQualitativeResult()` が `sanitizeMeasurementsForDelivery` 冒頭で、
     value 空時に括弧付き定性記号 `(-)`/`(+)`/`(±)`/陰性/陽性 を ref_high/ref_low/note から value へ移送する
     (結果 `(-)` が基準列(上限値)へ吸われ脱落する非決定バグ=Semantic Tie の保険)。
@@ -458,6 +461,41 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   ファイル名を出さない)。
 - **dev サーバの `astro-dev-toolbar` が画面下端のボタンへのクリックを横取りする** (実測)。
   ブラウザ検査では隠してから測る (**本番には無い要素**)。
+
+### スキャンの画像の扱いと実行モデル (2026-09-10 確定・発注者判断)
+
+**ユーザーのスキャン (`/scan`) は原本画像を保存しない。** コード側にも明記がある
+(`src/pages/scan.astro:789`「原本画像は保存しない方針」)。**admin バッチとは扱いが違うので
+混同しないこと** (下記)。
+
+| 経路 | 画像の行き先 | 残るか (実測) |
+|---|---|---|
+| カメラ撮影 | メモリ (`ScanPageList`) のみ | **残らない**。結果画面へ進む時に `pages.clear()`。`localStorage`/`sessionStorage`/`indexedDB` はスキャン画面に 0 件 |
+| アップロード (予算内 ≒3.2MB 以下) | data URL を `/api/scan` へ POST → Gemini へ渡すだけ | **残らない**。`/api/scan` に書き込み系の呼び出しは 0 件 (`fetchScanUpload` で読むだけ) |
+| アップロード (予算超え) | ブラウザ → S3 直 PUT `{prefix}scan-uploads/YYYY/MM/DD/<uuid>.<ext>` | **1 日で自動削除**。読んだ後に消す実装は無く (`scan-upload-ticket.ts` に delete 系 0 件)、バケットのライフサイクル任せ (`Expiration{Days:1}` + `NoncurrentVersionExpiration{NoncurrentDays:1}`) |
+
+- **保存するのは結果テキストだけ**: `/api/scan/save` ← `{ markdownClean, pageCount }` /
+  `/api/scan/export` ← `markdownClean` + ID + hint + ファイル名。**どちらも画像を受け取らない**。
+- **10 年保管の `putOriginal()` はスキャン経路から呼ばれない** (呼び出しは admin の 3 経路
+  `genoplan-fetch` / `elith-report/upload` / `lab-results/upload` だけ)。
+- **【混同注意】上の「納品整形」節の「監査は raw_markdown + 元画像(S3) に保持」は
+  admin バッチ (`elith-scan` / `batch-scan-to-elith.mjs`) の話**で、あちらは実際に
+  元画像を S3 へ書く (`elith-scan.ts` の `image_key`)。**ユーザーのスキャンには当てはまらない。**
+
+**帰結: 送信後のバックグラウンド処理は採らない (発注者判断 2026-09-10)。**
+バックグラウンド化するには**全ページをサーバ側に置き、ジョブが終わるまで保持**する必要があり、
+上の「画像を残さない」と両立しない。**画像を残さない方を採る。**
+
+- したがって **送信は前景処理のまま**: `sendAll()` が 1 枚ずつ `await camera.analyzeToResult()`
+  → `await fetch('/api/scan')` → サーバは `await callGemini()` の結果を同じ応答で返す。
+  **キューもジョブも無い** (`waitUntil`/queue/jobId/polling・ジョブテーブルとも 0 件)。
+- **利用者は画面を開いたまま待つ**。1 枚あたり **30〜50 秒**かかった記録がある
+  (`astro.config.mjs:9-11` のコメント。gemini-2.5-flash 当時の値で、現行既定
+  `gemini-3.1-flash-lite` での実測ではない) ので、複数枚では数分になり得る。
+- **ページ列はメモリだけ**なので、**送信中にタブを閉じる / リロードすると全ページ失われ最初から**。
+  この事実は画面の文言に反映されていない (「少し時間がかかります」だけ) = **未対応の申し送り**。
+- 「バッチ」という語は本アプリでは**「撮影中は読まず、完了時に全ページを続けて処理する」**の意味
+  (`src/scripts/scan-pages.ts:10-14`)。**バックグラウンド実行の意味ではない。**
 
 ### 検査種別ごとの本番処理 (役割分担)
 根拠: `docs/elith/elith_batch_centralization_design.md`
