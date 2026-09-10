@@ -196,6 +196,13 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
 ### インフラ / 実行モデル
 - **Vercel Serverless (iad1 / US East)**。Gemini API と地理的近接 (`docs/architecture/system_architecture_overview.md` L143/L273)。
 - 関数タイムアウト ~60s。大型検査表はストリーミング/分割。
+  **【2026-09-10 訂正】この 60s は プラットフォーム上限ではなく `astro.config.mjs` の
+  `maxDuration: 60` で自分から絞っている値**。Vercel の実際の上限は fluid compute 有効時で
+  **Hobby 300s / Pro・Ent 800s (既定はどちらも 300s)**
+  (出典: vercel.com/docs/functions/limitations・2026-08-24 版)。
+  → **「60s だから 1 画像 = 1 リクエスト」という根拠は現在は成り立たない**。
+  変更するかは `docs/scan/スキャン非同期処理_仕様書.md` で扱う (**リクエスト本文 4.5MB の
+  制限は別で、こちらは今も有効**)。
   → バッチは **1 画像 = 1 リクエスト**で処理し、クライアントが順に呼ぶ (`docs/architecture/system_architecture_overview.md` L316)。
 
 ### Elith 連携 (S3 データ受け渡し)
@@ -267,6 +274,9 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
   (`sanitizeDelivery`) の全経路で同関数を通す (二重管理しない)。LLM に判定・整形はさせない。
   - 理由: 方式Aバッチ/assemble未実行の経路では**生スキャン出力がそのまま Elith 納品**になり得るため、
     整形は「書き出し時点」に置く (assemble任せにしない)。監査は raw_markdown + 元画像(S3) に保持。
+    **ここでいう scan は admin バッチ (`elith-scan`/`batch-scan-to-elith.mjs`) の経路**で、
+    元画像を S3 へ書くのはこちら。**ユーザーのスキャン (`/scan`) は原本画像を保存しない**
+    (下の「スキャンの画像の扱いと実行モデル」)。**2 つを混同しないこと。**
   - **定性結果の列サルベージ (Phase 0)**: `salvageQualitativeResult()` が `sanitizeMeasurementsForDelivery` 冒頭で、
     value 空時に括弧付き定性記号 `(-)`/`(+)`/`(±)`/陰性/陽性 を ref_high/ref_low/note から value へ移送する
     (結果 `(-)` が基準列(上限値)へ吸われ脱落する非決定バグ=Semantic Tie の保険)。
@@ -458,6 +468,51 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   ファイル名を出さない)。
 - **dev サーバの `astro-dev-toolbar` が画面下端のボタンへのクリックを横取りする** (実測)。
   ブラウザ検査では隠してから測る (**本番には無い要素**)。
+
+### スキャンの画像の扱いと実行モデル
+
+> **【2026-09-10 に方針転換・発注者指示】この節の「画像を残さない / バックグラウンド化は採らない」は
+> **撤回**された。新方針 = **S3 に置いて定期的に削除し、送信後はバックグラウンドで処理する**。
+> 正本は `docs/scan/スキャン非同期処理_仕様書.md`。**以下は転換前の現状 (= 現在の実装) の記録**として
+> 残す — 実装はまだこの姿なので、読む価値がある。**「採らない」という判断だけが無効。**
+
+**現状 (実装): ユーザーのスキャン (`/scan`) は原本画像を保存しない。** コード側にも明記がある
+(`src/pages/scan.astro:789`「原本画像は保存しない方針」)。**admin バッチとは扱いが違うので
+混同しないこと** (下記)。
+
+| 経路 | 画像の行き先 | 残るか (実測) |
+|---|---|---|
+| カメラ撮影 | メモリ (`ScanPageList`) のみ | **残らない**。結果画面へ進む時に `pages.clear()`。`localStorage`/`sessionStorage`/`indexedDB` はスキャン画面に 0 件 |
+| アップロード (予算内 ≒3.2MB 以下) | data URL を `/api/scan` へ POST → Gemini へ渡すだけ | **残らない**。`/api/scan` に書き込み系の呼び出しは 0 件 (`fetchScanUpload` で読むだけ) |
+| アップロード (予算超え) | ブラウザ → S3 直 PUT `{prefix}scan-uploads/YYYY/MM/DD/<uuid>.<ext>` | **1 日で自動削除**。読んだ後に消す実装は無く (`scan-upload-ticket.ts` に delete 系 0 件)、バケットのライフサイクル任せ (`Expiration{Days:1}` + `NoncurrentVersionExpiration{NoncurrentDays:1}`) |
+
+- **保存するのは結果テキストだけ**: `/api/scan/save` ← `{ markdownClean, pageCount }` /
+  `/api/scan/export` ← `markdownClean` + ID + hint + ファイル名。**どちらも画像を受け取らない**。
+- **10 年保管の `putOriginal()` はスキャン経路から呼ばれない** (呼び出しは admin の 3 経路
+  `genoplan-fetch` / `elith-report/upload` / `lab-results/upload` だけ)。
+- **【混同注意】上の「納品整形」節の「監査は raw_markdown + 元画像(S3) に保持」は
+  admin バッチ (`elith-scan` / `batch-scan-to-elith.mjs`) の話**で、あちらは実際に
+  元画像を S3 へ書く (`elith-scan.ts` の `image_key`)。**ユーザーのスキャンには当てはまらない。**
+
+**【撤回済み】~~帰結: 送信後のバックグラウンド処理は採らない (発注者判断 2026-09-10)。~~**
+~~バックグラウンド化するには全ページをサーバ側に置き、ジョブが終わるまで保持する必要があり、
+上の「画像を残さない」と両立しない。画像を残さない方を採る。~~
+→ **同日中に発注者が判断を変更**:「B は『検査票の画像 (PII) を一定期間サーバに置く』ことと
+不可分 ⇒ **S3 に置いて、定期的に削除で進めて**」。**画像を S3 に置くことを許容し、
+バックグラウンド化を採る**。設計・段階・未確認事項は `docs/scan/スキャン非同期処理_仕様書.md`。
+
+**以下は転換前の現状 (= 現在の実装)。仕様書の Phase が入るまではこの姿。**
+
+- **送信は前景処理のまま**: `sendAll()` が 1 枚ずつ `await camera.analyzeToResult()`
+  → `await fetch('/api/scan')` → サーバは `await callGemini()` の結果を同じ応答で返す。
+  **キューもジョブも無い** (`waitUntil`/queue/jobId/polling・ジョブテーブルとも 0 件)。
+- **利用者は画面を開いたまま待つ**。1 枚あたり **30〜50 秒**かかった記録がある
+  (`astro.config.mjs:9-11` のコメント。gemini-2.5-flash 当時の値で、現行既定
+  `gemini-3.1-flash-lite` での実測ではない) ので、複数枚では数分になり得る。
+- **ページ列はメモリだけ**なので、**送信中にタブを閉じる / リロードすると全ページ失われ最初から**。
+  この事実は画面の文言に反映されていない (「少し時間がかかります」だけ) = **未対応の申し送り**。
+- 「バッチ」という語は本アプリでは**「撮影中は読まず、完了時に全ページを続けて処理する」**の意味
+  (`src/scripts/scan-pages.ts:10-14`)。**バックグラウンド実行の意味ではない。**
 
 ### 検査種別ごとの本番処理 (役割分担)
 根拠: `docs/elith/elith_batch_centralization_design.md`
@@ -1691,6 +1746,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | **`docs/lab/demecal_unattended_spec.md`** | **【無人定期取得の正本 2026-08-31】** 発注者判断「最初から無人」。無人にしてよい根拠(`last_to` 単調前進=走らない日があっても取り漏れゼロ)/取り込み専用キー `LAB_INTAKE_API_KEY`(**未実装・ADMIN_API_KEY を PC に置かないため必須**)/実行ログAPI/秘密の保管(DPAPI)/タスク設定/監視(GitHub Actions を見張りにして通知基盤を作らない)/失敗時の挙動表/未確定と実装TODO |
 | `docs/subscription/subscription_management_feature_requirements.md` | サブスク契約管理 拡張 機能要件 (要件1〜4・データモデル・付録Bマトリクス) |
 | `docs/subscription/subscription_management_implementation_guide.md` | 上記の実装手順書 |
+| **`docs/subscription/検査キット_データモデル_仕様書.md`** | **【サブスク→検査キット→進捗 の背骨。ここに触る前に最初に読む】** 現在地(実測)と目標モデルの差の正本。**最新仕様の 7 テーブルは本番・staging とも実在 0 件**／**`app_bridge.kit_shipment` はキットでなく `orders` のミラー(1注文=1行・回の列なし)**／**同名別物が 2 つあり別 DB に在る**(`kit_shipment` 単数=使用中 / `kit_shipments` 複数=未使用)／`create-order` が決済前に `pending` で INSERT する仕様違反／`/kit` の 10 件表示の因果／埋め方 3 案 |
 | `docs/subscription/kit_lifecycle_and_handoff_management_spec.md` | **検査キット 出荷・進捗・データ受渡 統合管理仕様(サブスク駆動)**。プラン×キット×発送タイミング/タカセ定期出荷/ライフサイクル状態機械+AI問診促し/進捗駆動の各社受渡・Elith作成指示。**§4.1.1=LAiF上りCSV(AI疾病発症予測 入力フォーム 約158項目)の写像仕様＋生成フロー**(健診スキャン+AI問診+基本情報を集約=スキャンフローに足さない別export・整理番号/生年月日は要確認) |
 | `docs/lab/wellfort_admin_lab_upload_spec.md` | 管理UI: 検査結果ファイルアップロード仕様 |
 | `docs/lab/lab_integration_workflow.md` | 検査機関→ユーザー割当ワークフロー (PII 制約) |
@@ -1704,6 +1760,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/scan/health_age_caba_v5.4_spec.md` | **ウェルネス年齢 ①正規版(CABA v5.4)確定事項** (免責2文/WBC桁正規化/補完定数/SBP・FEV補正・Wellfort確認2026-08) |
 | `docs/scan/health_age_simple_v7.0_spec.md` | **ウェルネス年齢 ②簡易版(CABA v7.0)** = 血球分画/ALP/WBC/CRP を持たない簡易書式向けフォールバック。**改称(健康年齢→ウェルネス年齢)の適用範囲・段階フォールバック①②③・移植元の復元手順と数値照合表**もここ |
 | `docs/scan/scan_canonicalization_standard_format_design.md` | **戦略正本: 検査票→標準フォーマット正準化(2層戦略)**。①読取=native multimodal維持 / ②正準化=健診標準フォーマット(KMAT)への決定論マッピング新規 |
+| **`docs/scan/スキャン非同期処理_仕様書.md`** | **【送信後はバックグラウンドで読み取る・仕様。実装は未着手】発注者判断 2026-09-10「S3 に置いて定期的に削除で進めて」。** 画像を全ページ S3 へ / 削除は既存ライフサイクル(1日)＋読了時削除の二段 / `diagnosis.scan_jobs` / ワーカーは 1 起動で回せるだけ回す / **Vercel の上限は 60s でなく 300〜800s・Cron 最小間隔はプラン依存**(一次資料つき) / 段階 P0〜P5 / **発注者確認 4 件** |
 | `docs/ai_reviews/` | Gemini/ChatGPT へのレビュー依頼・相談ドラフト集(開発経緯の記録。確定仕様は各 spec が正本) |
 
 ## CI (2026-09-08 新設・`.github/workflows/ci.yml`)
