@@ -2,7 +2,7 @@
 
 | 項目 | 内容 |
 |---|---|
-| 版 | **0.3.1**（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離。変更点は §30） |
+| 版 | **0.4**（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離。変更点は §30） |
 | 対象システム | **wellfort-site**（管理画面 UI・管理者認証・ブラウザとのやり取り）／ **Scan-Chat-AI**（ZIP 受付処理・分類・解析・ジョブ状態・ウェルネス年齢・Elith JSON 生成・S3） |
 | 同系統の先行仕様 | `docs/lab/wellfort_admin_lab_upload_spec.md`（**責務分界の正**。§3 配置場所／§6-1 Bearer API Key） |
 | 上位・関連 | `docs/elith/elith_s3_data_handoff_spec.md`（納品パス・命名）／`docs/elith/elith_assembly_wrapping_spec.md`／`docs/elith/elith_masking_definition.md`／`docs/scan/health_age_caba_v5.4_spec.md`／`docs/scan/health_age_simple_v7.0_spec.md`／`docs/lab/lab_data_pipeline_master_spec.md` |
@@ -185,6 +185,12 @@ Phase 1 で `.xls` を読む必要が出たら、§5.3 の選定と**同じ手�
 | **③ ZIP 解析時** | Central Directory 読取時と展開中 | 宣言値の合計が `MAX_TOTAL_UNCOMPRESSED` / `MAX_ENTRIES` / `MAX_ENTRY_BYTES` を超えたら中断。**展開中も実バイト数を数えて宣言値超過で中断**（§5.3.3-4） | 圧縮率の詐称（ZIP 爆弾）を止める |
 
 **②が本命**。①はクライアント申告なので信用しない。③は「小さく見せかけた ZIP」への備え。
+
+**保存も 2 列に分ける（v0.4・§23.1）。** ①の申告値は `declared_source_size`、
+②の実測値は `source_size` に入れ、**混ぜない**。
+batch 行が出来るのは ticket 発行時点で**まだ PUT が済んでいない**ため、
+1 列にすると**申告値を実測値として保存する**ことになる。
+②を通るまで `source_size` は **null（＝まだ確認していない）**。
 先行例として `scan-upload-ticket.ts:158-161` が**読み出し側でもサイズを見ている**
 （コメントは「署名で固定してあるが念のため」だが、**実際にはこちらが主防御**）。
 
@@ -343,8 +349,13 @@ subject_fp = SHA-256(  そのフォルダに属するファイルの content SHA
 
 - 材料は **ファイルの中身のハッシュだけ**。
   **フォルダ名・ファイル名・氏名・生年月日を一切使わない**ので、
-  **fingerprint から PII を引き出す経路が原理的に無い**（辞書攻撃の対象にならない）。
+  **平文の PII は含まない**（原像に氏名等が無いため、辞書攻撃で氏名に戻す経路が無い）。
   秘密鍵（HMAC）も要らない。
+- **ただし「安全な値」として扱わない（v0.4・発注者指摘）。** `subject_fp` は
+  **特定の個人の検査ファイル群に 1 対 1 で対応する照合用識別子**なので、
+  **機微情報と同等に扱う** — ログに出さない / 外部へ渡さない / 納品 JSON に載せない /
+  画面に出すときも先頭数文字に留める。
+  （元の ZIP を持っている者にとっては「どの人物の行か」を突き合わせられる値である。）
 - 材料の `sha256` は **`ad_hoc_diagnosis_files.sha256` として既に保存する値**（§23.3）＝新しい保存物を増やさない。
 - **昇順ソート**するので、ZIP のエントリ順や読み取り順が変わっても同じ値になる。
 - 同じ ZIP を選び直せば**バイトが同じ＝必ず同じ値**になる。
@@ -951,7 +962,9 @@ simple unavailable: albumin, creatinine
 |---|---|
 | `batch_id` / `subject_id?` / `file_id?` | 対象 |
 | `event` | `created` / `classified` / `reclassified` / `parsed` / `page_done` / `page_failed` / `confirmed` / `exported` / `retry` / `override` |
-| `actor_masked` / `actor_sha256` | 操作した管理者。**メールの現物は保存しない**（v0.3.1 で変更）。表示用マスク（`h***@example.com`）と、後から候補アドレスを突き合わせて確認できる sha256 だけを持つ。**既存 `demo.account_emails` と同じ規律**（CLAUDE.md「メールの現物は保存しない」）。wellfort-site が検証した email を中継時に渡し、**Scan-Chat-AI 側で受け取った直後にマスク＋ハッシュ化して原文を捨てる** |
+| **`actor_user_id`** | **操作者識別の正**（v0.4・発注者判断で O10 CLOSE）。wellfort-site が `/auth/v1/user` で検証した Supabase Auth の **`user.id`（UUID）**。**中継のサーバ側で注入する** — **ブラウザ body の `actor_user_id` は信用しない**（申告値をそのまま積むと監査ログとして成立しない）。UUID なので PII ではなく、`admin_users` を引けば後から人に戻せる |
+| `actor_masked` / `actor_sha256` | **表示用と補助**（正ではない）。`actor_masked` は一覧に出すマスク済み文字列（`h***@example.com`）、`actor_sha256` は任意。**メールの現物は保存しない** — 既存 `demo.account_emails` と同じ規律（CLAUDE.md「メールの現物は保存しない」）。wellfort-site が検証した email を中継時に渡し、**Scan-Chat-AI 側で受け取った直後にマスク＋ハッシュ化して原文を捨てる** |
+| — | **自動処理（人の操作でない）は actor 3 列とも null** のまま積む。`page_done` などに架空の操作者を入れない |
 | `detail` | JSON。**値そのものではなく種類と件数**（例 `{ "from": "needs_review", "to": "HealthCheckupData" }`） |
 | `created_at` | — |
 
@@ -980,6 +993,10 @@ overwrite export / retry。
 
 - **HTTP API 同士を Scan-Chat-AI 内部から呼ばない。** 既存 `elith-scan` / `elith-genetic-merge` /
   `health-age` / `elith-assemble` の処理は**共通 lib へ切り出して再利用**する（指示書 §13）。
+- **操作者は中継のサーバ側で注入する（v0.4・§21 / §28.1-O10）。**
+  `{B}` の各中継は `verifyAdmin` で `/auth/v1/user` を引いた**その応答の `user.id`** を
+  `{S}` へ渡す（`actor_user_id`）。**ブラウザ body に同名のキーが在っても捨てる**
+  — 上書きを許すと監査ログが自己申告になる。人の操作でない処理は**渡さない**（null のまま）。
 - 切り出す先: `src/lib/ad-hoc-diagnosis/*.ts`（`archive`（§5.3 の手段をここに隠す） / `classify` /
   `parsers` / `pipeline` / `state` / `fingerprint`（§6.2））。
 
@@ -994,14 +1011,24 @@ overwrite export / retry。
 
 ### 23.1 `diagnosis.ad_hoc_diagnosis_batches`
 
-`id` / `title` / `status` / `bundle_date`(null 可) / `source_sha256` / `source_size` /
+`id` / `title` / `status` / `bundle_date`(null 可) / `source_sha256` /
+**`declared_source_size`(NOT NULL)** / **`source_size`(NULL 可)** /
 `source_key` / `subject_count` / `file_count` / **`required_formats`(jsonb)** / **`optional_formats`(jsonb)** /
-`retain_originals`(bool, 既定 false) / **`created_by_masked`** / **`created_by_sha256`** /
+`retain_originals`(bool, 既定 false) / **`created_by_user_id`(uuid)** / **`created_by_masked`** /
 `created_at` / `updated_at` / `confirmed_at` / `exported_at` / `last_error`
 
 - `required_formats` / `optional_formats` は §15.2 の JSON の 2 キーを**別列に分けた**もの（Phase C）。
-- `created_by` は**メールの現物を保存しない**ので `_masked` / `_sha256` の 2 列（§21 と同じ規律）。
-- `source_size` には **`HeadObject` で確認した実バイト数**を入れる（クライアント申告ではない・§5.2.1 ②）。
+- **`created_by_user_id` が作成者識別の正**（v0.4）。wellfort-site が `/auth/v1/user` で検証した
+  `user.id` を**サーバ側で注入する**。`created_by_masked` は表示用で、識別には使わない。
+  **メールの現物は保存しない**（§21 と同じ規律）。
+- **ZIP のサイズは申告値と実測値を分けて持つ（v0.4・発注者指示）。**
+  - `declared_source_size` = **ticket 発行時のブラウザ申告値**。上限の一次判定に使うだけで信用しない（§5.2.1 ①）。
+  - `source_size` = **PUT 完了後に `HeadObject` で確認した実サイズ**（§5.2.1 ②）。
+  - **なぜ 1 列にしないか**: batch 行が出来るのは ticket 発行時点で、**まだ PUT が済んでいない**。
+    その時点に実測値は存在しないので、1 列に混ぜると**申告値を実測値として保存する**ことになる。
+    だから `source_size` は **NULL 可**（＝まだ確認していない）にし、**申告値をここへ入れない**。
+  - **classify 開始時に `HeadObject` を行い `source_size` を確定させる。**
+    上限超過なら `failed` にし、**一時 ZIP を削除する**。
 - `source_sha256` は**一意にしない**。同じ ZIP の再投入は「検知して警告する」だけで、
   自動で拒否も自動で続行もしない（§19.1）。索引だけ張る。
 
@@ -1233,6 +1260,17 @@ ZIP / XLSX を読む層（**手段は §5.3 で未決定**。ライブラリな�
 Scan-Chat-AI に既存する `src/pages/admin/*` は**今回の前例として使わない**。
 削除・移設は**本仕様のスコープ外**。**CLAUDE.md に「Scan 側 admin UI の例外」を追加しない。**
 
+**O10. 監査ログの操作者をどう持つか — 解決（2026-09-10 発注者判断・v0.4 で CLOSE）**
+v0.3.1 は `actor_masked` + `actor_sha256` だけにしたため、**「誰がやったか」を一覧から直接読めず**、
+候補アドレスを hash して突き合わせる必要があった（監査ログとして弱い）。
+→ **`actor_user_id`（uuid）を操作者識別の正**にする。wellfort-site は既に `/auth/v1/user` で
+認証済みユーザーを取得している（`elith-scan.ts:34-39` と同形）ので、**そこから `user.id` を取り出し、
+中継のサーバ側で Scan-Chat-AI へ渡す**。
+- **`actor_user_id`** = 操作者識別の正 / **`actor_masked`** = 表示用 / **`actor_sha256`** = 任意の補助。
+- **ブラウザ body の `actor_user_id` は信用しない。wellfort-site で検証した値だけを注入する。**
+- `batches` の作成者も同じ形（`created_by_user_id` / `created_by_masked`・§23.1）。
+- UUID は PII ではなく、後から `admin_users` を引けば人に戻せる＝**追跡性と PII 非保存が両立する**。
+
 ### 28.2 未確定（`OPEN`）
 
 | # | 論点 | 影響 | 既定（Phase 1） |
@@ -1240,7 +1278,6 @@ Scan-Chat-AI に既存する `src/pages/admin/*` は**今回の前例として�
 | **O2** | **臨時バッチの原本を 10 年保管（Object Lock）の対象にするか。** 原本用バケットは削除不可なので、氏名・DOB を含むファイルを入れると消せない | 保管ポリシー | **保存しない**（`retain_originals=false`）。受け皿だけ用意 |
 | **O3** | **元ファイル名を DB に保存するか。** 氏名が含まれ得る（指示書 §10）。保存しないと現場が原本を追いにくい | 運用性 vs PII | **保存しない**（`{分類}_{連番}{拡張子}` に置換） |
 | **O4** | **ブラウザで「必要なエントリだけ部分展開」が実機で成立するか**（`File.slice()` ＋ `DecompressionStream('deflate-raw')`、または §5.3 で選ぶライブラリの部分読み API）。代替として **S3 の CORS に `GET` を足すか**（CLAUDE.md は「`GET` も足さない」） | 遺伝子 PDF のページ画像化経路 | ブラウザ内で**部分読み**（§11.5。**全体展開は禁止**）。**再読込後は ZIP を選び直す** |
-| **O10** | **監査ログの `actor` にメールの現物を保存しないでよいか。** `actor_masked` + `actor_sha256` にしたので、**後から「誰がやったか」を知るには候補アドレスを hash して突き合わせる**必要がある（一覧から直接読めない） | 監査の追跡性 vs PII | **現物を保存しない**（既存 `demo.account_emails` と同じ規律）。運用上つらければ前進 migration で列を足す |
 | **O9** | **presigned PUT で `Content-Length` が署名対象になるか / ブラウザから明示できるか / 違うサイズを S3 が拒否するか**（§5.2.1 の 3 点）。既存コードのコメントと `signableHeaders` の実装が食い違っている | サイズ防御の設計 | **署名に依存しない**。①ticket 発行時上限 ②アップロード後の `HeadObject` ③ZIP 解析時の展開上限 の**多層で守る**（§5.2.1） |
 | **O8** | **ZIP / XLSX を読む手段（案 L / 案 H / 案 M）。** v0.1 の「依存追加ゼロだから自作」は撤回済み（§5.3） | Phase D の実装全体 | **未決定。Phase D 着手前に §5.3.2 の 8 観点で比較して決める。既定の姿勢は案 L / 案 H を優先し、独自 ZIP parser を第一選択にしない** |
 | **O5** | **問診 XLSX / PDF の実列・実レイアウト。** サンプル ZIP が本作業環境に無く、**私は列名を実測していない** | 問診の写像表・`test_date` の正 | 問診 XLSX は**マッピング表を実物で確定してから**。問診 PDF の人物は **`needs_review`** |
@@ -1272,6 +1309,7 @@ Scan-Chat-AI に既存する `src/pages/admin/*` は**今回の前例として�
 
 | 版 | 日付 | 内容 |
 |---|---|---|
+| **0.4** | 2026-09-10 | **発注者レビューで migration を DB 適用前に 3 点修正（Phase C 最終 PASS）。** **A. ZIP のサイズを申告値と実測値に分離**（§23.1）— **`declared_source_size`(NOT NULL) / `source_size`(NULL 可)**。理由は **batch 行が出来るのが ticket 発行時点で、まだ PUT が済んでいない**こと。1 列に混ぜると**申告値を実測値として保存する**ことになる。`source_size` は **classify 開始時の `HeadObject` で確定**させ、上限超過なら `failed` ＋一時 ZIP 削除。**申告値をここへ入れない**。 **B. 操作者識別の正を `actor_user_id`（uuid）にして O10 を CLOSE**（§21 / §22 / §23.1 / §28.1）— wellfort-site は既に `/auth/v1/user` で認証済みユーザーを取得している（`elith-scan.ts:34-39` と同形）ので、**`user.id` をサーバ側で注入**する。`actor_masked` は表示用・`actor_sha256` は任意の補助へ降格。**ブラウザ body の `actor_user_id` は信用しない。** `batches` にも `created_by_user_id` / `created_by_masked`。UUID は PII でなく後から `admin_users` で人に戻せる＝**追跡性と PII 非保存が両立**。 **C. `subject_fp` の表現を弱めた**（§6.2.1）— 「PII を引き出す経路が**原理的に無い**」は言い過ぎ。**平文の PII は含まないが、特定個人のファイル群に 1 対 1 で対応する照合用識別子**なので、**機微情報と同等に扱う**（ログに出さない・外部へ渡さない・納品 JSON に載せない）へ修正。 **検証**: scratch PostgreSQL 16 に**全 17 migration を白紙から適用 OK**・再適用も冪等・`ix_ad_hoc_subjects_batch_fp` が**非 UNIQUE**であること・**同一 batch 内の fp 衝突が 2 行とも INSERT できる**こと・`declared_source_size` NOT NULL / `source_size` が後から埋められること・`actor_user_id` / `created_by_user_id` が UUID を受けること・RLS force＋policy 0＋`anon`/`authenticated` に権限が無いことを実測。 |
 | **0.3.1** | 2026-09-10 | **Phase C（migration ファイル作成）で実装した形に §21 / §23 を同期。** ①**監査ログの `actor` を `actor_masked` + `actor_sha256` に変更** — §21 は「admin の email」と書いていたが、**Scan-Chat-AI 側にメールの現物を置かない**既存の規律（`demo.account_emails`・CLAUDE.md）に合わせた。**発注者確認事項**（§28.2-O10） ②`required_formats` / `optional_formats` を**別列**に ③`created_by` も `_masked` / `_sha256` の 2 列に ④`pages` に **`file_sha256` を非正規化**（キャッシュ参照 `(file_sha256, page_no)` を 1 索引で引くため・§19.3） ⑤`outputs` に **UNIQUE (subject_id, format_id)** を明記 ⑥`batches.source_sha256` は**一意にしない**（再投入は検知して警告するだけ・§19.1）ことを明記。 |
 | **0.3** | 2026-09-10 | **発注者レビューで 2 点を修正（Phase C 着手前）。** **A. `subject_fp` の UNIQUE 制約を撤回** — v0.2 は「衝突したら両方を `needs_review` で残す」と `UNIQUE (batch_id, subject_fp)` が**矛盾していた**（UNIQUE があると 2 人目の INSERT が失敗し「両方残す」が実行できない）。**`subject_fp` は再開時の照合用の検索キーであって一意識別子ではない**と位置づけを確定し、**同一 fp が複数人物に存在し得ることを仕様として認める**。制約を**通常 INDEX `(batch_id, subject_fp)`** へ変更し、再開時は**ヒット件数で判定**（0 件=`unmatched` / 1 件=`match` / **2 件以上=`fp_collision` で該当 subject を全件 `needs_review`**）。**`UNIQUE (batch_id, subject_no)` は維持**。**B. `Content-Length` の「署名固定」を未確認へ落とした** — 実測すると `scan-upload-ticket.ts:129` の `signableHeaders` は **`content-type` だけ**で、返す `headers` にも Content-Length は無い（`:132`）。同ファイルのコメント `:21-22`/`:127`/`:158` は「署名に固定」と書いているが**実装と食い違う**ので根拠にしない。→ 断定を撤回し、**サイズ防御を ①ticket 発行時上限 ②アップロード後 `HeadObject` の実サイズ検証 ③ZIP 解析時の展開上限 の多層**にした（**②が本命**・§5.2.1）。署名の実挙動 3 点は O9 として Phase D-0 / upload-ticket 実装時に実測する。 |
 | **0.2** | 2026-09-10 | **発注者レビューで 3 点を修正。** ①**ZIP/XLSX の自作リーダを「決定仕様」から外した** — 「`package.json` に無いから自作」は依存追加禁止の根拠にならない、という指摘。§5.3 を「案 L(ライブラリ) / 案 H / 案 M(最小自作) を **8 観点**（セキュリティ・メモリ・ZIP64・data descriptor・文字コード・保守性・Vercel 対応・XLSX 必要機能）で比較して **Phase D 着手前に決める**」へ書き換え、**医療関連データなので独自 ZIP parser を第一選択にしない**と明記。手段によらず満たす要件（Central Directory を正 / エントリ単位で読む / ZIP security は自分でも検査 / サイズは宣言値と実バイトの両方で判定）は決定仕様として残した。あわせて**`.xls` を受入対象から外した**（OLE2 で ZIP/XML ではない → `unsupported_file` として一覧に出す） ②**ブラウザ側の ZIP 全体メモリ展開を禁止**。`File.slice()` で **Central Directory ＋ 処理中の 1 エントリだけ**を載せる形へ（サーバの S3 Range GET と同型）。SHA-256 も逐次計算。ピークメモリを実測で見張る ③**§6.2 を新設**: 再開時に「この人物 = この client_id」を取り違えない仕組み。**内容ハッシュだけから作る非可逆 `subject_fp`**（氏名・フォルダ名・ファイル名を材料にしない＝PII を引き出す経路が無い・秘密鍵も不要）で結び直し、**ヒットしなければ推測で寄せず `needs_review`**。`UNIQUE (batch_id, subject_fp)` で衝突も検出する。§6.1 / §23.2 に列を追加し、§29 に **Phase D-0（手段の決定）** を挿入。 |

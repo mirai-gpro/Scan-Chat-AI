@@ -12,7 +12,9 @@
 --   diagnosis.scan_jobs とも別 (あちらは利用者 1 人のスキャン。こちらは複数人分の取込バッチ)。
 --
 -- 【PII】この 6 表に **氏名・生年月日・社員番号・元ファイル名・フォルダ名を保存しない** (spec §6.1 / §8)。
---   持つのは性別・年齢・内容ハッシュ・S3 キーだけ。**S3 キーと sha256 をログに出さない。**
+--   持つのは性別・年齢・内容ハッシュ・S3 キーだけ。**S3 キーと各種ハッシュをログに出さない。**
+--   **内容ハッシュ (sha256 / subject_fp) は平文 PII を含まないが、特定個人のファイルに
+--   1 対 1 で対応する照合用識別子なので、機微情報と同等に扱う。**
 --   ZIP と展開ファイルは Elith バケットの一時領域 {prefix}ad-hoc-uploads/ にあり、
 --   **ライフサイクルで失効させる** (spec §24.4。AWS 側の作業が別途 1 つ要る)。
 --
@@ -53,9 +55,18 @@ create table if not exists diagnosis.ad_hoc_diagnosis_batches (
   -- これが一致しない ZIP を同じバッチの続きとして扱わない。
   source_sha256      text not null check (source_sha256 ~ '^[0-9a-f]{64}$'),
 
-  -- ZIP の実バイト数。**クライアント申告ではなく HeadObject で確認した値を入れる**
-  -- (spec §5.2.1 ②。Content-Length が署名に固定されるかは未確認なので、ここが主防御)。
-  source_size        bigint not null check (source_size >= 0),
+  -- ZIP のサイズは**申告値と実測値を分けて持つ** (v0.4)。
+  --   batch 行が出来るのは presigned ticket を発行する時点で、**まだ PUT が済んでいない**。
+  --   その時点に HeadObject の実測値は存在しないので、1 列に混ぜると
+  --   「申告値を実測値として保存する」ことになってしまう。
+  --
+  -- ticket 発行時にブラウザが申告したサイズ。**上限の一次判定に使うだけで信用しない**。
+  declared_source_size bigint not null check (declared_source_size >= 0),
+  --
+  -- PUT 完了後に **HeadObject で確認した実サイズ**。classify の冒頭で確定させる。
+  -- **確定するまで null**。上限超過ならバッチを failed にし、一時 ZIP を削除する。
+  -- Content-Length が署名に固定されるかは未確認なので (spec §5.2.1)、**ここが主防御**。
+  source_size        bigint check (source_size is null or source_size >= 0),
 
   -- S3 キー。形は {prefix}ad-hoc-uploads/{batch_id}/source.zip に完全一致する
   -- (isAdHocZipKey。部分一致にしない)。**ログに出さない。**
@@ -78,10 +89,12 @@ create table if not exists diagnosis.ad_hoc_diagnosis_batches (
   -- ファイルを入れると後から消せない (spec §9 / §28.2-O2 = 発注者判断待ち)。
   retain_originals   boolean not null default false,
 
-  -- 誰が作ったか。**メールの現物は保存しない** (既存 demo.account_emails と同じ規律)。
-  -- 表示用のマスク (例 h***@example.com) と、後から本人確認できる sha256 だけを持つ。
+  -- 誰が作ったか。**操作者識別の正は `created_by_user_id`** (v0.4・発注者判断)。
+  --   wellfort-site が `/auth/v1/user` で検証した Supabase Auth の user.id (UUID) を
+  --   **サーバ側で注入する**。**ブラウザ body の値は信用しない。**
+  -- メールの現物は保存しない (既存 demo.account_emails と同じ規律)。マスクは表示用の補助。
+  created_by_user_id uuid,
   created_by_masked  text,
-  created_by_sha256  text check (created_by_sha256 is null or created_by_sha256 ~ '^[0-9a-f]{64}$'),
 
   created_at         timestamptz not null default now(),
   updated_at         timestamptz not null default now(),
@@ -96,12 +109,18 @@ comment on table diagnosis.ad_hoc_diagnosis_batches is
   '臨時診断バッチ 1 回分。正本 docs/lab/ad_hoc_diagnosis_batch_spec.md。氏名・生年月日は保存しない';
 comment on column diagnosis.ad_hoc_diagnosis_batches.source_sha256 is
   '投入 ZIP の SHA-256。再開時に「同じ ZIP か」を判定する唯一の入口 (spec §6.2.3-1)';
+comment on column diagnosis.ad_hoc_diagnosis_batches.declared_source_size is
+  'ticket 発行時のブラウザ申告値。上限の一次判定に使うだけで信用しない (spec §5.2.1 ①)';
 comment on column diagnosis.ad_hoc_diagnosis_batches.source_size is
-  'ZIP の実バイト数。クライアント申告でなく HeadObject の結果を入れる (spec §5.2.1 ②)';
+  'PUT 完了後に HeadObject で確認した実サイズ。確定するまで null。申告値をここへ入れない (spec §5.2.1 ②)';
 comment on column diagnosis.ad_hoc_diagnosis_batches.required_formats is
   'この案件で必要な format 集合。既存 GATING_FORMAT_IDS (通常プランの 5 種必須) は変更しない (spec §15.2)';
 comment on column diagnosis.ad_hoc_diagnosis_batches.retain_originals is
   '原本を 10 年保管の対象にするか。既定 false = 保存しない (spec §28.2-O2 が未裁定のため)';
+comment on column diagnosis.ad_hoc_diagnosis_batches.created_by_user_id is
+  '作成者識別の正。wellfort-site が /auth/v1/user で検証した Supabase Auth の user.id。ブラウザ申告値は使わない';
+comment on column diagnosis.ad_hoc_diagnosis_batches.created_by_masked is
+  '画面表示用のマスク済み文字列 (例 h***@example.com)。識別には使わない。現物のアドレスを入れない';
 
 create index if not exists ix_ad_hoc_batches_status_created
   on diagnosis.ad_hoc_diagnosis_batches(status, created_at desc);
@@ -129,8 +148,9 @@ create table if not exists diagnosis.ad_hoc_diagnosis_subjects (
 
   -- 内容由来の非可逆 fingerprint (spec §6.2.1)。
   --   SHA-256( そのフォルダのファイルの content SHA-256 を 16進小文字で昇順ソートし "\n" 連結 )
-  -- **材料はファイルの中身のハッシュだけ**で、氏名・フォルダ名・ファイル名を一切使わない
-  -- = この列から PII を引き出す経路が原理的に無い (辞書攻撃の対象にならない・秘密鍵も不要)。
+  -- **材料はファイルの中身のハッシュだけ**で、氏名・フォルダ名・ファイル名を一切使わない。
+  -- **平文の PII は含まないが、特定の個人の検査ファイル群に 1 対 1 で対応する照合用識別子**
+  -- なので、**機微情報と同等に扱う** (ログに出さない・外部へ渡さない・納品 JSON に載せない)。
   -- ファイルが 0 件の人物は計算できないので null (identity_status='unresolved')。
   subject_fp         text check (subject_fp is null or subject_fp ~ '^[0-9a-f]{64}$'),
 
@@ -174,7 +194,8 @@ create table if not exists diagnosis.ad_hoc_diagnosis_subjects (
 comment on table diagnosis.ad_hoc_diagnosis_subjects is
   '臨時診断バッチの被験者 1 人。氏名・生年月日・社員番号・フォルダ名は保存しない (spec §6.1)';
 comment on column diagnosis.ad_hoc_diagnosis_subjects.subject_fp is
-  '内容ハッシュだけから作る非可逆 fingerprint。**再開時の照合用の検索キーであって一意識別子ではない** (spec §6.2.5.1)';
+  '内容ハッシュだけから作る非可逆 fingerprint。再開時の照合用の検索キーであって一意識別子ではない (spec §6.2.5.1)。'
+  ' 平文 PII は含まないが個人の検査ファイル群に 1 対 1 で対応するため、機微情報と同等に扱う (ログに出さない)';
 comment on column diagnosis.ad_hoc_diagnosis_subjects.identity_reason is
   '食い違いの種類と件数だけ。氏名・生年月日などの値そのものを書かないこと';
 comment on column diagnosis.ad_hoc_diagnosis_subjects.client_id is
@@ -377,10 +398,13 @@ create table if not exists diagnosis.ad_hoc_diagnosis_events (
                                         'page_done','page_failed','confirmed','exported',
                                         'retry','override')),
 
-  -- 誰の操作か。**メールの現物は保存しない** (既存 demo.account_emails と同じ規律)。
-  -- 表示用のマスクと、後から候補アドレスを突き合わせて確認できる sha256 だけを持つ。
-  -- ※ spec §21 は「actor = admin の email」と書いているが、Scan-Chat-AI 側にメールの
-  --   現物を置かない既存の規律に合わせた。仕様書側は §21 に注記して同期させる。
+  -- 誰の操作か。**操作者識別の正は `actor_user_id`** (v0.4・発注者判断で O10 CLOSE)。
+  --   wellfort-site は中継の入口で `/auth/v1/user` を叩いて管理者を検証しているので、
+  --   そこで得た **Supabase Auth の user.id (UUID)** を Scan-Chat-AI へ**サーバ側で注入**する。
+  --   **ブラウザ body に載ってきた actor_user_id は信用しない**
+  --   (受け取っても捨て、中継が検証した値だけを使う)。
+  -- masked / sha256 は補助。**メールの現物は保存しない** (既存 demo.account_emails と同じ規律)。
+  actor_user_id      uuid,
   actor_masked       text,
   actor_sha256       text check (actor_sha256 is null or actor_sha256 ~ '^[0-9a-f]{64}$'),
 
@@ -393,8 +417,10 @@ create table if not exists diagnosis.ad_hoc_diagnosis_events (
 
 comment on table diagnosis.ad_hoc_diagnosis_events is
   '臨時診断バッチの監査ログ (append only)。PII を入れない。値でなく種類と件数を残す (spec §21)';
+comment on column diagnosis.ad_hoc_diagnosis_events.actor_user_id is
+  '操作者識別の正。wellfort-site が /auth/v1/user で検証した Supabase Auth の user.id。ブラウザ申告値は使わない';
 comment on column diagnosis.ad_hoc_diagnosis_events.actor_masked is
-  '操作した管理者の表示用マスク。メールの現物は保存しない (demo.account_emails と同じ規律)';
+  '表示用マスク (補助)。メールの現物は保存しない (demo.account_emails と同じ規律)';
 
 create index if not exists ix_ad_hoc_events_batch_created
   on diagnosis.ad_hoc_diagnosis_events(batch_id, created_at desc);
