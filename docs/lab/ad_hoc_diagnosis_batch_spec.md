@@ -3,6 +3,7 @@
 | 項目 | 内容 |
 |---|---|
 | 版 | **0.4**（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離。変更点は §30） |
+| 未確定の残り | **7 件**（O2 / O3 / O4 / O5 / O6 / O7 / O9・§28.2）。**O1 / O8 / O10 は解決済み**（§28.1） |
 | 対象システム | **wellfort-site**（管理画面 UI・管理者認証・ブラウザとのやり取り）／ **Scan-Chat-AI**（ZIP 受付処理・分類・解析・ジョブ状態・ウェルネス年齢・Elith JSON 生成・S3） |
 | 同系統の先行仕様 | `docs/lab/wellfort_admin_lab_upload_spec.md`（**責務分界の正**。§3 配置場所／§6-1 Bearer API Key） |
 | 上位・関連 | `docs/elith/elith_s3_data_handoff_spec.md`（納品パス・命名）／`docs/elith/elith_assembly_wrapping_spec.md`／`docs/elith/elith_masking_definition.md`／`docs/scan/health_age_caba_v5.4_spec.md`／`docs/scan/health_age_simple_v7.0_spec.md`／`docs/lab/lab_data_pipeline_master_spec.md` |
@@ -212,12 +213,23 @@ batch 行が出来るのは ticket 発行時点で**まだ PUT が済んでい�
   （`docs/operations/S3原本ストレージ_構築手順書.md`）で、**PII を含む ZIP を置くと削除できなくなる**（§28-O2）。
 - **【AWS 側の作業が 1 つ要る】** `ad-hoc-uploads/` のライフサイクル失効ルール（§24.4）。
 
-### 5.3 ZIP / XLSX の読み方（**未決定。Phase D 着手前に 3 案を比較して決める**）
+### 5.3 ZIP / XLSX の読み方（**Phase D-0 で決定・v0.4**）
 
-> **【v0.2 で「自作」の決定を撤回】** v0.1 は「`package.json` にライブラリが 0 件だから自作」と書いたが、
+> **結論（2026-09-10・Phase D-0 実施）**
+> - **ZIP = 案 L / [`@zip.js/zip.js`](https://www.npmjs.com/package/@zip.js/zip.js)**（ブラウザ・サーバ共通で 1 本）
+> - **XLSX = 案 H / [`read-excel-file`](https://www.npmjs.com/package/read-excel-file)**（ZIP とは別に選ぶ）
+> - **案 M（自作）は不採用。** ①②を満たすライブラリが実在したため（§5.3.4-4 の条件を満たさない）。
+> - **SheetJS `xlsx`（および依存する `node-xlsx`）は採用不可。** 理由は §5.3.6。
+>
+> 根拠はすべて **2026-09-10 に一次資料から実測**（`registry.npmjs.org` / `api.osv.dev` /
+> 各プロジェクトの README・型定義）。**記憶で書いていない**（CLAUDE.md R2 / R3）。
+
+> **【経緯・v0.2 で「自作」の決定を撤回】** v0.1 は「`package.json` にライブラリが 0 件だから自作」と書いたが、
 > **依存が入っていないことは依存を足してはいけない根拠ではない**（発注者指摘 2026-09-10）。
 > **医療関連データを扱うので、独自 ZIP parser を第一選択にしない。**
-> ここは決定仕様から外し、**Phase D 着手前に実測で比較して決める**。
+> → v0.2 で決定仕様から外し、**v0.4（Phase D-0）で実測比較して上記のとおり決めた**。
+> **この方針は生きている**（自作を採らなかった理由がこれ）。以下 §5.3.1〜§5.3.4 は**そのときの比較の枠組み**で、
+> 結果は §5.3.5 以降にある。
 
 #### 5.3.1 比較する 3 案
 
@@ -257,7 +269,7 @@ batch 行が出来るのは ticket 発行時点で**まだ PUT が済んでい�
    **展開中も実バイト数を数えて宣言値を超えたら中断**する（宣言値の詐称対策）。
 5. 対応しない圧縮方式は `unsupported_file` として**一覧に出す**（黙って捨てない）。
 
-#### 5.3.4 決め方（Phase D 着手前）
+#### 5.3.4 決め方（Phase D 着手前・**v0.4 で実施済み**。結果は §5.3.5〜）
 
 1. 候補ライブラリを**実在確認**（npm の最終公開日・ライセンス・既知脆弱性・推移的依存数）。
 2. §5.3.2 の 8 観点で表を埋める。**埋まらない欄は「未確認」と書く**（推測で埋めない）。
@@ -268,6 +280,109 @@ batch 行が出来るのは ticket 発行時点で**まだ PUT が済んでい�
 **現時点で確認できている環境事実（実測。案の優劣ではない）**:
 `zlib.inflateRawSync` が使える（Node v22）／`DecompressionStream` が Node 側に存在する
 （**ブラウザ実機は未確認**→§28-O4）／`TextDecoder('shift_jis')` が使える（§5.4）。
+
+#### 5.3.5 Phase D-0 の実測結果（2026-09-10・一次資料）
+
+**取得元**: `https://registry.npmjs.org/{pkg}`（最終公開日・ライセンス・依存・engines）/
+`https://api.osv.dev/v1/query`（既知脆弱性）/ `https://api.npmjs.org/downloads/point/last-week`（週間 DL）/
+各プロジェクトの README・`index.d.ts`（機能）。
+
+**ZIP 候補（7 本）**
+
+| ライブラリ | 最新 / 最終公開 | ライセンス | 直接依存 | 週間DL | 既知脆弱性（OSV） | 部分読み | ZIP64 | 文字コード | 判定 |
+|---|---|---|---|---|---|---|---|---|---|
+| **`@zip.js/zip.js` 2.14.0** | **2026-09-09** | BSD-3-Clause | **0** | 2.8M | **0 件** | **`BlobReader` / `HttpRangeReader` / 独自 `Reader` 実装可**（`index.d.ts:888,1006`） | あり（README） | **`filenameEncoding` + `decodeText` フック**（`index.d.ts:1652,1668`） | **採用** |
+| `yauzl` 3.4.0 | 2026-06-07 | MIT | 1 | 27.1M | 1（MODERATE・`fixed<3.2.1` ＝最新は解消済） | `fromRandomAccessReader()` | あり（8PiB まで） | **CP437 / UTF-8 のみ**（README L112）。CP932 は `decodeStrings:false` で自前 | 次点（サーバ専用） |
+| `node-stream-zip` 1.16.0 | 2026-07-22 | MIT | 0 | 2.9M | **0 件** | 「アーカイブ全体をメモリに載せない」（README L6） | あり（README L13） | `nameEncoding`（`TextDecoder` へ委譲・実装 L144） | 次点（**Node 専用・`fd` 前提**） |
+| `unzipper` 0.12.5 | 2026-06-21 | MIT | **5**（`bluebird` ほか） | 11.6M | 1（MODERATE・`fixed<0.8.13`） | `Open.s3` / `Open.url` / `Open.custom`（Range ヘッダ・README L24,72） | 記載あり | — | 不採用（依存が重い） |
+| `fflate` 0.8.3 | 2026-05-16 | MIT | 0 | 42.6M | 1（MODERATE・**ZIP64 の不正データで無限ループ**・`fixed<0.6.11`） | 非同期 API はあるが Central Directory 前提の部分読みではない | あり | — | 不採用（下記 `read-excel-file` の内部で間接利用） |
+| `jszip` 3.10.2 | 2026-09-08 | MIT or GPL-3.0 | 4 | 23.6M | 2（`fixed<3.8.0` / `fixed<3.7.0`） | **全体をメモリに載せる設計** | — | — | **不採用**（§11.5 に反する） |
+| `adm-zip` 0.6.0 | 2026-07-10 | MIT | 0 | 11.1M | **3（HIGH 1・うち 1 件は未修正）** | 全体メモリ | — | — | **不採用**（下記） |
+
+**`adm-zip` を外した理由（決定的）**: `GHSA-vwc7-r8mq-g2x9`（展開先の symlink を辿って任意ファイル上書き）が
+**`introduced=0.5.9 / last_affected=0.6.0` ＝ 現在の最新版がまだ影響下**で、**修正版が無い**。
+加えて `GHSA-xcpc-8h2w-3j85`（HIGH・細工 ZIP で 4GB 確保）。設計も全体メモリ展開で §11.5 と両立しない。
+
+**XLSX 候補（4 本）**
+
+| ライブラリ | 最新 / 最終公開 | ライセンス | 直接依存 | 週間DL | 既知脆弱性 | 実行環境 | 判定 |
+|---|---|---|---|---|---|---|---|
+| **`read-excel-file` 9.3.10** | **2026-08-10** | MIT | 4（`saxen` / `fflate` / `worker-f` / `unzipper-esm`） | 1.1M | **0 件** | **ブラウザ・Node 両対応**（README L6）。値は `string`/`number`/`boolean`/**`Date`** で返る（L139） | **採用** |
+| `exceljs` 4.4.0 | **2023-10-19（約 2 年停止）** | MIT | **9**（`jszip` / `archiver` / `tmp` / `fast-csv` ほか） | 8.0M | 1（MODERATE・`fixed<1.6.0`） | Node 中心 | 次点 |
+| `xlsx`（SheetJS CE）0.18.5 | **2022-03-24** | Apache-2.0 | 7 | 6.7M | **5（HIGH 2・npm に修正版が無い）** | — | **採用不可**（§5.3.6） |
+| `node-xlsx` 0.24.0 | 2024-04-15 | Apache-2.0 | 1（**`xlsx`**） | — | 自身は 0 件だが**上記を推移的に継承** | — | **採用不可** |
+
+#### 5.3.6 SheetJS `xlsx` を採用できない理由（**この 1 点で確定**）
+
+`GHSA-5pgg-2g8v-p4x9`（**HIGH**・ReDoS）の advisory 本文が、**npm には修正版が存在しないと明記している**:
+
+> "SheetJS Community Edition before 0.20.2 is vulnerable to Regular Expression Denial of Service (ReDoS).
+> **A non-vulnerable version cannot be found via npm**, as the repository hosted on GitHub and the npm package `xlsx` are n…"
+
+- 実測: npm の `xlsx` は **0.18.5（2022-03-24）で止まっている**（総 171 版・以降の公開 0）。
+- もう 1 件 `GHSA-4r6h-8v6p-xvw6`（**HIGH**・Prototype Pollution）は
+  **"when reading specially crafted files"** ＝ **管理者が投入した XLSX を読む本機能そのものが該当**する。
+  advisory は「ファイルを読まない用途（書き出しのみ）なら影響なし」としているが、**本機能は読む**。
+- → **医療データを扱う経路に、修正版の無い HIGH を 2 件持ち込むことになる**ので採らない。
+  `node-xlsx` は `xlsx` に依存するので**同じ理由で不可**。
+- **回避策として SheetJS 公式 CDN（`cdn.sheetjs.com`）から入れる案も採らない** —
+  ①CLAUDE.md の「標準スクリプトは追加依存なし方針」に対して npm 外の取得経路を増やす
+  ②Vercel のビルドが外部 CDN に依存する ③本機能に必要な機能は他で足りる。
+
+#### 5.3.7 なぜ ZIP に `@zip.js/zip.js` を選んだか
+
+1. **ブラウザとサーバで同じ実装を使える**（`engines: node >=18` かつブラウザ向けが本来の出自）。
+   本仕様は **ブラウザ側 `File.slice()` 部分読み（§11.5）** と **サーバ側 S3 Range GET（§5.3.3-2）**
+   の**両方**が要る。`Reader` 基底クラス（`index.d.ts:888`）を継承すれば **S3 Range GET の Reader を自作して
+   同じ `ZipReader` に食わせられる**ので、**ZIP の解釈は 1 本に統一できる**。
+   → §24.3 のセキュリティ検査も **1 か所**で済む（2 実装だと片方に検査が抜ける）。
+2. **`BlobReader`（`:958`）がブラウザの `File` をそのまま受ける** ＝ §11.5 の「全体を `ArrayBuffer` にしない」を
+   ライブラリ側の設計として満たす。`HttpRangeReader`（`:1006`）も標準で在る。
+3. **直接依存 0 ／ 既知脆弱性 0 ／ BSD-3-Clause ／ 最終公開 2026-09-09（総 365 版）** —
+   §5.3.2-1（攻撃面・保守）で候補中もっとも良い。
+4. **`filenameEncoding` と `decodeText` フック（`:1652,1668`）で CP932 を自分で解釈できる**（§5.4）。
+   `yauzl` は仕様どおり **CP437 / UTF-8 しか解釈しない**（README L112）ので、
+   日本語ファイル名は `decodeStrings:false` にして自前で decode する必要がある。
+5. ネイティブ拡張なし・ESM/CJS 両方・型定義同梱（§5.3.2-7）。
+
+**`yauzl` / `node-stream-zip` を次点として残す**（どちらもサーバ側だけなら十分）。
+`@zip.js/zip.js` で実測上の問題が出たら**この 2 本のどちらかへ差し替える**
+— そのために **ZIP を触るコードは `src/lib/ad-hoc-diagnosis/archive.ts` の内側にだけ置く**（§22）。
+
+#### 5.3.8 なぜ XLSX を別に選んだか（案 H）
+
+XLSX は実体が ZIP なので「`@zip.js/zip.js` で開いてシート XML を自前で読む」（案 M 相当）も成立するが、**採らない**。
+
+- **理由 = 日付**。Excel はセルに**日付を数値（シリアル値）で持つ**ので、
+  1900 年うるう年問題・`date1904` 方式・`numFmt` の判定を**自前でやると静かに間違える**。
+  本仕様では `test_date` が **Elith 納品パス `date/{YYYY_MM_DD}`（§15）** と 🎯 照合の両方を決めるので、
+  **1 日ずれても納品先が変わる**。**「捏造ゼロ／サイレント脱落ゼロ」より前に、値が合っていること**が要る。
+- `read-excel-file` は **セル値を `Date` として返す**（README L139）ので、この判定をライブラリが持つ。
+- **ブラウザ・Node 両対応**なので、`@zip.js/zip.js` と同じく**片側だけの実装にならない**。
+- **既知脆弱性 0 件・MIT・最終公開 2026-08-10** と、§5.3.2-1 も満たす。
+
+**採用にあたって記録しておく弱点（隠さない）**:
+- **依存 4 本のうち 2 本（`unzipper-esm` / `worker-f`）が `read-excel-file` と同一の単独メンテナ**
+  （`catamphetamine`・実測）。週間 DL は 73 万 / 50 万で無名ではないが、**供給網は 1 人に寄っている**。
+- **v9 で API が変わっている**（既定 export の改名・`parseExcelDate` の削除・`type: Date` の扱い変更）＝
+  活発だが**API は安定していない**。→ **呼び出しは `src/lib/ad-hoc-diagnosis/` のパーサ 1 枚に閉じ込める**。
+- **XLSX の内側の ZIP は `read-excel-file` 側が読む**ので、§24.3 の検査は外側の ZIP にしか掛からない。
+  → **XLSX 1 ファイルのサイズは外側の `MAX_ENTRY_BYTES`（80 MB）で既に上限が掛かっている**ことを
+  受け入れ条件とする（無制限のものを渡さない）。
+- **`exceljs` へ切り替える条件**: 健診 XLSX が `read-excel-file` で読めない構造だった場合
+  （結合セルをまたぐ見出し・複数シートの書式依存など）。**その場合も `xlsx` には戻らない。**
+
+#### 5.3.9 Phase D で実測して確かめること（**まだ未確認**）
+
+**ライブラリを選んだだけで、動かして確かめてはいない。** 次を Phase D の最初に実測する。
+
+1. **Vercel の Node ランタイムで `TextDecoder('cp932' / 'shift_jis')` が使えるか**
+   （full-ICU が入っているか）。使えなければ CP932 の decode 表を自前で持つ（§5.4）。
+2. **ブラウザ実機で `BlobReader` が本当に部分読みになるか**（ピークメモリを実測・§11.5 / §28-O4）。
+3. **S3 Range GET を `Reader` として実装したときの往復回数と所要時間**（512 MB の ZIP で）。
+4. **`read-excel-file` が実物の健診 XLSX（39 列）を読めるか** — ただし**サンプル ZIP が本作業環境に無い**ので、
+   **実物での確認は投入時**（§0 の但し書きと同じ）。
+5. **バンドルサイズが Vercel の関数サイズ上限に収まるか**（§5.3.2-7）。
 
 ### 5.4 ファイル名の文字コード
 
@@ -570,7 +685,8 @@ Elith へ渡す JSON の PII 規則は `docs/elith/elith_masking_definition.md` 
 ### 11.1 健診 XLSX → `HealthCheckupData`
 
 **構成**: 「シートを読む層」＋ `src/lib/health-checkup-xlsx.ts`（写像）。
-**シートを読む層の実現手段（ライブラリか自作か）は §5.3 で未決定**。
+**シートを読む層の実現手段は §5.3 で決定済み（`read-excel-file`・v0.4）。**
+呼び出しは `src/lib/ad-hoc-diagnosis/` のパーサ 1 枚に閉じ込め、ライブラリの API を画面や API 層へ漏らさない（§5.3.8）。
 どちらになっても**写像側のインターフェースは変えない**ように、
 `readSheet(bytes) → { headers: string[]; rows: Cell[][] }` の形で切っておく。
 
@@ -1241,7 +1357,8 @@ health age check / schema validation / **dry-run export**。
 
 ### 27.3 新規実装
 
-ZIP / XLSX を読む層（**手段は §5.3 で未決定**。ライブラリなら薄いラッパ 1 枚） /
+ZIP / XLSX を読む層（**手段は §5.3 で決定＝`@zip.js/zip.js` + `read-excel-file`**。
+`src/lib/ad-hoc-diagnosis/archive.ts` が ZIP を、パーサ 1 枚が XLSX を隠す薄いラッパ） /
 `src/lib/health-checkup-xlsx.ts` /
 `src/lib/questionnaire-xlsx.ts` / `src/lib/ad-hoc-diagnosis/{classify,state,pipeline,keys}.ts` /
 `src/pages/api/admin/ad-hoc-diagnosis/*.ts` / migration 1 本 /
@@ -1271,6 +1388,14 @@ v0.3.1 は `actor_masked` + `actor_sha256` だけにしたため、**「誰が�
 - `batches` の作成者も同じ形（`created_by_user_id` / `created_by_masked`・§23.1）。
 - UUID は PII ではなく、後から `admin_users` を引けば人に戻せる＝**追跡性と PII 非保存が両立する**。
 
+**O8. ZIP / XLSX を読む手段 — 解決（2026-09-10・Phase D-0 で実測比較・v0.4 で CLOSE）**
+候補 11 本を一次資料（npm registry / OSV / 各 README・型定義）で比較し、
+**ZIP = `@zip.js/zip.js`（案 L）／ XLSX = `read-excel-file`（案 H）**に決めた。**案 M（自作）は不採用**
+— §5.3.4-4 の「①②を満たすライブラリが無いときだけ自作」の条件を満たさなかったため。
+**SheetJS `xlsx` と `node-xlsx` は採用不可**（npm に修正版の無い HIGH 2 件・§5.3.6）。
+比較表と選定理由は §5.3.5〜§5.3.8。**ただし動かして確かめてはいない** — Phase D の最初に
+実測することを §5.3.9 に 5 件挙げてある（**「決めた」と「動く」を混同しない**）。
+
 ### 28.2 未確定（`OPEN`）
 
 | # | 論点 | 影響 | 既定（Phase 1） |
@@ -1279,7 +1404,6 @@ v0.3.1 は `actor_masked` + `actor_sha256` だけにしたため、**「誰が�
 | **O3** | **元ファイル名を DB に保存するか。** 氏名が含まれ得る（指示書 §10）。保存しないと現場が原本を追いにくい | 運用性 vs PII | **保存しない**（`{分類}_{連番}{拡張子}` に置換） |
 | **O4** | **ブラウザで「必要なエントリだけ部分展開」が実機で成立するか**（`File.slice()` ＋ `DecompressionStream('deflate-raw')`、または §5.3 で選ぶライブラリの部分読み API）。代替として **S3 の CORS に `GET` を足すか**（CLAUDE.md は「`GET` も足さない」） | 遺伝子 PDF のページ画像化経路 | ブラウザ内で**部分読み**（§11.5。**全体展開は禁止**）。**再読込後は ZIP を選び直す** |
 | **O9** | **presigned PUT で `Content-Length` が署名対象になるか / ブラウザから明示できるか / 違うサイズを S3 が拒否するか**（§5.2.1 の 3 点）。既存コードのコメントと `signableHeaders` の実装が食い違っている | サイズ防御の設計 | **署名に依存しない**。①ticket 発行時上限 ②アップロード後の `HeadObject` ③ZIP 解析時の展開上限 の**多層で守る**（§5.2.1） |
-| **O8** | **ZIP / XLSX を読む手段（案 L / 案 H / 案 M）。** v0.1 の「依存追加ゼロだから自作」は撤回済み（§5.3） | Phase D の実装全体 | **未決定。Phase D 着手前に §5.3.2 の 8 観点で比較して決める。既定の姿勢は案 L / 案 H を優先し、独自 ZIP parser を第一選択にしない** |
 | **O5** | **問診 XLSX / PDF の実列・実レイアウト。** サンプル ZIP が本作業環境に無く、**私は列名を実測していない** | 問診の写像表・`test_date` の正 | 問診 XLSX は**マッピング表を実物で確定してから**。問診 PDF の人物は **`needs_review`** |
 | **O6** | `10名の情報.xlsx` の `実施日` の意味 | `bundle_date` の自動決定 | **転用しない**（§14.4） |
 | **O7** | Elith 側に既存 manifest 定義があるか | §15.4 | 定義があればそれに合わせる。無ければ §15.4 の最小形 |
@@ -1309,6 +1433,7 @@ v0.3.1 は `actor_masked` + `actor_sha256` だけにしたため、**「誰が�
 
 | 版 | 日付 | 内容 |
 |---|---|---|
+| **0.4** | 2026-09-10 | **Phase D-0（ZIP/XLSX ライブラリの比較）を実施し §5.3 を「未決定」から「決定」へ格上げ。O8 CLOSE。** 候補 11 本を**一次資料から実測**（`registry.npmjs.org` / `api.osv.dev` / 各 README・`index.d.ts`）。**ZIP = `@zip.js/zip.js`**（直接依存 0・既知脆弱性 0・BSD-3-Clause・最終公開 2026-09-09。**ブラウザの `BlobReader` とサーバの Range GET を同じ `ZipReader` で賄えるので ZIP の解釈を 1 本に統一でき、§24.3 の検査も 1 か所で済む**。`filenameEncoding`/`decodeText` で CP932 も扱える）。**XLSX = `read-excel-file`**（MIT・既知脆弱性 0・最終公開 2026-08-10・ブラウザ/Node 両対応。**セル値を `Date` で返す**＝日付シリアル値の判定をライブラリが持つ。`test_date` は納品パスと 🎯 照合を決めるので自前判定で静かに 1 日ずらすわけにいかない）。**案 M（自作）は不採用**。**SheetJS `xlsx` / `node-xlsx` は採用不可** — `GHSA-5pgg-2g8v-p4x9`(HIGH) の advisory 本文が**「npm に修正版が存在しない」と明記**しており、実測でも npm は **0.18.5(2022-03-24) で停止**。もう 1 件 `GHSA-4r6h-8v6p-xvw6`(HIGH・Prototype Pollution) は**「細工されたファイルを読むとき」＝本機能そのもの**が該当（§5.3.6）。`adm-zip` も除外（`GHSA-vwc7-r8mq-g2x9` が `last_affected=0.6.0` ＝**最新版がまだ影響下で修正版が無い**）。`jszip` は全体メモリ展開で §11.5 に反するため不採用。**採用 2 本の弱点も隠さず記録**（`read-excel-file` の依存 4 本中 2 本が同一の単独メンテナ・v9 で API 破壊あり → 呼び出しをパーサ 1 枚に閉じ込める）。**まだ動かして確かめてはいない** — Phase D 冒頭で実測する 5 件を §5.3.9 に明記（full-ICU の有無・ブラウザ実機のピークメモリ・S3 Range の往復・実物 XLSX・バンドルサイズ）。 |
 | **0.4** | 2026-09-10 | **発注者レビューで migration を DB 適用前に 3 点修正（Phase C 最終 PASS）。** **A. ZIP のサイズを申告値と実測値に分離**（§23.1）— **`declared_source_size`(NOT NULL) / `source_size`(NULL 可)**。理由は **batch 行が出来るのが ticket 発行時点で、まだ PUT が済んでいない**こと。1 列に混ぜると**申告値を実測値として保存する**ことになる。`source_size` は **classify 開始時の `HeadObject` で確定**させ、上限超過なら `failed` ＋一時 ZIP 削除。**申告値をここへ入れない**。 **B. 操作者識別の正を `actor_user_id`（uuid）にして O10 を CLOSE**（§21 / §22 / §23.1 / §28.1）— wellfort-site は既に `/auth/v1/user` で認証済みユーザーを取得している（`elith-scan.ts:34-39` と同形）ので、**`user.id` をサーバ側で注入**する。`actor_masked` は表示用・`actor_sha256` は任意の補助へ降格。**ブラウザ body の `actor_user_id` は信用しない。** `batches` にも `created_by_user_id` / `created_by_masked`。UUID は PII でなく後から `admin_users` で人に戻せる＝**追跡性と PII 非保存が両立**。 **C. `subject_fp` の表現を弱めた**（§6.2.1）— 「PII を引き出す経路が**原理的に無い**」は言い過ぎ。**平文の PII は含まないが、特定個人のファイル群に 1 対 1 で対応する照合用識別子**なので、**機微情報と同等に扱う**（ログに出さない・外部へ渡さない・納品 JSON に載せない）へ修正。 **検証**: scratch PostgreSQL 16 に**全 17 migration を白紙から適用 OK**・再適用も冪等・`ix_ad_hoc_subjects_batch_fp` が**非 UNIQUE**であること・**同一 batch 内の fp 衝突が 2 行とも INSERT できる**こと・`declared_source_size` NOT NULL / `source_size` が後から埋められること・`actor_user_id` / `created_by_user_id` が UUID を受けること・RLS force＋policy 0＋`anon`/`authenticated` に権限が無いことを実測。 |
 | **0.3.1** | 2026-09-10 | **Phase C（migration ファイル作成）で実装した形に §21 / §23 を同期。** ①**監査ログの `actor` を `actor_masked` + `actor_sha256` に変更** — §21 は「admin の email」と書いていたが、**Scan-Chat-AI 側にメールの現物を置かない**既存の規律（`demo.account_emails`・CLAUDE.md）に合わせた。**発注者確認事項**（§28.2-O10） ②`required_formats` / `optional_formats` を**別列**に ③`created_by` も `_masked` / `_sha256` の 2 列に ④`pages` に **`file_sha256` を非正規化**（キャッシュ参照 `(file_sha256, page_no)` を 1 索引で引くため・§19.3） ⑤`outputs` に **UNIQUE (subject_id, format_id)** を明記 ⑥`batches.source_sha256` は**一意にしない**（再投入は検知して警告するだけ・§19.1）ことを明記。 |
 | **0.3** | 2026-09-10 | **発注者レビューで 2 点を修正（Phase C 着手前）。** **A. `subject_fp` の UNIQUE 制約を撤回** — v0.2 は「衝突したら両方を `needs_review` で残す」と `UNIQUE (batch_id, subject_fp)` が**矛盾していた**（UNIQUE があると 2 人目の INSERT が失敗し「両方残す」が実行できない）。**`subject_fp` は再開時の照合用の検索キーであって一意識別子ではない**と位置づけを確定し、**同一 fp が複数人物に存在し得ることを仕様として認める**。制約を**通常 INDEX `(batch_id, subject_fp)`** へ変更し、再開時は**ヒット件数で判定**（0 件=`unmatched` / 1 件=`match` / **2 件以上=`fp_collision` で該当 subject を全件 `needs_review`**）。**`UNIQUE (batch_id, subject_no)` は維持**。**B. `Content-Length` の「署名固定」を未確認へ落とした** — 実測すると `scan-upload-ticket.ts:129` の `signableHeaders` は **`content-type` だけ**で、返す `headers` にも Content-Length は無い（`:132`）。同ファイルのコメント `:21-22`/`:127`/`:158` は「署名に固定」と書いているが**実装と食い違う**ので根拠にしない。→ 断定を撤回し、**サイズ防御を ①ticket 発行時上限 ②アップロード後 `HeadObject` の実サイズ検証 ③ZIP 解析時の展開上限 の多層**にした（**②が本命**・§5.2.1）。署名の実挙動 3 点は O9 として Phase D-0 / upload-ticket 実装時に実測する。 |
