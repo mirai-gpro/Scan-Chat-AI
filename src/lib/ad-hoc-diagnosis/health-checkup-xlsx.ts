@@ -199,35 +199,50 @@ export function buildHealthCheckupSheet(rows: readonly (readonly CellValue[])[])
 }
 
 /**
- * XLSX のバイト列を読む。**`read-excel-file` に触れる唯一の場所。**
- *
- * 返すのは `buildHealthCheckupSheet` の結果だけなので、
- * ライブラリを差し替えることになってもここ 1 か所で済む（spec §5.3.8 の弱点対策）。
+ * XLSX を健診シートとして読む。
  *
  * **v9 の既定 export は「シートの配列」を返す**（`Sheet[] = { sheet, data }[]`。
  * 実測: `node_modules/read-excel-file/types/Sheet.d.ts`）。**行の配列ではない。**
  * v8 以前は行の配列だったので、**ここは版が変わると黙って壊れる**箇所。
- *
- * **シート番号を決め打ちしない** — 健診ブックの 1 枚目が表紙・凡例のことがあるため、
- * **全シートを見出しの一致数で採点し、いちばん高いものを採る**。
- * 同点なら先に出てきたシート（後ろを優先すると集計シートを掴む）。
  */
 export async function readHealthCheckupXlsx(bytes: Uint8Array): Promise<HealthCheckupSheet> {
-  // 遅延 import。**ブラウザ向けバンドルに入れない**ためと、
-  // 読めない XLSX で機能全体を巻き込まないため。
+  const sheets = await readWorkbookSheets(bytes);
+  return pickHealthCheckupSheet(sheets);
+}
+
+/**
+ * ワークブックの全シートを読む。**`read-excel-file` に触れる唯一の場所。**
+ *
+ * ライブラリを差し替えることになってもここ 1 か所で済む（spec §5.3.8 の弱点対策）。
+ * **健診としても問診としても、この 1 回の読み取りを使い回す** —
+ * 2 回読むと、片方が失敗したときにもう片方まで道連れになる（実測でそうなった）。
+ */
+export async function readWorkbookSheets(
+  bytes: Uint8Array,
+): Promise<{ sheet: string; data: CellValue[][] }[]> {
   const mod = await import('read-excel-file/node');
   const readXlsxFile = (mod as unknown as {
     default: (input: unknown) => Promise<{ sheet: string; data: CellValue[][] }[]>;
   }).default;
-
   const sheets = await readXlsxFile(Buffer.from(bytes));
-  if (!Array.isArray(sheets) || sheets.length === 0) {
+  return Array.isArray(sheets) ? sheets : [];
+}
+
+/**
+ * 健診シートを選ぶ。**シート番号を決め打ちしない** —
+ * 健診ブックの 1 枚目が表紙・凡例のことがあるので、
+ * **全シートを見出しの一致数で採点し、いちばん高いものを採る**。
+ * 同点なら先に出てきたシート（後ろを優先すると集計シートを掴む）。
+ */
+export function pickHealthCheckupSheet(
+  sheets: readonly { sheet: string; data: CellValue[][] }[],
+): HealthCheckupSheet {
+  if (sheets.length === 0) {
     return {
       headerRowIndex: -1, headerHits: 0, headers: [], rows: [],
       testDate: { status: 'absent' }, notes: ['workbook_has_no_sheets'],
     };
   }
-
   let best: HealthCheckupSheet | null = null;
   let bestName = '';
   for (const s of sheets) {

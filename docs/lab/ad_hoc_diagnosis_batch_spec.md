@@ -2,8 +2,9 @@
 
 | 項目 | 内容 |
 |---|---|
-| 版 | **0.5**（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離。変更点は §30） |
-| 未確定の残り | **7 件**（O2 / O3 / O4 / O5 / O6 / O7 / O9・§28.2）。**O1 / O8 / O10 は解決済み**（§28.1） |
+| 版 | **1.0**（2026-09-10・**実装済み**・**決定仕様**。未確定は §28 に `OPEN` として分離。変更点は §30） |
+| 未確定の残り | **6 件**（O2 / O3 / O4 / O6 / O7 / O9・§28.2）。**O1 / O5 / O8 / O10 は解決済み**（§28.1） |
+| 実装 | **完了**（§31）。Scan-Chat-AI = `src/lib/ad-hoc-diagnosis/*` + `src/pages/api/admin/ad-hoc-diagnosis/*` ／ wellfort-site = `/admin/ad-hoc-diagnosis` + 中継 API |
 | 対象システム | **wellfort-site**（管理画面 UI・管理者認証・ブラウザとのやり取り）／ **Scan-Chat-AI**（ZIP 受付処理・分類・解析・ジョブ状態・ウェルネス年齢・Elith JSON 生成・S3） |
 | 同系統の先行仕様 | `docs/lab/wellfort_admin_lab_upload_spec.md`（**責務分界の正**。§3 配置場所／§6-1 Bearer API Key） |
 | 上位・関連 | `docs/elith/elith_s3_data_handoff_spec.md`（納品パス・命名）／`docs/elith/elith_assembly_wrapping_spec.md`／`docs/elith/elith_masking_definition.md`／`docs/scan/health_age_caba_v5.4_spec.md`／`docs/scan/health_age_simple_v7.0_spec.md`／`docs/lab/lab_data_pipeline_master_spec.md` |
@@ -1601,6 +1602,19 @@ v0.3.1 は `actor_masked` + `actor_sha256` だけにしたため、**「誰が�
 比較表と選定理由は §5.3.5〜§5.3.8。**ただし動かして確かめてはいない** — Phase D の最初に
 実測することを §5.3.9 に 5 件挙げてある（**「決めた」と「動く」を混同しない**）。
 
+**O5. 問診 XLSX / PDF の実列・実レイアウト — 解決（2026-09-10・発注者から実列の提示・v1.0 で CLOSE）**
+発注者より **8 ファイルとも同一の 62 列構成**であること、先頭 6 列が
+`ID` / `開始時刻` / `完了時刻` / `メール` / `名前` / `最終変更時刻` であること、
+以降が共通問診項目であることの提示を受けた。
+→ **`questionnaire-map.ts` に明示の写像表**を実装（`COLUMN_TO_QUESTION` /
+`COLUMN_TO_MATRIX_ROW` / `VALUE_ALIASES`）。**fuzzy な LLM 推測は使わない** —
+完全一致か、この表に書いた読み替えだけ。写像に無い列・値は **`unmapped`** として
+管理画面に出し、**1 項目未対応で人物全体を失敗にしない**。
+`完了時刻` を問診実施日時として扱い、既存仕様どおり `test_date` を作る。
+**氏名・メール・生年月日は Elith JSON へ入れない**（`sex` / `age` だけ渡す）。
+問診 PDF は 2 様式（`welltect_common_v1` / `ai_prevention_short_v1`）を判定し、
+共通の内部形式 `QuestionnaireNormalized` を経て**既存 `buildElithInterviewJson()`** へ入れる。
+
 ### 28.2 未確定（`OPEN`）
 
 | # | 論点 | 影響 | 既定（Phase 1） |
@@ -1609,7 +1623,6 @@ v0.3.1 は `actor_masked` + `actor_sha256` だけにしたため、**「誰が�
 | **O3** | **元ファイル名を DB に保存するか。** 氏名が含まれ得る（指示書 §10）。保存しないと現場が原本を追いにくい | 運用性 vs PII | **保存しない**（`{分類}_{連番}{拡張子}` に置換） |
 | **O4** | **ブラウザで「必要なエントリだけ部分展開」が実機で成立するか**（`File.slice()` ＋ `DecompressionStream('deflate-raw')`、または §5.3 で選ぶライブラリの部分読み API）。代替として **S3 の CORS に `GET` を足すか**（CLAUDE.md は「`GET` も足さない」） | 遺伝子 PDF のページ画像化経路 | ブラウザ内で**部分読み**（§11.5。**全体展開は禁止**）。**再読込後は ZIP を選び直す** |
 | **O9** | **presigned PUT で `Content-Length` が署名対象になるか / ブラウザから明示できるか / 違うサイズを S3 が拒否するか**（§5.2.1 の 3 点）。既存コードのコメントと `signableHeaders` の実装が食い違っている | サイズ防御の設計 | **署名に依存しない**。①ticket 発行時上限 ②アップロード後の `HeadObject` ③ZIP 解析時の展開上限 の**多層で守る**（§5.2.1） |
-| **O5** | **問診 XLSX / PDF の実列・実レイアウト。** サンプル ZIP が本作業環境に無く、**私は列名を実測していない** | 問診の写像表・`test_date` の正 | 問診 XLSX は**マッピング表を実物で確定してから**。問診 PDF の人物は **`needs_review`** |
 | **O6** | `10名の情報.xlsx` の `実施日` の意味 | `bundle_date` の自動決定 | **転用しない**（§14.4） |
 | **O7** | Elith 側に既存 manifest 定義があるか | §15.4 | 定義があればそれに合わせる。無ければ §15.4 の最小形 |
 
@@ -1639,9 +1652,86 @@ v0.3.1 は `actor_masked` + `actor_sha256` だけにしたため、**「誰が�
 | 版 | 日付 | 内容 |
 |---|---|---|
 | **0.4** | 2026-09-10 | **Phase D-0（ZIP/XLSX ライブラリの比較）を実施し §5.3 を「未決定」から「決定」へ格上げ。O8 CLOSE。** 候補 11 本を**一次資料から実測**（`registry.npmjs.org` / `api.osv.dev` / 各 README・`index.d.ts`）。**ZIP = `@zip.js/zip.js`**（直接依存 0・既知脆弱性 0・BSD-3-Clause・最終公開 2026-09-09。**ブラウザの `BlobReader` とサーバの Range GET を同じ `ZipReader` で賄えるので ZIP の解釈を 1 本に統一でき、§24.3 の検査も 1 か所で済む**。`filenameEncoding`/`decodeText` で CP932 も扱える）。**XLSX = `read-excel-file`**（MIT・既知脆弱性 0・最終公開 2026-08-10・ブラウザ/Node 両対応。**セル値を `Date` で返す**＝日付シリアル値の判定をライブラリが持つ。`test_date` は納品パスと 🎯 照合を決めるので自前判定で静かに 1 日ずらすわけにいかない）。**案 M（自作）は不採用**。**SheetJS `xlsx` / `node-xlsx` は採用不可** — `GHSA-5pgg-2g8v-p4x9`(HIGH) の advisory 本文が**「npm に修正版が存在しない」と明記**しており、実測でも npm は **0.18.5(2022-03-24) で停止**。もう 1 件 `GHSA-4r6h-8v6p-xvw6`(HIGH・Prototype Pollution) は**「細工されたファイルを読むとき」＝本機能そのもの**が該当（§5.3.6）。`adm-zip` も除外（`GHSA-vwc7-r8mq-g2x9` が `last_affected=0.6.0` ＝**最新版がまだ影響下で修正版が無い**）。`jszip` は全体メモリ展開で §11.5 に反するため不採用。**採用 2 本の弱点も隠さず記録**（`read-excel-file` の依存 4 本中 2 本が同一の単独メンテナ・v9 で API 破壊あり → 呼び出しをパーサ 1 枚に閉じ込める）。**まだ動かして確かめてはいない** — Phase D 冒頭で実測する 5 件を §5.3.9 に明記（full-ICU の有無・ブラウザ実機のピークメモリ・S3 Range の往復・実物 XLSX・バンドルサイズ）。 |
+| **1.0** | 2026-09-10 | **実装完了（§31）。** ZIP 投入 → S3 → 解析 → 人物分離 → 分類 → 健診/遺伝子/問診 → 人物整合 → ウェルネス年齢 → 管理者確認 → Elith JSON → 納品セット → dry-run → 管理 UI まで通した。**O5 を CLOSE**（発注者から 62 列の実列の提示。明示の写像表を実装し fuzzy 推測は使わない）。**DB 6 表を実コードから使用**（`store.ts` が唯一の口・migration を置いただけの状態を解消）。**Genoplan は既存 `scanGeneticPage` を再利用**しページ単位保存・キャッシュ・失敗ページ retry まで接続。**ウェルネス年齢は既存 `computeWellnessAge()` を呼ぶだけ**で、`unavailable` でも人物を failed にしない。**納品は既定 dry-run**（S3 key / JSON body / format / 検証 を書き込み前に確認できる）。検証は **archive 85 / parse 113 / e2e 92 / zip-digest 40**、`astro check` 0 errors、両リポジトリ build 成功、既存 A 層 11 本と `verify:screen` 47/47・`verify:scan-pages` 47/47 に回帰なし。実装中に直したもの: ①**ワークブックの二重読み**で片方の失敗がもう片方を道連れにしていた → 1 回読んで両方に使う ②`sanitizeMeasurementsForDelivery` の戻り値を配列と誤認（実際は `{ kept, anomalies }`） ③**単一選択の設問まで配列**にしていた（`multi` のときだけ配列が正） ④`S3RangeReader` が zip.js の Reader 契約（末尾をまたぐ要求）に合っておらず 416 を招く形だった → `clampReadLength()` で `min(length, size - offset)` に丸め、`offset >= size` は空を返す ⑤設定未了を 500 で返していた → **503 と理由**。 |
 | **0.5** | 2026-09-10 | **Phase D 着手前に、発注者指示で経路を 3 点 確定。** **A. ブラウザの SHA-256 を逐次計算へ（§11.6・新設）** — `SubtleCrypto.digest()` は **`BufferSource` を 1 個受け取る一発 API で `update()` を持たない**ので、`file.stream()` を読んでも結局全体を連結することになり省メモリにならない。→ **wellfort-site に `@noble/hashes` を追加**し `sha256.create()` → `update()` → `digest()` で計算する。**ZIP 全体を `arrayBuffer()` 化して `crypto.subtle.digest()` へ渡すのは禁止。** **①初回 ticket 発行前の `source_sha256` と ②再読込後の同一性照合を同じ実装で処理する**（別実装にすると「同じ ZIP なのに一致しない」が起き、**再開が黙って新規バッチになる**）。**`source_sha256 NOT NULL` の DB 設計は変更不要**（逐次でも ticket 前に確定する）。実測: 2.4.0 / MIT / 依存 0 / 既知脆弱性 0 / `engines: node>=20.19.0`、**import は `@noble/hashes/sha2.js` で `.js` 必須**（`exports` に `"./sha2"` は無い＝拡張子を落とすと解決失敗）、`create`/`update`/`digest` は `utils.d.ts:504/419/430`。 **B. サーバ側 ZIP は custom `Reader` → AWS SDK Range（§5.3.7.1・新設）** — **presigned GET は使わない**（署名付き URL という秘密を増やさない・既存の資格情報で完結する経路から外れない）。`readUint8Array(offset,length)` の中で `GetObjectCommand` に `Range: bytes=offset-(offset+length-1)` を付ける。**Range は両端を含む閉区間**なので終端に `offset+length` を書くと 1 バイト多く読み Central Directory の解釈がずれる=検証で固定。`ZipReader` はブラウザ側と同一なので **§24.3 の検査は 1 か所のまま**。`size` は §5.2.1 ② の `HeadObject` と同じ呼び出しで取る。 **C. `read-excel-file` はサーバ側だけ（§5.3.8.1・新設）** — ブラウザが触るのは ZIP 部分読み / SHA-256 / pdf.js の 3 つだけ。実物 XLSX で **Excel 日付 / カスタム日付書式 / 1900・1904 date system / 空欄と 0 / 日本語ヘッダー** の 5 点を必ず実測する。**カスタム日付書式は自動判定できない場合があるので、判定できないものを勝手に日付化しない** — 数値のまま持ち `needs_review` にする（シリアル値の変換は 1900/1904 の決め打ちが要り、**4 年ずれた日付を静かに作る**＝捏造）。**`test_date` が確定しない人物は納品しない**（今日の日付や別ファイルの日付を流用しない）。 |
 | **0.4** | 2026-09-10 | **発注者レビューで migration を DB 適用前に 3 点修正（Phase C 最終 PASS）。** **A. ZIP のサイズを申告値と実測値に分離**（§23.1）— **`declared_source_size`(NOT NULL) / `source_size`(NULL 可)**。理由は **batch 行が出来るのが ticket 発行時点で、まだ PUT が済んでいない**こと。1 列に混ぜると**申告値を実測値として保存する**ことになる。`source_size` は **classify 開始時の `HeadObject` で確定**させ、上限超過なら `failed` ＋一時 ZIP 削除。**申告値をここへ入れない**。 **B. 操作者識別の正を `actor_user_id`（uuid）にして O10 を CLOSE**（§21 / §22 / §23.1 / §28.1）— wellfort-site は既に `/auth/v1/user` で認証済みユーザーを取得している（`elith-scan.ts:34-39` と同形）ので、**`user.id` をサーバ側で注入**する。`actor_masked` は表示用・`actor_sha256` は任意の補助へ降格。**ブラウザ body の `actor_user_id` は信用しない。** `batches` にも `created_by_user_id` / `created_by_masked`。UUID は PII でなく後から `admin_users` で人に戻せる＝**追跡性と PII 非保存が両立**。 **C. `subject_fp` の表現を弱めた**（§6.2.1）— 「PII を引き出す経路が**原理的に無い**」は言い過ぎ。**平文の PII は含まないが、特定個人のファイル群に 1 対 1 で対応する照合用識別子**なので、**機微情報と同等に扱う**（ログに出さない・外部へ渡さない・納品 JSON に載せない）へ修正。 **検証**: scratch PostgreSQL 16 に**全 17 migration を白紙から適用 OK**・再適用も冪等・`ix_ad_hoc_subjects_batch_fp` が**非 UNIQUE**であること・**同一 batch 内の fp 衝突が 2 行とも INSERT できる**こと・`declared_source_size` NOT NULL / `source_size` が後から埋められること・`actor_user_id` / `created_by_user_id` が UUID を受けること・RLS force＋policy 0＋`anon`/`authenticated` に権限が無いことを実測。 |
 | **0.3.1** | 2026-09-10 | **Phase C（migration ファイル作成）で実装した形に §21 / §23 を同期。** ①**監査ログの `actor` を `actor_masked` + `actor_sha256` に変更** — §21 は「admin の email」と書いていたが、**Scan-Chat-AI 側にメールの現物を置かない**既存の規律（`demo.account_emails`・CLAUDE.md）に合わせた。**発注者確認事項**（§28.2-O10） ②`required_formats` / `optional_formats` を**別列**に ③`created_by` も `_masked` / `_sha256` の 2 列に ④`pages` に **`file_sha256` を非正規化**（キャッシュ参照 `(file_sha256, page_no)` を 1 索引で引くため・§19.3） ⑤`outputs` に **UNIQUE (subject_id, format_id)** を明記 ⑥`batches.source_sha256` は**一意にしない**（再投入は検知して警告するだけ・§19.1）ことを明記。 |
 | **0.3** | 2026-09-10 | **発注者レビューで 2 点を修正（Phase C 着手前）。** **A. `subject_fp` の UNIQUE 制約を撤回** — v0.2 は「衝突したら両方を `needs_review` で残す」と `UNIQUE (batch_id, subject_fp)` が**矛盾していた**（UNIQUE があると 2 人目の INSERT が失敗し「両方残す」が実行できない）。**`subject_fp` は再開時の照合用の検索キーであって一意識別子ではない**と位置づけを確定し、**同一 fp が複数人物に存在し得ることを仕様として認める**。制約を**通常 INDEX `(batch_id, subject_fp)`** へ変更し、再開時は**ヒット件数で判定**（0 件=`unmatched` / 1 件=`match` / **2 件以上=`fp_collision` で該当 subject を全件 `needs_review`**）。**`UNIQUE (batch_id, subject_no)` は維持**。**B. `Content-Length` の「署名固定」を未確認へ落とした** — 実測すると `scan-upload-ticket.ts:129` の `signableHeaders` は **`content-type` だけ**で、返す `headers` にも Content-Length は無い（`:132`）。同ファイルのコメント `:21-22`/`:127`/`:158` は「署名に固定」と書いているが**実装と食い違う**ので根拠にしない。→ 断定を撤回し、**サイズ防御を ①ticket 発行時上限 ②アップロード後 `HeadObject` の実サイズ検証 ③ZIP 解析時の展開上限 の多層**にした（**②が本命**・§5.2.1）。署名の実挙動 3 点は O9 として Phase D-0 / upload-ticket 実装時に実測する。 |
 | **0.2** | 2026-09-10 | **発注者レビューで 3 点を修正。** ①**ZIP/XLSX の自作リーダを「決定仕様」から外した** — 「`package.json` に無いから自作」は依存追加禁止の根拠にならない、という指摘。§5.3 を「案 L(ライブラリ) / 案 H / 案 M(最小自作) を **8 観点**（セキュリティ・メモリ・ZIP64・data descriptor・文字コード・保守性・Vercel 対応・XLSX 必要機能）で比較して **Phase D 着手前に決める**」へ書き換え、**医療関連データなので独自 ZIP parser を第一選択にしない**と明記。手段によらず満たす要件（Central Directory を正 / エントリ単位で読む / ZIP security は自分でも検査 / サイズは宣言値と実バイトの両方で判定）は決定仕様として残した。あわせて**`.xls` を受入対象から外した**（OLE2 で ZIP/XML ではない → `unsupported_file` として一覧に出す） ②**ブラウザ側の ZIP 全体メモリ展開を禁止**。`File.slice()` で **Central Directory ＋ 処理中の 1 エントリだけ**を載せる形へ（サーバの S3 Range GET と同型）。SHA-256 も逐次計算。ピークメモリを実測で見張る ③**§6.2 を新設**: 再開時に「この人物 = この client_id」を取り違えない仕組み。**内容ハッシュだけから作る非可逆 `subject_fp`**（氏名・フォルダ名・ファイル名を材料にしない＝PII を引き出す経路が無い・秘密鍵も不要）で結び直し、**ヒットしなければ推測で寄せず `needs_review`**。`UNIQUE (batch_id, subject_fp)` で衝突も検出する。§6.1 / §23.2 に列を追加し、§29 に **Phase D-0（手段の決定）** を挿入。 |
 | 0.1 | 2026-09-10 | 初版。発注者指示書（臨時診断バッチ）を受けて Phase B として作成。**責務境界は 2026-09-10 の発注者確定（UI=wellfort-site / 処理=Scan-Chat-AI）を反映**し、指示書初版の「Scan-Chat-AI に UI」は §28.1 に訂正記録として残した。ZIP は presigned PUT・`GATING_FORMAT_IDS` 不変・案件別 `required_formats` を決定（**ZIP/XLSX の読み方は v0.2 で未決定へ差し戻した**）。未確定 6 件を §28.2 に分離。 |
+
+---
+
+## 31. 実装（v1.0・2026-09-10）
+
+**この節は「どこに何が在るか」だけを書く。** 決定の理由は各節（§5〜§24）が正。
+
+### 31.1 Scan-Chat-AI（処理・API）
+
+| ファイル | 役割 |
+|---|---|
+| `src/lib/ad-hoc-diagnosis/keys.ts` | S3 キーの採番と**完全一致**検証（§24.2） |
+| `src/lib/ad-hoc-diagnosis/ticket.ts` | presigned PUT 発行 ／ `HeadObject` の実サイズ検証 ／ 一時 ZIP 削除（§5.2.1） |
+| `src/lib/ad-hoc-diagnosis/archive.ts` | **ZIP を触る唯一の場所**。`S3RangeReader` ／ §24.3 の検査 ／ 文字コード probe |
+| `src/lib/ad-hoc-diagnosis/classify.ts` | 決定論の分類（§7）。`ELITH_ALLOWED_FORMATS` |
+| `src/lib/ad-hoc-diagnosis/fingerprint.ts` | `subject_fp` とヒット件数での照合（§6.2） |
+| `src/lib/ad-hoc-diagnosis/health-checkup-xlsx.ts` | **`read-excel-file` を触る唯一の場所**。日付の確定（§5.3.8.1） |
+| `src/lib/ad-hoc-diagnosis/questionnaire-map.ts` | 62 列 → `question_id` の**明示の写像表**（§11.3） |
+| `src/lib/ad-hoc-diagnosis/questionnaire.ts` | XLSX / PDF 2 様式 → `QuestionnaireNormalized` |
+| `src/lib/ad-hoc-diagnosis/pipeline.ts` | ZIP 解析 → 人物分離 → 各 format の JSON ／ ready 判定 ／ 納品 key |
+| `src/lib/ad-hoc-diagnosis/store.ts` | **DB 6 表を触る唯一の場所** |
+| `src/lib/ad-hoc-diagnosis/service.ts` | API から呼ぶ「動詞」。`store` と `pipeline` を繋ぐ |
+| `src/pages/api/admin/ad-hoc-diagnosis/*.ts` | 8 ルート（下記）。**手続きを書かず `service` を呼ぶだけ** |
+
+**API（すべて Bearer `ADMIN_API_KEY`。取り込み専用キーは通さない）**
+
+| メソッド | パス | 役割 |
+|---|---|---|
+| POST | `upload-ticket` | batch 作成 + presigned PUT 発行。同一 ZIP の再投入を**警告だけ**返す |
+| POST | `classify` | `HeadObject` → ZIP 解析 → 人物分離 → 分類 → DB |
+| GET | `status` | 画面が見る状態（batch / subject / file / output / 監査） |
+| POST | `confirm` | 管理者の分類修正と人物識別の確定。**監査に残す** |
+| POST | `process` | 解析して Elith JSON を作る（**S3 へは書かない**）。遺伝子は 1 ページ = 1 リクエスト |
+| POST | `health-age` | 人物ごとのウェルネス年齢（**保存しない**） |
+| POST | `export` | 納品セット。**既定 `dryRun: true`** |
+| POST | `retry` | 失敗ページ・ファイルを `pending` へ戻す |
+| GET | `file` | ZIP 内の 1 ファイルの**生バイト列**（ブラウザが PDF をページ画像化するため） |
+
+### 31.2 wellfort-site（UI・中継）
+
+| ファイル | 役割 |
+|---|---|
+| `src/pages/admin/ad-hoc-diagnosis.astro` | 6 ステップの管理画面。**実 API に繋がっている** |
+| `src/pages/api/admin/ad-hoc-diagnosis/[...path].ts` | 中継。**allow-list の 9 パスだけ**。`file` は生バイト列を素通し |
+| `src/scripts/ad-hoc-diagnosis/zip-digest.ts` | 逐次 SHA-256（§11.6） |
+| `src/components/AdminLayout.astro` | サイドバー「検査連携 › 臨時診断バッチ」 |
+
+**操作者の注入**: 中継が `/auth/v1/user` で検証した `user.id` を
+`x-ad-hoc-actor-user-id` に載せる。**ブラウザ body の `actor` 系は削除してから転送する**（§21）。
+
+### 31.3 検証
+
+| コマンド | 件数 | 中身 |
+|---|---|---|
+| `npm run verify:ad-hoc-archive` | 85 | キー検証 ／ §24.3 の各検査 ／ Range の算術 ／ 文字コード probe |
+| `npm run verify:ad-hoc-parse` | 113 | 分類 ／ fingerprint ／ **実物 .xlsx** での日付・空欄・和文見出し |
+| `npm run verify:ad-hoc-e2e` | 92 | **ZIP → 分類 → 解析 → 納品 (dry-run)** の通し |
+| `npm run verify:zip-digest`（wellfort-site） | 40 | 逐次 SHA-256 が `crypto.subtle` と一致 ／ 確保量 |
+
+**S3 も DB も Gemini も要らない。** ZIP も XLSX もその場でコードから組む
+（`scripts/lib/make-test-xlsx.mjs`）ので、**バイナリを commit しない**。
+CI は `static-required`（A 層）で 3 本とも走る。
+
+### 31.4 実装で決めたこと（§ の決定に足したもの）
+
+- **`HealthAgeData` は `outputs.format_id` の許可集合に無い**ので、DB には `Other` として
+  記録し `error_detail` に `HealthAgeData:{method}` を残す。**納品 JSON の `format_id` は
+  `HealthAgeData`** のまま（Elith 側の名前を変えない）。
+- **ワークブックは 1 回だけ読む。** 健診と問診で 2 回読むと、片方の失敗が
+  もう片方を道連れにする（実測）。`readWorkbookSheets()` の結果を両方で使う。
+- **`sanitizeMeasurementsForDelivery` の戻り値は `{ kept, anomalies }`**（配列ではない）。
+  納品に載せるのは `kept` だけで、`anomalies` は監査へ回す。
+- **単一選択の設問は文字列**、`multi` のときだけ配列（`interview-script.ts` の
+  `QuestionDef.multi` に合わせる）。常に配列にすると既存の表示・書き出しが
+  「1 件の配列」を受け取ることになる。
+- **設定が無いだけのときは 500 にしない。** Supabase / S3 未設定は **503 と理由**を返す。

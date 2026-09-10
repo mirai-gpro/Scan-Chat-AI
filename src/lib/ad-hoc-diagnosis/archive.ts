@@ -105,17 +105,41 @@ export class S3RangeReader extends Reader<string> {
   }
 
   async readUint8Array(offset: number, length: number): Promise<Uint8Array> {
-    if (length <= 0) return new Uint8Array(0);
-    const range = rangeHeaderFor(offset, length);
+    // **zip.js の Reader 契約に合わせて末尾を丸める。**
+    // 呼び出し側はファイル末尾をまたぐ長さを要求してくることがある
+    // (EOCD を探すのに「末尾 N バイト」を決め打ちで読む場面など)。
+    // ここで丸めないと S3 が 416 を返し、**開けるはずの ZIP が開けなくなる**。
+    const actualLength = clampReadLength(offset, length, this.size);
+    if (actualLength <= 0) return new Uint8Array(0);
+
+    const range = rangeHeaderFor(offset, actualLength);
     const client = makeS3Client(this.cfg);
     const res = await client.send(
       new GetObjectCommand({ Bucket: this.cfg.bucket, Key: this.key, Range: range }),
     );
     if (!res.Body) throw new Error(`S3RangeReader: 本文が空 (${this.key} ${range})`);
     const bytes = await res.Body.transformToByteArray();
-    assertExactLength(bytes, length, `${this.key} ${range}`);
+    // **丸めた後の長さ**とちょうど一致するか。丸める前の length と比べない。
+    assertExactLength(bytes, actualLength, `${this.key} ${range}`);
     return bytes;
   }
+}
+
+/**
+ * 実際に読む長さを決める。`min(length, size - offset)`。
+ *
+ * - `offset >= size` → **0**（呼び出し側は空の `Uint8Array` を受け取る）
+ * - 末尾をまたぐ要求 → **ファイル末尾まで**に丸める
+ *
+ * **丸めるのはここだけ。** `rangeHeaderFor` は丸めない (算術だけを持つ) ので、
+ * 「丸め忘れ」と「閉区間の取り違え」を別々に検証できる。
+ */
+export function clampReadLength(offset: number, length: number, size: number): number {
+  if (!Number.isFinite(offset) || offset < 0) return 0;
+  if (!Number.isFinite(length) || length <= 0) return 0;
+  if (!Number.isFinite(size) || size <= 0) return 0;
+  if (offset >= size) return 0;
+  return Math.min(length, size - offset);
 }
 
 /**

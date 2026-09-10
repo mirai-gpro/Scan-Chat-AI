@@ -5,7 +5,17 @@ import { ZipWriter, Uint8ArrayWriter, TextReader, configure } from '@zip.js/zip.
 configure({ useWebWorkers: false });
 
 const esc = (s) => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-const COLS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+/**
+ * 0 始まりの列 index を Excel の列参照へ (`0→A` … `25→Z` `26→AA`)。
+ * **26 列を超える表を組むので 1 文字では足りない** — 足りないと
+ * セル参照が `undefined1` になり read-excel-file が
+ * `RangeError: Invalid array length` で落ちる (実測)。
+ */
+function colRef(i) {
+  let n = i, s = '';
+  do { s = String.fromCharCode(65 + (n % 26)) + s; n = Math.floor(n / 26) - 1; } while (n >= 0);
+  return s;
+}
 
 /** 1900 方式のシリアル値 (Excel 既定・起点 1899-12-30)。 */
 export function serial1900(y, m, d) {
@@ -37,7 +47,7 @@ export async function buildXlsx(o) {
   };
 
   const rowXml = (cells, rowNo) =>
-    `<row r="${rowNo}">${cells.map((c, i) => cellXml(`${COLS[i]}${rowNo}`, c)).join('')}</row>`;
+    `<row r="${rowNo}">${cells.map((c, i) => cellXml(`${colRef(i)}${rowNo}`, c)).join('')}</row>`;
 
   const headerCells = o.headers.map((h) => ({ v: h, kind: 'text' }));
   const body = [headerCells, ...o.rows].map((cells, i) => rowXml(cells, i + 1)).join('');

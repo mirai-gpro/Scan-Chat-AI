@@ -17,6 +17,16 @@ export type FormatId =
   | 'LifestyleQuestionnaireData'
   | 'Other';
 
+/** 受け付ける format_id の集合。**この機能のために増やさない** (§15.2)。 */
+export const ELITH_ALLOWED_FORMATS: FormatId[] = [
+  'HealthCheckupData',
+  'CancerRiskAssessmentData',
+  'GeneticTestResultData',
+  'BloodTestData',
+  'LifestyleQuestionnaireData',
+  'Other',
+];
+
 /** 分類の確からしさ。3 値（spec §7.1）。 */
 export type Confidence = 'confirmed' | 'probable' | 'needs_review';
 
