@@ -1,0 +1,1024 @@
+# 臨時診断バッチ 仕様書（クロスシステム）
+
+| 項目 | 内容 |
+|---|---|
+| 版 | 0.1（2026-09-10・**決定仕様**。未確定は §28 に `OPEN` として分離） |
+| 対象システム | **wellfort-site**（管理画面 UI・管理者認証・ブラウザとのやり取り）／ **Scan-Chat-AI**（ZIP 受付処理・分類・解析・ジョブ状態・ウェルネス年齢・Elith JSON 生成・S3） |
+| 同系統の先行仕様 | `docs/lab/wellfort_admin_lab_upload_spec.md`（**責務分界の正**。§3 配置場所／§6-1 Bearer API Key） |
+| 上位・関連 | `docs/elith/elith_s3_data_handoff_spec.md`（納品パス・命名）／`docs/elith/elith_assembly_wrapping_spec.md`／`docs/elith/elith_masking_definition.md`／`docs/scan/health_age_caba_v5.4_spec.md`／`docs/scan/health_age_simple_v7.0_spec.md`／`docs/lab/lab_data_pipeline_master_spec.md` |
+| 発端 | 発注者指示書「ClaudeCode 実装指示書 — 臨時診断バッチ 仕様書作成・保存・実装」（2026-09-10） |
+
+---
+
+## 0. この文書の読み方
+
+- **「既存仕様」「現行実装（実測）」「今回の要求」を必ず分けて書く。**
+- 断定には出典（`file:line` か実測値）を付ける（CLAUDE.md R1）。**出典を出せないものは「未確認」と明示**する。
+- **実装対象として決めたことは「決定仕様」として書く。** 決められないものだけ §28 に `OPEN` として置く。
+- **本書に出てくる件数・列数のうち、出典が「指示書」のものは私の実測ではない。**
+  今回のサンプル ZIP は本作業環境に渡っていない（アップロード領域に `.zip` は 0 件・実測）。
+  ZIP の中身に関する記述（10 名／38 ファイル／健診 39 列／問診 62 列 等）は**すべて指示書 §2 からの引用**であり、
+  実物での照合は行っていない。**列名に依存する箇所は `OPEN` に落としてある**（§28-O5）。
+
+---
+
+## 1. 目的
+
+企業・団体等から**臨時に受領した複数人分の検査データ一式（ZIP）**を、管理者が投入し、
+**自動分類 → 人物単位の整理 → 構造化 → ウェルネス年齢判定 → 管理者確認 → Elith 納品セット生成**
+まで安全に実行できる管理機能を追加する。
+
+**この機能の中心は「ZIP の OCR」ではない。**
+
+```
+ZIP → 人物単位へ整理 → データ種別を判定 → 既存の専門処理へ振り分け
+    → 重複を除去 → 管理者確認 → Elith 形式へ統一
+```
+
+**分類と人物識別を分離すること**、**PII を client_id へ変換すること**、
+**Elith 送信前に人間が確認すること**が設計の芯である。
+
+---
+
+## 2. 対象ユースケース
+
+1. 企業・団体から「N 名分の健診 PDF／XLSX・遺伝子検査 PDF・問診 XLSX／PDF」を 1 つの ZIP で受領した。
+2. 管理者が wellfort-site の管理画面から ZIP を投入する。
+3. 人物ごとに何が揃っているかを画面で確認し、誤分類を直す。
+4. 変換結果（項目数・警告・ウェルネス年齢の可否）を確認する。
+5. **管理者が「確定」を押して初めて** Elith 納品先へ書き出す。
+6. 結果（client_id／format／test_date／S3 key／validation）を後から再表示できる。
+
+---
+
+## 3. 非対象範囲
+
+- **通常プラン（サブスク契約者）の検査パイプラインは変更しない。** 既存 5 種ゲート
+  （`src/lib/elith-assemble.ts:29` `GATING_FORMAT_IDS`）は**この機能のために変更しない**（§15.5）。
+- 顧客（`customer_profiles`）との自動紐付けはしない。**臨時バッチの被験者は EC 顧客ではない**前提で、
+  診断側の識別子（`client_id`）だけを採番する（§13）。
+- 検査機関 API からの自動受信（`wellfort_admin_lab_upload_spec` 付録 B-1）は対象外。
+- 既存 `/admin/lab-results/upload`（検査結果アップロード）は**置換しない**。別機能として追加する。
+- **Scan-Chat-AI 側に管理画面を作らない**（§4）。既存 `Scan-Chat-AI/src/pages/admin/*` は
+  今回の前例として使わない。**削除・移設も本仕様のスコープ外。**
+
+---
+
+## 4. システム責務境界（**本仕様の要**・2026-09-10 発注者確定）
+
+`docs/lab/wellfort_admin_lab_upload_spec.md` L5-6／§3／§6-1 の既存確定アーキテクチャを正とする。
+
+| 層 | wellfort-site | Scan-Chat-AI |
+|---|---|---|
+| 管理画面メニュー | **担当**（`src/components/AdminLayout.astro` の `検査連携` グループへ追加） | — |
+| 6 ステップ UI | **担当**（`/admin/ad-hoc-diagnosis`） | — |
+| 管理者認証（入口） | **担当**（ユーザーのアクセストークン + anon apikey で `admin_users` を照会。`api/admin/elith-scan.ts:27-49` と同形。**service_role は使わない**） | — |
+| ブラウザとのやり取り | **担当**（中継 API のみ。**ブラウザに `SCAN_CHAT_AI_API_KEY` を渡さない**） | — |
+| PDF のページ画像化 | **担当**（pdf.js。既存 `admin/elith-batch.astro:494-508` と同じ） | — |
+| ZIP 受付（ticket 発行） | 中継のみ | **担当**（キー採番・presigned PUT 発行） |
+| ZIP 展開・安全検査 | — | **担当** |
+| ファイル分類 | — | **担当** |
+| XLSX / PDF 解析 | — | **担当** |
+| ジョブ状態 | — | **担当**（`diagnosis` スキーマ） |
+| ウェルネス年齢 | — | **担当**（`wellness-age.ts` を呼ぶだけ） |
+| Elith JSON 生成・アセンブリ | — | **担当** |
+| S3 処理 | — | **担当** |
+
+### 4.1 呼び出しの向き（固定）
+
+```
+ブラウザ ──(ユーザーのアクセストークン)──▶ wellfort-site /api/admin/ad-hoc-diagnosis/*
+                                              │  ① admin_users で admin 判定
+                                              │  ② Bearer SCAN_CHAT_AI_API_KEY を付けて中継
+                                              ▼
+                                      Scan-Chat-AI /api/admin/ad-hoc-diagnosis/*
+                                              │  isAdminAuthorized() (api-auth.ts)
+                                              ▼
+                                      S3 / Supabase / Gemini
+```
+
+- **鍵はサーバ側だけ**。`ADMIN_API_KEY` / `SCAN_CHAT_AI_API_KEY` は**ブラウザに出さない**。
+- ブラウザが直接触れる外部 URL は **presigned URL 1 本だけ**（§5.2）。これは
+  「特定の 1 オブジェクトに、決められた Content-Type と長さで、15 分だけ PUT できる」もので、鍵ではない。
+- **Scan-Chat-AI 側 API 同士を HTTP で呼び合わない。** 既存処理の再利用は
+  **共通 lib への切り出し**で行う（指示書 §13）。
+
+### 4.2 なぜこの形か
+
+- 既存の Elith バッチが**まさにこの形で動いている**（実測）:
+  UI=`wellfort-site/src/pages/admin/elith-batch.astro` / 中継=`wellfort-site/src/pages/api/admin/elith-scan.ts`
+  / 処理=`Scan-Chat-AI/src/pages/api/admin/elith-scan.ts`。**新しい形を発明しない。**
+- `SCAN_CHAT_AI_API_KEY` を使う中継は wellfort-site に **10 本実在**（実測）。同じ規律に乗せる。
+
+---
+
+## 5. 入力 ZIP 仕様
+
+### 5.1 受け入れるもの
+
+| 項目 | 値 | 根拠 |
+|---|---|---|
+| 形式 | `application/zip`（`.zip`） | — |
+| 上限サイズ | **512 MB**（`MAX_ZIP_BYTES`） | 指示書 §22「約160MB級」に対する余裕。署名に固定するので超過は S3 が拒否 |
+| 展開後の総容量上限 | **1.5 GB**（`MAX_TOTAL_UNCOMPRESSED`） | ZIP 爆弾対策 |
+| ファイル数上限 | **2,000**（`MAX_ENTRIES`） | 同上 |
+| 1 ファイル上限 | **80 MB**（`MAX_ENTRY_BYTES`） | Genoplan 208 ページ PDF を通す |
+| ネスト深度上限 | **8**（`MAX_DEPTH`） | 同上 |
+| 許可拡張子 | `.pdf` / `.xlsx` / `.xls` / `.docx` / `.csv` | 指示書 §2 の実構成 |
+
+### 5.2 ブラウザ → S3（presigned PUT・**Vercel を本体が通らない**）
+
+**Vercel Functions のリクエストボディ上限は 4.5 MB**（出典: vercel.com/docs/functions/limitations
+「Request body size」・2026-08-24 版。CLAUDE.md に実測記録あり）。ZIP 本体は関数を通せない。
+`src/lib/scan-upload-ticket.ts` と**同じ考え方**で presigned PUT にする。
+
+```
+1. ブラウザ  → wellfort-site  POST /api/admin/ad-hoc-diagnosis/upload-ticket
+                              { title, fileName, contentType, contentLength, sha256 }
+2. wellfort-site（サーバ）→ Scan-Chat-AI  同名 API（Bearer SCAN_CHAT_AI_API_KEY）
+3. Scan-Chat-AI → batch 行を作成（status=draft）＋ presigned PUT を発行
+                  { batchId, url, key, headers, expiresIn }
+4. wellfort-site → ブラウザへは **url / headers / expiresIn / batchId だけ**返す
+                  （key も返してよいが、以後クライアントから key を受け取らない＝§24.2）
+5. ブラウザ → S3 へ直接 PUT（Content-Type と Content-Length は署名に固定済み）
+6. ブラウザ → wellfort-site POST /api/admin/ad-hoc-diagnosis/{batchId}/classify
+```
+
+**安全性（`/api/scan` で踏んだ罠と同型の対策）**
+
+1. **キーはサーバが採番する。** クライアントは PUT 先を選べない。
+2. 形は `{prefix}ad-hoc-uploads/{batch_id}/source.zip` に**完全一致**（`isAdHocZipKey`。部分一致にしない）。
+3. `batch_id` は UUID v4（推測不能）。
+4. **Content-Type（`application/zip`）と ContentLength を署名に固定**する。
+5. 期限 **15 分**（`PRESIGN_EXPIRES_SEC`）。
+6. **`.json` を許可拡張子に入れない**（Elith 納品 JSON を読ませない・書かせないため）。
+
+**置き場所（決定）**: Elith 用バケット `AWS_S3_BUCKET` の**一時領域** `{AWS_S3_PREFIX}ad-hoc-uploads/`。
+- 理由: `scan-uploads/` が既に**同じバケットの一時領域**として運用されており（CLAUDE.md・2026-09-04 実測）、
+  **CORS（`PUT` / `content-type`）が既に設定済み**なので AWS 側の追加作業が 1 つ減る。
+- **納品物として置くのではない。** 指示書 §10「ZIP 内原本を Elith 納品バケットへ直接保存しない」は
+  **納品セットとして置かない**という意味で受け取り、`user/{client_id}/date/...` の納品領域には一切書かない。
+  一時領域と納品領域はパスで完全に分かれる。
+- **原本用バケット（`AWS_S3_ORIGINALS_BUCKET`）には置かない。** あちらは 10 年保管・Object Lock
+  （`docs/operations/S3原本ストレージ_構築手順書.md`）で、**PII を含む ZIP を置くと削除できなくなる**（§28-O2）。
+- **【AWS 側の作業が 1 つ要る】** `ad-hoc-uploads/` のライフサイクル失効ルール（§24.4）。
+
+### 5.3 ZIP の読み方（依存ライブラリを足さない・決定）
+
+`package.json` 実測: `jszip` / `adm-zip` / `unzipper` / `yauzl` / `xlsx` / `exceljs` は**いずれも 0 件**。
+
+**決定 = 最小 ZIP リーダを自作する**（`src/lib/zip-reader.ts`）。
+
+- 展開は **Central Directory を正**とする（Local File Header だけを信用しない）。
+- 圧縮方式は **stored(0) と deflate(8) のみ**。他は `unsupported_file`。
+  - サーバ: `zlib.inflateRawSync`（実測: 利用可）
+  - ブラウザ: `DecompressionStream('deflate-raw')`（実測: この Node にも存在。**ブラウザ実機は要確認**→§28-O4）
+- **XLSX も ZIP なので同じリーダで読める**（§11.1）。これが自作を選ぶ最大の理由。
+- **S3 上の ZIP は Range GET で部分取得する。**
+  ① 末尾を Range GET → EOCD（+ ZIP64 EOCD）→ Central Directory を読む
+  ② エントリごとに**そのエントリの範囲だけ** Range GET して展開
+  → **160 MB を関数のメモリに載せない**・**エントリ単位で再開できる**。
+
+### 5.4 ファイル名の文字コード
+
+ZIP の general purpose bit 11（UTF-8 フラグ）を見る。
+- 立っていれば UTF-8。
+- 立っていなければ **`TextDecoder('shift_jis')`**（Windows 製 ZIP の日本語名。実測: Node v22 / full ICU で `shift_jis` 実在・`日本` を正しく復号）。
+- どちらでも復号できない場合は**推測しない**。`needs_review` にして**バイト列の hex** を表示する。
+
+### 5.5 常に無視するもの
+
+| 対象 | 扱い | 根拠 |
+|---|---|---|
+| `~$*`（Excel 一時ファイル） | **常に無視**（一覧にも出さない） | 指示書 §2 |
+| `__MACOSX/` 配下・`.DS_Store` | 無視 | 一般的な ZIP のごみ |
+| ディレクトリエントリ | 無視（構造の把握にのみ使う） | — |
+| サイズ 0 のファイル | `unsupported_file` として一覧に出す（黙って捨てない） | 指示書 §22 |
+
+### 5.6 ZIP 直下の参考資料
+
+ZIP 直下（人物フォルダの外）にあるファイルは **`batch_reference`** として扱い、
+**どの人物にも自動割当しない**（指示書 §2）。
+
+- `10名の情報.xlsx` … **人物識別の正として使わない**（サンプルでは氏名セルが空。指示書 §2）。
+  `実施日` 列も**どの検査日か未確定**なので、`test_date` へ自動転用しない（§14.4）。
+- `問診サイト.docx` … 参考資料。解析しない。
+
+---
+
+## 6. 人物単位の識別仕様
+
+**ZIP 直下の「人物フォルダ」を第一の人物境界**とする（指示書 §6）。
+
+1. ZIP 直下のディレクトリを人物候補として検出する。**フォルダ 1 つ = 被験者 1 人**。
+2. 各人物フォルダに**新規 UUID v4 の `client_id`** を発番する（§13）。
+3. **ファイル名中の番号・Excel 内部 ID・フォルダ名の番号を `client_id` に使わない。**
+   指示書 §2 に「人物フォルダ番号と問診ファイル名中の番号は一致しないケースがある」と明記されている。
+4. 氏名は**異なる資料間の整合チェックにのみ**使う。
+5. 氏名は照合後に**納品 JSON・S3 key へ一切残さない**（§8）。
+6. 生年月日は **age 算出にのみ**使い、納品 JSON へ DOB を出さない。
+7. 社員番号も納品 JSON へ出さない。
+8. 同一フォルダ内で氏名／生年月日が食い違う場合、**自動確定しない**。
+9. 食い違いは **`identity_status = 'needs_review'`** とし、管理者が判断する。
+
+### 6.1 保存するもの（PII を持たない）
+
+`ad_hoc_diagnosis_subjects` に持つのは以下だけ（§23）。
+
+| 列 | 内容 |
+|---|---|
+| `subject_no` | 画面表示用の連番（`No.01` …）。**フォルダ名そのものは保存しない** |
+| `client_id` | 採番した UUID |
+| `identity_status` | `confirmed` / `needs_review` / `unresolved` |
+| `identity_reason` | 食い違いの**種類**だけ（例 `dob_mismatch:2`）。**値そのものは書かない** |
+| `sex` | `male` / `female` / `unknown` |
+| `age` | 整数（DOB から算出した結果のみ） |
+
+**氏名・生年月日・社員番号・メールは DB に保存しない。** 照合は展開直後のメモリ内でのみ行う。
+長期保存が必要と判断された場合は、既存の PII データ設計（`customer` スキーマ）を確認したうえで
+別途決めること。**`diagnosis` スキーマへ無断で追加しない**（CLAUDE.md「PII / データ分離」）。
+
+---
+
+## 7. ファイル分類仕様
+
+**ファイル名だけに依存しない。** 拡張子・ファイル内容・ヘッダー・PDF 内テキストを組み合わせる。
+
+### 7.1 判定の順序（決定論・上から評価）
+
+| # | 条件 | 分類 | 信頼度 |
+|---|---|---|---|
+| 1 | `~$` 始まり / `__MACOSX` / `.DS_Store` | `ignored` | — |
+| 2 | 人物フォルダの外にある | `batch_reference` | `confirmed` |
+| 3 | `.xlsx` かつ **健診ヘッダ群**が閾値以上一致（§7.2） | `HealthCheckupData`（構造化元） | `confirmed` |
+| 4 | `.xlsx` かつ **問診ヘッダ群**が閾値以上一致（§7.3） | `LifestyleQuestionnaireData` | `confirmed` |
+| 5 | `.pdf` かつ **Genoplan 識別要素**あり（§7.4） | `GeneticTestResultData` | `confirmed` |
+| 6 | `.pdf` かつ 健診語彙が閾値以上 | `HealthCheckupData`（原票 or 構造化元） | `probable` |
+| 7 | `.pdf` かつ 問診語彙が閾値以上 | `LifestyleQuestionnaireData` | `probable` |
+| 8 | 上記いずれにも当たらない | `needs_review` | `needs_review` |
+
+- **信頼度は 3 値**: `confirmed` / `probable` / `needs_review`。
+- **誤分類は管理者が画面で修正できる**（§17 STEP 2）。修正した事実は監査に残す（§21）。
+- **`probable` / `needs_review` が 1 件でもある人物は、管理者が確認するまで `ready` にしない。**
+
+### 7.2 健診 XLSX の判定
+
+指示書 §2 の代表 39 列のうち、次の**ヘッダー名が 6 件中 4 件以上**あれば健診とみなす。
+
+`健診日` / `身長` / `体重` / `BMI` / `収縮期血圧` / `拡張期血圧`
+
+- **ヘッダー行は 1 行目固定にしない**（先頭 10 行を走査して最も一致数の多い行をヘッダーとする）。
+- **列順に依存しない**（名前で引く）。
+- **XLSX は LLM へ送らない。決定論 parser で読む**（指示書 §7）。
+
+### 7.3 問診 XLSX の判定
+
+指示書 §2 の代表 62 列のうち、次の**語が 3 件以上**ヘッダーにあれば問診とみなす。
+
+`既往歴` / `喫煙` / `飲酒` / `食事` / `運動` / `睡眠` / `ストレス`
+
+### 7.4 Genoplan PDF の判定
+
+- 拡張子が `.pdf`。
+- **PDF 内部に Genoplan / ジェノプラン の識別要素**がある（テキスト抽出できる場合）。
+- ファイル名が Genoplan の検査キー形式（`XXXX-XXXX-XXXX.pdf`。
+  `wellfort_admin_lab_upload_spec.md` 付録 A-3）に一致する。
+- **①②のどちらかだけでは `probable`**。両方そろって `confirmed`。
+
+分類後の処理は**既存経路をそのまま使う**（指示書 §7）:
+`src/lib/elith-genetic.ts` の `scanGeneticPage` と、`elith-genetic-merge.ts` の part/finalize 構造。
+**新しい遺伝子 OCR / LLM プロンプトを作らない。**
+
+---
+
+## 8. PII 取扱
+
+| データ | 変換時に使う | DB に保存 | 納品 JSON | S3 key | ログ |
+|---|---|---|---|---|---|
+| 氏名 | ○（整合チェックのみ） | **×** | **×** | **×** | **×** |
+| 生年月日 | ○（age 算出のみ） | **×** | **×** | **×** | **×** |
+| 社員番号 | ○（同一人物性の補助） | **×** | **×** | **×** | **×** |
+| 性別 | ○ | ○ | ○（`subject.sex`） | × | × |
+| 年齢 | ○ | ○ | ○（`subject.age`） | × | × |
+| 元ファイル名 | ○ | **正規化して保存**（§8.1） | × | **×** | × |
+
+### 8.1 元ファイル名の扱い
+
+ユーザー提供のファイル名には**氏名が含まれ得る**（指示書 §10）。
+
+- **S3 key に元ファイル名を入れない。** key は `{batch_id}/files/{file_id}.{ext}` で採番する。
+- DB には `display_name` として保存するが、**氏名らしき部分をマスクした形**にする
+  （`原ファイル名` そのままは保存しない）。画面には `display_name` を出す。
+- **マスクの規則を「氏名らしさの推測」に依存させない**: 保存するのは
+  `{分類}_{連番}{拡張子}`（例 `健診_01.xlsx`）とし、**元の文字列は保存しない**のが既定。
+  「元のファイル名が分からないと現場が困る」場合は §28-O3 で判断する。
+
+### 8.2 masking
+
+Elith へ渡す JSON の PII 規則は `docs/elith/elith_masking_definition.md` に従う。
+本機能で新しいマスキング規則を作らない。
+
+---
+
+## 9. 原本保存仕様
+
+**新規方式を作らない。** 既存 `src/lib/originals-storage.ts` の `putOriginal()` を再利用する（指示書 §10）。
+
+ただし**保存の可否そのものが未確定**なので、Phase 1 では次のとおりにする。
+
+| 対象 | 置き場所 | 保持 | Phase 1 の既定 |
+|---|---|---|---|
+| ZIP 本体 | `{AWS_S3_PREFIX}ad-hoc-uploads/{batch_id}/source.zip` | **ライフサイクルで失効**（§24.4） | 置く |
+| 展開後の個別ファイル | `{AWS_S3_PREFIX}ad-hoc-uploads/{batch_id}/files/{file_id}.{ext}` | 同上 | 置く |
+| 長期原本（10 年保管） | `putOriginal()`（`AWS_S3_ORIGINALS_BUCKET`） | Versioning + Object Lock | **保存しない**（`retain_originals=false` 既定） |
+
+**なぜ長期保存を既定 off にするか**: 原本用バケットは 10 年保管・削除不可の設計
+（`docs/operations/S3原本ストレージ_構築手順書.md`）。**氏名・生年月日を含む臨時案件のファイルを
+そこへ入れると、後から消せない。** 契約顧客の検査原本とは保管要件が同じとは限らないので、
+**発注者の判断（§28-O2）を受けてから on にする**。受け皿（`retain_originals` 列と分岐）は用意しておく。
+
+---
+
+## 10. 一時状態・ジョブ状態管理
+
+### 10.1 なぜ DB に持つか
+
+- Genoplan PDF は**約 208〜210 ページ/人 × 10 名**（指示書 §2/§11）。
+- **ZIP 全体を 1 リクエストで処理してはいけない**（指示書 §11）。
+- **ブラウザを再読込しても状態が戻る**ことが受入条件（指示書 §26-17）。
+
+→ 進捗は**サーバ側 DB に置く**。既存 `diagnosis.scan_jobs`
+（`supabase/migrations/20260910000010_scan_jobs.sql`）と同じ考え方を踏襲する
+（**確定した検査 1 件 = `test_artifacts`、途中経過 = 別表**）。
+
+### 10.2 粒度
+
+| 単位 | 行 | 再開できること |
+|---|---|---|
+| バッチ | `ad_hoc_diagnosis_batches` | 状態・確定・書出しの各段 |
+| 人物 | `ad_hoc_diagnosis_subjects` | 人物単位の ready 判定 |
+| ファイル | `ad_hoc_diagnosis_files` | 解析済み／失敗のファイルを飛ばす |
+| ページ | `ad_hoc_diagnosis_pages` | **成功済みページを毎回 LLM に再送しない** |
+
+- **1 件失敗で 10 名全体を破棄しない**（指示書 §11）。
+- **成功済みページを毎回再 LLM 処理しない**（同）。キーは `(file_sha256, page_no)`（§19.3）。
+
+---
+
+## 11. 変換仕様
+
+### 11.1 健診 XLSX → `HealthCheckupData`
+
+**新規 parser**: `src/lib/xlsx-reader.ts`（汎用シート読取）＋ `src/lib/health-checkup-xlsx.ts`（写像）。
+
+**XLSX の読み方（決定論・依存追加なし）**
+- XLSX は ZIP。§5.3 のリーダで次を読む:
+  `xl/workbook.xml`（シート名・`r:id`・`date1904` フラグ）/ `xl/_rels/workbook.xml.rels` /
+  `xl/sharedStrings.xml` / `xl/worksheets/sheet*.xml` / `xl/styles.xml`（`numFmt` の日付判定）。
+- セル型: `t="s"`（共有文字列）/ `t="inlineStr"` / `t="str"` / `t="b"` / 既定（数値）。
+- **日付**: 数値セルのうち、`s`（style index）→ `cellXfs` → `numFmtId` が日付書式なら**シリアル値→日付**へ。
+  1900 年方式の**うるう年バグ（1900-02-29 が存在する）**を織り込む。`date1904` が真なら 1904 年方式。
+  文字列日付（`2026/03/29` 等）も受ける。**Excel 日付型 / 文字列日付型の両方に対応**（指示書 §15）。
+
+**写像の要件（指示書 §15）**
+- **PII 列（社員番号・漢字氏名・生年月日）を `measurements` に混入させない。** 変換時のみ利用する。
+- 数値変換する。**単位は保持**する。
+- **空欄は行を作らない。`0` と空欄を区別する**（`0` は実測値、空欄は未実施）。
+- **列順に依存しない**（名前で引く）。**列追加に強い**（未知列は落とすだけで壊れない）。
+- **未知列を勝手に診断項目化しない**（捏造ゼロ）。未知列は監査に件数だけ出す。
+- 出力は既存 `HealthCheckupData` の共通エンベロープに合わせる。
+  整形は必ず **`sanitizeMeasurementsForDelivery()`**（`src/lib/elith-export.ts:467`）を通す
+  ——「納品整形は決定論プログラムに集約」（CLAUDE.md）。**ここで二重管理しない。**
+
+### 11.2 健診 PDF → `HealthCheckupData`
+
+- **同一人物に健診 XLSX があるなら、PDF は原票（証跡）としてのみ扱う**（§12）。
+- 健診 XLSX が無い人物のみ、**既存 AI スキャン経路**で構造化する。
+  再利用: `src/lib/elith-export.ts` `buildElithScanBundle`。
+  `application/pdf` は **`MIME_TO_EXT`（`elith-export.ts:117`）に実在**するので、
+  **PDF をそのまま Gemini へ渡せる**（ページ画像化は不要）。
+- **1 ファイル = 1 リクエスト**（CLAUDE.md の実行モデル）。
+
+### 11.3 問診 XLSX → `LifestyleQuestionnaireData`
+
+**新規 parser**: `src/lib/questionnaire-xlsx.ts`。読取は §11.1 と同じ `xlsx-reader.ts`。
+
+- 出力は **既存 `src/lib/interview-export.ts` の `buildElithInterviewJson()` / `buildElithInterviewBundle()`
+  が作るものと同じ構造**にする。**新しい独自 JSON 形式を作らない**（指示書 §7）。
+- ヘッダー文 → 安定した項目 ID へのマッピング表を持つ（`QUESTIONNAIRE_XLSX_MAP`）。
+- 複数選択の区切り（`;` 等）は**既存 export の表現に合わせる**。
+- **氏名 / DOB / メールを納品しない。** `sex` / `age` は `subject` へ。
+- **未知の設問は捨てない。** マッピングに無い列は `needs_review` として件数と列名を監査に出す
+  （**中身を勝手に項目化しない**）。
+
+### 11.4 問診 PDF → `LifestyleQuestionnaireData`
+
+- **汎用スキャン結果をそのまま `LifestyleQuestionnaireData` にしない**（指示書 §7）。
+  既存問診スキーマ（`interview-export.ts`）の形へ正規化する。
+- 実現方式は **既存の VLM 経路を再利用**する。
+- **今回のサンプルの問診 PDF を確認できていない**ため、**写像表は `OPEN`**（§28-O5）。
+  Phase 1 では **問診 PDF の人物は `needs_review`** とし、
+  管理者が「この人物は問診なしで確定する」を選べるようにする（**捏造しない**）。
+
+### 11.5 Genoplan PDF → `GeneticTestResultData`
+
+**既存の専用処理を維持する**（指示書 §16）。
+
+- **1 PDF 一括 Gemini 送信は禁止。1 ページずつ。**
+- ページ画像化は **wellfort-site のブラウザ（pdf.js）**が行う。
+  既存 `admin/elith-batch.astro:494-508`（jsDelivr `pdfjs-dist@3.11.174`）と同じ経路。
+  **ページ画像は wellfort-site の中継 API を通って Scan-Chat-AI へ渡る**（本体は数百 KB＝4.5 MB 内）。
+- Scan-Chat-AI は `scanGeneticPage` を呼び、結果を `ad_hoc_diagnosis_pages` に保存する
+  （page_no・parsed・raw を監査保持）。
+- `finalize` で 1 つの `GeneticTestResultData` に集約する。
+- **同じ PDF を再処理した場合、`(file_sha256, page_no)` でキャッシュを使う**（§19.3）。
+- **既存プロンプトを重複定義しない。**
+
+**ブラウザがページ画像を作るための PDF バイト列の入手（決定）**
+- **既定 = ブラウザが選択時の ZIP をメモリに保持**し、`DecompressionStream('deflate-raw')` で
+  必要な PDF だけを取り出して pdf.js に渡す（**AWS 側の追加作業なし**）。
+- **ブラウザを再読込した場合**、DB の状態（どのページまで終わったか）は復元されるが、
+  PDF のバイト列は失われる。→ 画面に
+  **「続きから処理するには同じ ZIP をもう一度選んでください」**と出し、
+  **SHA-256 が一致すれば同じバッチの続きから**再開する（**再アップロードはしない**）。
+- **S3 から presigned GET でブラウザへ渡す案は採らない。** バケットの CORS は現在 `PUT` のみで、
+  `GET` を足す運用変更が要る（CLAUDE.md「`GET` も足さない」）。必要になったら §28-O4 で判断する。
+
+---
+
+## 12. 同一検査の PDF / XLSX 重複判定
+
+同一人物に健診 PDF と健診 XLSX がある場合（指示書 §8）:
+
+- **XLSX = 構造化値の正**
+- **PDF = 原票証跡**
+- **両方を別々の `HealthCheckupData` として Elith に納品しない。**
+
+### 12.1 判定キー（ファイル名では判定しない）
+
+次を**すべて**満たすとき「同一検査」とみなす。
+
+1. 同一人物（同じ `subject_id`）
+2. 同一検査種別（同じ `classified_format_id`）
+3. **健診日が一致**
+4. **主要計測値が一致**: 身長 / 体重 / BMI / 収縮期血圧 / 拡張期血圧 / 血糖 or HbA1c / LDL
+   のうち、**両方に値がある項目の 80% 以上**が一致（数値は絶対値差 0、丸めのみ許容）
+
+### 12.2 一致しない場合
+
+**勝手に XLSX 優先で確定しない。** `needs_review` とし、画面に
+**どの項目がどう食い違ったか**（項目名と 2 つの値）を出す。管理者がどちらを主ソースにするか選ぶ。
+
+### 12.3 出力への反映
+
+- 採用した方の `selected_as_primary = true`。
+- 採用しなかった方は `duplicate_of_file_id` を埋め、**納品 JSON を生成しない**（原票としては残る）。
+
+---
+
+## 13. `client_id` / `diagnostic_id` の採番
+
+### 13.1 `client_id`
+
+- **人物フォルダごとに新規 UUID v4 を発番**する（指示書 §6）。
+- **ファイル名やフォルダ名の番号を使わない。**
+- **【既存仕様との差・明記】** CLAUDE.md は「`client_id` = `diagnostic_user_id`（PII 非含有）」としている。
+  臨時バッチの被験者は **EC 顧客でもアプリ利用者でもない**ので `diagnostic_user_id` を持たない。
+  → **`diagnosis.app_users` とは別空間の UUID** を採番する。
+  先行例: `Scan-Chat-AI/src/pages/api/admin/elith-scan.ts` のコメント
+  「`clientId?: string, // 未指定ならサーバで UUID 採番 (サンプル用)`」= **同じことを既にしている**。
+  対応は `ad_hoc_diagnosis_subjects.client_id` にだけ持ち、**PII は生まれない**。
+
+### 13.2 `diagnostic_id`
+
+- 問診 export（`interview-export.ts`）が要求する識別子。**バッチ × 人物ごとに 1 つ採番**する。
+- `client_id` と同値にしてよいが、**別列で保持**する（意味が違うものを 1 列に潰さない）。
+
+---
+
+## 14. 日付の決定（`test_date` / `bundle_date`）
+
+### 14.1 既存仕様の整理（指示書 §9 の要求）
+
+- `docs/elith/elith_s3_data_handoff_spec.md`: **date フォルダ = AI 診断回の単位日** /
+  **`test_date` = 各検査の実施日**。
+- 後続のアセンブリ実装・仕様では `bundleDate` と各 `test_date` の扱いに拡張がある。
+
+**決定: 内部データでは 2 つを必ず別フィールドで持ち、最初から同一値に潰さない。**
+
+| フィールド | 意味 | 持つ場所 |
+|---|---|---|
+| `bundle_date`（= `diagnosis_date`） | この診断回の単位日。**Elith の date フォルダになる** | `ad_hoc_diagnosis_batches` |
+| `test_date` | その検査の実施日。**納品 JSON の `test_date`** | `ad_hoc_diagnosis_files` / 出力 |
+
+### 14.2 `test_date` の決定（ソース別・優先順）
+
+| ソース | `test_date` |
+|---|---|
+| 健診 XLSX | **`健診日` 列** |
+| 健診 PDF | 既存スキャンの抽出（`buildElithScanBundle` の `examDateFromScan` → `extractExamDate`。`elith-export.ts:1322-1328`） |
+| 問診 XLSX | **`OPEN`（§28-O5）**。開始時刻 / 完了時刻 / 診断基準日のどれを正とするか、実列を見てから決める。Phase 1 は**未決なら空**にし、埋めない |
+| 問診 PDF | 同上 |
+| Genoplan | **既存 Genoplan 実装の決定ルールを継承**する（新しい規則を作らない） |
+
+### 14.3 `bundle_date` の決定
+
+1. 管理者が STEP 1 で「診断回の基準日」を入力していればそれ。
+2. 入力が無ければ、**そのバッチで確定した `test_date` のうち最も新しい日**。
+3. どちらも無ければ**確定できない**として `needs_review`（**今日の日付で埋めない**）。
+
+### 14.4 `10名の情報.xlsx` の `実施日`
+
+**意味が確定していないので、どの format の `test_date` にも自動転用しない**（指示書 §9・§27）。
+画面には参考情報として出してよいが、**採用するには管理者の明示操作を必要とする**。
+
+---
+
+## 15. Elith 出力
+
+### 15.1 今回の対象 format
+
+| format_id | 出所 | 必須/任意 |
+|---|---|---|
+| `HealthCheckupData` | 健診 XLSX（正）／健診 PDF | **必須** |
+| `GeneticTestResultData` | Genoplan PDF | **必須** |
+| `LifestyleQuestionnaireData` | 問診 XLSX / PDF | **必須** |
+| `HealthAgeData` | 算出できた場合のみ | 任意 |
+
+**今回のデータに無い format を捏造しない。** `BloodTestData` / `CancerRiskAssessmentData` は出さない。
+
+### 15.2 既存 5 種ゲートを壊さない（**重要**）
+
+`src/lib/elith-assemble.ts:29` の `GATING_FORMAT_IDS`（5 種必須）は
+**通常プランの完全性判定**であり、**この機能のために変更しない**（指示書 §18・§27）。
+
+臨時バッチは**案件ごとに必要な format 集合**を batch 設定として持つ。
+
+```json
+{
+  "required_formats": ["HealthCheckupData", "GeneticTestResultData", "LifestyleQuestionnaireData"],
+  "optional_formats": ["HealthAgeData"]
+}
+```
+
+- 人物の `ready` 判定は**この集合だけ**で行う。
+- `HealthAgeData` が無くても **他 3 種の ready を維持する**（指示書 §26-21）。
+
+### 15.3 納品パス・命名
+
+`docs/elith/elith_s3_data_handoff_spec.md` に従う（新規則を作らない）。
+
+```
+{prefix}user/{client_id}/date/{YYYY_MM_DD}/{format_id}_date_{YYYY_MM_DD}_user_{client_id}.json
+```
+
+`{YYYY_MM_DD}` は **`bundle_date`**（§14）。
+
+### 15.4 manifest（1 人分の納品セット）
+
+| キー | 内容 |
+|---|---|
+| `batch_id` / `client_id` | — |
+| `bundle_date` | date フォルダの日付 |
+| `included_formats` | 実際に書き出した format |
+| `source_test_dates` | format ごとの `test_date` |
+| `validation` | schema validation の結果 |
+| `health_age` | `full` / `simple` / `unavailable` と不足マーカー |
+| `generated_at` | — |
+
+**PII を入れない。** Elith 側に既存 manifest 定義があればそれを再利用する
+（`docs/elith/elith_assembly_wrapping_spec.md`）。
+
+### 15.5 書出し前チェック
+
+PII 除外 / schema validation（`docs/elith/elith_handoff.schema.json`）/ 同一 format の重複 /
+空 JSON / `client_id` 整合 / `test_date` / `format_id`。**1 つでも落ちたら書き出さない。**
+
+---
+
+## 16. ウェルネス年齢
+
+**既存ロジックを一切変更しない**（指示書 §17）。入口は `src/lib/wellness-age.ts` の
+`computeWellnessAge` **だけ**（`computeHealthAge` を直接呼ばない。CLAUDE.md）。
+
+計算順（既存の 3 段階フォールバック）:
+
+1. **CABA v5.4 full**（`health-age.ts`）
+2. **CABA v7.0 simple**（`health-age-simple.ts`）
+3. **unavailable** → 値を作らず定型文 `WELLNESS_AGE_UNAVAILABLE_MESSAGE`。**保存しない**
+
+### 16.1 全員が算出できると仮定しない
+
+指示書 §17 のとおり、**確認された 39 列型の健診 XLSX ヘッダーに `albumin` / `creatinine` は無い**。
+簡易版の必須は「実年齢・アルブミン・クレアチニン＋（血糖 or HbA1c）」なので、
+**この様式だけでは 10 名全員が `unavailable` になり得る。**
+
+→ 人物ごとに **`full` / `simple` / `unavailable`** を明示し、**不足マーカーも表示**する。
+
+```
+simple unavailable: albumin, creatinine
+```
+
+### 16.2 捏造しない
+
+- **値が足りなければ勝手に補完しない。** 既存仕様で許可済みの補完（CABA v5.4 の
+  MCV / RDW / CRP / WBC 桁 / BMI）**のみ**使う。
+- 既存管理 API にある `syntheticMarkers` の例外運用は、**この機能では初期状態で自動使用しない**。
+  必要なら**管理者の明示操作**とし、元データとの区別と監査情報を必ず残す（§21）。
+- `health_age_unavailable` は**バッチ全体の致命エラーにしない**（§20.2）。
+
+---
+
+## 17. 管理者確認画面（6 ステップ・wellfort-site）
+
+配置: `/admin/ad-hoc-diagnosis`。
+`src/components/AdminLayout.astro` の **`検査連携` グループ**へメニューを追加する
+（既存: `Elith バッチ生成` / `健康年齢テスト`。実測 `AdminLayout.astro:23-24`）。
+
+### STEP 1 — ZIP 受付
+入力: 案件名 / 診断回の基準日（任意）/ ZIP。
+表示: ファイル件数 / ZIP サイズ / **SHA-256**。
+**この時点で Elith 本番 S3 へ送らない。**
+
+### STEP 2 — 自動分類・人物グループ確認
+- **氏名を出さない。** `No.01` … `No.10` の管理用表示にする。
+- 人物ごとにファイル一覧（種別 / ファイル / 判定 / 採用）と**分類信頼度**を出す。
+- **誤分類を管理者が修正できる。**
+
+### STEP 3 — 変換・事前検証
+人物ごとに: 健診構造化 / 問診構造化 / 遺伝子構造化 / `test_date` 抽出 /
+`subject.sex`・`subject.age` 生成 / schema validation / ウェルネス年齢適合判定。
+
+```
+健診: OK / 39 項目中 xx 件
+遺伝子: OK / 208 ページ
+問診: OK
+ウェルネス年齢: full / simple / unavailable
+警告: 2   エラー: 0
+```
+
+### STEP 4 — 管理者確認
+**この確認前に Elith 納品先へ確定書き出ししない。**
+管理者が **`納品データを確定`** を実行して初めて納品対象として固定する。
+
+### STEP 5 — Elith 納品セット生成・書出し
+§15.5 のチェックを全て通してから書き出す。**ドライラン（`dry_run=true`）を必ず用意する。**
+
+### STEP 6 — 完了・監査
+人物ごとに `client_id` / format 一覧 / `test_date` / HealthAge method / S3 key / validation result。
+**成功 / 警告あり / 失敗** を明示。**実行結果は後から再表示できる。**
+
+---
+
+## 18. S3 書出し
+
+- 書出しは **Scan-Chat-AI 側のみ**が行う（§4）。
+- 既存 `src/lib/s3.ts` の `getS3Config` / `isS3Configured` / `putFiles` を使う。
+- **S3 未設定ならドライラン**（既存 API と同じ挙動。`elith-scan.ts` の
+  `{ ok:false, configured:false, ..., preview }`）。
+- **`dry_run=true` のときは `putFiles` を呼ばない。** 生成した JSON と書き込み予定 key を返すだけ。
+- **この実装作業では本番 Elith S3 へ今回の実データを送らない**（§24.5）。
+
+---
+
+## 19. 再実行・冪等性
+
+### 19.1 同一 ZIP の二重登録
+
+キー = **ZIP の SHA-256**。同じ SHA のバッチが既にあれば**管理者へ警告**する
+（`{ duplicate_of_batch_id, created_at, status }`）。**自動で拒否も自動で続行もしない。**
+
+### 19.2 同一原本の重複
+
+同じファイル SHA-256 が同一バッチ内に複数あれば**自動重複候補**として `duplicate_of_file_id` を付ける。
+
+### 19.3 ページ結果のキャッシュ
+
+`(file_sha256, page_no)` で `ad_hoc_diagnosis_pages` を引き、**成功済みなら Gemini を呼ばない**。
+これにより「同じ PDF を再処理しても課金と時間が積み上がらない」。
+
+### 19.4 S3 への再 export
+
+**無制限に別物を増やさない。**
+- 同じ `(client_id, bundle_date, format_id)` へ 2 回目を書くのは **overwrite** になる。
+- **overwrite には管理者の明示確認を必要とする**（`overwrite=true`）。
+  確認が無ければ `export_failed: would_overwrite` を返す。
+
+---
+
+## 20. 部分失敗・リトライ
+
+### 20.1 原則
+
+- **1 件失敗で 10 名全体を破棄しない**（指示書 §11）。
+- 失敗は**その単位に閉じる**（ページ → ファイル → 人物 → バッチ の順に集約して表示）。
+- `retry` は**失敗した対象だけ**を再実行する。成功済みは触らない。
+
+### 20.2 致命でないもの
+
+| 状態 | バッチの扱い |
+|---|---|
+| `health_age_unavailable` | **致命にしない。** 「ウェルネス年齢なしで他データは納品可能」を表せる |
+| `needs_review` が残っている | `ready` にしないが、**他の人物の確定は妨げない** |
+| 1 ページの `page_failed` | ファイルは `partial`。リトライ可 |
+
+---
+
+## 21. 監査ログ
+
+`ad_hoc_diagnosis_events`（append only）に次を積む。**PII は入れない。**
+
+| 列 | 内容 |
+|---|---|
+| `batch_id` / `subject_id?` / `file_id?` | 対象 |
+| `event` | `created` / `classified` / `reclassified` / `parsed` / `page_done` / `page_failed` / `confirmed` / `exported` / `retry` / `override` |
+| `actor` | wellfort-site が検証した **admin の email**（Scan-Chat-AI へは中継時に渡す） |
+| `detail` | JSON。**値そのものではなく種類と件数**（例 `{ "from": "needs_review", "to": "HealthCheckupData" }`） |
+| `created_at` | — |
+
+**必ず残すもの**: 分類の手動修正 / 重複判定の上書き / `syntheticMarkers` の明示使用 /
+overwrite export / retry。
+
+---
+
+## 22. API 一覧
+
+`{B}` = wellfort-site の中継（ブラウザから呼ぶ。admin token）
+`{S}` = Scan-Chat-AI の処理（サーバ間。Bearer `ADMIN_API_KEY`）
+**パスは両側で同じにする**（中継が何を呼ぶか自明にするため）。
+
+| # | パス | メソッド | 役割 |
+|---|---|---|---|
+| 1 | `/api/admin/ad-hoc-diagnosis/upload-ticket` | POST | batch 作成 + presigned PUT 発行（§5.2） |
+| 2 | `/api/admin/ad-hoc-diagnosis/{batchId}` | GET | 状態取得（バッチ / 人物 / ファイル / 進捗） |
+| 3 | `/api/admin/ad-hoc-diagnosis/{batchId}/classify` | POST | ZIP 展開・分類・人物グループ化 |
+| 4 | `/api/admin/ad-hoc-diagnosis/{batchId}/reclassify` | POST | 管理者による分類修正 |
+| 5 | `/api/admin/ad-hoc-diagnosis/{batchId}/process-file` | POST | 1 ファイル or 1 ページ処理（body に `fileId` / `page` / `image`） |
+| 6 | `/api/admin/ad-hoc-diagnosis/{batchId}/health-age-check` | POST | 全人物のウェルネス年齢適合判定 |
+| 7 | `/api/admin/ad-hoc-diagnosis/{batchId}/finalize` | POST | Elith format JSON 確定（S3 書出しはしない） |
+| 8 | `/api/admin/ad-hoc-diagnosis/{batchId}/export` | POST | S3 納品（`dry_run` / `overwrite`） |
+| 9 | `/api/admin/ad-hoc-diagnosis/{batchId}/retry` | POST | 失敗対象の再実行 |
+
+- **HTTP API 同士を Scan-Chat-AI 内部から呼ばない。** 既存 `elith-scan` / `elith-genetic-merge` /
+  `health-age` / `elith-assemble` の処理は**共通 lib へ切り出して再利用**する（指示書 §13）。
+- 切り出す先: `src/lib/ad-hoc-diagnosis/*.ts`（`zip-reader` / `classify` / `parsers` / `pipeline` / `state`）。
+
+---
+
+## 23. DB 変更（`diagnosis` スキーマ・**Production 適用禁止**）
+
+既存テーブルの調査結果（実測・`supabase/migrations/`）: `announcements` / `app_config` / `app_users` /
+`diagnosis_results` / `health_age_scores` / `measurement_values` / `scan_jobs` /
+`test_artifact_files` / `test_artifacts` / `user_notices`。
+**臨時バッチの状態を持てる表は無い**ので新設する。
+
+### 23.1 `diagnosis.ad_hoc_diagnosis_batches`
+
+`id` / `title` / `status` / `bundle_date`(null 可) / `source_sha256` / `source_size` /
+`source_key` / `subject_count` / `file_count` / `required_formats`(jsonb) /
+`retain_originals`(bool, 既定 false) / `created_by`(admin email) /
+`created_at` / `updated_at` / `confirmed_at` / `exported_at` / `last_error`
+
+`status`: `draft` / `uploaded` / `classified` / `processing` / `needs_review` / `ready` /
+`exporting` / `completed` / `failed`
+
+### 23.2 `diagnosis.ad_hoc_diagnosis_subjects`
+
+`id` / `batch_id` / `subject_no` / `client_id` / `diagnostic_id` /
+`identity_status` / `identity_reason` / `sex` / `age` / `status` / `created_at` / `updated_at`
+
+**氏名は保存しない**（§6.1）。
+
+### 23.3 `diagnosis.ad_hoc_diagnosis_files`
+
+`id` / `batch_id` / `subject_id`(null 可) / `storage_key` / `display_name` / `sha256` /
+`size_bytes` / `mime_type` / `source_kind` / `classified_format_id` /
+`classification_confidence` / `test_date` / `parse_status` / `page_count` /
+`selected_as_primary` / `duplicate_of_file_id` / `error_detail`
+
+### 23.4 `diagnosis.ad_hoc_diagnosis_pages`
+
+`id` / `file_id` / `page_no` / `status` / `parsed`(jsonb) / `raw`(text・監査) /
+`attempts` / `error_detail` / `created_at` / `updated_at`
+**UNIQUE (file_id, page_no)**。キャッシュ参照は `(file_sha256, page_no)`（§19.3）。
+
+### 23.5 `diagnosis.ad_hoc_diagnosis_outputs`
+
+**既存 `test_artifacts` / `test_artifact_files` では表現しない。**
+理由: あちらは「**確定した検査 1 件**」＋「その原本ファイル」で、
+`diagnostic_user_id`（`app_users` への FK）を要求する。臨時バッチの被験者は
+`app_users` に行が無いので**そのままでは入らない**（`app_users` に偽の行を作るのは PII/識別の設計に反する）。
+→ 別表にする。**似た表を二重に作らない**という指示（§12）とは、
+「**入る器があるなら新設しない**」の意味で読み、入らないことを根拠に新設する。
+
+`id` / `subject_id` / `format_id` / `output_status` / `json_storage_key` /
+`validation_status` / `item_count` / `test_date` / `generated_at`
+
+### 23.6 `diagnosis.ad_hoc_diagnosis_events`
+
+§21 のとおり。
+
+### 23.7 適用の約束
+
+- **migration ファイルの作成までが本作業。** 適用は発注者の操作。
+  **`supabase db push` はこちらで実行しない**（CLAUDE.md）。
+- **Production DB へ適用しない。**
+- **適用済みの migration を編集して当て直さない。** 直すときは前進 migration を足す（CLAUDE.md）。
+- RLS: `enable row level security` + `force row level security` を付け、**ポリシーは置かない**。
+  `revoke all ... from anon, authenticated` / `grant all to service_role`
+  （`scan_jobs`（`20260910000010`）と同形）。**この設計は `service_role` の BYPASSRLS に依存する**
+  ——無いと `grant all` は通るのに **0 行しか見えず、エラーも出ない**。
+
+---
+
+## 24. セキュリティ
+
+### 24.1 認可
+
+- **管理画面ページ**: wellfort-site 側で `admin_users`（`is_active=true`）を
+  **ユーザー自身のアクセストークン + anon apikey** で照会する（`api/admin/elith-scan.ts:27-49` と同形。
+  **service_role を使わない**）。
+- **Scan-Chat-AI 側 API**: `src/lib/api-auth.ts` の `isAdminAuthorized()` を使う
+  （**キー未設定の本番は拒否＝fail-closed**）。
+- **ブラウザへ `ADMIN_API_KEY` / `SCAN_CHAT_AI_API_KEY` を渡さない。**
+- **`LAB_INTAKE_API_KEY`（取り込み専用キー）ではこの API を通さない。**
+  intake キーが通ってよい口は 3 つだけで（`api-auth.ts` のコメント）、
+  `npm run verify:intake-scope` が「他の口が intake キーで通ったら落とす」形で固定している。
+  **臨時診断バッチの API をその 3 つに足さない。**
+
+### 24.2 presigned とキー検証
+
+§5.2 のとおり。加えて:
+- **クライアントから S3 key を受け取らない。** `batchId` から**サーバが導出**する。
+- `isAdHocZipKey` / `isAdHocFileKey` は**完全一致**で検証する（部分一致にしない）。
+
+### 24.3 ZIP security（指示書 §22）
+
+| 対策 | 実装 |
+|---|---|
+| Zip Slip（`../`） | 正規化後にベースディレクトリ配下か検査。外れたら**そのエントリを捨てて記録** |
+| 絶対パス | `/` 始まり・`C:` 等のドライブレターを拒否 |
+| symlink | 外部属性の Unix モード上位ビットが `S_IFLNK` のエントリを拒否 |
+| 展開後総容量 | `MAX_TOTAL_UNCOMPRESSED`（§5.1）。Central Directory の `uncompressed size` を**先に合計**して判定 |
+| ファイル数 | `MAX_ENTRIES` |
+| 1 ファイル容量 | `MAX_ENTRY_BYTES` |
+| ネスト深度 | `MAX_DEPTH` |
+| 許可拡張子 | §5.1。**それ以外は展開しない** |
+| MIME 確認 | 拡張子だけで信じず**マジックバイト**を見る（PDF=`%PDF-`、XLSX=`PK\x03\x04` かつ `[Content_Types].xml` を含む） |
+| 空ファイル | 検出して一覧に出す |
+| パスワード保護 | general purpose bit 0 が立っていたら `password_protected_file` |
+
+### 24.4 AWS 側の作業（**運用・発注者側**）
+
+`{AWS_S3_PREFIX}ad-hoc-uploads/` に**ライフサイクル失効ルール**を足す。
+
+- `Expiration { Days: 7 }` + **バケットがバージョニング有効なら
+  `NoncurrentVersionExpiration { NoncurrentDays: 7 }` も必須**
+  （`Expiration` だけだと削除マーカーが付くだけで実データが残る。2026-09-04 の実測）。
+- **prefix を誤ると Elith 納品 JSON が消える。** `ad-hoc-uploads/` で終わることを必ず確認する。
+- 既存ルール（`scan-uploads/` 用）を**消さない**。get → 統合 → put。
+
+### 24.5 この実装作業でやらないこと
+
+- Production DB への migration 実行 / Production データの更新・削除
+- 本番 Elith S3 への今回の実データ送信
+- 本番の検査機関・タカセ・メールへの送信
+- `.env` / 秘密鍵の追加・commit・画面出力
+- **サンプル ZIP・実在氏名の commit**
+
+---
+
+## 25. テスト
+
+### 25.1 fixture（**実在 10 名の ZIP を Git に入れない**・指示書 §24）
+
+`scripts/` で**匿名・架空データから生成**する（生成物は `.gitignore`）。
+
+1. 1 人 3 ファイル / 2. 1 人 4 ファイル（健診 PDF + XLSX 重複）/ 3. 問診 XLSX /
+4. 問診 PDF / 5. 多ページ PDF（**ページ数を縮小した疑似 fixture**）/ 6. 氏名不一致 /
+7. `test_date` 不一致 / 8. unsupported file / 9. `~$` 一時ファイル / 10. duplicate SHA /
+11. malformed ZIP / 12. Zip Slip
+
+### 25.2 Unit（`npm run verify:ad-hoc-*`・サーバ不要）
+
+ZIP 安全展開 / 分類 / 健診 XLSX parser / 問診 XLSX parser / identity check /
+duplicate 判定 / date parse（Excel シリアル・1900 うるう年バグ・`date1904`・文字列日付） /
+age 算出 / PII masking / state transition。
+
+**「壊して落ちること」を必ず確認する**（この種の検査は静かに壊れるため。CLAUDE.md の
+`verify:demo-gate` / `verify:scan-upload-key` と同じ規律）。とくに:
+- **PII masking**: 保存物・応答・ログのどこにも氏名 / DOB が出ないこと。
+  → `hashEmail` を壊すと落ちる形（`verify:demo-gate`）を真似て、**実際に動かして**検査する。
+- **Zip Slip**: `../` を通す実装にすると落ちること。
+
+### 25.3 Integration
+
+ZIP → 1 人物認識 / 3 format 生成 / PDF+XLSX 重複抑止 / Genoplan page resume /
+health age check / schema validation / **dry-run export**。
+
+### 25.4 Regression（既存を壊さない）
+
+`elith-scan` / `elith-genetic-merge` / `health-age` / `elith-assemble` / `admin lab upload`。
+既存の `npm run verify:*` と `astro check` / `astro build` を通す。
+**CI（`.github/workflows/ci.yml`）には新しい検査を書き足さず、`verify:*` を足して既存 job に載せる。**
+
+---
+
+## 26. 受入条件
+
+指示書 §26 の 30 項目をそのまま受入条件とする。要点の再掲:
+
+1. **管理トップ（wellfort-site）に「臨時診断バッチ」が表示される**（※指示書原文の
+   「管理トップ」は wellfort-site 側 = §4 の確定に読み替え）
+2. admin 以外はアクセス不可 / 3. ZIP を投入できる / 4. 10 人物フォルダ構成を検出 /
+5. `~$` を無視 / 6. root 参考ファイルを人物へ誤割当しない /
+7. フォルダ番号と問診内部 ID を同一 ID 扱いしない / 8. 各人物へ新規 UUID `client_id` /
+9〜14. 分類と変換 / **15. PII が納品 JSON / S3 key に出ない** /
+16. 1 ページ失敗から再開 / 17. ブラウザ再読込後もバッチ状態が復元 /
+18. full/simple/unavailable を人物ごとに表示 / **19. 不足値からウェルネス年齢を捏造しない** /
+20〜21. ready 判定 / 22. schema validation / **23. 管理者確定前に Elith 納品しない** /
+24. dry-run / 25. 同一 ZIP 再投入を検知 / **26. Production へ実データを書かずにテスト完了** /
+**27. 既存 5 種 GATING 仕様を壊さない** / **28. 実 PII を Git に含めない** /
+29. unit/integration/regression PASS / 30. build PASS
+
+---
+
+## 27. 既存再利用 / 新規実装
+
+### 27.1 再利用（そのまま呼ぶ）
+
+| 対象 | 実装 |
+|---|---|
+| 遺伝子 1 ページ構造化 | `src/lib/elith-genetic.ts` `scanGeneticPage` |
+| 健診 PDF スキャン → Elith bundle | `src/lib/elith-export.ts` `buildElithScanBundle` |
+| 納品整形（唯一の正規化本体） | `src/lib/elith-export.ts` `sanitizeMeasurementsForDelivery` |
+| 問診エンベロープ | `src/lib/interview-export.ts` `buildElithInterviewJson` / `buildElithInterviewBundle` |
+| ウェルネス年齢 | `src/lib/wellness-age.ts` `computeWellnessAge` |
+| S3 | `src/lib/s3.ts` `getS3Config` / `isS3Configured` / `putFiles` |
+| 原本保存 | `src/lib/originals-storage.ts` `putOriginal`（`retain_originals=true` のときだけ） |
+| 認可 | `src/lib/api-auth.ts` `isAdminAuthorized` |
+| 運用パラメータ | `src/lib/app-config.ts` `refreshConfig`（処理前に呼ぶ） |
+
+### 27.2 ラップして利用
+
+| 対象 | 方法 |
+|---|---|
+| 遺伝子ページ集約 | `elith-genetic-merge.ts` の part/finalize の**思想**を `src/lib/ad-hoc-diagnosis/genetic.ts` へ切り出して共用（HTTP で呼び合わない） |
+| Elith 納品 key 生成 | `elith-genetic-merge.ts` の `folderOf()` 相当を共通化 |
+
+### 27.3 新規実装
+
+`src/lib/zip-reader.ts` / `src/lib/xlsx-reader.ts` / `src/lib/health-checkup-xlsx.ts` /
+`src/lib/questionnaire-xlsx.ts` / `src/lib/ad-hoc-diagnosis/{classify,state,pipeline,keys}.ts` /
+`src/pages/api/admin/ad-hoc-diagnosis/*.ts` / migration 1 本 /
+（wellfort-site 側）`src/pages/admin/ad-hoc-diagnosis.astro` + `src/pages/api/admin/ad-hoc-diagnosis/*.ts`
+
+---
+
+## 28. 既存仕様との矛盾・`OPEN`
+
+### 28.1 解決済み（記録）
+
+**O1. admin UI をどちらのリポジトリに置くか — 解決（2026-09-10 発注者確定）**
+指示書の初版は「Scan-Chat-AI の `/admin/ad-hoc-diagnosis` に UI を追加」としていたが、
+**発注者が訂正**し、`docs/lab/wellfort_admin_lab_upload_spec.md` の既存確定アーキテクチャを正とした。
+→ **UI = wellfort-site / 処理・API = Scan-Chat-AI**（§4）。
+Scan-Chat-AI に既存する `src/pages/admin/*` は**今回の前例として使わない**。
+削除・移設は**本仕様のスコープ外**。**CLAUDE.md に「Scan 側 admin UI の例外」を追加しない。**
+
+### 28.2 未確定（`OPEN`）
+
+| # | 論点 | 影響 | 既定（Phase 1） |
+|---|---|---|---|
+| **O2** | **臨時バッチの原本を 10 年保管（Object Lock）の対象にするか。** 原本用バケットは削除不可なので、氏名・DOB を含むファイルを入れると消せない | 保管ポリシー | **保存しない**（`retain_originals=false`）。受け皿だけ用意 |
+| **O3** | **元ファイル名を DB に保存するか。** 氏名が含まれ得る（指示書 §10）。保存しないと現場が原本を追いにくい | 運用性 vs PII | **保存しない**（`{分類}_{連番}{拡張子}` に置換） |
+| **O4** | **ブラウザの `DecompressionStream('deflate-raw')` 実機対応**と、代替として **S3 の CORS に `GET` を足すか**（CLAUDE.md は「`GET` も足さない」） | 遺伝子 PDF のページ画像化経路 | ブラウザ内展開。**再読込後は ZIP を選び直す**（§11.5） |
+| **O5** | **問診 XLSX / PDF の実列・実レイアウト。** サンプル ZIP が本作業環境に無く、**私は列名を実測していない** | 問診の写像表・`test_date` の正 | 問診 XLSX は**マッピング表を実物で確定してから**。問診 PDF の人物は **`needs_review`** |
+| **O6** | `10名の情報.xlsx` の `実施日` の意味 | `bundle_date` の自動決定 | **転用しない**（§14.4） |
+| **O7** | Elith 側に既存 manifest 定義があるか | §15.4 | 定義があればそれに合わせる。無ければ §15.4 の最小形 |
+
+**`OPEN` を推測で埋めない。** 埋めた瞬間にこの文書は「決定仕様」でなくなる。
+
+---
+
+## 29. 実装フェーズ
+
+| Phase | 内容 | Production |
+|---|---|---|
+| A | 調査（git / docs / DB / 既存 API / originals / Elith 出力 / health age） | 触れない |
+| **B** | **本仕様書の作成・保存** | 触れない |
+| C | DB migration（**ファイル作成のみ**） | **適用禁止** |
+| D | parser / lib（ZIP・分類・XLSX・state）を単体で実装 + unit 検査 | 触れない |
+| E | Scan-Chat-AI 側 管理 API | 触れない |
+| F | wellfort-site 側 6 ステップ UI + 中継 API | 触れない |
+| G | 既存 Elith / HealthAge との接続 | 触れない |
+| H | integration / regression | **dry-run のみ** |
+| I | 実装差異を本仕様書へ反映 | — |
+
+---
+
+## 30. 変更履歴
+
+| 版 | 日付 | 内容 |
+|---|---|---|
+| 0.1 | 2026-09-10 | 初版。発注者指示書（臨時診断バッチ）を受けて Phase B として作成。**責務境界は 2026-09-10 の発注者確定（UI=wellfort-site / 処理=Scan-Chat-AI）を反映**し、指示書初版の「Scan-Chat-AI に UI」は §28.1 に訂正記録として残した。ZIP は presigned PUT・依存追加なしの自作 ZIP/XLSX リーダ・`GATING_FORMAT_IDS` 不変・案件別 `required_formats` を決定。未確定 6 件を §28.2 に分離。 |
