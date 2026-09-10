@@ -34,3 +34,6 @@ pnpm-debug.log*
 supabase/.branches/
 supabase/.temp/
 __pycache__/
+
+# 検証スクリプトが transpile 結果を置く一時ディレクトリ (node_modules 解決のためリポジトリ内に作る)
+.verify-adhoc-*/

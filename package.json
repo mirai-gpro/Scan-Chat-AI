@@ -37,7 +37,11 @@
     "verify:scan-pages": "node scripts/verify-scan-pages.mjs",
     "verify:scan-persist": "esbuild scripts/verify-scan-persist.ts --bundle --platform=node --format=esm --log-level=error \"--define:import.meta.env={}\" --outfile=node_modules/.cache/verify-scan-persist.mjs && node node_modules/.cache/verify-scan-persist.mjs",
     "verify:interview-ui": "node scripts/verify-interview-ui.mjs",
-    "verify:laif-revoke-key": "node scripts/verify-laif-revoke-key.mjs"
+    "verify:laif-revoke-key": "node scripts/verify-laif-revoke-key.mjs",
+    "verify:ad-hoc-archive": "node scripts/verify-ad-hoc-archive.mjs",
+    "verify:ad-hoc-parse": "node scripts/verify-ad-hoc-parse.mjs",
+    "verify:ad-hoc": "npm run verify:ad-hoc-archive && npm run verify:ad-hoc-parse && npm run verify:ad-hoc-e2e",
+    "verify:ad-hoc-e2e": "node scripts/verify-ad-hoc-e2e.mjs"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
@@ -48,9 +52,11 @@
     "@google/genai": "^2.6.0",
     "@lucide/astro": "^1.31.0",
     "@supabase/supabase-js": "^2.46.1",
+    "@zip.js/zip.js": "^2.14.0",
     "astro": "^5.18.2",
     "marked": "^18.0.4",
     "qrcode-generator": "^2.0.4",
+    "read-excel-file": "^9.3.10",
     "sharp": "^0.35.3",
     "tailwindcss": "^3.4.17",
     "typescript": "^5.7.2"
