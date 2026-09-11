@@ -47,9 +47,18 @@ const u = viewer.uid;
 // `?debug=bridge` を付けて開くとサーバー側 env の有無をUIに表示する。
 // デバッグ表示は admin だけ (本番相当への切替・2026-08-30)。
 const debugBridge = url.searchParams.get('debug') === 'bridge' && viewer.isAdmin;
-const bridgeConfigured = isBridgeConfigured();
-const bridgeUrlSeen = !!(import.meta.env.HP_BRIDGE_SUPABASE_URL || (typeof process !== 'undefined' ? process.env?.HP_BRIDGE_SUPABASE_URL : ''));
-const bridgeKeySeen = !!(import.meta.env.HP_BRIDGE_READONLY_KEY  || (typeof process !== 'undefined' ? process.env?.HP_BRIDGE_READONLY_KEY  : ''));
+// **閲覧者の origin で見る** — staging の閲覧者に production の構成状況を出すと、
+// 「configured=true なのに空」の切り分けができなくなる (2026-09-11)。
+const bridgeConfigured = isBridgeConfigured(viewer.origin);
+const bridgeEnvNames = viewer.origin === 'staging'
+  ? (['HP_BRIDGE_STAGING_FUNCTION_URL', 'HP_BRIDGE_STAGING_SHARED_SECRET'] as const)
+  : (['HP_BRIDGE_SUPABASE_URL', 'HP_BRIDGE_READONLY_KEY'] as const);
+const envSeen = (name: string) =>
+  !!((import.meta.env as Record<string, string | undefined>)[name]
+    || (typeof process !== 'undefined' ? (process.env as Record<string, string | undefined>)?.[name] : ''));
+// 値そのものは絶対に出さない (secret を含むため)。**有無だけ**。
+const bridgeUrlSeen = envSeen(bridgeEnvNames[0]);
+const bridgeKeySeen = envSeen(bridgeEnvNames[1]);
 
 /*
  * 表示中のデプロイを特定するための刻印。
@@ -69,7 +78,7 @@ const envStr = (name: string): string => {
 };
 const buildRef = envStr('VERCEL_GIT_COMMIT_REF') || 'local';
 const buildSha = (envStr('VERCEL_GIT_COMMIT_SHA') || 'local').slice(0, 7);
-console.log('[bridge-debug]', { bridgeConfigured, bridgeUrlSeen, bridgeKeySeen, buildRef, buildSha });
+console.log('[bridge-debug]', { origin: viewer.origin, bridgeConfigured, bridgeUrlSeen, bridgeKeySeen, buildRef, buildSha });
 
 // テストフェーズの前提 (発注者指定 2026-08-20):
 //   Wellfort の admin なら誰でもアクセスでき、全員が同じデータ・同じ表示になる。
@@ -132,7 +141,7 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
 <BaseLayout title={data ? `${greeting} | Welltect` : 'マイページ | Welltect'} width="app">
   {debugBridge && (
     <div style="position:fixed;top:0;left:0;right:0;z-index:9999;background:#102B3A;color:#fff;font-size:12px;padding:6px 10px;font-family:monospace;">
-      bridge[configured={String(bridgeConfigured)} url={String(bridgeUrlSeen)} key={String(bridgeKeySeen)}]
+      bridge[origin={viewer.origin} configured={String(bridgeConfigured)} url={String(bridgeUrlSeen)} key={String(bridgeKeySeen)}]
       kit[source={data?.shipmentSource ?? '-'} n={String(data?.shipments?.length ?? 0)} uid={data?.resultUid ?? '-'}]
       build[{buildRef}@{buildSha}]
       <span id="dbg-scrim">scrim[?]</span>
