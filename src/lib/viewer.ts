@@ -19,6 +19,7 @@
  *   ローンチ直前の切替で締め出された場合の復旧用。**本番では off のままにすること。**
  */
 
+import type { BridgeOrigin } from './supabase';
 import type { APIContext, AstroGlobal } from 'astro';
 
 /** Cookie 名。値は署名付きなので中身を書き換えても通らない。 */
@@ -84,11 +85,26 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *
  * **改竄はできない** — payload に admin を含めて HMAC を取るので、`1` に書き換えると署名が合わない。
  */
-export async function signViewer(uid: string, isAdmin = false, now = Date.now()): Promise<string | null> {
+export async function signViewer(
+  uid: string,
+  isAdmin = false,
+  now = Date.now(),
+  origin: BridgeOrigin = 'production',
+): Promise<string | null> {
   const key = secret();
   if (!key || !UUID_RE.test(uid)) return null;
   const exp = Math.floor(now / 1000) + MAX_AGE_SEC;
-  const payload = `${uid.toLowerCase()}.${exp}.${isAdmin ? '1' : '0'}`;
+  /*
+   * **staging 由来のときだけ 5 分割にする。**
+   *
+   * production は従来どおり 4 分割 (`uid.exp.admin`) のままにして、
+   * **既存の Cookie と発行物を 1 バイトも変えない**。staging は総合テスト用の
+   * 一時的な経路なので、そちらにだけ印を足す。
+   * 改竄不可 — origin も payload に含めて HMAC を取る。
+   */
+  const payload = origin === 'staging'
+    ? `${uid.toLowerCase()}.${exp}.${isAdmin ? '1' : '0'}.s`
+    : `${uid.toLowerCase()}.${exp}.${isAdmin ? '1' : '0'}`;
   return `${payload}.${await hmac(payload, key)}`;
 }
 
@@ -108,6 +124,15 @@ export interface VerifiedViewer {
    * → この印を見て**その場で発行し直す** (`GoogleOneTap` の自己修復)。
    */
   legacy: boolean;
+  /**
+   * **この閲覧者を解決した HP/EC 環境。**
+   *
+   * 総合テストは staging の EC で購入した人を本番の Web アプリで受けるため、
+   * キット進捗が読む `app_bridge` の**接続先を人ごとに変える**必要がある。
+   * `/api/auth/resolve` が解決に使った経路をそのまま Cookie に載せる。
+   * **印が無い Cookie は production 扱い** (既定を staging にしない＝混線を作らない)。
+   */
+  origin: BridgeOrigin;
 }
 
 /**
@@ -121,22 +146,33 @@ export async function verifyViewer(token: string | undefined | null, now = Date.
   const key = secret();
   if (!key || !token) return null;
   const parts = token.split('.');
-  if (parts.length !== 3 && parts.length !== 4) return null;
+  // 3=旧形式 / 4=admin つき / 5=admin + 環境印 (staging)
+  if (parts.length < 3 || parts.length > 5) return null;
 
   const [uid, expRaw] = parts;
-  const adminRaw = parts.length === 4 ? parts[2] : null;
+  const adminRaw = parts.length >= 4 ? parts[2] : null;
+  const originRaw = parts.length === 5 ? parts[3] : null;
   const sig = parts[parts.length - 1];
   if (!UUID_RE.test(uid)) return null;
   if (adminRaw !== null && adminRaw !== '0' && adminRaw !== '1') return null;
+  // **印は `s` だけ許す。** 未知の値は受け付けない (production へ落とさず拒否)。
+  if (originRaw !== null && originRaw !== 's') return null;
   const exp = Number(expRaw);
   if (!Number.isFinite(exp) || exp * 1000 < now) return null;
 
   const payload = adminRaw === null
     ? `${uid.toLowerCase()}.${expRaw}`
-    : `${uid.toLowerCase()}.${expRaw}.${adminRaw}`;
+    : originRaw === null
+      ? `${uid.toLowerCase()}.${expRaw}.${adminRaw}`
+      : `${uid.toLowerCase()}.${expRaw}.${adminRaw}.${originRaw}`;
   const expected = await hmac(payload, key);
   if (!timingSafeEqual(sig, expected)) return null;
-  return { uid: uid.toLowerCase(), admin: adminRaw === '1', legacy: adminRaw === null };
+  return {
+    uid: uid.toLowerCase(),
+    admin: adminRaw === '1',
+    legacy: adminRaw === null,
+    origin: originRaw === 's' ? 'staging' : 'production',
+  };
 }
 
 /** `Set-Cookie` に載せる属性。 */
@@ -172,6 +208,12 @@ export interface Viewer {
   /** admin が `?u=` で他人を表示している状態か。 */
   impersonating: boolean;
   /**
+   * **表示対象がどの HP/EC 環境で解決された人か。** キット進捗が読む `app_bridge` の
+   * 接続先をこれで選ぶ。**印の無い Cookie は production**（既定を staging にしない）。
+   * 代理表示 (`?u=`) 中は**表示対象ではなく Cookie の持ち主の印**が載る点に注意。
+   */
+  origin: BridgeOrigin;
+  /**
    * **Cookie の admin フラグを取り直す必要があるか。**
    * `GoogleOneTap` がこれを見て `/api/auth/refresh-admin` を呼ぶ (自己修復)。
    *
@@ -187,7 +229,7 @@ export interface Viewer {
   cookieStale: boolean;
 }
 
-const ANONYMOUS: Viewer = { uid: null, selfUid: null, isAdmin: false, adminBy: null, impersonating: false, cookieStale: false };
+const ANONYMOUS: Viewer = { uid: null, selfUid: null, isAdmin: false, adminBy: null, impersonating: false, cookieStale: false, origin: 'production' };
 
 /**
  * リクエストから閲覧者を解決する。**すべてのユーザー向けページはこれを通すこと。**
@@ -211,7 +253,7 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
        * その一覧は撤去した (admin の正は wellfort-site の管理者リストだけ)。
        * URL に uid を書くだけで admin になれる経路を残さない。
        */
-      return { uid: requested, selfUid: requested, isAdmin: false, adminBy: null, impersonating: false, cookieStale: false };
+      return { uid: requested, selfUid: requested, isAdmin: false, adminBy: null, impersonating: false, cookieStale: false, origin: 'production' };
     }
     return ANONYMOUS;
   }
@@ -227,9 +269,9 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
   const adminBy: Viewer['adminBy'] = verified.admin ? 'cookie' : null;
   const isAdmin = adminBy !== null;
   if (isAdmin && requested && requested !== selfUid) {
-    return { uid: requested, selfUid, isAdmin, adminBy, impersonating: true, cookieStale: verified.legacy || !isAdmin };
+    return { uid: requested, selfUid, isAdmin, adminBy, impersonating: true, cookieStale: verified.legacy || !isAdmin, origin: verified.origin };
   }
-  return { uid: selfUid, selfUid, isAdmin, adminBy, impersonating: false, cookieStale: verified.legacy || !isAdmin };
+  return { uid: selfUid, selfUid, isAdmin, adminBy, impersonating: false, cookieStale: verified.legacy || !isAdmin, origin: verified.origin };
 }
 
 /** `?u=` の短縮形（先頭8桁）も従来どおり受ける。 */

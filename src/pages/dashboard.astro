@@ -85,7 +85,7 @@ const needsSignIn = authEnabled && !u;
  * 後ろに置くと初回リクエストで admin 画面からの登録が効かない (コード既定に落ちる)。
  */
 await refreshConfig();
-const result = needsSignIn ? null : await loadDashboard(u);
+const result = needsSignIn ? null : await loadDashboard(u, viewer.origin);
 
 const hasError = result ? 'error' in result : false;
 const data = !result || hasError ? null : (result as Exclude<typeof result, { error: string }>);
