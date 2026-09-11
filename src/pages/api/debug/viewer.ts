@@ -26,7 +26,7 @@ import { demoFallbackEnabled } from '../../../lib/demo-data';
 import { demoAccountStats } from '../../../lib/demo-accounts';
 import { loadReportVM } from '../../../lib/elith-report-queries';
 import { refreshConfig } from '../../../lib/app-config';
-import { getServerSupabase } from '../../../lib/supabase';
+import { getServerSupabase, isBridgeConfigured, type BridgeOrigin } from '../../../lib/supabase';
 
 export const prerender = false;
 
@@ -95,13 +95,18 @@ export const GET: APIRoute = async (ctx) => {
    *   ③ 現行形式の実データが在る → **モックとは違って当然** (モックは 2026-08-26 検体の紙面)
    * 行の有無だけを見て「データは在る」と判断しない、が 2026-08-30 の教訓。
    */
-  const report = await inspectReport(viewer.uid);
+  const report = await inspectReport(viewer.uid, viewer.origin);
   /*
    * 「この検査だけ画面に出ない」の切り分け用。**カードは種別ごとに常に描かれる**
    * (`TestResultsSection.astro`) ので、空に見えるのは行が無いときだけ。
    * 種別と件数しか出さない (PII を載せない)。
    */
-  const artifacts = await inspectArtifacts(viewer.uid);
+  const artifacts = await inspectArtifacts(viewer.uid, viewer.origin);
+  /*
+   * 「キットの進捗が空」の切り分け。`loadDashboard` は bridge の失敗を空へ畳むので、
+   * 画面だけでは「顧客が居ない」と「呼び出しが失敗した」を区別できない。
+   */
+  const bridge = await inspectBridge(viewer.uid, viewer.origin);
 
   return json({
     ok: true,
@@ -120,11 +125,16 @@ export const GET: APIRoute = async (ctx) => {
     },
     report,
     artifacts,
+    bridge,
     cookie: {
       present: !!raw,
       valid: !!verified,
       parts: raw ? raw.split('.').length : 0,
-      format: verified ? (verified.legacy ? '旧 3 分割 (admin フラグ無し)' : '4 分割') : null,
+      format: verified
+        ? (verified.legacy
+            ? '旧 3 分割 (admin フラグ無し)'
+            : verified.origin === 'staging' ? '5 分割 (staging 印つき)' : '4 分割')
+        : null,
       admin_flag: verified ? verified.admin : null,
     },
     viewer: {
@@ -133,6 +143,12 @@ export const GET: APIRoute = async (ctx) => {
       is_admin: viewer.isAdmin,
       admin_by: viewer.adminBy,
       impersonating: viewer.impersonating,
+      /**
+       * **どちらの HP/EC 環境で解決されたか** (Cookie の署名に含まれる)。
+       * staging の EC で購入した検体を本番の Web アプリで見るとき、ここが `staging` に
+       * なっていないと bridge は production を読む = キット進捗が空になる (2026-09-11)。
+       */
+      origin: viewer.origin,
       /** true なら GoogleOneTap が refresh-admin を呼ぶ (タブ + ビルド版ごとに 1 回)。 */
       cookie_stale: viewer.cookieStale,
     },
@@ -173,7 +189,47 @@ export const GET: APIRoute = async (ctx) => {
  * 報告書の「材料」と「出来上がった紙面」を並べて返す。**PII は出さない**
  * (氏名は渡さず、本文も出さず、件数と字数だけ)。
  */
-async function inspectReport(viewerUid: string | null): Promise<Record<string, unknown>> {
+/**
+ * **キット進捗が空のときの切り分け。**
+ *
+ * 画面 (`/kit`・ダッシュボード) は「顧客が居ない」でも「bridge の呼び出しが失敗した」でも
+ * 同じ空表示になるので、区別できるのはここだけ。`loadDashboard` は失敗を空へ畳むため、
+ * **`loadBridgeBundle` を直接呼んで生の結果を見る**。
+ *
+ * **出すのは件数と真偽だけ** — 氏名・住所・注文番号・secret は 1 文字も載せない。
+ */
+async function inspectBridge(viewerUid: string | null, origin: BridgeOrigin): Promise<Record<string, unknown>> {
+  const configured = isBridgeConfigured(origin);
+  const out: Record<string, unknown> = {
+    origin,
+    /** staging = Edge Function 経由 / production = app_bridge へ直接 (2026-09-11 確定)。 */
+    transport: origin === 'staging' ? 'edge-function (get-bridge-bundle)' : 'supabase (app_bridge)',
+    configured,
+  };
+  if (!configured) {
+    out.note = origin === 'staging'
+      ? 'HP_BRIDGE_STAGING_FUNCTION_URL / HP_BRIDGE_STAGING_SHARED_SECRET が未設定 → 顧客・プラン・キットは空になる'
+      : 'HP_BRIDGE_SUPABASE_URL / HP_BRIDGE_READONLY_KEY が未設定 → 顧客・プラン・キットは空になる';
+    return out;
+  }
+  if (!viewerUid) { out.note = 'uid が無い (未サインイン)'; return out; }
+  try {
+    const { loadBridgeBundle } = await import('../../../lib/bridge-queries');
+    const b = await loadBridgeBundle(viewerUid, origin);
+    if ('error' in b) { out.ok = false; out.error = b.error; return out; }
+    out.ok = true;
+    out.customer = !!b.customer;
+    out.subscription = !!b.subscription;
+    out.shipments = b.shipments.length;
+    if (!b.customer) out.note = 'bridge は応答したが該当顧客が居ない (別環境で購入した / 未連携)';
+  } catch (e) {
+    out.ok = false;
+    out.error = e instanceof Error ? e.message : String(e);
+  }
+  return out;
+}
+
+async function inspectReport(viewerUid: string | null, origin: BridgeOrigin): Promise<Record<string, unknown>> {
   await refreshConfig();
 
   /*
@@ -184,7 +240,7 @@ async function inspectReport(viewerUid: string | null): Promise<Record<string, u
   let uid = viewerUid;
   try {
     const { loadDashboard } = await import('../../../lib/dashboard-queries');
-    const r = await loadDashboard(viewerUid);
+    const r = await loadDashboard(viewerUid, origin);
     if (r && !('error' in r)) uid = r.diagnosticUserId;
   } catch { /* 解決できなければ Cookie の uid のまま見る */ }
 
@@ -295,11 +351,11 @@ function json(data: unknown, status = 200): Response {
  * **画面と違う答えを出す診断**になる (inspectReport と同じ理由)。
  * 出すのは **種別と件数と日付だけ** (PII を載せない)。
  */
-async function inspectArtifacts(viewerUid: string | null): Promise<Record<string, unknown>> {
+async function inspectArtifacts(viewerUid: string | null, origin: BridgeOrigin): Promise<Record<string, unknown>> {
   const KINDS = ['health_checkup', 'blood', 'cancer_urine', 'ai_prediction', 'genetics'];
   try {
     const { loadDashboard } = await import('../../../lib/dashboard-queries');
-    const r = await loadDashboard(viewerUid);
+    const r = await loadDashboard(viewerUid, origin);
     if (!r || 'error' in r) return { error: r && 'error' in r ? r.error : '取得できず' };
 
     const rows = r.artifacts ?? [];

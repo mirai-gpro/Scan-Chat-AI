@@ -21,6 +21,7 @@
     "verify:screen": "node scripts/verify-screen.mjs",
     "verify:report": "npm run verify:report-model && npm run verify:sheet-contract && npm run verify:demo-gate",
     "verify:demo-gate": "node scripts/verify-demo-gate.mjs",
+    "verify:staging-bridge": "node scripts/verify-staging-bridge.mjs",
     "verify:intake-scope": "esbuild scripts/verify-intake-scope.ts --bundle --platform=node --format=esm --log-level=error | node --input-type=module",
     "verify:demecal-flow": "node scripts/verify-demecal-flow.mjs",
     "verify:demecal-range": "node scripts/verify-demecal-range.mjs",

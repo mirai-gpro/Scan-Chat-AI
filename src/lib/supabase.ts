@@ -49,8 +49,8 @@ export function getServerSupabase(): SupabaseClient<Database> | null {
 type BridgeEnvName =
   | 'HP_BRIDGE_SUPABASE_URL'
   | 'HP_BRIDGE_READONLY_KEY'
-  | 'HP_BRIDGE_STAGING_SUPABASE_URL'
-  | 'HP_BRIDGE_STAGING_READONLY_KEY';
+  | 'HP_BRIDGE_STAGING_FUNCTION_URL'
+  | 'HP_BRIDGE_STAGING_SHARED_SECRET';
 
 function envOf(name: BridgeEnvName): string {
   const v = (import.meta.env as Record<string, string | undefined>)[name];
@@ -67,25 +67,27 @@ function envOf(name: BridgeEnvName): string {
  *  `docs/subscription/検査キット_データモデル_仕様書.md` §2)。
  * 総合テストは **staging の EC で購入 → 本番の Web アプリでサインイン**という
  * 環境を跨いだ構成で行うため、**接続先を 1 本の env で決め打ちできない**。
+ *
+ * **取り方が 2 つに分かれる** (2026-09-11 確定):
+ *   production … `app_bridge` スキーマへ**直接** Supabase 接続 (従来どおり)
+ *   staging    … Edge Function `get-bridge-bundle` を**サーバ間で POST**
+ *                (staging は新 API キー方式で、`app_bridge_readonly` ロールを
+ *                 名乗る鍵を用意できないため。関数の内側で service_role が
+ *                 3 表だけを読む)
  */
 export type BridgeOrigin = 'production' | 'staging';
 
-const BRIDGE_ENV: Record<BridgeOrigin, { url: BridgeEnvName; key: BridgeEnvName }> = {
-  production: { url: 'HP_BRIDGE_SUPABASE_URL', key: 'HP_BRIDGE_READONLY_KEY' },
-  staging: { url: 'HP_BRIDGE_STAGING_SUPABASE_URL', key: 'HP_BRIDGE_STAGING_READONLY_KEY' },
-};
-
 /**
- * `app_bridge` 読み取り専用クライアント。
+ * `app_bridge` 読み取り専用クライアント (**production 専用**)。
  *
- * **既定は production**。staging は `origin='staging'` を明示したときだけで、
- * **production が空でも staging へ落ちない** (無条件フォールバックは
- * production 利用者と staging 利用者の混線を招くため禁止)。
+ * **staging では使わない** — staging は Edge Function 経由なので、
+ * ここで直接クライアントを作ると新方式の鍵で弾かれる。
+ * `origin='staging'` を渡した場合は null を返す (呼び出し側が経路を分ける)。
  */
 export function getBridgeSupabase(origin: BridgeOrigin = 'production'): SupabaseClient<BridgeDatabase> | null {
-  const names = BRIDGE_ENV[origin];
-  const url = envOf(names.url);
-  const key = envOf(names.key);
+  if (origin !== 'production') return null;
+  const url = envOf('HP_BRIDGE_SUPABASE_URL');
+  const key = envOf('HP_BRIDGE_READONLY_KEY');
   if (!url || !key) return null;
   return createClient<BridgeDatabase>(url, key, {
     db: { schema: 'app_bridge' },
@@ -94,13 +96,20 @@ export function getBridgeSupabase(origin: BridgeOrigin = 'production'): Supabase
 }
 
 /**
- * app_bridge への接続が構成済みか (dev フォールバック判定用)。
+ * staging の `get-bridge-bundle` 呼び出しに要る設定。未構成なら null。
  *
- * **env の有無しか見ない。接続先の project は見ない** — 従来からの性質で、
- * だからこそ「どちらの環境か」は env の有無でなく `origin` で決める
- * (仕様書 §2 の囲みが指摘している落とし穴)。
+ * **secret はここから外へ出さない** — 返すのは呼び出し直前の 1 か所だけで使う。
+ * ログ・応答・画面に載せてはならない。
  */
-export function isBridgeConfigured(origin: BridgeOrigin = 'production'): boolean {
-  const names = BRIDGE_ENV[origin];
-  return !!envOf(names.url) && !!envOf(names.key);
+export function getStagingBridgeEndpoint(): { url: string; secret: string } | null {
+  const url = envOf('HP_BRIDGE_STAGING_FUNCTION_URL');
+  const secret = envOf('HP_BRIDGE_STAGING_SHARED_SECRET');
+  if (!url || !secret) return null;
+  return { url, secret };
 }
+
+export function isBridgeConfigured(origin: BridgeOrigin = 'production'): boolean {
+  if (origin === 'staging') return getStagingBridgeEndpoint() !== null;
+  return !!envOf('HP_BRIDGE_SUPABASE_URL') && !!envOf('HP_BRIDGE_READONLY_KEY');
+}
+

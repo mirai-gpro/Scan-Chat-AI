@@ -84,6 +84,10 @@ jobs:
       - run: npm run verify:ad-hoc-archive
       - run: npm run verify:ad-hoc-parse
       - run: npm run verify:ad-hoc-e2e
+      # staging bridge (Edge Function 経路・2026-09-11 追加)。**鍵もサーバも要らない**
+      # ので A 層。実物を transpile し、Edge Function は localhost のスタブ、
+      # Supabase クライアントは記録用スタブに差し替えて動かす。
+      - run: npm run verify:staging-bridge
 
   # ── PowerShell 必須の検査 (初回 non-required) ──────────────────
   # ubuntu-24.04 ランナーには PowerShell 7.6.5 が同梱されている見込み

@@ -8,7 +8,7 @@
  *     「検査完了」表示は #2 (test_artifacts) 側で別途扱う。
  */
 
-import { getBridgeSupabase , type BridgeOrigin } from './supabase';
+import { getBridgeSupabase, getStagingBridgeEndpoint, type BridgeOrigin } from './supabase';
 import type { CustomerProfile, KitShipment, Subscription } from '../types/supabase';
 import type { BridgeCustomerAccount, BridgeKitShipment, BridgeSubscription } from '../types/supabase-bridge';
 
@@ -101,10 +101,88 @@ function adaptShipment(s: BridgeKitShipment): KitShipment & { lab_name: string |
 /**
  * app_bridge から顧客バンドルを取得。bridge 未構成時に呼ばれた場合は error を返す。
  */
+/** `get-bridge-bundle` の応答 (staging)。中身は app_bridge の生の行。 */
+interface StagingBundleResponse {
+  success: boolean;
+  data?: {
+    customer: BridgeCustomerAccount | null;
+    subscription: BridgeSubscription | null;
+    shipments: BridgeKitShipment[] | null;
+  } | null;
+  error?: string;
+}
+
+/** Edge Function の応答を待つ上限。SSR を止めないため短く切る。 */
+const STAGING_BRIDGE_TIMEOUT_MS = 8000;
+
+/**
+ * **staging は Edge Function `get-bridge-bundle` をサーバ間で叩く** (2026-09-11 確定)。
+ *
+ * staging は新しい API キー方式で、`app_bridge_readonly` ロールを名乗る鍵を用意できない。
+ * 代わりに staging 側へ関数を置き、その内側で service_role が
+ * `customer_account` / `subscription` / `kit_shipment` の 3 表だけを読む。
+ * 認証はサーバ間の共有シークレット (`x-bridge-secret`)。
+ *
+ * **失敗は握り潰さない。** 原因をサーバログに残したうえで `{ error }` を返す
+ * (画面は呼び出し側が空で成立させる)。**シークレット・JWT・PII はログに出さない** —
+ * 出すのは HTTP ステータスと関数が返したエラー文字列だけ。
+ */
+async function loadStagingBundleViaFunction(uid: string): Promise<CustomerBundle | { error: string }> {
+  const endpoint = getStagingBridgeEndpoint();
+  if (!endpoint) return { error: 'staging bridge が未構成です。' };
+
+  let res: Response;
+  try {
+    res = await fetch(endpoint.url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-bridge-secret': endpoint.secret,
+      },
+      body: JSON.stringify({ diagnostic_user_id: uid }),
+      signal: AbortSignal.timeout(STAGING_BRIDGE_TIMEOUT_MS),
+    });
+  } catch (e) {
+    // timeout / 通信断。**uid は診断側の識別子で PII ではない**が、載せない。
+    const reason = e instanceof Error ? e.message : String(e);
+    console.error('[bridge] staging get-bridge-bundle 呼び出しに失敗:', reason);
+    return { error: `staging bridge 呼び出し失敗: ${reason}` };
+  }
+
+  if (!res.ok) {
+    console.error(`[bridge] staging get-bridge-bundle HTTP ${res.status}`);
+    return { error: `staging bridge HTTP ${res.status}` };
+  }
+
+  const payload = (await res.json().catch(() => null)) as StagingBundleResponse | null;
+  if (!payload?.success) {
+    const reason = payload?.error ?? '応答を解釈できません';
+    console.error('[bridge] staging get-bridge-bundle が success:false:', reason);
+    return { error: `staging bridge: ${reason}` };
+  }
+
+  const account = payload.data?.customer ?? null;
+  if (!account) {
+    // 未連携 (ブリッジに行が無い)。**エラーではない。**
+    return { customer: null, shipments: [], subscription: null };
+  }
+
+  const sub = payload.data?.subscription ?? null;
+  const ships = payload.data?.shipments ?? [];
+  return {
+    customer: adaptCustomer(account),
+    subscription: sub ? adaptSubscription(sub, account.hp_customer_id) : null,
+    shipments: ships.map(adaptShipment),
+  };
+}
+
 export async function loadBridgeBundle(
   uid: string,
   origin: BridgeOrigin = 'production',
 ): Promise<CustomerBundle | { error: string }> {
+  // **staging だけ経路が違う。** production へ落とさない (混線防止)。
+  if (origin === 'staging') return loadStagingBundleViaFunction(uid);
+
   const bridge = getBridgeSupabase(origin);
   if (!bridge) return { error: 'app_bridge が未構成です。' };
 

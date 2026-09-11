@@ -171,10 +171,17 @@ export async function loadDashboard(
     const bundle = usingBridge
       ? await loadBridgeBundle(resultUid, origin)
       : await loadMockCustomerBundle(sb, resultUid);
-    // バンドル取得失敗時も画面は成立させる (顧客/プランは空扱い)
-    const safeBundle: CustomerBundle = 'error' in bundle
-      ? { customer: null, shipments: [], subscription: null }
-      : bundle;
+    // バンドル取得失敗時も画面は成立させる (顧客/プランは空扱い)。
+    // **黙って空にしない** — 空の理由が「顧客が居ない」なのか「bridge が失敗した」なのかを
+    // 区別できないと切り分けが泥沼になるので、サーバログに理由だけを残す
+    // (secret / JWT / PII は載せない。uid も出さない)。
+    let safeBundle: CustomerBundle;
+    if ('error' in bundle) {
+      console.error(`[dashboard] bridge(${origin}) 取得失敗のため顧客/プラン/キットを空で描画します:`, bundle.error);
+      safeBundle = { customer: null, shipments: [], subscription: null };
+    } else {
+      safeBundle = bundle;
+    }
 
     /*
      * ここへ来るのは**非デモの閲覧者だけ** (デモ用アカウントは上で return 済み)。
