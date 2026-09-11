@@ -264,7 +264,18 @@ export const POST: APIRoute = async ({ request, cookies }) => {
    */
   await linkDemoEmail(email, diagnosticUserId);
 
-  const token = await signViewer(diagnosticUserId, isAdmin || await isAdminEmailAsync(email));
+  /*
+   * **解決元の環境を Cookie に載せる。** キット進捗が読む `app_bridge` は
+   * production と staging で別プロジェクトなので、以後のページ表示で
+   * 「この人はどちらを見るか」を決める根拠が要る。**staging のときだけ印が付く**
+   * (印の無い Cookie は production 扱い＝既定を staging にしない)。
+   */
+  const token = await signViewer(
+    diagnosticUserId,
+    isAdmin || await isAdminEmailAsync(email),
+    Date.now(),
+    resolvedFrom === 'staging' ? 'staging' : 'production',
+  );
   if (token) cookies.set(VIEWER_COOKIE, token, viewerCookieOptions());
 
   // `resolvedBy` は切り分け用 (PII 非含有)。**staging 由来かどうかがここで分かる**。

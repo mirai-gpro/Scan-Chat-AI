@@ -7,7 +7,7 @@
  */
 
 import type { AppIconName } from '../components/AppIcon.astro';
-import { getServerSupabase, isBridgeConfigured } from './supabase';
+import { getServerSupabase, isBridgeConfigured, type BridgeOrigin } from './supabase';
 import { loadBridgeBundle, type CustomerBundle } from './bridge-queries';
 import { buildDemoDashboard, demoFallbackEnabled, demoMetricTrend } from './demo-data';
 import type {
@@ -89,7 +89,15 @@ function normalizeDiagnosticUserId(raw: string): string | null {
 }
 
 /** dashboard.astro から呼ぶ。 */
-export async function loadDashboard(diagnosticUserId?: string | null): Promise<DashboardData | { error: string }> {
+export async function loadDashboard(
+  diagnosticUserId?: string | null,
+  /**
+   * **どの HP/EC 環境の `app_bridge` を読むか** (`viewer.origin` をそのまま渡す)。
+   * 既定 production。**production が空でも staging へ落とさない** — 無条件
+   * フォールバックは production 利用者と staging 利用者の混線を招くため。
+   */
+  origin: BridgeOrigin = 'production',
+): Promise<DashboardData | { error: string }> {
   const normalized = diagnosticUserId ? normalizeDiagnosticUserId(diagnosticUserId) : null;
   const uid = normalized ?? DEFAULT_USER;
 
@@ -159,9 +167,9 @@ export async function loadDashboard(diagnosticUserId?: string | null): Promise<D
 
     // 顧客/プラン/キットは app_bridge (本番) もしくは customer モック (dev) から取得。
     // デモ表示中は結果元 (resultUid) に揃える。
-    const usingBridge = isBridgeConfigured();
+    const usingBridge = isBridgeConfigured(origin);
     const bundle = usingBridge
-      ? await loadBridgeBundle(resultUid)
+      ? await loadBridgeBundle(resultUid, origin)
       : await loadMockCustomerBundle(sb, resultUid);
     // バンドル取得失敗時も画面は成立させる (顧客/プランは空扱い)
     const safeBundle: CustomerBundle = 'error' in bundle

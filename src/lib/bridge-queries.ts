@@ -8,7 +8,7 @@
  *     「検査完了」表示は #2 (test_artifacts) 側で別途扱う。
  */
 
-import { getBridgeSupabase } from './supabase';
+import { getBridgeSupabase , type BridgeOrigin } from './supabase';
 import type { CustomerProfile, KitShipment, Subscription } from '../types/supabase';
 import type { BridgeCustomerAccount, BridgeKitShipment, BridgeSubscription } from '../types/supabase-bridge';
 
@@ -101,8 +101,11 @@ function adaptShipment(s: BridgeKitShipment): KitShipment & { lab_name: string |
 /**
  * app_bridge から顧客バンドルを取得。bridge 未構成時に呼ばれた場合は error を返す。
  */
-export async function loadBridgeBundle(uid: string): Promise<CustomerBundle | { error: string }> {
-  const bridge = getBridgeSupabase();
+export async function loadBridgeBundle(
+  uid: string,
+  origin: BridgeOrigin = 'production',
+): Promise<CustomerBundle | { error: string }> {
+  const bridge = getBridgeSupabase(origin);
   if (!bridge) return { error: 'app_bridge が未構成です。' };
 
   const { data: account, error: accErr } = await bridge
