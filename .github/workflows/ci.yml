@@ -88,6 +88,11 @@ jobs:
       # ので A 層。実物を transpile し、Edge Function は localhost のスタブ、
       # Supabase クライアントは記録用スタブに差し替えて動かす。
       - run: npm run verify:staging-bridge
+      # Cookie の origin が再署名で失われないこと (2026-09-11 の実障害の固定)。
+      # refresh-admin が `signViewer(uid, isAdmin)` と呼んで staging の 5 分割 Cookie を
+      # production の 4 分割へ黙って書き換え、キット進捗が 0 件になった。
+      # **画面にエラーは出ない**ので目視では守れない。鍵もサーバも要らないので A 層。
+      - run: npm run verify:viewer-origin
 
   # ── PowerShell 必須の検査 (初回 non-required) ──────────────────
   # ubuntu-24.04 ランナーには PowerShell 7.6.5 が同梱されている見込み
