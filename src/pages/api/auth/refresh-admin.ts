@@ -43,7 +43,21 @@ export const POST: APIRoute = async ({ request, cookies }) => {
   if (!email) return json({ error: 'no email' }, 400);
 
   const isAdmin = await isAdminEmailAsync(email);
-  const token = await signViewer(current.uid, isAdmin);
+  /*
+   * **`origin` を絶対に変えない (2026-09-11・実障害)。**
+   *
+   * ここは **admin フラグだけ**を入れ直す口。`signViewer` の `origin` 既定は
+   * `'production'` なので、**渡し忘れると staging 由来の 5 分割 Cookie が
+   * production の 4 分割へ黙って書き換わる**。
+   * `GoogleOneTap.astro:51` の `needsCookieRefresh` は **`selfUid` があれば真**
+   * = サインイン済みなら誰でもこの口を叩く (同 `:95` `refreshViewerCookie`・
+   * タブごと・ビルドごとに 1 回) ので、**必ず踏む**経路。実測ではサインイン直後に
+   * 出ていたキット 2 件が、この再署名の直後から 0 件になった
+   * (dashboard → 進捗の詳細 → dashboard の全部)。
+   * → **uid と origin は `current`(検証済み Cookie) のものをそのまま引き継ぐ。**
+   * 固定は `npm run verify:viewer-origin`。
+   */
+  const token = await signViewer(current.uid, isAdmin, Date.now(), current.origin);
   if (!token) return json({ error: 'cannot sign' }, 503);
   cookies.set(VIEWER_COOKIE, token, viewerCookieOptions());
 
