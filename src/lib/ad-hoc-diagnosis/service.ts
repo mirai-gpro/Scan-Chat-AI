@@ -658,6 +658,15 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
         });
       const failed = pages.filter((p) => p.status === 'failed').length;
       /*
+       * **読み切れていないページが 1 枚でもあるか** (failed / pending / processing)。
+       * `failed` だけを見ると、途中で止まった (pending のまま) PDF が
+       * 「失敗 0 件」として通ってしまう。
+       *
+       * **`page_count` は使わない** — あれは `countPdfPages` の正規表現による概算で、
+       * 外すと**操作で直せない状態で納品が永久に止まる**。ここで見るのは実在の行だけ。
+       */
+      const incomplete = pages.filter((p) => p.status !== 'done').length;
+      /*
        * **遺伝子の日付は遺伝子ファイル自身のもの** (§10・Phase B1 で是正)。
        * 以前は健診の `hcTestDate` を流用していたが、健診日と採取日は別物で、
        * **納品 key の日付フォルダとファイル名がそのまま間違う** (Elith 側では
@@ -681,8 +690,16 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
             ? 'test_date_unresolved'
             : failed > 0 ? `failed_pages:${failed}` : null,
         });
-        // **日付が無いものは ready の材料に数えない** (§16-G)。
-        if (gTestDate) formats.push('GeneticTestResultData');
+        /*
+         * **納品物として数えるのは「日付があり・失敗ページが 0」のときだけ** (§16-G)。
+         *
+         * 以前は成功ページが 1 枚でもあれば数えていたが、それだと
+         * **読めなかったページを落としたまま「遺伝子検査の結果」として納品**される。
+         * 失敗が残る間は `optional_present_but_not_ready:GeneticTestResultData` で
+         * ready が止まり、retry で全ページ成功して初めて納品対象になる。
+         * (`upsertOutput` は上で済ませてあるので、warn/error の記録は消えない。)
+         */
+        if (gTestDate && incomplete === 0) formats.push('GeneticTestResultData');
       }
       await store.updateFile(gFile.id, {
         parse_status: doneParts.length > 0 && failed === 0 ? 'done' : doneParts.length > 0 ? 'processing' : 'pending',
@@ -869,7 +886,16 @@ export async function assembleBatch(input: {
        * まるごと誤った日付で S3 に置かれる。**取れないなら納品しない。**
        */
       const gTestDate = gFile.test_date ?? null;
-      if (parts.length > 0 && gTestDate) {
+      /*
+       * **読み切れていないページがあれば組まない** (process 経路と同じ規則)。
+       * 成功ページだけで JSON を作ると、**落ちたページの中身が無いまま
+       * 「遺伝子検査の結果」として納品される** (受け取った側は欠けに気づけない)。
+       * ここで組まなければ readiness が
+       * `optional_present_but_not_ready:GeneticTestResultData` で止まり、
+       * retry で全ページ成功してから納品される。
+       */
+      const gIncomplete = pages.filter((p) => p.status !== 'done').length;
+      if (parts.length > 0 && gTestDate && gIncomplete === 0) {
         const b = buildGeneticJson({ clientId: s.client_id, parts, testDate: gTestDate });
         built.push(toDeliveryFile(cfg.prefix, s.client_id, 'GeneticTestResultData', gTestDate, b.json));
         formats.push('GeneticTestResultData');

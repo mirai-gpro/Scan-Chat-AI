@@ -198,10 +198,10 @@ console.log('\n=== G. 遺伝子の日付が無ければ納品 ready にしない
   const code = stripComments(read(SERVICE));
   // process 側: 日付が無ければ formats に push しない
   eq('日付が無ければ formats に push しない',
-    /if \(gTestDate\) formats\.push\('GeneticTestResultData'\)/.test(code), true);
+    /if \(gTestDate && [^)]*\) formats\.push\('GeneticTestResultData'\)/.test(code), true);
   // assemble 側: 日付が無ければ納品ファイルを作らない
   eq('日付が無ければ納品ファイルを作らない',
-    /if \(parts\.length > 0 && gTestDate\)/.test(code), true);
+    /if \(parts\.length > 0 && gTestDate[^)]*\)/.test(code), true);
   // 黙って落とさず error として見せる
   eq('日付未確定を error で可視化する',
     /validation_status: !gTestDate \? 'error'/.test(code), true);
@@ -261,6 +261,154 @@ console.log('\n=== J. Phase A の安全装置を弱めていない ===');
   // key allowlist が Elith の論理形のまま (test_date 変更で緩めていない)
   eq('key allowlist が user/.../date/... のまま',
     /user\/\(\$\{UUID\}\)\/date\//.test(code), true);
+}
+
+console.log('\n=== K. 任意 format の「不存在」と「在るが不完全」を分ける ===');
+{
+  /*
+   * **実物の `evaluateReadiness` をそのまま動かす。** 判定規則を検査側に写すと、
+   * 実装が変わっても検査だけ通る (=何も守れない) ので、
+   * pipeline.ts と classify.ts から関数の本体を取り出して実行する。
+   */
+  const ts3 = (await import('typescript')).default;
+  const pipe = read('src/lib/ad-hoc-diagnosis/pipeline.ts');
+  const cls = read('src/lib/ad-hoc-diagnosis/classify.ts');
+
+  /*
+   * 関数 1 本を丸ごと取り出す。**正規表現で終わりを探さない** —
+   * `evaluateReadiness` は引数がオブジェクト型で `\n}` を途中に含むため、
+   * 非貪欲マッチだと**シグネチャだけ**を掴んで黙って空の関数になる (実際そうなった)。
+   * 括弧の対応を数えて本体の終わりを決める。
+   */
+  const extractFn = (src, name) => {
+    const head = src.indexOf(`export function ${name}(`);
+    if (head < 0) return null;
+    let i = src.indexOf('(', head), depth = 0;
+    for (; i < src.length; i++) {           // 引数リストの `)` まで
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')' && --depth === 0) break;
+    }
+    const bodyStart = src.indexOf('{', i);  // 本体の `{`
+    if (bodyStart < 0) return null;
+    depth = 0;
+    for (let j = bodyStart; j < src.length; j++) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}' && --depth === 0) return src.slice(head, j + 1);
+    }
+    return null;
+  };
+
+  const evalFn = extractFn(pipe, 'evaluateReadiness');
+  const autoFn = extractFn(cls, 'subjectIsAutoReady');
+  eq('evaluateReadiness が見つかる', evalFn !== null, true);
+  eq('subjectIsAutoReady が見つかる', autoFn !== null, true);
+  // シグネチャだけを掴んでいないこと (本体が入っている)
+  eq('evaluateReadiness の本体まで取れている', /missingRequired/.test(evalFn ?? ''), true);
+
+  const src = `${autoFn}\n${evalFn}\nexport { evaluateReadiness };`
+    .replace(/export function/g, 'function');
+  const CACHE2 = resolve(ROOT, 'node_modules/.cache');
+  mkdirSync(CACHE2, { recursive: true });
+  const p = resolve(CACHE2, 'verify-exec-readiness.mjs');
+  writeFileSync(p, ts3.transpileModule(src, {
+    compilerOptions: { target: 'ES2022', module: 'ESNext' },
+  }).outputText);
+  const { evaluateReadiness } = await import(`${p}?t=${Date.now()}`);
+
+  const REQ = ['HealthCheckupData', 'LifestyleQuestionnaireData'];
+  const OPT = ['GeneticTestResultData', 'HealthAgeData'];
+  const cf = (formatId) => ({ sourceKind: 'person_file', formatId, confidence: 'confirmed', reason: '' });
+  const HC_Q = [cf('HealthCheckupData'), cf('LifestyleQuestionnaireData')];
+  const run = (produced, classifications) => evaluateReadiness({
+    producedFormats: produced, requiredFormats: REQ, optionalFormats: OPT, classifications,
+  });
+
+  // ① 遺伝子ファイルが無い → 必須が揃えば ready (任意なので妨げない)
+  const a = run(['HealthCheckupData', 'LifestyleQuestionnaireData'], HC_Q);
+  eq('遺伝子ファイル無し: ready', a.ready, true);
+  eq('遺伝子ファイル無し: 不完全の指摘は無い', a.presentOptionalSourceButNotProduced, []);
+
+  // ② 遺伝子ファイルが在るのに納品物になっていない → not ready
+  //    (test_date 未確定 / 解析失敗 / 未処理 は、どれもこの形になる)
+  const b = run(['HealthCheckupData', 'LifestyleQuestionnaireData'],
+    [...HC_Q, cf('GeneticTestResultData')]);
+  eq('遺伝子ファイル在り・未完成: not ready', b.ready, false);
+  eq('遺伝子ファイル在り・未完成: 理由が出る',
+    b.reasons.includes('optional_present_but_not_ready:GeneticTestResultData'), true);
+  eq('遺伝子ファイル在り・未完成: 必須不足とは別建て', b.missingRequired, []);
+
+  // ③ 遺伝子が仕上がった → ready
+  const c = run(['HealthCheckupData', 'LifestyleQuestionnaireData', 'GeneticTestResultData'],
+    [...HC_Q, cf('GeneticTestResultData')]);
+  eq('遺伝子が仕上がった: ready', c.ready, true);
+  eq('遺伝子が仕上がった: presentOptional に出る',
+    c.presentOptional.includes('GeneticTestResultData'), true);
+
+  // ④ **HealthAgeData は派生データ**。算出できなくても ready を妨げない
+  //    (元ファイルの分類が存在しないので、この検査に現れようが無い)。
+  eq('HealthAgeData は不完全の対象外', a.presentOptionalSourceButNotProduced.includes('HealthAgeData'), false);
+  eq('HealthAgeData は不完全の対象外 (遺伝子在りでも)',
+    b.presentOptionalSourceButNotProduced.includes('HealthAgeData'), false);
+
+  // ⑤ 必須不足と同時に起きたら両方出る (片方で黙らない)
+  const d = run([], [cf('GeneticTestResultData')]);
+  eq('必須不足も同時に出る', d.reasons.some((r) => r.startsWith('missing_required:')), true);
+  eq('任意の不完全も同時に出る',
+    d.reasons.includes('optional_present_but_not_ready:GeneticTestResultData'), true);
+}
+
+console.log('\n=== L. 遺伝子の部分納品を禁止 (失敗/未処理ページが残る間は納品しない) ===');
+{
+  const code = stripComments(read(SERVICE));
+
+  // 「done でないページ」を数えていること (failed だけ見ていない = pending を見逃さない)
+  eq('process 側は done 以外を数える',
+    /const incomplete = pages\.filter\(\(p\) => p\.status !== 'done'\)\.length;/.test(code), true);
+  eq('assemble 側は done 以外を数える',
+    /const gIncomplete = pages\.filter\(\(p\) => p\.status !== 'done'\)\.length;/.test(code), true);
+  // **page_count (countPdfPages の概算) に依存していない** — 操作で直せない停止を作らない
+  eq('page_count を納品条件にしていない',
+    /(incomplete|gIncomplete)[^;]*page_count/.test(code), false);
+
+  /*
+   * **実物のガード式をそのまま動かす。**
+   * 条件を検査側に書き写すと、実装を緩めても検査が通ってしまう。
+   */
+  /*
+   * **条件の中身を決め打ちで探さない。** `if (…)` の中をそのまま取り出して動かす。
+   * 「期待する形の式が見つからない」で落とすと、ガードを緩めたときに
+   * *どう* 壊れたのかが分からないし、書き方を変えただけでも落ちる。
+   * ここで見たいのは形でなく**振る舞い**。
+   */
+  const pg = /if \(([^)]*)\) formats\.push\('GeneticTestResultData'\)/.exec(code);
+  const ag = /if \((parts\.length > 0[^)]*)\)/.exec(code);
+  eq('process 側のガード式が見つかる', pg !== null, true);
+  eq('assemble 側のガード式が見つかる', ag !== null, true);
+
+  // 見つからなければ「常に納品する」とみなして下の検査で落とす (黙って素通りさせない)。
+  const runP = new Function('gTestDate', 'incomplete', `return !!(${pg?.[1] ?? 'true'});`);
+  const runA = new Function('parts', 'gTestDate', 'gIncomplete', `return !!(${ag?.[1] ?? 'true'});`);
+  const PARTS = [{ page: 1 }];
+
+  // ① 日付あり・全ページ成功 → 納品する
+  eq('process: 日付あり + 全ページ成功 → produced', runP('2026-03-29', 0), true);
+  eq('assemble: 日付あり + 全ページ成功 → 納品', runA(PARTS, '2026-03-29', 0), true);
+
+  // ② 日付が無い → 納品しない
+  eq('process: 日付なし → produced にしない', runP(null, 0), false);
+  eq('assemble: 日付なし → 納品しない', runA(PARTS, null, 0), false);
+
+  // ③ **失敗/未処理ページが残る → 成功ページだけで納品しない**
+  eq('process: 未完了ページあり → produced にしない', runP('2026-03-29', 1), false);
+  eq('assemble: 未完了ページあり → 納品しない', runA(PARTS, '2026-03-29', 1), false);
+  eq('process: 未完了が複数でも同じ', runP('2026-03-29', 3), false);
+
+  // ④ 成功ページが 1 枚も無ければ当然作らない
+  eq('assemble: 成功ページ 0 → 納品しない', runA([], '2026-03-29', 0), false);
+
+  // 失敗の事実は warn/error として残り続ける (黙って消さない)
+  eq('失敗ページを warn で残す', /failed > 0 \? 'warn'/.test(code), true);
+  eq('失敗ページ数を error_detail に残す', /failed_pages:\$\{failed\}/.test(code), true);
 }
 
 console.log('');
