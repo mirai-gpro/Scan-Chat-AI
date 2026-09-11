@@ -84,6 +84,9 @@ jobs:
       - run: npm run verify:ad-hoc-archive
       - run: npm run verify:ad-hoc-parse
       - run: npm run verify:ad-hoc-e2e
+      # Elith 実書き込みの安全装置 (2026-09-11 Phase A)。**鍵もサーバも AWS も要らない**
+      # (実物を transpile し aws-sdk と ../s3 をスタブへ差し替えて動かす) ので A 層。
+      - run: npm run verify:ad-hoc-write-guard
       # staging bridge (Edge Function 経路・2026-09-11 追加)。**鍵もサーバも要らない**
       # ので A 層。実物を transpile し、Edge Function は localhost のスタブ、
       # Supabase クライアントは記録用スタブに差し替えて動かす。
