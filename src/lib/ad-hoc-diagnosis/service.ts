@@ -5,7 +5,8 @@
 // **API ルートはここを呼ぶだけにする。** ルートに手続きを書かない
 // (同じ処理を 2 つの口から呼べるようにするため。§22「API 同士を HTTP で呼ばない」)。
 
-import { getS3Config, putFiles } from '../s3';
+import { getS3Config } from '../s3';
+import { checkWriteGate, preflightNoExistingObjects, putDeliveryFilesCreateOnly } from './write-guard';
 import { refreshConfig } from '../app-config';
 import { scanGeneticPage } from '../elith-genetic';
 import * as store from './store';
@@ -793,17 +794,48 @@ export async function assembleBatch(input: {
     return { ok: true, dryRun: true, files: listed, skipped, totalBytes };
   }
 
-  // **実書き込み。** Production の Elith 納品領域へは、この呼び出しを
-  // 発注者が明示的に許可したときだけ通す (§24.5 / §20)。
+  /*
+   * **実書き込み。** Production の Elith 納品領域へは、この呼び出しを
+   * 発注者が明示的に許可したときだけ通す (§24.5 / §20)。
+   *
+   * **UI のチェックボックスだけに安全性を依存させない** (2026-09-11・Phase A)。
+   * サーバ側で ①env 2 本のゲート ②key の allowlist ③部分納品の禁止 ④既存 key の
+   * 事前確認 を**全て通してからでないと status を進めない** — 安全検査で弾かれただけなのに
+   * `exporting` / `completed` になると、書いていないのに「出した」ことになってしまう。
+   */
+  /*
+   * **弾いたことを監査イベントにはしない (Phase A)。** `EventName` は `store.ts` の型で、
+   * 新しい名前を足すと DB 表の値域まで触ることになる。Phase A の allowlist の外なので
+   * 広げない。呼び出し側には `error` / `detail` を明示して返す。
+   */
+  const gate = checkWriteGate({ delivery, skipped });
+  if (!gate.ok) {
+    return { ok: false, status: gate.status, error: gate.error, detail: gate.detail };
+  }
+
+  const pre = await preflightNoExistingObjects(delivery.map((f) => f.key), gate.cfg);
+  if (!pre.ok) {
+    return { ok: false, status: pre.status, error: pre.error, detail: pre.detail };
+  }
+
+  // ここから先だけが実書き込み。**create-only** (既存 key は上書きしない)。
   await store.updateBatch(input.batchId, { status: 'exporting' });
-  const written = await putFiles(
-    delivery.map((f) => ({
-      key: f.key,
-      contentType: 'application/json; charset=utf-8',
-      body: f.body,
-      bytes: f.bytes,
-    })),
-  );
+  let written: { key: string; bytes: number; uri: string }[];
+  try {
+    written = await putDeliveryFilesCreateOnly(
+      delivery.map((f) => ({ key: f.key, body: f.body, bytes: f.bytes })),
+      gate.cfg,
+    );
+  } catch (e) {
+    /*
+     * 途中で失敗しても **completed にしない**。Phase A では複雑な巻き戻しを作らず、
+     * failed として明示する。再実行しても create-only 制約があるので、
+     * 既に書けた分を上書きすることはない。
+     */
+    const detail = e instanceof Error ? e.message : String(e);
+    await store.updateBatch(input.batchId, { status: 'failed', last_error: detail });
+    return { ok: false, status: 502, error: 'export_failed', detail };
+  }
   for (const s of subjects) {
     const own = listed.filter((l) => l.subjectNo === s.subject_no);
     for (const o of own) {
