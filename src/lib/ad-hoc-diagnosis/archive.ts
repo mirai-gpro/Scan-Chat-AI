@@ -11,13 +11,35 @@
 //  2. **presigned GET は使わない** (spec §5.3.7.1・発注者指示)。
 //     custom `Reader` の `readUint8Array()` から AWS SDK を直接呼ぶ。
 //  3. **ライブラリが守ってくれることを前提にしない。** §24.3 の検査は自分でも行う。
-import { GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
+import { GetObjectCommand, HeadObjectCommand, type S3Client } from '@aws-sdk/client-s3';
 import { Reader, ZipReader, Uint8ArrayWriter, configure, type FileEntry } from '@zip.js/zip.js';
 import { getS3Config, makeS3Client, type S3Config } from '../s3';
 
+/**
+ * **1 回の Range GET で読む最大バイト数** (Phase B2.2・2026-09-12)。
+ *
+ * **なぜ既定を上書きするか**: `@zip.js/zip.js` の既定は **64 KiB**
+ * (`lib/core/configuration.js` の `DEFAULT_CHUNK_SIZE = 64 * 1024`・実測 v2.14.0)。
+ * エントリ本体は `zip-reader.js:951` が
+ * `reader.createReadable({ offset: dataOffset, size: compressedSize })` を呼び、
+ * `io.js:95` が `Math.min(chunkSize, size - chunkOffset)` ずつ `readUint8Array()` する。
+ * → **compressed 15.73MB の Genoplan PDF 1 本で約 241 往復**になり、
+ * 各往復が S3 への HTTP になるので `classify-entry` がタイムアウトした
+ * (PDF の展開と走査そのものはローカルで 0.2 秒未満 = I/O の粒度が原因)。
+ *
+ * **ZIP 全体を 1 回で GET することにはならない。** 読む長さは常に
+ * `min(chunkSize, そのエントリの compressedSize - 読んだ分)` で頭打ちで、
+ * Central Directory / EOCD は `chunkSize` を通らず**構造から算出した長さ**で読む
+ * (`zip-reader.js` の `readUint8Array(reader, offset, length)` 直接呼び出し)。
+ * つまりこの値は **1 エントリの上限**であって ZIP の上限ではない。
+ *
+ * `MAX_ENTRY_BYTES`(80MB) 等の安全上限は**別物で、変更していない**。
+ */
+export const S3_RANGE_CHUNK_BYTES = 16 * 1024 * 1024; // 16 MiB
+
 // Web Worker を使わせない。Vercel の Node ランタイムには居ないので、
 // 使おうとすると環境差で落ちる (メインスレッドで展開する)。
-configure({ useWebWorkers: false });
+configure({ useWebWorkers: false, chunkSize: S3_RANGE_CHUNK_BYTES });
 
 // ---------------------------------------------------------------------------
 // 上限 (spec §5.1)。**マジックナンバーをコード内に散らさない。**
@@ -81,6 +103,16 @@ export interface ArchiveListing {
 export class S3RangeReader extends Reader<string> {
   private cfg: S3Config;
   private key: string;
+  /**
+   * **この Reader が使う S3 クライアント。constructor で 1 回だけ作る。**
+   *
+   * 以前は `readUint8Array()` のたびに `makeS3Client(this.cfg)` を呼んでいた
+   * (Phase B2.2 で是正)。zip.js は 1 エントリを chunkSize ずつ何度も読むので、
+   * **チャンクの数だけ S3Client を作り直していた** — 資格情報の解決・署名器・
+   * HTTP ハンドラ (と接続プール) が毎回作り直されるため、**接続を使い回せない**。
+   * クライアントを持ち回せば同じ接続プールに乗る。
+   */
+  private client: S3Client;
   /** `init()` で確定させた実サイズ。`HeadObject` の ContentLength。 */
   declare size: number;
 
@@ -88,13 +120,14 @@ export class S3RangeReader extends Reader<string> {
     super(key);
     this.cfg = cfg;
     this.key = key;
+    // **ここが唯一の生成点。** `init()` も `readUint8Array()` も this.client を使う。
+    this.client = makeS3Client(cfg);
     if (typeof knownSize === 'number') this.size = knownSize;
   }
 
   async init(): Promise<void> {
     if (typeof this.size === 'number' && this.size > 0) return; // 既知なら叩かない
-    const client = makeS3Client(this.cfg);
-    const head = await client.send(
+    const head = await this.client.send(
       new HeadObjectCommand({ Bucket: this.cfg.bucket, Key: this.key }),
     );
     const len = head.ContentLength;
@@ -113,8 +146,8 @@ export class S3RangeReader extends Reader<string> {
     if (actualLength <= 0) return new Uint8Array(0);
 
     const range = rangeHeaderFor(offset, actualLength);
-    const client = makeS3Client(this.cfg);
-    const res = await client.send(
+    // **ここで `makeS3Client()` を呼ばない** (Phase B2.2)。constructor で作った 1 個を使う。
+    const res = await this.client.send(
       new GetObjectCommand({ Bucket: this.cfg.bucket, Key: this.key, Range: range }),
     );
     if (!res.Body) throw new Error(`S3RangeReader: 本文が空 (${this.key} ${range})`);

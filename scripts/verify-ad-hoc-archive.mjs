@@ -39,15 +39,43 @@ function loadTs(relPath, outName, rewrite = (s) => s) {
 
 // archive.ts は s3.ts を import する (env に依存)。**S3 を触らない検査**なので、
 // import 先だけを差し替えて読み込む (ロジックは 1 文字も変えない)。
+/*
+ * **S3Client を「何個作ったか」まで数える stub** (Phase B2.2)。
+ *
+ * 以前は `makeS3Client()` が投げるだけだった。それだと
+ * **`readUint8Array()` のたびにクライアントを作り直している**という退行を
+ * 検出できない (動きはするので画面にも実測にも出ず、遅いだけ)。
+ * → 個数と送信内容を記録し、`body` を差し込んだときだけ応答する。
+ *   差し込んでいない間は従来どおり「呼ばない」ことを守らせる。
+ */
 const stubS3 = join(tmp, 's3-stub.js');
 writeFileSync(stubS3, `
+export const s3Stub = { clientCount: 0, sends: [], body: null };
 export function getS3Config() { return null; }
-export function makeS3Client() { throw new Error('この検査では S3 を呼ばない'); }
+export function makeS3Client() {
+  s3Stub.clientCount += 1;
+  const clientId = s3Stub.clientCount;
+  return {
+    clientId,
+    async send(cmd) {
+      const input = (cmd && cmd.input) || {};
+      s3Stub.sends.push({ clientId, range: input.Range ?? null });
+      if (!s3Stub.body) throw new Error('この検査では S3 を呼ばない');
+      // Range が無ければ HeadObject
+      if (!input.Range) return { ContentLength: s3Stub.body.length };
+      const m = /^bytes=(\\d+)-(\\d+)$/.exec(input.Range);
+      if (!m) throw new Error('Range の形が不正: ' + input.Range);
+      const slice = s3Stub.body.slice(Number(m[1]), Number(m[2]) + 1);
+      return { Body: { transformToByteArray: async () => slice } };
+    },
+  };
+}
 `);
 
 const archive = await loadTs('src/lib/ad-hoc-diagnosis/archive.ts', 'archive.js', (s) =>
   s.replace(`from '../s3'`, `from ${JSON.stringify(pathToFileURL(stubS3).href)}`),
 );
+const { s3Stub } = await import(pathToFileURL(stubS3).href);
 const keys = await loadTs('src/lib/ad-hoc-diagnosis/keys.ts', 'keys.js', (s) =>
   s.replace(/import type \{ S3Config \} from '\.\.\/s3';?/, ''),
 );
@@ -271,6 +299,170 @@ ok('length: 長いと投げる', okLen(new Uint8Array(101), 100) === false);
   ok('range: [退行注入] 終端を +1 すると 1 バイト多い範囲になる', got === 101, `${got} バイト`);
   ok('range: [退行注入] その多い分を assertExactLength が捕まえる',
     okLen(new Uint8Array(got), 100) === false);
+}
+
+// ===========================================================================
+// ⑥ Range GET のスループット (Phase B2.2)
+//
+// **ここが壊れても画面には出ない。遅くなるだけ**で、しかも小さい ZIP では
+// 再現しない (本番の 159MB / compressed 15.73MB の PDF で初めて落ちる)。
+// 実障害: `readUint8Array()` のたびに `makeS3Client()` を呼び、chunkSize が
+// 既定の 64KiB だったため **1 エントリで約 241 往復** = FUNCTION_INVOCATION_TIMEOUT。
+// ===========================================================================
+
+// --- A/B: S3Client は Reader ごとに 1 個。読み出しの回数で増えない ---------
+{
+  const body = new Uint8Array(300_000);
+  for (let i = 0; i < body.length; i++) body[i] = i & 0xff;
+  s3Stub.body = body;
+  s3Stub.clientCount = 0;
+  s3Stub.sends.length = 0;
+
+  const reader = new archive.S3RangeReader(CFG, 'x/y/source.zip');
+  eq('throughput: A) constructor で S3Client を 1 個だけ作る', s3Stub.clientCount, 1);
+
+  await reader.init(); // size 未知 → HeadObject
+  eq('throughput: A) init() はクライアントを増やさない', s3Stub.clientCount, 1);
+  eq('throughput: A) init() が実サイズを取れる', reader.size, body.length);
+
+  const reads = 5;
+  for (let i = 0; i < reads; i++) {
+    const got = await reader.readUint8Array(i * 1000, 1000);
+    if (got.length !== 1000) ok(`throughput: 読み出し ${i} の長さ`, false, `${got.length}`);
+  }
+  eq('throughput: B) readUint8Array を 5 回呼んでもクライアントは 1 個', s3Stub.clientCount, 1);
+  eq('throughput: B) 送信はすべて同じクライアント',
+    new Set(s3Stub.sends.map((s) => s.clientId)).size, 1);
+  eq('throughput: B) 送信回数は Head 1 + Get 5', s3Stub.sends.length, 1 + reads);
+
+  // 2 本目の Reader は当然 別のクライアント (使い回しは Reader の中だけ)
+  const before = s3Stub.clientCount;
+  new archive.S3RangeReader(CFG, 'x/y/other.zip', 10);
+  eq('throughput: A) Reader を 2 本作れば 2 個', s3Stub.clientCount, before + 1);
+
+  s3Stub.body = null; // 以降は「S3 を呼ばない」を守らせる
+}
+
+// --- C: chunkSize が実際に効いていること -----------------------------------
+{
+  eq('throughput: C) 公開定数は 16MiB', archive.S3_RANGE_CHUNK_BYTES, 16 * 1024 * 1024);
+  ok('throughput: C) 公開定数が 8MiB 以上', archive.S3_RANGE_CHUNK_BYTES >= 8 * 1024 * 1024,
+    `${archive.S3_RANGE_CHUNK_BYTES} バイト`);
+
+  /*
+   * **定数を見るだけでは足りない。** `configure()` へ渡し忘れても定数は正しいままで、
+   * zip.js は既定の 64KiB で読み続ける (= 直したつもりで直っていない)。
+   * → zip.js に実際に読ませて**要求された長さ**を測る
+   *   (`io.js:95` の `Math.min(chunkSize, size - chunkOffset)`)。
+   */
+  const probe = new zipjs.Reader('probe');
+  probe.size = 64 * 1024 * 1024;
+  probe.init = async () => {};
+  const asked = [];
+  probe.readUint8Array = async (_o, l) => { asked.push(l); return new Uint8Array(l); };
+  const rs = probe.createReadable({ offset: 0, size: 40 * 1024 * 1024 });
+  const rd = rs.getReader();
+  await rd.read();
+  await rd.cancel();
+  ok('throughput: C) zip.js が実際に使う chunkSize が 8MiB 以上',
+    asked[0] >= 8 * 1024 * 1024, `${asked[0]} バイト`);
+  eq('throughput: C) 既定の 64KiB のままになっていない', asked[0] === 65536, false);
+}
+
+// --- F: ZIP 全体を 1 回で GET する退行は禁止 --------------------------------
+{
+  /*
+   * **「1 エントリを 1 回で読む」と「ZIP 全体を 1 回で読む」は別物。**
+   * chunkSize を上げた副作用で後者になっていないことを、
+   * **中身の大きいエントリを 2 本持つ ZIP** で見分ける
+   * (1 本だけだと「エントリ = ほぼ ZIP 全体」で区別できない)。
+   */
+  const mkBody = (seed, len) => {
+    const b = new Uint8Array(len);
+    let x = seed >>> 0;
+    for (let i = 0; i < len; i++) {
+      x ^= x << 13; x >>>= 0; x ^= x >>> 17; x ^= x << 5; x >>>= 0;
+      b[i] = x & 0xff;
+    }
+    b.set(pdfHead, 0);
+    return b;
+  };
+  const a = mkBody(0x12345678, 1_400_000);
+  const b = mkBody(0x87654321, 1_400_000);
+  const twoZip = await buildZip([['p/one.pdf', a], ['p/two.pdf', b]]);
+  ok('throughput: F) 2 本入りの ZIP は 1 エントリより明確に大きい',
+    twoZip.length > a.length * 1.8, `${twoZip.length} / エントリ ${a.length}`);
+
+  const { reader: r2, calls: c2 } = makeRangeReader(twoZip);
+  const opened2 = await archive.openArchive(r2);
+  const openMax = Math.max(...c2.map(([s, e]) => e - s + 1));
+  /*
+   * **開くだけなら中身は読まない。**
+   * `getEntries()` の読み出しは chunkSize を通らず、**ZIP の構造から算出した長さ**で走る
+   * (`zip-reader.js` が `readUint8Array(reader, offset, length)` を直接呼ぶ)。
+   * 最大は EOCD 探索の `Math.min(size, END_OF_CENTRAL_DIR_LENGTH + MAX_16_BITS)`
+   * = 22 + 65535 = **65557 バイト** (`zip-reader.js:1589` / `constants.js:30,48`)。
+   * chunkSize を上げてもここは 1 バイトも増えない、が要点。
+   */
+  const EOCD_PROBE_MAX = 22 + 0xffff; // 65557
+  ok('throughput: F) openArchive の読み出しは ZIP 構造由来の上限に収まる',
+    openMax <= EOCD_PROBE_MAX, `開くときの最大 ${openMax} バイト`);
+  ok('throughput: F) openArchive が chunkSize ぶんを読み込まない',
+    openMax < archive.S3_RANGE_CHUNK_BYTES / 16, `開くときの最大 ${openMax} バイト`);
+
+  c2.length = 0;
+  const got = await opened2.read('p/one.pdf');
+  await opened2.close();
+  eq('throughput: F) 1 本目を読み出せる', got.length, a.length);
+
+  const readMax = Math.max(...c2.map(([s, e]) => e - s + 1));
+  const totalRead = c2.reduce((n, [s, e]) => n + (e - s + 1), 0);
+  ok('throughput: F) 1 回の Range が ZIP 全体に達しない', readMax < twoZip.length,
+    `最大 ${readMax} / ZIP 全体 ${twoZip.length}`);
+  ok('throughput: F) 読んだ総量が ZIP 全体より小さい (2 本目を巻き込まない)',
+    totalRead < twoZip.length, `合計 ${totalRead} / ZIP 全体 ${twoZip.length}`);
+  // **これが Phase B2.2 の効果そのもの**: 1 エントリが数回で読めていること。
+  ok('throughput: F) 1 エントリが少ない往復で読める', c2.length <= 4,
+    `${c2.length} 回 (64KiB 既定なら 20 回以上)`);
+}
+
+// --- E: readByIndex の範囲検査 (Phase B2.1 の約束を維持していること) --------
+{
+  /*
+   * **序数はブラウザから来る数字**なので、範囲・種別を Reader 側でも見る。
+   * 分割分類 (`classify-entry`) の唯一の locator なので、ここが緩むと
+   * 「別のエントリを黙って返す」より悪い壊れ方をする。
+   * **例外に path を出さない**ことも併せて固定 (§8.1・ログへ流れるため)。
+   */
+  const { reader: r3 } = makeRangeReader(zipBytes);
+  const o3 = await archive.openArchive(r3);
+  const refuses = async (i) => o3.readByIndex(i).then(() => null, (e) => String(e.message));
+
+  eq('readByIndex: エントリ総数と一致', o3.entryCount, o3.listing.entries.length);
+  const okIdx = o3.listing.entries.findIndex((e) => e.rejected === null);
+  const gotByIdx = await o3.readByIndex(okIdx);
+  ok('readByIndex: 採用エントリは読める', gotByIdx.length > 0, `${gotByIdx.length} バイト`);
+
+  /*
+   * **「何かが throw した」では足りない。** 範囲検査を外しても
+   * `entries[index]` が undefined になって別の場所で TypeError が出るだけなので、
+   * 検査を消した退行が素通りする (実測: 注入しても通ってしまった)。
+   * → **自分の guard の文言 (`範囲外`) が出ること**まで見る。
+   */
+  const refusedWithRange = async (i) => {
+    const m = await refuses(i);
+    return typeof m === 'string' && m.includes('範囲外');
+  };
+  ok('readByIndex: 範囲外 (負) を自分の検査で拒む', await refusedWithRange(-1));
+  ok('readByIndex: 範囲外 (総数以上) を自分の検査で拒む', await refusedWithRange(o3.entryCount));
+  ok('readByIndex: 小数を自分の検査で拒む', await refusedWithRange(0.5));
+  const badIdx = o3.listing.entries.findIndex((e) => e.rejected !== null);
+  const badMsg = await refuses(badIdx);
+  ok('readByIndex: 採用しなかったエントリを拒む', badMsg !== null);
+  ok('readByIndex: 例外に path を出さない',
+    typeof badMsg === 'string' && !badMsg.includes('notes.txt') && badMsg.includes('index='),
+    String(badMsg));
+  await o3.close();
 }
 
 // ===========================================================================
