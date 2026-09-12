@@ -91,3 +91,40 @@ alter table diagnosis.ad_hoc_diagnosis_outputs
 comment on column diagnosis.ad_hoc_diagnosis_outputs.validation_status is
   'pending / ok / warn / error をコードが書く。'
   ' invalid は旧値との互換のために残してあり、新しくは書かない。';
+
+-- ────────────────────────────────────────────────────────────────────────────
+-- 3) `files.parse_status` の値域をコードに合わせる
+--
+-- 基盤 migration は pending/running/done/partial/failed/skipped/unsupported を許すが、
+-- 現行 store/service は遺伝子 PDF の「一部 done・一部未完了」を `processing` として保存する。
+-- Production 適用前の実査でこの不整合を検出したため、旧値を残したまま `processing` を追加する。
+-- ────────────────────────────────────────────────────────────────────────────
+
+do $$
+declare
+  c record;
+begin
+  for c in
+    select con.conname
+    from pg_constraint con
+    join pg_class      rel on rel.oid = con.conrelid
+    join pg_namespace  nsp on nsp.oid = rel.relnamespace
+    where nsp.nspname = 'diagnosis'
+      and rel.relname = 'ad_hoc_diagnosis_files'
+      and con.contype = 'c'
+      and pg_get_constraintdef(con.oid) ilike '%parse_status%'
+  loop
+    execute format(
+      'alter table diagnosis.ad_hoc_diagnosis_files drop constraint %I', c.conname
+    );
+  end loop;
+end
+$$;
+
+alter table diagnosis.ad_hoc_diagnosis_files
+  add constraint ad_hoc_diagnosis_files_parse_status_check
+  check (parse_status in ('pending','running','processing','done','partial','failed','skipped','unsupported'));
+
+comment on column diagnosis.ad_hoc_diagnosis_files.parse_status is
+  'pending / running / processing / done / partial / failed / skipped / unsupported。'
+  ' processing は現行 service が遺伝子 PDF の部分処理中に書く。';
