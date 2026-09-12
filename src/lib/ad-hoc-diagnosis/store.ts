@@ -13,6 +13,7 @@
 import { getServerSupabase } from '../supabase';
 import type { FormatId, Confidence, SourceKind } from './classify';
 import type { RejectReason } from './archive';
+import { assertNoPiiKeys } from './normalized-payload';
 
 // ---------------------------------------------------------------------------
 // 型 (DB の行)
@@ -105,6 +106,19 @@ export interface FileRow {
   selected_as_primary: boolean;
   duplicate_of_file_id: string | null;
   error_detail: string | null;
+  /**
+   * ZIP の Central Directory における序数 (0 始まり)。**不透明な位置情報**。
+   * **path / 元ファイル名 / 人物フォルダ名は保存しない** (§8.1)。
+   * 分割分類より前に作られた行は null。
+   */
+  archive_entry_index: number | null;
+  /**
+   * 健診 / 問診の正規化済み解析結果 (`normalized-payload.ts` が組む)。
+   * **氏名・メール・会社名・役職・path・元ファイル名は禁止** — 書き込み前に
+   * `assertNoPiiKeys` が検査し、見つかれば **DB へ書かずに throw** する。
+   * 遺伝子はページ表 (`ad_hoc_diagnosis_pages`) が持つので **null**。
+   */
+  normalized_payload: unknown;
   created_at: string;
   updated_at: string;
 }
@@ -290,6 +304,40 @@ export async function replaceSubjects(
   return (res.data as SubjectRow[]) ?? [];
 }
 
+/**
+ * **足りない人物行だけを作る** (分割分類・Phase B2.1)。
+ *
+ * `replaceSubjects` は行を作り直すので、分割分類の途中でもう一度 plan を叩くと
+ * **Executive 人物マスタへの紐付けも遺伝子のページも cascade で消える**
+ * (再開できることが分割の目的なので、これでは意味が無い)。
+ * こちらは **`subject_no` が既に在れば触らない**。
+ *
+ * `subject_no` は Central Directory の出現順で決まる = **同じ ZIP なら同じ番号**
+ * なので、途中から再開しても同じ人物へ戻る。
+ */
+export async function ensureSubjectPlaceholders(
+  batchId: string,
+  subjectNos: readonly number[],
+  make: (subjectNo: number) => {
+    client_id: string;
+    diagnostic_id: string;
+    identity_status: SubjectIdentityStatus;
+    identity_reason: string | null;
+  },
+): Promise<SubjectRow[]> {
+  const d = need();
+  const current = await listSubjects(batchId);
+  const have = new Set(current.map((s) => s.subject_no));
+  const missing = subjectNos.filter((n) => !have.has(n));
+  if (missing.length > 0) {
+    const res = await d
+      .from('ad_hoc_diagnosis_subjects')
+      .insert(missing.map((n) => ({ ...make(n), subject_no: n, subject_fp: null, batch_id: batchId })));
+    if (res.error) throw new Error(`ensureSubjectPlaceholders(insert): ${res.error.message}`);
+  }
+  return listSubjects(batchId);
+}
+
 export async function listSubjects(batchId: string): Promise<SubjectRow[]> {
   const res = await need()
     .from('ad_hoc_diagnosis_subjects')
@@ -348,24 +396,42 @@ export async function updateSubject(
 // files
 // ---------------------------------------------------------------------------
 
-export async function replaceFiles(
-  batchId: string,
-  files: {
-    subject_id: string | null;
-    storage_key: string;
-    display_name: string;
-    sha256: string;
-    size_bytes: number;
-    mime_type: string | null;
-    source_kind: SourceKind;
-    classified_format_id: FormatId | null;
-    classification_confidence: Confidence;
-    test_date: string | null;
-    parse_status: ParseStatus;
-    page_count: number | null;
-    error_detail: string | null;
-  }[],
-): Promise<FileRow[]> {
+/** ファイル 1 行ぶんの書き込み内容 (一括 / 1 件ずつ の両方で使う)。 */
+export interface FileWrite {
+  subject_id: string | null;
+  storage_key: string;
+  display_name: string;
+  sha256: string;
+  size_bytes: number;
+  mime_type: string | null;
+  source_kind: SourceKind;
+  classified_format_id: FormatId | null;
+  classification_confidence: Confidence;
+  test_date: string | null;
+  parse_status: ParseStatus;
+  page_count: number | null;
+  error_detail: string | null;
+  /** 分割分類のときだけ入る。一括分類でも入れてよい (どちらでも後工程が同じになる)。 */
+  archive_entry_index?: number | null;
+  /** 健診 / 問診の正規化済み結果。遺伝子・その他は null。 */
+  normalized_payload?: unknown;
+}
+
+/**
+ * **DB へ入る payload を最後にもう一度検査する。**
+ *
+ * 呼び出し側 (`normalized-payload.ts`) でも検査しているが、**書き込みの扉はここ 1 つ**
+ * なので、新しい経路が増えても素通りしないようここでも通す。
+ * 見つかったら**書かずに throw** する (保存してから消す、をしない)。
+ */
+function guardPayload(files: readonly FileWrite[], where: string): void {
+  files.forEach((f, i) => {
+    if (f.normalized_payload != null) assertNoPiiKeys(f.normalized_payload, `${where}[${i}]`);
+  });
+}
+
+export async function replaceFiles(batchId: string, files: FileWrite[]): Promise<FileRow[]> {
+  guardPayload(files, 'replaceFiles');
   const d = need();
   const del = await d.from('ad_hoc_diagnosis_files').delete().eq('batch_id', batchId);
   if (del.error) throw new Error(`replaceFiles(delete): ${del.error.message}`);
@@ -376,6 +442,41 @@ export async function replaceFiles(
     .select('*');
   if (res.error) throw new Error(`replaceFiles(insert): ${res.error.message}`);
   return (res.data as FileRow[]) ?? [];
+}
+
+/**
+ * **ZIP 内の 1 エントリぶんを冪等に書く** (分割分類・Phase B2.1)。
+ *
+ * キーは `(batch_id, archive_entry_index)`。**同じエントリを何度実行しても行は 1 つ**
+ * — 通信が切れて同じ番号をやり直したときに、同じファイルが 2 行に増えないため。
+ *
+ * `upsert(onConflict)` を使わず select → update / insert にしてあるのは、
+ * DB 側の一意インデックスが **部分インデックス** (`where archive_entry_index is not null`)
+ * で、PostgREST からは推論できないため (`upsertPage` と同じ形)。
+ */
+export async function upsertFileByEntryIndex(
+  batchId: string,
+  entryIndex: number,
+  file: FileWrite,
+): Promise<FileRow> {
+  if (!Number.isInteger(entryIndex) || entryIndex < 0) {
+    throw new Error(`upsertFileByEntryIndex: entryIndex が不正 (index=${entryIndex})`);
+  }
+  guardPayload([file], 'upsertFileByEntryIndex');
+  const d = need();
+  const existing = await d
+    .from('ad_hoc_diagnosis_files')
+    .select('*')
+    .eq('batch_id', batchId)
+    .eq('archive_entry_index', entryIndex)
+    .maybeSingle();
+  if (existing.error) throw new Error(`upsertFileByEntryIndex(select): ${existing.error.message}`);
+  const prev = existing.data as FileRow | null;
+  const payload = { ...file, archive_entry_index: entryIndex, batch_id: batchId };
+  const res = prev
+    ? await d.from('ad_hoc_diagnosis_files').update(payload).eq('id', prev.id).select('*').single()
+    : await d.from('ad_hoc_diagnosis_files').insert(payload).select('*').single();
+  return unwrap<FileRow>(res, 'upsertFileByEntryIndex');
 }
 
 export async function listFiles(batchId: string): Promise<FileRow[]> {
@@ -401,9 +502,11 @@ export async function updateFile(
       FileRow,
       | 'subject_id' | 'classified_format_id' | 'classification_confidence' | 'test_date'
       | 'parse_status' | 'page_count' | 'selected_as_primary' | 'duplicate_of_file_id' | 'error_detail'
+      | 'normalized_payload'
     >
   >,
 ): Promise<FileRow> {
+  if (patch.normalized_payload != null) assertNoPiiKeys(patch.normalized_payload, 'updateFile');
   const res = await need()
     .from('ad_hoc_diagnosis_files')
     .update(patch)

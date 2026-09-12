@@ -13,13 +13,14 @@ import * as store from './store';
 import { adHocZipKey } from './keys';
 import { headAdHocZip, deleteAdHocZip, createAdHocUploadTicket } from './ticket';
 import { openArchiveFromS3 } from './archive';
-import { matchByFingerprint, shortFingerprint } from './fingerprint';
+import { matchByFingerprint, shortFingerprint, subjectFingerprint } from './fingerprint';
 import { questionnaireSummary, questionnaireIsUsable } from './questionnaire';
+import { buildEntryPayload, restoreHealthCheckupSheet, restoreQuestionnaire } from './normalized-payload';
 import {
-  AD_HOC_OPTIONAL_FORMATS, AD_HOC_REQUIRED_FORMATS, analyzeOpened, buildGeneticJson,
+  AD_HOC_OPTIONAL_FORMATS, AD_HOC_REQUIRED_FORMATS, analyzeEntry, analyzeOpened, buildGeneticJson,
   buildHealthCheckupJson, buildQuestionnaireJson, computeSubjectWellnessAge, evaluateReadiness,
-  newClientId, newDiagnosticId, toDeliveryFile,
-  type AnalyzedFile, type AnalyzedSubject, type DeliveryFile, type GeneticPagePart,
+  newClientId, newDiagnosticId, planArchive, toDeliveryFile,
+  type AnalyzedFile, type DeliveryFile, type GeneticPagePart,
 } from './pipeline';
 import type { FormatId } from './classify';
 
@@ -242,18 +243,20 @@ export async function classifyBatch(batchId: string, actor: Actor) {
   };
 }
 
+function mimeOf(ext: string): string | null {
+  return ext === '.pdf' ? 'application/pdf'
+    : ext === '.xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
+    : ext === '.docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    : ext === '.csv' ? 'text/csv'
+    : null;
+}
+
 function fileRowOf(
   f: AnalyzedFile,
   subjectId: string | null,
   prefix: string,
   batchId: string,
-): Parameters<typeof store.replaceFiles>[1][number] {
-  const mime =
-    f.ext === '.pdf' ? 'application/pdf'
-    : f.ext === '.xlsx' ? 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
-    : f.ext === '.docx' ? 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
-    : f.ext === '.csv' ? 'text/csv'
-    : null;
+): store.FileWrite {
   return {
     subject_id: subjectId,
     // **S3 key に元ファイル名を入れない** (§8.1)。ZIP 内の位置は sha256 で追える。
@@ -261,7 +264,7 @@ function fileRowOf(
     display_name: f.displayName,
     sha256: f.sha256,
     size_bytes: f.sizeBytes,
-    mime_type: mime,
+    mime_type: mimeOf(f.ext),
     source_kind: f.classification.sourceKind,
     classified_format_id: f.classification.formatId,
     classification_confidence: f.classification.confidence,
@@ -269,6 +272,294 @@ function fileRowOf(
     parse_status: f.error ? 'failed' : 'pending',
     page_count: f.pageCount ?? null,
     error_detail: f.error ?? f.classification.reason,
+    /*
+     * **一括分類でも正規化結果を保存する** (Phase B2.1)。
+     * 後工程 (process / ウェルネス年齢 / 納品) が ZIP を読み直さなくなったので、
+     * ここで保存しないと**一括分類したバッチだけ材料が無い**ことになる。
+     * 中身の検査 (PII) は `buildEntryPayload` と `store` の両方で行う。
+     */
+    normalized_payload: buildEntryPayload({
+      healthCheckup: f.healthCheckup,
+      questionnaire: f.questionnaire,
+    }),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ②′ 分割分類 (Phase B2.1) — plan → entry × N → finalize
+//
+// **なぜ 3 つに割るか**: 159MB / 38 ファイル (21MB の PDF × 10) を 1 リクエストで
+// 展開すると `maxDuration=800` でも足りない。**タイムアウトを伸ばさず、
+// 1 リクエスト = ZIP 内 1 ファイル**にする。
+//
+// **どれも ZIP を開き直す**が、開くのは Central Directory (数 KB) だけで、
+// 中身を読むのは `classify-entry` が指定された 1 エントリを取りに行くときだけ。
+// ---------------------------------------------------------------------------
+
+/** plan / entry が共通で使う「開いて計画を立てる」。**中身は読まない。** */
+async function openAndPlan(batch: store.BatchRow) {
+  const cfg = getS3Config();
+  if (!cfg) return { ok: false as const, status: 503, error: 's3_not_configured' };
+  const head = await headAdHocZip(batch.source_key, cfg);
+  if (!head.ok) return { ok: false as const, status: head.status, error: head.error, detail: head.detail };
+  const archive = await openArchiveFromS3({ key: batch.source_key, knownSize: head.size, cfg });
+  return { ok: true as const, cfg, size: head.size, archive, plan: planArchive(archive) };
+}
+
+/**
+ * **① 作業計画を返す。** ZIP の中身は 1 バイトも読まない。
+ *
+ * 人物行は**足りないぶんだけ作る** (`ensureSubjectPlaceholders`) —
+ * 作り直すと Executive の紐付けも遺伝子のページも消え、**再開できなくなる**。
+ */
+export async function classifyPlan(batchId: string, actor: Actor) {
+  const batch = await store.getBatch(batchId);
+  if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
+
+  const opened = await openAndPlan(batch);
+  if (!opened.ok) {
+    if (opened.status === 413) {
+      const cfg = getS3Config();
+      if (cfg) await deleteAdHocZip(batch.source_key, cfg);
+      await store.updateBatch(batchId, { status: 'failed', last_error: opened.detail ?? opened.error });
+    }
+    return opened;
+  }
+  const { plan } = opened;
+  await opened.archive.close();
+
+  await store.updateBatch(batchId, { status: 'processing', source_size: opened.size });
+
+  const subjectNos = [...new Set(plan.workItems.map((w) => w.subjectNo!).filter((n) => n != null))];
+  await store.ensureSubjectPlaceholders(batchId, subjectNos, () => ({
+    client_id: newClientId(),
+    diagnostic_id: newDiagnosticId(),
+    // **分類が終わるまで確定させない。** 誰の分か決まっていないので needs_review。
+    identity_status: 'needs_review',
+    identity_reason: 'pending_classification',
+  }));
+
+  // **既に読んだエントリ**を返す = 途中から再開できる (同じ ZIP を上げ直させない)。
+  const existing = await store.listFiles(batchId);
+  const done = existing
+    .map((f) => f.archive_entry_index)
+    .filter((i): i is number => typeof i === 'number');
+
+  await store.logEvent({
+    batch_id: batchId, event: 'classified',
+    actor_user_id: actor.userId, actor_masked: actor.masked, actor_sha256: actor.sha256,
+    detail: {
+      kind: 'plan',
+      subjects: plan.subjectCount,
+      work_items: plan.workItems.length + plan.batchReferenceItems.length,
+      already_done: done.length,
+      rejected: plan.rejected.length,
+    },
+  });
+
+  return {
+    ok: true as const,
+    subjectCount: plan.subjectCount,
+    // **path も人物フォルダ名も返さない** (§8.1)。返すのは序数と拡張子とサイズだけ。
+    items: [...plan.workItems, ...plan.batchReferenceItems].map((w) => ({
+      entryIndex: w.entryIndex,
+      subjectNo: w.subjectNo,
+      ext: w.ext,
+      declaredSize: w.declaredSize,
+    })),
+    done,
+    rejected: plan.rejected,
+    notes: plan.notes,
+  };
+}
+
+/**
+ * **② 指定された 1 エントリだけを読んで分類し、1 行だけ書く。**
+ *
+ * `entryIndex` 以外はサーバが決める。**クライアントの申告 (人物番号・format) は使わない**
+ * — 改竄されると別人のデータに混ざる。人物番号は毎回 `planArchive` から引き直す。
+ */
+export async function classifyEntry(input: { batchId: string; entryIndex: number; actor: Actor }) {
+  const batch = await store.getBatch(input.batchId);
+  if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
+  if (!Number.isInteger(input.entryIndex) || input.entryIndex < 0) {
+    return { ok: false as const, status: 400, error: 'invalid_entry_index' };
+  }
+
+  const opened = await openAndPlan(batch);
+  if (!opened.ok) return opened;
+
+  let analyzed;
+  try {
+    analyzed = await analyzeEntry(opened.archive, input.entryIndex, opened.plan);
+  } catch (err) {
+    await opened.archive.close();
+    // **path をエラーに含めない** (`archive.readByIndex` も `index=N` しか出さない)。
+    return {
+      ok: false as const, status: 502, error: 'entry_read_failed',
+      detail: `index=${input.entryIndex}: ${String(err).slice(0, 160)}`,
+    };
+  } finally {
+    await opened.archive.close().catch(() => {});
+  }
+
+  if (analyzed.rejectedReason === 'not_in_plan') {
+    // 計画に無い序数 = 採用していないエントリ。**行を作らない。**
+    return { ok: false as const, status: 404, error: 'entry_not_in_plan' };
+  }
+
+  const subjects = await store.listSubjects(input.batchId);
+  const subjectId = analyzed.subjectNo == null
+    ? null
+    : subjects.find((s) => s.subject_no === analyzed.subjectNo)?.id ?? null;
+
+  /*
+   * **採用しなかったエントリも 1 行残す** (magic 不一致など)。
+   *
+   * 一括分類では `rejected` の配列に入れて応答で返していたが、分割では応答が
+   * エントリごとに散るので**どこにも残らない**。そのうえ finalize が
+   * 「まだ読んでいない」と区別できず、**永久に完了しない**。
+   * `source_kind='ignored'` の行として残せば、一覧にも出て (§5.5 黙って捨てない)、
+   * 進捗も数えられる。**納品には入らない** (`person_file` でないため)。
+   */
+  const write: store.FileWrite = analyzed.rejectedReason
+    ? {
+        subject_id: subjectId,
+        storage_key: `${opened.cfg.prefix}ad-hoc-uploads/${input.batchId}/files/${analyzed.sha256 || `idx${input.entryIndex}`}${analyzed.ext}`,
+        display_name: `未採用_${String(input.entryIndex).padStart(3, '0')}${analyzed.ext}`,
+        sha256: analyzed.sha256,
+        size_bytes: analyzed.sizeBytes,
+        mime_type: mimeOf(analyzed.ext),
+        source_kind: 'ignored',
+        classified_format_id: null,
+        classification_confidence: analyzed.classification.confidence,
+        test_date: null,
+        parse_status: 'skipped',
+        page_count: null,
+        error_detail: analyzed.rejectedReason,
+        archive_entry_index: input.entryIndex,
+        normalized_payload: null,
+      }
+    : {
+        subject_id: subjectId,
+        storage_key: `${opened.cfg.prefix}ad-hoc-uploads/${input.batchId}/files/${analyzed.sha256}${analyzed.ext}`,
+        display_name: analyzed.displayName,
+        sha256: analyzed.sha256,
+        size_bytes: analyzed.sizeBytes,
+        mime_type: mimeOf(analyzed.ext),
+        source_kind: analyzed.classification.sourceKind,
+        classified_format_id: analyzed.classification.formatId,
+        classification_confidence: analyzed.classification.confidence,
+        test_date: analyzed.testDate,
+        parse_status: analyzed.error ? 'failed' : 'pending',
+        page_count: analyzed.pageCount ?? null,
+        error_detail: analyzed.error ?? analyzed.classification.reason,
+        archive_entry_index: input.entryIndex,
+        // **遺伝子 PDF は null** (ページは `ad_hoc_diagnosis_pages` が持つ)。
+        normalized_payload: buildEntryPayload({
+          healthCheckup: analyzed.healthCheckup,
+          questionnaire: analyzed.questionnaire,
+        }),
+      };
+
+  const row = await store.upsertFileByEntryIndex(input.batchId, input.entryIndex, write);
+
+  // 性別・年齢は問診から拾う (拾えなければ触らない = unknown / null のまま)
+  if (subjectId && analyzed.questionnaire) {
+    const q = analyzed.questionnaire;
+    if (q.subject.sex || q.subject.age != null) {
+      await store.updateSubject(subjectId, {
+        sex: q.subject.sex ?? 'unknown',
+        age: q.subject.age,
+      });
+    }
+  }
+
+  return {
+    ok: true as const,
+    entryIndex: input.entryIndex,
+    fileId: row.id,
+    subjectNo: analyzed.subjectNo,
+    displayName: row.display_name,
+    formatId: row.classified_format_id,
+    confidence: row.classification_confidence,
+    testDate: row.test_date,
+    sourceKind: row.source_kind,
+    skipped: analyzed.rejectedReason ?? null,
+  };
+}
+
+/**
+ * **③ 全エントリが済んでいることを確かめて締める。**
+ *
+ * 1 件でも残っていれば **409 `classification_incomplete`** を返して締めない
+ * (「途中まで分類しただけのバッチ」を `classified` と名乗らせない)。
+ * **返すのは件数だけ** — どのファイルが残っているかを path で示さない (§8.1)。
+ */
+export async function classifyFinalize(batchId: string, actor: Actor) {
+  const batch = await store.getBatch(batchId);
+  if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
+
+  const opened = await openAndPlan(batch);
+  if (!opened.ok) return opened;
+  const { plan } = opened;
+  await opened.archive.close();
+
+  const files = await store.listFiles(batchId);
+  const seen = new Set(
+    files.map((f) => f.archive_entry_index).filter((i): i is number => typeof i === 'number'),
+  );
+  const planned = [...plan.workItems, ...plan.batchReferenceItems].map((w) => w.entryIndex);
+  const remaining = planned.filter((i) => !seen.has(i));
+  if (remaining.length > 0) {
+    return {
+      ok: false as const, status: 409, error: 'classification_incomplete',
+      // **序数も出さない。件数だけ。** 続きは classify-plan の `done` から求める。
+      detail: `未処理 ${remaining.length} 件 / 全 ${planned.length} 件`,
+      remaining: remaining.length,
+      total: planned.length,
+    };
+  }
+
+  /*
+   * **fingerprint はここで初めて決まる** (材料 = その人物のファイルの sha256)。
+   * 1 件ずつ読む都合上、plan の時点では人物のファイルが全部読めていない。
+   */
+  const subjects = await store.listSubjects(batchId);
+  for (const s of subjects) {
+    const own = files.filter((f) => f.subject_id === s.id && f.source_kind === 'person_file');
+    const fp = subjectFingerprint(own.map((f) => f.sha256));
+    if (fp !== s.subject_fp) await store.updateSubject(s.id, { subject_fp: fp, subject_fp_source: 'auto' });
+  }
+
+  const needsReview =
+    files.some((f) => f.source_kind === 'person_file' && f.classification_confidence !== 'confirmed') ||
+    subjects.some((s) => s.identity_status !== 'confirmed');
+
+  await store.updateBatch(batchId, {
+    status: needsReview ? 'needs_review' : 'classified',
+    subject_count: subjects.length,
+    file_count: files.length,
+  });
+  await store.logEvent({
+    batch_id: batchId, event: 'classified',
+    actor_user_id: actor.userId, actor_masked: actor.masked, actor_sha256: actor.sha256,
+    detail: {
+      kind: 'finalize',
+      subjects: subjects.length,
+      files: files.length,
+      rejected: plan.rejected.length,
+      needs_review: needsReview,
+    },
+  });
+
+  return {
+    ok: true as const,
+    subjects: subjects.length,
+    files: files.length,
+    rejected: plan.rejected,
+    notes: plan.notes,
+    needsReview,
   };
 }
 
@@ -570,7 +861,7 @@ export interface ProcessOptions {
 
 export async function processBatch(batchId: string, actor: Actor, options: ProcessOptions = {}) {
   await refreshConfig();
-  const cfg = getS3Config();
+  // **S3 は要らない** (Phase B2.1)。ここは ZIP を開かず DB の材料だけで組む。
   const batch = await store.getBatch(batchId);
   if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
 
@@ -618,25 +909,18 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
     }
   }
 
-  // ZIP を開き直して健診・問診を解析する (中身は DB に持たないので毎回読む)
-  const head = await headAdHocZip(batch.source_key, cfg);
-  const analysisByFingerprint = new Map<string, AnalyzedSubject>();
-  if (head.ok && cfg) {
-    const archive = await openArchiveFromS3({ key: batch.source_key, knownSize: head.size, cfg });
-    try {
-      const a = await analyzeOpened(archive);
-      for (const s of a.subjects) if (s.fingerprint) analysisByFingerprint.set(s.fingerprint, s);
-    } finally {
-      await archive.close();
-    }
-  }
-
+  /*
+   * **ZIP を開き直さない** (Phase B2.1)。
+   *
+   * 以前はここで `analyzeOpened` を呼び、159MB の ZIP を毎回まるごと展開していた。
+   * 分割分類を入れても、**この 1 か所が残っていれば結局タイムアウトする**。
+   * 材料は分類のときに `normalized_payload` として保存済みなので、DB から復元する。
+   */
   const subjects = await store.listSubjects(batchId);
   const files = await store.listFiles(batchId);
   const produced: { subjectId: string; formats: string[] }[] = [];
 
   for (const s of subjects) {
-    const analyzed = s.subject_fp ? analysisByFingerprint.get(s.subject_fp) : undefined;
     const own = files.filter((f) => f.subject_id === s.id);
     const formats: string[] = [];
     let markers: Record<string, number> = {};
@@ -644,9 +928,21 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
 
     // ── 健診 ──
     const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
-    const hcAnalyzed = analyzed?.files.find((f) => f.sha256 === hcFile?.sha256);
-    if (hcFile && hcAnalyzed?.healthCheckup) {
-      const built = buildHealthCheckupJson({ clientId: s.client_id, sheet: hcAnalyzed.healthCheckup });
+    const hcSheet = hcFile ? restoreHealthCheckupSheet(hcFile.normalized_payload) : null;
+    if (hcFile && !hcSheet) {
+      /*
+       * **黙って落とさない。** 分類はされているのに材料が無い = 分類前の古い行
+       * (`normalized_payload` が入る前のバッチ) か、読めなかった XLSX。
+       * どちらも「分類し直せば直る」ので、理由をそのまま画面へ出す。
+       */
+      await store.upsertOutput({
+        subject_id: s.id, format_id: 'HealthCheckupData',
+        output_status: 'failed', validation_status: 'error',
+        error_detail: 'normalized_payload_missing',
+      });
+    }
+    if (hcFile && hcSheet) {
+      const built = buildHealthCheckupJson({ clientId: s.client_id, sheet: hcSheet });
       hcTestDate = built.testDate;
       markers = built.markers as Record<string, number>;
       if (built.testDate) {
@@ -670,9 +966,16 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
 
     // ── 問診 ──
     const qFile = own.find((f) => f.classified_format_id === 'LifestyleQuestionnaireData');
-    const qAnalyzed = analyzed?.files.find((f) => f.sha256 === qFile?.sha256);
-    if (qFile && qAnalyzed?.questionnaire) {
-      const q = qAnalyzed.questionnaire;
+    const qRestored = qFile ? restoreQuestionnaire(qFile.normalized_payload) : null;
+    if (qFile && !qRestored) {
+      await store.upsertOutput({
+        subject_id: s.id, format_id: 'LifestyleQuestionnaireData',
+        output_status: 'failed', validation_status: 'error',
+        error_detail: 'normalized_payload_missing',
+      });
+    }
+    if (qFile && qRestored) {
+      const q = qRestored;
       if (questionnaireIsUsable(q)) {
         const built = buildQuestionnaireJson({
           clientId: s.client_id,
@@ -835,26 +1138,16 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
 // ---------------------------------------------------------------------------
 
 export async function healthAgeCheck(batchId: string) {
-  const cfg = getS3Config();
   const batch = await store.getBatch(batchId);
   if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
 
-  const head = await headAdHocZip(batch.source_key, cfg);
-  if (!head.ok || !cfg) return { ok: false as const, status: head.ok ? 503 : head.status, error: 'zip_unavailable' };
-
-  const archive = await openArchiveFromS3({ key: batch.source_key, knownSize: head.size, cfg });
-  let byFp = new Map<string, AnalyzedSubject>();
-  try {
-    const a = await analyzeOpened(archive);
-    byFp = new Map(a.subjects.filter((s) => s.fingerprint).map((s) => [s.fingerprint!, s]));
-  } finally {
-    await archive.close();
-  }
-
+  // **ZIP を開かない** (Phase B2.1)。材料は分類時に保存済み。
   const subjects = await store.listSubjects(batchId);
+  const files = await store.listFiles(batchId);
   const rows = subjects.map((s) => {
-    const analyzed = s.subject_fp ? byFp.get(s.subject_fp) : undefined;
-    const hc = analyzed?.files.find((f) => f.healthCheckup)?.healthCheckup;
+    const own = files.filter((f) => f.subject_id === s.id);
+    const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
+    const hc = hcFile ? restoreHealthCheckupSheet(hcFile.normalized_payload) : null;
     const markers = hc ? buildHealthCheckupJson({ clientId: s.client_id, sheet: hc }).markers : {};
     const testDate = hc?.testDate.status === 'resolved' ? hc.testDate.date : null;
     const wa = computeSubjectWellnessAge({
@@ -902,18 +1195,7 @@ export async function assembleBatch(input: {
   const batch = await store.getBatch(input.batchId);
   if (!batch) return { ok: false, status: 404, error: 'batch_not_found' };
 
-  const head = await headAdHocZip(batch.source_key, cfg);
-  if (!head.ok) return { ok: false, status: head.status, error: head.error, detail: head.detail };
-
-  const archive = await openArchiveFromS3({ key: batch.source_key, knownSize: head.size, cfg });
-  let byFp = new Map<string, AnalyzedSubject>();
-  try {
-    const a = await analyzeOpened(archive);
-    byFp = new Map(a.subjects.filter((s) => s.fingerprint).map((s) => [s.fingerprint!, s]));
-  } finally {
-    await archive.close();
-  }
-
+  // **ZIP を開かない** (Phase B2.1)。納品 JSON の材料は分類時に保存済み。
   const subjects = await store.listSubjects(input.batchId);
   const files = await store.listFiles(input.batchId);
   const delivery: DeliveryFile[] = [];
@@ -921,7 +1203,6 @@ export async function assembleBatch(input: {
   const skipped: { subjectNo: number; reason: string }[] = [];
 
   for (const s of subjects) {
-    const analyzed = s.subject_fp ? byFp.get(s.subject_fp) : undefined;
     const own = files.filter((f) => f.subject_id === s.id);
     const formats: string[] = [];
     const built: DeliveryFile[] = [];
@@ -929,7 +1210,8 @@ export async function assembleBatch(input: {
     let markers: Record<string, number> = {};
 
     // 健診
-    const hc = analyzed?.files.find((f) => f.healthCheckup)?.healthCheckup;
+    const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
+    const hc = hcFile ? restoreHealthCheckupSheet(hcFile.normalized_payload) : null;
     if (hc) {
       const b = buildHealthCheckupJson({ clientId: s.client_id, sheet: hc });
       hcTestDate = b.testDate;
@@ -941,7 +1223,8 @@ export async function assembleBatch(input: {
     }
 
     // 問診
-    const q = analyzed?.files.find((f) => f.questionnaire)?.questionnaire;
+    const qFile = own.find((f) => f.classified_format_id === 'LifestyleQuestionnaireData');
+    const q = qFile ? restoreQuestionnaire(qFile.normalized_payload) : null;
     if (q && questionnaireIsUsable(q)) {
       const b = buildQuestionnaireJson({
         clientId: s.client_id, diagnosticId: s.diagnostic_id ?? s.client_id, normalized: q,

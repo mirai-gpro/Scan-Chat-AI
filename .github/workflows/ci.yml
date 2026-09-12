@@ -87,6 +87,10 @@ jobs:
       # Elith 実書き込みの安全装置 (2026-09-11 Phase A)。**鍵もサーバも AWS も要らない**
       # (実物を transpile し aws-sdk と ../s3 をスタブへ差し替えて動かす) ので A 層。
       - run: npm run verify:ad-hoc-write-guard
+      # 分割分類 (2026-09-12 Phase B2.1)。**鍵もサーバも ZIP も要らない**ので A 層
+      # (PII ゲートと planArchive は実物を transpile して動かし、ZIP はダミーの
+      # Central Directory を渡すだけ = 中身を 1 バイトも読まないことの証明にもなる)。
+      - run: npm run verify:ad-hoc-chunked
       # staging bridge (Edge Function 経路・2026-09-11 追加)。**鍵もサーバも要らない**
       # ので A 層。実物を transpile し、Edge Function は localhost のスタブ、
       # Supabase クライアントは記録用スタブに差し替えて動かす。

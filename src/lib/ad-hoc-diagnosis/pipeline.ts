@@ -15,7 +15,7 @@ import {
   openArchiveFromS3, magicMatchesExtension, type ArchiveEntry, type OpenedArchive,
 } from './archive';
 import {
-  classifyFile, commonRootPrefix, displayNameFor, personFolderOf, subjectIsAutoReady,
+  classifyFile, commonRootPrefix, displayNameFor, isNoiseEntry, personFolderOf, subjectIsAutoReady,
   type Classification, type FormatId,
 } from './classify';
 import { sha256Hex, subjectFingerprint } from './fingerprint';
@@ -268,6 +268,237 @@ export async function analyzeOpened(archive: OpenedArchive): Promise<AnalyzeResu
   });
 
   return { subjects, batchReference, rejected, notes };
+}
+
+// ---------------------------------------------------------------------------
+// 分割分類 — ① 計画 (Central Directory だけを読む)
+// ---------------------------------------------------------------------------
+
+/** 1 エントリぶんの作業。**path も人物フォルダ名も持たない。** */
+export interface PlanWorkItem {
+  /** Central Directory の序数。**これが唯一の locator。** */
+  entryIndex: number;
+  /** 人物の通し番号 (1 始まり)。バッチ共通資料は null。 */
+  subjectNo: number | null;
+  /** その人物の中での連番 (`display_name` に使う)。 */
+  seq: number;
+  /** 拡張子 (`.pdf` 等)。中身は読んでいない。 */
+  ext: string;
+  /** 申告サイズ (Central Directory の値・実測ではない)。 */
+  declaredSize: number;
+}
+
+export interface ArchivePlan {
+  subjectCount: number;
+  /** 人物フォルダの中のファイル。**この順に 1 件ずつ処理する。** */
+  workItems: PlanWorkItem[];
+  /** 人物フォルダの外にあったファイル (バッチ共通の資料)。 */
+  batchReferenceItems: PlanWorkItem[];
+  /** 採用しなかったエントリ。**path でなく序数と理由だけ。** */
+  rejected: { entryIndex: number; reason: string }[];
+  /** 人物フォルダ名 → 通し番号。**メモリの中だけ。DB にも応答にも出さない。** */
+  subjectNoByFolder: Map<string, number>;
+  notes: string[];
+}
+
+/**
+ * **ZIP の Central Directory だけを見て作業計画を立てる。中身は 1 バイトも読まない。**
+ *
+ * これが分割分類の起点。ここで「何件あるか」「どれが誰のものか」まで決まるので、
+ * 巨大な PDF を展開せずに済み、1 リクエストが数秒で終わる。
+ *
+ * 人物の採番規則は `analyzeOpened` と同じ (**Central Directory の出現順**) —
+ * 判定に使うのは path だけ (`isNoiseEntry` / `personFolderOf`) で、
+ * どちらも中身を見ないので**分割しても同じ番号になる**。
+ */
+export function planArchive(archive: OpenedArchive): ArchivePlan {
+  const notes: string[] = [];
+  const rejected: { entryIndex: number; reason: string }[] = [];
+
+  /** 採用したエントリを **序数つき**で持つ (以降 path は locator に使わない)。 */
+  const adopted: { index: number; entry: ArchiveEntry }[] = [];
+  archive.listing.entries.forEach((e, index) => {
+    if (e.rejected === null) adopted.push({ index, entry: e });
+    else if (e.rejected !== 'directory') rejected.push({ entryIndex: index, reason: e.rejected });
+  });
+
+  const root = commonRootPrefix(adopted.map((a) => a.entry.path));
+  if (root) notes.push('root_prefix_detected');
+
+  const subjectNoByFolder = new Map<string, number>();
+  const seqByFolder = new Map<string, number>();
+  const workItems: PlanWorkItem[] = [];
+  const batchReferenceItems: PlanWorkItem[] = [];
+  let batchRefSeq = 0;
+
+  for (const { index, entry } of adopted) {
+    // **ノイズは中身を見ずに落とせる** (`~$` / `.DS_Store` / `__MACOSX`)。
+    if (isNoiseEntry(entry.path)) continue;
+
+    const folder = personFolderOf(entry.path, root);
+    if (folder === null) {
+      batchRefSeq += 1;
+      batchReferenceItems.push({
+        entryIndex: index, subjectNo: null, seq: batchRefSeq,
+        ext: entry.ext, declaredSize: entry.declaredSize,
+      });
+      continue;
+    }
+
+    if (!subjectNoByFolder.has(folder)) subjectNoByFolder.set(folder, subjectNoByFolder.size + 1);
+    const seq = (seqByFolder.get(folder) ?? 0) + 1;
+    seqByFolder.set(folder, seq);
+
+    workItems.push({
+      entryIndex: index,
+      subjectNo: subjectNoByFolder.get(folder)!,
+      seq,
+      ext: entry.ext,
+      declaredSize: entry.declaredSize,
+    });
+  }
+
+  return {
+    subjectCount: subjectNoByFolder.size,
+    workItems,
+    batchReferenceItems,
+    rejected,
+    subjectNoByFolder,
+    notes,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// 分割分類 — ② 1 エントリだけ読む
+// ---------------------------------------------------------------------------
+
+export interface AnalyzedEntry {
+  entryIndex: number;
+  subjectNo: number | null;
+  ext: string;
+  sha256: string;
+  sizeBytes: number;
+  classification: Classification;
+  displayName: string;
+  testDate: string | null;
+  pageCount: number | null;
+  healthCheckup?: HealthCheckupSheet;
+  questionnaire?: QuestionnaireNormalized;
+  error?: string | null;
+  /** 採用できなかった理由 (magic 不一致など)。**path は入れない。** */
+  rejectedReason?: string;
+}
+
+/**
+ * **指定された 1 エントリだけを読んで分類する。**
+ *
+ * `analyzeOpened` の 1 件ぶんと同じ処理を、同じ関数 (`classifyFile` /
+ * `readWorkbookSheets` / `extractPdfText` / `countPdfPages`) で行う。
+ * **分割用に別の判定規則を作らない** — 作ると「まとめて処理したときと結果が違う」が起きる。
+ *
+ * `plan` を渡すのは **サーバ側で subjectNo を決め直す**ため。
+ * クライアントが申告した人物番号は信用しない (改竄されると別人のデータに混ざる)。
+ */
+export async function analyzeEntry(
+  archive: OpenedArchive,
+  entryIndex: number,
+  plan: ArchivePlan,
+): Promise<AnalyzedEntry> {
+  const item =
+    plan.workItems.find((w) => w.entryIndex === entryIndex) ??
+    plan.batchReferenceItems.find((w) => w.entryIndex === entryIndex);
+  if (!item) {
+    // 計画に無い = 採用していないエントリ。**読ませない。**
+    return {
+      entryIndex, subjectNo: null, ext: '', sha256: '', sizeBytes: 0,
+      classification: { sourceKind: 'ignored', formatId: null, confidence: 'confirmed', reason: 'not_in_plan' },
+      displayName: '', testDate: null, pageCount: null, rejectedReason: 'not_in_plan',
+    };
+  }
+
+  const entry = archive.listing.entries[entryIndex];
+  const bytes = await archive.readByIndex(entryIndex);
+
+  // **拡張子だけで信じない** (§24.3)。まとめて処理していたときと同じ検査。
+  if (!magicMatchesExtension(item.ext, bytes.subarray(0, 8))) {
+    return {
+      entryIndex, subjectNo: item.subjectNo, ext: item.ext,
+      sha256: sha256Hex(bytes), sizeBytes: bytes.length,
+      classification: { sourceKind: 'ignored', formatId: null, confidence: 'needs_review', reason: 'magic_mismatch' },
+      displayName: '', testDate: null, pageCount: null, rejectedReason: 'magic_mismatch',
+    };
+  }
+
+  const out: AnalyzedEntry = {
+    entryIndex,
+    subjectNo: item.subjectNo,
+    ext: item.ext,
+    sha256: sha256Hex(bytes),
+    sizeBytes: bytes.length,
+    classification: { sourceKind: 'person_file', formatId: null, confidence: 'needs_review', reason: 'pending' },
+    displayName: '',
+    testDate: null,
+    pageCount: null,
+  };
+
+  let sheetRows: CellValue[][] | null = null;
+  let pdfText: string | null = null;
+
+  if (item.ext === '.xlsx') {
+    // **ワークブックを 1 回だけ読み、健診と問診の両方をそこから起こす**
+    // (2 回読むと片方の失敗がもう片方を道連れにする = 既存の実装で踏んだ罠)。
+    try {
+      const sheets = await readWorkbookSheets(bytes);
+      const sheet = pickHealthCheckupSheet(sheets);
+      out.healthCheckup = sheet;
+
+      let widest: CellValue[][] = [];
+      for (const sh of sheets) if ((sh.data?.length ?? 0) > widest.length) widest = sh.data ?? [];
+      const q = normalizeExternalFormSheet(widest);
+
+      if (q.people.length > 0) {
+        out.questionnaire = q.people[0];
+        sheetRows = [q.header as unknown as CellValue[]];
+      } else if (sheet.headers.length) {
+        sheetRows = [sheet.headers as unknown as CellValue[]];
+      } else if (widest.length) {
+        sheetRows = widest.slice(0, 12);
+      }
+    } catch (err) {
+      out.error = `xlsx_read_failed:${String(err).slice(0, 120)}`;
+    }
+  } else if (item.ext === '.pdf') {
+    pdfText = extractPdfText(bytes);
+    out.pageCount = countPdfPages(bytes);
+  }
+
+  out.classification = classifyFile({
+    path: entry.path,
+    ext: item.ext,
+    inPersonFolder: item.subjectNo !== null,
+    sheetRows: sheetRows ? sheetRows.map((r) => r.map((c) => (c == null ? '' : String(c)))) : null,
+    pdfText,
+  });
+
+  if (out.classification.formatId === 'LifestyleQuestionnaireData' && item.ext === '.pdf' && pdfText) {
+    out.questionnaire = normalizeQuestionnairePdf(pdfText);
+  }
+
+  if (out.classification.formatId === 'HealthCheckupData' && out.healthCheckup?.testDate.status === 'resolved') {
+    out.testDate = out.healthCheckup.testDate.date;
+  } else if (
+    out.classification.formatId === 'LifestyleQuestionnaireData' &&
+    out.questionnaire?.completedAt.status === 'resolved'
+  ) {
+    out.testDate = out.questionnaire.completedAt.date;
+  }
+
+  out.displayName = displayNameFor(
+    item.subjectNo === null ? null : out.classification.formatId,
+    item.seq,
+    item.ext,
+  );
+  return out;
 }
 
 // ---------------------------------------------------------------------------

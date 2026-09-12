@@ -1652,6 +1652,7 @@ v0.3.1 は `actor_masked` + `actor_sha256` だけにしたため、**「誰が�
 | 版 | 日付 | 内容 |
 |---|---|---|
 | **0.4** | 2026-09-10 | **Phase D-0（ZIP/XLSX ライブラリの比較）を実施し §5.3 を「未決定」から「決定」へ格上げ。O8 CLOSE。** 候補 11 本を**一次資料から実測**（`registry.npmjs.org` / `api.osv.dev` / 各 README・`index.d.ts`）。**ZIP = `@zip.js/zip.js`**（直接依存 0・既知脆弱性 0・BSD-3-Clause・最終公開 2026-09-09。**ブラウザの `BlobReader` とサーバの Range GET を同じ `ZipReader` で賄えるので ZIP の解釈を 1 本に統一でき、§24.3 の検査も 1 か所で済む**。`filenameEncoding`/`decodeText` で CP932 も扱える）。**XLSX = `read-excel-file`**（MIT・既知脆弱性 0・最終公開 2026-08-10・ブラウザ/Node 両対応。**セル値を `Date` で返す**＝日付シリアル値の判定をライブラリが持つ。`test_date` は納品パスと 🎯 照合を決めるので自前判定で静かに 1 日ずらすわけにいかない）。**案 M（自作）は不採用**。**SheetJS `xlsx` / `node-xlsx` は採用不可** — `GHSA-5pgg-2g8v-p4x9`(HIGH) の advisory 本文が**「npm に修正版が存在しない」と明記**しており、実測でも npm は **0.18.5(2022-03-24) で停止**。もう 1 件 `GHSA-4r6h-8v6p-xvw6`(HIGH・Prototype Pollution) は**「細工されたファイルを読むとき」＝本機能そのもの**が該当（§5.3.6）。`adm-zip` も除外（`GHSA-vwc7-r8mq-g2x9` が `last_affected=0.6.0` ＝**最新版がまだ影響下で修正版が無い**）。`jszip` は全体メモリ展開で §11.5 に反するため不採用。**採用 2 本の弱点も隠さず記録**（`read-excel-file` の依存 4 本中 2 本が同一の単独メンテナ・v9 で API 破壊あり → 呼び出しをパーサ 1 枚に閉じ込める）。**まだ動かして確かめてはいない** — Phase D 冒頭で実測する 5 件を §5.3.9 に明記（full-ICU の有無・ブラウザ実機のピークメモリ・S3 Range の往復・実物 XLSX・バンドルサイズ）。 |
+| **1.1** | 2026-09-12 | **分割分類（§32）。** 159MB / 38 ファイルの ZIP が `maxDuration=800` でもタイムアウトしたので、**timeout を伸ばさず 1 リクエスト = ZIP 内 1 ファイル**に割った（`classify-plan` / `classify-entry` / `classify-finalize`。旧 `classify` は残す）。**リクエストをまたいで指すのは Central Directory の序数（整数）だけ** — path / 元ファイル名 / 人物フォルダ名は保存も応答も例外メッセージもしない（§8.1 不変）。**本丸は後工程**で、`process` / `health-age` / `export` / `GET /file` から `analyzeOpened()` を外し、分類時に保存した `normalized_payload` から復元する（残っていれば分割した意味が消え、しかも小さい ZIP では再現しない）。payload は **allow-list で組み書き込み前に deny-list で検査して throw**（`Date` セル・PII 見出し列・`notes`・`unmapped` を落とす。遺伝子は null）。**行は `(batch_id, archive_entry_index)` で冪等**・**plan は人物行を作り直さない**（cascade で Executive の紐付けと遺伝子のページが消えるため）・**採用外のエントリも行を残す**（finalize が「未処理」と区別できず永久に完了しないため）。**ZIP は上げ直さない** — `?batchId=` と「続きから再開」で `done` を飛ばす。migration は前進のみ（`20260912000010`・両列 nullable = 後方互換）。検証 176 + 40、退行注入 17 種で落ちることを確認。**Production 適用と再実行は未実施**（資格情報も admin セッションも無い）。 |
 | **1.0** | 2026-09-10 | **実装完了（§31）。** ZIP 投入 → S3 → 解析 → 人物分離 → 分類 → 健診/遺伝子/問診 → 人物整合 → ウェルネス年齢 → 管理者確認 → Elith JSON → 納品セット → dry-run → 管理 UI まで通した。**O5 を CLOSE**（発注者から 62 列の実列の提示。明示の写像表を実装し fuzzy 推測は使わない）。**DB 6 表を実コードから使用**（`store.ts` が唯一の口・migration を置いただけの状態を解消）。**Genoplan は既存 `scanGeneticPage` を再利用**しページ単位保存・キャッシュ・失敗ページ retry まで接続。**ウェルネス年齢は既存 `computeWellnessAge()` を呼ぶだけ**で、`unavailable` でも人物を failed にしない。**納品は既定 dry-run**（S3 key / JSON body / format / 検証 を書き込み前に確認できる）。検証は **archive 85 / parse 113 / e2e 92 / zip-digest 40**、`astro check` 0 errors、両リポジトリ build 成功、既存 A 層 11 本と `verify:screen` 47/47・`verify:scan-pages` 47/47 に回帰なし。実装中に直したもの: ①**ワークブックの二重読み**で片方の失敗がもう片方を道連れにしていた → 1 回読んで両方に使う ②`sanitizeMeasurementsForDelivery` の戻り値を配列と誤認（実際は `{ kept, anomalies }`） ③**単一選択の設問まで配列**にしていた（`multi` のときだけ配列が正） ④`S3RangeReader` が zip.js の Reader 契約（末尾をまたぐ要求）に合っておらず 416 を招く形だった → `clampReadLength()` で `min(length, size - offset)` に丸め、`offset >= size` は空を返す ⑤設定未了を 500 で返していた → **503 と理由**。 |
 | **0.5** | 2026-09-10 | **Phase D 着手前に、発注者指示で経路を 3 点 確定。** **A. ブラウザの SHA-256 を逐次計算へ（§11.6・新設）** — `SubtleCrypto.digest()` は **`BufferSource` を 1 個受け取る一発 API で `update()` を持たない**ので、`file.stream()` を読んでも結局全体を連結することになり省メモリにならない。→ **wellfort-site に `@noble/hashes` を追加**し `sha256.create()` → `update()` → `digest()` で計算する。**ZIP 全体を `arrayBuffer()` 化して `crypto.subtle.digest()` へ渡すのは禁止。** **①初回 ticket 発行前の `source_sha256` と ②再読込後の同一性照合を同じ実装で処理する**（別実装にすると「同じ ZIP なのに一致しない」が起き、**再開が黙って新規バッチになる**）。**`source_sha256 NOT NULL` の DB 設計は変更不要**（逐次でも ticket 前に確定する）。実測: 2.4.0 / MIT / 依存 0 / 既知脆弱性 0 / `engines: node>=20.19.0`、**import は `@noble/hashes/sha2.js` で `.js` 必須**（`exports` に `"./sha2"` は無い＝拡張子を落とすと解決失敗）、`create`/`update`/`digest` は `utils.d.ts:504/419/430`。 **B. サーバ側 ZIP は custom `Reader` → AWS SDK Range（§5.3.7.1・新設）** — **presigned GET は使わない**（署名付き URL という秘密を増やさない・既存の資格情報で完結する経路から外れない）。`readUint8Array(offset,length)` の中で `GetObjectCommand` に `Range: bytes=offset-(offset+length-1)` を付ける。**Range は両端を含む閉区間**なので終端に `offset+length` を書くと 1 バイト多く読み Central Directory の解釈がずれる=検証で固定。`ZipReader` はブラウザ側と同一なので **§24.3 の検査は 1 か所のまま**。`size` は §5.2.1 ② の `HeadObject` と同じ呼び出しで取る。 **C. `read-excel-file` はサーバ側だけ（§5.3.8.1・新設）** — ブラウザが触るのは ZIP 部分読み / SHA-256 / pdf.js の 3 つだけ。実物 XLSX で **Excel 日付 / カスタム日付書式 / 1900・1904 date system / 空欄と 0 / 日本語ヘッダー** の 5 点を必ず実測する。**カスタム日付書式は自動判定できない場合があるので、判定できないものを勝手に日付化しない** — 数値のまま持ち `needs_review` にする（シリアル値の変換は 1900/1904 の決め打ちが要り、**4 年ずれた日付を静かに作る**＝捏造）。**`test_date` が確定しない人物は納品しない**（今日の日付や別ファイルの日付を流用しない）。 |
 | **0.4** | 2026-09-10 | **発注者レビューで migration を DB 適用前に 3 点修正（Phase C 最終 PASS）。** **A. ZIP のサイズを申告値と実測値に分離**（§23.1）— **`declared_source_size`(NOT NULL) / `source_size`(NULL 可)**。理由は **batch 行が出来るのが ticket 発行時点で、まだ PUT が済んでいない**こと。1 列に混ぜると**申告値を実測値として保存する**ことになる。`source_size` は **classify 開始時の `HeadObject` で確定**させ、上限超過なら `failed` ＋一時 ZIP 削除。**申告値をここへ入れない**。 **B. 操作者識別の正を `actor_user_id`（uuid）にして O10 を CLOSE**（§21 / §22 / §23.1 / §28.1）— wellfort-site は既に `/auth/v1/user` で認証済みユーザーを取得している（`elith-scan.ts:34-39` と同形）ので、**`user.id` をサーバ側で注入**する。`actor_masked` は表示用・`actor_sha256` は任意の補助へ降格。**ブラウザ body の `actor_user_id` は信用しない。** `batches` にも `created_by_user_id` / `created_by_masked`。UUID は PII でなく後から `admin_users` で人に戻せる＝**追跡性と PII 非保存が両立**。 **C. `subject_fp` の表現を弱めた**（§6.2.1）— 「PII を引き出す経路が**原理的に無い**」は言い過ぎ。**平文の PII は含まないが、特定個人のファイル群に 1 対 1 で対応する照合用識別子**なので、**機微情報と同等に扱う**（ログに出さない・外部へ渡さない・納品 JSON に載せない）へ修正。 **検証**: scratch PostgreSQL 16 に**全 17 migration を白紙から適用 OK**・再適用も冪等・`ix_ad_hoc_subjects_batch_fp` が**非 UNIQUE**であること・**同一 batch 内の fp 衝突が 2 行とも INSERT できる**こと・`declared_source_size` NOT NULL / `source_size` が後から埋められること・`actor_user_id` / `created_by_user_id` が UUID を受けること・RLS force＋policy 0＋`anon`/`authenticated` に権限が無いことを実測。 |
@@ -1735,3 +1736,152 @@ CI は `static-required`（A 層）で 3 本とも走る。
   `QuestionDef.multi` に合わせる）。常に配列にすると既存の表示・書き出しが
   「1 件の配列」を受け取ることになる。
 - **設定が無いだけのときは 500 にしない。** Supabase / S3 未設定は **503 と理由**を返す。
+
+---
+
+## 32. 分割分類（Phase B2.1・2026-09-12）
+
+### 32.1 発端 — タイムアウトは「伸ばす」のでなく「割る」
+
+10 名ぶんの ZIP（**159,308,299 バイト / 38 ファイル・Genoplan PDF ≒21MB × 10**）を
+`POST /classify` に投げると、`maxDuration=800` でも `FUNCTION_INVOCATION_TIMEOUT` になった。
+1 リクエストの中で **ZIP の全エントリを展開し、SHA-256 を取り、XLSX を解析し、PDF から
+テキストを抜く**ので、大きさに正比例して時間が伸びる。
+
+**発注者指示 = timeout をこれ以上延長しない／新しい ZIP をアップロードさせない。**
+→ **1 リクエスト = ZIP 内 1 ファイル**に割る。既にアップロード済みの ZIP
+（バッチ `ef4a08d6-40b2-4de7-815f-052a1c8cab50`）をそのまま使う。
+
+### 32.2 3 段に割る
+
+| 段 | API | 何をするか | ZIP の中身を読むか |
+|---|---|---|---|
+| ① 計画 | `POST /classify-plan` | Central Directory だけを読み、作業一覧と**済んだ序数**を返す | **読まない**（数 KB） |
+| ② 実行 | `POST /classify-entry` | **指定の 1 エントリだけ**を読んで分類し、行を 1 つ書く | その 1 件だけ |
+| ③ 締め | `POST /classify-finalize` | 全件揃ったことを確かめ、人物の fingerprint を決めて締める | **読まない** |
+
+- **旧 `POST /classify` は残す。** 小さい ZIP は 1 回で済むし、汎用の臨時診断バッチは
+  こちらを使っている。**分割は Executive 専用ではない**（汎用でもそのまま使える）。
+- ②は `for ... of` で **1 件ずつ順に**呼ぶ。`Promise.all` にすると同じ ZIP へ同時に
+  Range GET が飛び、関数の同時実行も増えて**かえって落ちやすくなる**（手元の小さい
+  ZIP では再現しない種類の壊れ方）。
+- 画面には **「自動分類 n / N」** を出す。数分かかるので黙らせない。
+
+### 32.3 保存してよいのは **整数だけ**（§8.1 の PII 規則は不変）
+
+分割すると「どのファイルの話か」を**リクエストをまたいで**指す必要が出る。
+ここで path や元ファイル名を保存すると、**人物フォルダ名 = 氏名**が `diagnosis` スキーマに
+入ってしまう。
+
+→ **`ad_hoc_diagnosis_files.archive_entry_index`（Central Directory の序数・0 始まり）だけ**を
+保存する。**path / 元ファイル名 / 人物フォルダ名は処理中のメモリでしか使わない。**
+
+- 応答にも出さない。`classify-plan` が返すのは **序数・人物番号・拡張子・申告サイズの 4 つだけ**。
+- 例外メッセージにも出さない（ログへ流れるため）。`archive.readByIndex` のラベルは **`index=N`**。
+- `classify-finalize` が未処理を報告するときも **件数だけ**。序数の一覧も返さない。
+
+### 32.4 後工程が ZIP を開き直さないようにする（**ここが本丸**）
+
+分割しても、`process` / `health-age` / `export` が今までどおり `analyzeOpened()` で
+ZIP をまるごと読み直していれば**結局同じところで落ちる**。しかも小さい ZIP では再現しない。
+
+→ 健診 XLSX と問診は、**その 1 エントリを読んだそのとき**に正規化して
+`ad_hoc_diagnosis_files.normalized_payload`（jsonb）へ置く。後工程は DB から復元する。
+
+- 変換規則は **`src/lib/ad-hoc-diagnosis/normalized-payload.ts` の 1 か所**。
+- **入れ物は健診と問診の両方を持てる**（`{kind:'entry', health_checkup?, questionnaire?}`）。
+  `.xlsx` は両方として読むし、**分類は後から管理者に直される**。読んだときの分類だけを
+  保存すると、直したあとに材料が無く**黙って納品から落ちる**。
+- **遺伝子は `null`。** ページは既存 `ad_hoc_diagnosis_pages` が持つ（本文も画像も入れない）。
+- 一括分類（`classifyBatch`）でも同じ payload を書く。**経路で挙動を変えない。**
+- 材料が無い行（分割分類より前のバッチ）は**黙って空にせず** `normalized_payload_missing` を
+  `error_detail` に残す（分類し直せば直る）。
+
+**`GET /file` も作り直した。** 以前は `analyzeOpened()` を呼んで sha256 で引き当てていた
+＝ **遺伝子 PDF を 1 枚取り出すたびに 159MB を読み直していた**。いまは `archive_entry_index` で
+直接その 1 エントリへ行き、**読んだ中身の SHA-256 が行と一致することを必ず確かめる**
+（同じ key に別の ZIP が上げ直されると、序数の指す先が変わって
+**別人の PDF がその人物の納品物に入る**）。不一致は `409 archive_entry_hash_mismatch`。
+
+### 32.5 PII ゲート — 「保存してから消す」をしない
+
+`normalized_payload` に入ってよいものを allow-list で組み、**書き込み前にもう一度
+deny-list で検査**する。1 つでも見つかれば **DB へ書かずに throw**（一度入った氏名は
+バックアップにも監査ログにも残り、後から取り消せない）。
+
+- 禁止キー（部分一致）: `name` / `email` / `mail` / `company` / `organization` /
+  `job_title` / `title` / `path` / `folder` / `address` / `phone` / `tel` / `birth` / `dob`。
+  **入れ子・配列の中も再帰的に見る。** 例外にはキー名だけを出し**値は出さない**。
+- **列見出しが個人情報のものは throw でなく「値ごと落とす」** — 見出しは検査票が持ってくる
+  データであってこちらの設計ではない。落とした事実は**件数だけ**残す（`dropped_pii_columns`）。
+- **`Date` セルは落とす。** JSON 化すると文字列になり、復元後に
+  `sheetRowToMeasurements` の `value instanceof Date` が効かなくなって
+  **受診日が測定値として納品される**（`test_date` は別に持っている）。
+- **`notes` を保存しない** — `health-checkup-xlsx.ts` が `sheet=<シート名>` を入れており、
+  **シート名が人物の氏名であることがある**。
+- **問診の `unmapped` も保存しない** — `UnmappedItem.header` は元の見出し。件数だけ。
+- 検査は **`store.ts` の書き込みの扉**（`replaceFiles` / `upsertFileByEntryIndex` /
+  `updateFile`）でも通す。新しい経路が増えても素通りしない。
+
+### 32.6 何度やり直しても壊れない
+
+- **行は `(batch_id, archive_entry_index)` で冪等。** 通信が切れて同じ序数をやり直しても
+  行は 1 つ（部分一意インデックス。**`upsert(onConflict)` は使わない** — 部分インデックスは
+  PostgREST から推論できず、黙って重複 insert になる）。
+- **`classify-plan` は人物行を作り直さない。** `replaceSubjects` は cascade で
+  **Executive の紐付けも遺伝子のページも消す**ので、足りない `subject_no` だけを作る
+  （`ensureSubjectPlaceholders`）。`subject_no` は Central Directory の出現順で決まる
+  ＝**同じ ZIP なら同じ番号**なので、途中から再開しても同じ人物へ戻る。
+- **fingerprint は `finalize` で決まる。** 材料は各ファイルの sha256（**昇順ソート**するので
+  1 件ずつ読む順に依存しない）。
+- **採用しなかったエントリ（magic 不一致など）も 1 行残す**（`source_kind='ignored'` /
+  `parse_status='skipped'`）。ここで捨てると `finalize` が「まだ読んでいない」と区別できず、
+  **永久に完了しない**。納品には入らない（`person_file` でないため）。
+- **既に `done` のページで LLM を再実行しない**（`findCachedPage` は不変）。
+- 全件揃うまで `finalize` は **409 `classification_incomplete`**。
+  「途中まで分類しただけのバッチ」を `classified` と名乗らせない。
+
+### 32.7 クライアントの申告を信用しない
+
+`classify-entry` が受けるのは **`batchId` と `entryIndex` だけ**。
+人物番号も format も**サーバが `planArchive` で毎回引き直す**
+（申告どおりに書くと、改竄した番号で**別人の検査データがその人物の納品物に入る**）。
+序数は API と `readByIndex` の**両方**で整数・範囲・種別を検査する。
+
+### 32.8 migration
+
+**`supabase/migrations/20260912000010_ad_hoc_chunked_classify.sql`（前進のみ）。**
+既存（`20260910000020` / `20260911000010`）は**編集しない**。
+
+- `archive_entry_index integer`（nullable・既定なし・`>= 0` の check）
+- 部分一意 `(batch_id, archive_entry_index) where archive_entry_index is not null`
+- `normalized_payload jsonb`（nullable・既定なし）
+
+**後方互換**：既存行は両方 NULL で始まる。NULL は一意インデックスの対象外なので旧行と共存する。
+**先に Production Scan DB へ適用し、後方互換を確認してからコードを merge / deploy する。**
+
+### 32.9 検証
+
+| コマンド | 件数 | 中身 |
+|---|---|---|
+| `npm run verify:ad-hoc-chunked`（Scan） | 176 | migration の後方互換 ／ PII ゲートを**実際に動かす** ／ `planArchive` が**中身を 1 バイトも読まない** ／ 応答に path が無い ／ 申告を信用しない ／ 後工程に `analyzeOpened` が残っていない ／ Phase A の装置が不変 |
+| `npm run verify:ad-hoc-chunked-ui`（wellfort-site） | 40 | 中継の allow-list に 3 本 ＋ **実際に upstream へ届く** ／ 画面が旧 `classify` を呼ばない ／ 1 件ずつ await ／ 進捗 ／ **再開で ZIP を上げ直さない** |
+
+**退行を注入して落ちることを確認済み**（12 種）:
+値の型フィルタを外す（`Date` が測定値に混ざる）／ deny-list を再帰させない ／
+`processBatch` で ZIP を開き直す ／ `upsert(onConflict)` に置き換える ／
+PII 検査を書き込みの後ろへ ／ `classifyPlan` が subjects を作り直す ／
+plan の応答に path を載せる ／ finalize が残りの序数を返す ／
+`readByIndex` の範囲検査を外す ／ ラベルを path にする ／
+申告の `subjectNo` / `formatId` を `as any` で使う ／ 採用外を早期 return で捨てる ／
+中継の allow-list から 1 本外す ／ `Promise.all` で並列化する ／
+済んだ序数を飛ばさない ／ 旧 `classify` に戻す ／ 再開ボタンを消す。
+
+### 32.10 まだやっていないこと
+
+- **migration の Production 適用**（このセッションに Supabase の資格情報も CLI も無い）。
+- **バッチ `ef4a08d6-40b2-4de7-815f-052a1c8cab50` の再実行**（admin セッションが無い）。
+  適用・deploy 後に `?batchId=ef4a08d6-…` で開き、**ZIP を上げ直さずに**「分類の続きから再開する」を押す。
+  期待値 = 人物 10 名 / ファイル 35 件（人物ファイル）＋ バッチ共通資料。
+- **`process` / dry-run / 実 Elith 納品へは進まない。**
+  `AD_HOC_ELITH_WRITE_ENABLED` は unset（または `on` 以外）のまま。
