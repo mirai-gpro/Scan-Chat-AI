@@ -52,6 +52,8 @@ export interface BatchRow {
   file_count: number;
   required_formats: string[];
   optional_formats: string[];
+  /** true = Executive Diagnosis。人物マスタへ紐付くまで納品しない。既定 false。 */
+  require_executive_link: boolean;
   retain_originals: boolean;
   created_by_user_id: string | null;
   created_by_masked: string | null;
@@ -180,6 +182,8 @@ export async function createBatch(input: {
   sourceKey: string;
   requiredFormats: string[];
   optionalFormats: string[];
+  /** Executive Diagnosis のときだけ true。既定 false = 従来の臨時診断バッチ。 */
+  requireExecutiveLink?: boolean;
   retainOriginals?: boolean;
   createdByUserId?: string | null;
   createdByMasked?: string | null;
@@ -195,6 +199,7 @@ export async function createBatch(input: {
       source_key: input.sourceKey,
       required_formats: input.requiredFormats,
       optional_formats: input.optionalFormats,
+      require_executive_link: input.requireExecutiveLink === true,
       retain_originals: input.retainOriginals ?? false,
       created_by_user_id: input.createdByUserId ?? null,
       created_by_masked: input.createdByMasked ?? null,

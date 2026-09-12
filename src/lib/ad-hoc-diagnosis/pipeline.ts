@@ -542,6 +542,9 @@ export interface ReadinessReport {
   reasons: string[];
 }
 
+/** Executive 案件で人物マスタへ紐付いていないときの理由 (画面・skipped で共有する)。 */
+export const EXECUTIVE_UNLINKED_REASON = 'executive_subject_unlinked';
+
 /**
  * 人物 1 人が納品してよい状態か。
  *
@@ -553,6 +556,13 @@ export function evaluateReadiness(input: {
   requiredFormats: readonly string[];
   optionalFormats: readonly string[];
   classifications: readonly Classification[];
+  /**
+   * Executive Diagnosis のバッチか (`batches.require_executive_link`)。
+   * **既定 false = 従来の臨時診断バッチと同じ判定**。
+   */
+  requireExecutiveLink?: boolean;
+  /** その人物が紐付いている Executive の UUID。未割当なら null。 */
+  executiveSubjectId?: string | null;
 }): ReadinessReport {
   const present = [...new Set(input.producedFormats)];
   const missingRequired = input.requiredFormats.filter((f) => !present.includes(f));
@@ -580,11 +590,22 @@ export function evaluateReadiness(input: {
   for (const f of presentOptionalSourceButNotProduced) {
     reasons.push(`optional_present_but_not_ready:${f}`);
   }
+
+  /*
+   * **Executive 案件は「誰の検査か」が決まるまで納品しない。**
+   * 検査が全部揃っていても、人物マスタへ紐付いていなければ
+   * 納品 JSON は client_id だけの匿名データになり、**後から誰の分か辿れない**。
+   * 従来の臨時診断バッチ (`require_executive_link=false`) では一切効かない。
+   */
+  const executiveUnlinked = input.requireExecutiveLink === true && !input.executiveSubjectId;
+  if (executiveUnlinked) reasons.push(EXECUTIVE_UNLINKED_REASON);
+
   const autoReady = subjectIsAutoReady(input.classifications);
   if (!autoReady) reasons.push('classification_needs_review');
   return {
     ready: missingRequired.length === 0
       && presentOptionalSourceButNotProduced.length === 0
+      && !executiveUnlinked
       && autoReady,
     present,
     missingRequired,

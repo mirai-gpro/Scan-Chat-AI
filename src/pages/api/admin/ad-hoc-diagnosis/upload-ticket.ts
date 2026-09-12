@@ -34,6 +34,9 @@ export const POST: APIRoute = async ({ request }) => {
       contentType: str(body.contentType) ?? undefined,
       requiredFormats: Array.isArray(body.requiredFormats) ? (body.requiredFormats as string[]) : undefined,
       optionalFormats: Array.isArray(body.optionalFormats) ? (body.optionalFormats as string[]) : undefined,
+      // **`true` ちょうどのときだけ Executive 案件**。省略・文字列 'true' では立てない
+      // (取り違えると納品条件が黙って変わる)。
+      requireExecutiveLink: body.requireExecutiveLink === true,
       retainOriginals: body.retainOriginals === true,
       actor: actorFrom(request),
     });

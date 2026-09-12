@@ -34,6 +34,21 @@ create unique index if not exists ad_hoc_diagnosis_subjects_batch_executive_uniq
   where executive_subject_id is not null;
 
 -- ────────────────────────────────────────────────────────────────────────────
+-- 1-b) このバッチが Executive Diagnosis か
+--
+-- **既定は false = 従来の臨時診断バッチ (generic ad-hoc) と完全に同じ挙動。**
+-- `true` のときだけ「人物マスタへ紐付いていない人は納品しない」が効く。
+-- 案件の種類を**バッチに明示して持つ**ので、画面や人物の状態から推測しない。
+-- ────────────────────────────────────────────────────────────────────────────
+
+alter table diagnosis.ad_hoc_diagnosis_batches
+  add column if not exists require_executive_link boolean not null default false;
+
+comment on column diagnosis.ad_hoc_diagnosis_batches.require_executive_link is
+  'true = Executive Diagnosis。人物が public.executive_subjects へ紐付くまで納品しない。'
+  ' false (既定) = 従来の臨時診断バッチ。挙動は変わらない。';
+
+-- ────────────────────────────────────────────────────────────────────────────
 -- 2) `outputs.validation_status` の値域をコードに合わせる
 --
 -- コードは `pending` / `ok` / `warn` / `error` を書くが (`store.ts` の

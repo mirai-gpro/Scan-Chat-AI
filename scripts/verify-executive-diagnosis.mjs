@@ -90,9 +90,15 @@ console.log('\n=== B. subjects に足したのは executive_subject_id (UUID) �
 {
   const sql = read(MIG_B1);
   const adds = [...sql.matchAll(/add column if not exists\s+(\w+)\s+(\w+)/gi)].map((x) => [x[1], x[2]]);
-  eq('追加列は 1 本だけ', adds.length, 1);
-  eq('列名', adds[0]?.[0], 'executive_subject_id');
-  eq('型は uuid', adds[0]?.[1], 'uuid');
+  /*
+   * 追加列は 2 本ちょうど: **人物の紐付け (UUID)** と **バッチが Executive 案件か**。
+   * ここが増えたら PII が診断側へ滲み出していないか必ず確かめる。
+   */
+  eq('追加列は 2 本 (紐付け + 案件フラグ)', adds.map(([n]) => n).sort(),
+    ['executive_subject_id', 'require_executive_link']);
+  const col = Object.fromEntries(adds);
+  eq('紐付けの型は uuid', col.executive_subject_id, 'uuid');
+  eq('案件フラグの型は boolean', col.require_executive_link, 'boolean');
   eq('外部キーを張っていない', /references\s+\w*executive/i.test(sql), false);
   eq('index がある', /create index[\s\S]*executive_subject_id/i.test(sql), true);
   eq('同一 batch の二重割当を防ぐ一意制約がある',
@@ -197,8 +203,11 @@ console.log('\n=== G. 遺伝子の日付が無ければ納品 ready にしない
 {
   const code = stripComments(read(SERVICE));
   // process 側: 日付が無ければ formats に push しない
-  eq('日付が無ければ formats に push しない',
-    /if \(gTestDate && [^)]*\) formats\.push\('GeneticTestResultData'\)/.test(code), true);
+  // (条件は `geneticComplete` に集約したので、その定義が日付を見ていることで担保する)
+  eq('完成条件が日付を見ている',
+    /const geneticComplete = !!gTestDate && /.test(code), true);
+  eq('formats.push は完成条件を通る',
+    /if \(geneticComplete\) formats\.push\('GeneticTestResultData'\)/.test(code), true);
   // assemble 側: 日付が無ければ納品ファイルを作らない
   eq('日付が無ければ納品ファイルを作らない',
     /if \(parts\.length > 0 && gTestDate[^)]*\)/.test(code), true);
@@ -366,9 +375,19 @@ console.log('\n=== L. 遺伝子の部分納品を禁止 (失敗/未処理ペー�
     /const incomplete = pages\.filter\(\(p\) => p\.status !== 'done'\)\.length;/.test(code), true);
   eq('assemble 側は done 以外を数える',
     /const gIncomplete = pages\.filter\(\(p\) => p\.status !== 'done'\)\.length;/.test(code), true);
-  // **page_count (countPdfPages の概算) に依存していない** — 操作で直せない停止を作らない
-  eq('page_count を納品条件にしていない',
-    /(incomplete|gIncomplete)[^;]*page_count/.test(code), false);
+  /*
+   * **page_count (countPdfPages の概算) を納品の条件にしていない** —
+   * 概算が実際とずれると**操作で直せないまま納品が永久に止まる**。
+   * 見るのは「未完了の数え方」と「納品のガード」だけ (`parse_status` の行には
+   * `page_count:` の代入が続くので、行全体を見ると必ず当たってしまう)。
+   */
+  const countDefs = [...code.matchAll(/const g?[Ii]ncomplete = [^;]+;/g)].map((m) => m[0]);
+  eq('未完了の数え方が 2 か所ある', countDefs.length, 2);
+  eq('数え方に page_count を使っていない',
+    countDefs.some((d) => d.includes('page_count')), false);
+  const completeDef = /const geneticComplete = [^;]+;/.exec(code);
+  eq('完成条件に page_count を使っていない',
+    (completeDef?.[0] ?? '').includes('page_count'), false);
 
   /*
    * **実物のガード式をそのまま動かす。**
@@ -385,8 +404,15 @@ console.log('\n=== L. 遺伝子の部分納品を禁止 (失敗/未処理ペー�
   eq('process 側のガード式が見つかる', pg !== null, true);
   eq('assemble 側のガード式が見つかる', ag !== null, true);
 
-  // 見つからなければ「常に納品する」とみなして下の検査で落とす (黙って素通りさせない)。
-  const runP = new Function('gTestDate', 'incomplete', `return !!(${pg?.[1] ?? 'true'});`);
+  /*
+   * process 側のガードは `geneticComplete` を経由するので、**その定義も一緒に
+   * 持ち込んで**評価する (定義を書き写すと、条件を緩めても検査が通る)。
+   */
+  const runP = new Function('gTestDate', 'incomplete', `
+    const doneParts = [{ page: 1 }];
+    ${completeDef?.[0] ?? 'const geneticComplete = true;'}
+    return !!(${pg?.[1] ?? 'true'});
+  `);
   const runA = new Function('parts', 'gTestDate', 'gIncomplete', `return !!(${ag?.[1] ?? 'true'});`);
   const PARTS = [{ page: 1 }];
 
@@ -407,8 +433,302 @@ console.log('\n=== L. 遺伝子の部分納品を禁止 (失敗/未処理ペー�
   eq('assemble: 成功ページ 0 → 納品しない', runA([], '2026-03-29', 0), false);
 
   // 失敗の事実は warn/error として残り続ける (黙って消さない)
-  eq('失敗ページを warn で残す', /failed > 0 \? 'warn'/.test(code), true);
+  eq('未完了を warn で残す', /incomplete > 0 \? 'warn'/.test(code), true);
   eq('失敗ページ数を error_detail に残す', /failed_pages:\$\{failed\}/.test(code), true);
+}
+
+console.log('\n=== M. 遺伝子の状態が output / parse_status / produced で一貫している ===');
+{
+  /*
+   * **実物の判定式をそのまま動かす。** 3 か所 (output_status / validation_status /
+   * error_detail / parse_status / producedFormats) が別々の条件を見ていたのが
+   * B1.2 で直した不具合そのものなので、**同じ入力を全部へ通して食い違いを見る**。
+   */
+  const code = stripComments(read(SERVICE));
+
+  const completeExpr = /const geneticComplete = ([^;]+);/.exec(code);
+  eq('geneticComplete の定義がある', completeExpr !== null, true);
+
+  // 遺伝子の upsertOutput をそのまま取り出す
+  const outCall = [...code.matchAll(/await store\.upsertOutput\(\{([\s\S]*?)\n\s*\}\);/g)]
+    .map((m) => m[1]).find((b) => b.includes("'GeneticTestResultData'"));
+  eq('遺伝子の upsertOutput が見つかる', outCall !== undefined, true);
+
+  const parseExpr = /parse_status: (doneParts\.length[\s\S]*?),\n\s+page_count:/.exec(code);
+  eq('遺伝子の parse_status 式が見つかる', parseExpr !== null, true);
+
+  const pushExpr = /if \(([^)]*)\) formats\.push\('GeneticTestResultData'\)/.exec(code);
+  eq('producedFormats のガードが見つかる', pushExpr !== null, true);
+
+  const run = new Function('gTestDate', 'doneCount', 'incomplete', 'failed', `
+    const s = { id: 'S1', client_id: 'C1' };
+    const built = { itemCount: 42 };
+    const doneParts = Array.from({ length: doneCount }, (_, i) => ({ page: i + 1 }));
+    const geneticComplete = ${completeExpr?.[1] ?? 'false'};
+    const output = doneParts.length > 0 ? ({${outCall ?? ''}}) : null;
+    const parse_status = ${parseExpr?.[1] ?? "'?'"};
+    const produced = !!(${pushExpr?.[1] ?? 'true'});
+    return { output, parse_status, produced, geneticComplete };
+  `);
+
+  // A. done + pending が混在 (failed は 0) → 完成扱いにしない
+  const a = run('2026-03-29', 3, 2, 0);
+  eq('A: output_status = failed', a.output.output_status, 'failed');
+  eq('A: validation_status = warn', a.output.validation_status, 'warn');
+  eq('A: error_detail に incomplete_pages',
+    /^incomplete_pages:2$/.test(a.output.error_detail ?? ''), true);
+  eq('A: parse_status = processing', a.parse_status, 'processing');
+  eq('A: produced に入らない', a.produced, false);
+
+  // A'. failed も混じるときは内訳が分かる (retry で直るものと未送信は対処が違う)
+  const a2 = run('2026-03-29', 3, 2, 1);
+  eq("A': error_detail に failed_pages も出る",
+    /incomplete_pages:2 failed_pages:1/.test(a2.output.error_detail ?? ''), true);
+
+  // B. 全ページ done + 日付あり → 完成
+  const b = run('2026-03-29', 5, 0, 0);
+  eq('B: output_status = generated', b.output.output_status, 'generated');
+  eq('B: validation_status = ok', b.output.validation_status, 'ok');
+  eq('B: error_detail は空', b.output.error_detail, null);
+  eq('B: parse_status = done', b.parse_status, 'done');
+  eq('B: produced に入る', b.produced, true);
+
+  // B'. 日付が無ければ完成しない (ページが全部 done でも)
+  const b2 = run(null, 5, 0, 0);
+  eq("B': output_status = failed", b2.output.output_status, 'failed');
+  eq("B': validation_status = error", b2.output.validation_status, 'error');
+  eq("B': error_detail = test_date_unresolved", b2.output.error_detail, 'test_date_unresolved');
+  eq("B': produced に入らない", b2.produced, false);
+
+  // 成功ページ 0 → output を作らない・parse_status は pending
+  const z = run('2026-03-29', 0, 4, 0);
+  eq('done 0 件: output を作らない', z.output, null);
+  eq('done 0 件: parse_status = pending', z.parse_status, 'pending');
+
+  // **3 者が同じ条件を見ている** (どれか 1 つだけ緩むのを防ぐ)
+  for (const [label, r] of [['A', a], ["B'", b2], ['B', b]]) {
+    eq(`${label}: produced と geneticComplete が一致`, r.produced, r.geneticComplete);
+    if (r.output) {
+      eq(`${label}: output_status と geneticComplete が一致`,
+        r.output.output_status === 'generated', r.geneticComplete);
+    }
+  }
+}
+
+console.log('\n=== N. batchStatus は納品できる output だけを produced に数える ===');
+{
+  const code = stripComments(read(SERVICE));
+  const fn = /function isDeliverableOutput\([\s\S]*?\n\}/.exec(code);
+  eq('isDeliverableOutput がある', fn !== null, true);
+  // **TS の型注釈が付いているので `new Function` へ直接は渡せない** (実際に落ちた)。
+  // 実物を transpile してから動かす。
+  const tsN = (await import('typescript')).default;
+  const jsFn = tsN.transpileModule(`${fn?.[0] ?? ''}\nexport { isDeliverableOutput };`, {
+    compilerOptions: { target: 'ES2022', module: 'ESNext' },
+  }).outputText;
+  const CACHE_N = resolve(ROOT, 'node_modules/.cache');
+  mkdirSync(CACHE_N, { recursive: true });
+  const pN = resolve(CACHE_N, 'verify-exec-deliverable.mjs');
+  writeFileSync(pN, jsFn);
+  const { isDeliverableOutput: isDeliverable } = await import(`${pN}?t=${Date.now()}`);
+
+  const O = (output_status, validation_status) => ({ output_status, validation_status });
+  // C. failed / error は数えない
+  eq('C: failed は数えない', isDeliverable(O('failed', 'warn')), false);
+  eq('C: failed + error も数えない', isDeliverable(O('failed', 'error')), false);
+  eq('C: generated + error は数えない', isDeliverable(O('generated', 'error')), false);
+  eq('C: pending は数えない', isDeliverable(O('pending', 'pending')), false);
+  // D. 問診の unmapped 由来 warn は数える (人物ごと落とさない、が既存の約束)
+  eq('D: generated + warn は数える', isDeliverable(O('generated', 'warn')), true);
+  eq('D: generated + ok は数える', isDeliverable(O('generated', 'ok')), true);
+  eq('D: exported + ok は数える', isDeliverable(O('exported', 'ok')), true);
+
+  // batchStatus が実際にこの関数を通していること
+  eq('batchStatus が filter で使っている',
+    /\.filter\(isDeliverableOutput\)\s*\n?\s*\.map\(\(o\) => o\.format_id\)/.test(code), true);
+  eq('素の map(format_id) が残っていない',
+    /outputsBySubject\.get\(s\.id\) \?\? \[\]\)\.map\(\(o\) => o\.format_id\)/.test(code), false);
+}
+
+console.log('\n=== O. Executive 未割当は納品しない / generic は従来どおり ===');
+{
+  const ts4 = (await import('typescript')).default;
+  const pipe = read('src/lib/ad-hoc-diagnosis/pipeline.ts');
+  const cls = read('src/lib/ad-hoc-diagnosis/classify.ts');
+  const extractFn = (src, name) => {
+    const head = src.indexOf(`export function ${name}(`);
+    if (head < 0) return null;
+    let i = src.indexOf('(', head), depth = 0;
+    for (; i < src.length; i++) {
+      if (src[i] === '(') depth++;
+      else if (src[i] === ')' && --depth === 0) break;
+    }
+    const b = src.indexOf('{', i);
+    depth = 0;
+    for (let j = b; j < src.length; j++) {
+      if (src[j] === '{') depth++;
+      else if (src[j] === '}' && --depth === 0) return src.slice(head, j + 1);
+    }
+    return null;
+  };
+  const src = `${extractFn(cls, 'subjectIsAutoReady')}\n${extractFn(pipe, 'evaluateReadiness')}\n`
+    .replace(/export function/g, 'function')
+    .replace(/EXECUTIVE_UNLINKED_REASON/g, "'executive_subject_unlinked'")
+    + 'export { evaluateReadiness };';
+  const CACHE3 = resolve(ROOT, 'node_modules/.cache');
+  mkdirSync(CACHE3, { recursive: true });
+  const p3 = resolve(CACHE3, 'verify-exec-readiness2.mjs');
+  writeFileSync(p3, ts4.transpileModule(src, {
+    compilerOptions: { target: 'ES2022', module: 'ESNext' },
+  }).outputText);
+  const { evaluateReadiness } = await import(`${p3}?t=${Date.now()}`);
+
+  const cf = (formatId) => ({ sourceKind: 'person_file', formatId, confidence: 'confirmed', reason: '' });
+  const base = {
+    producedFormats: ['HealthCheckupData', 'LifestyleQuestionnaireData'],
+    requiredFormats: ['HealthCheckupData', 'LifestyleQuestionnaireData'],
+    optionalFormats: ['GeneticTestResultData', 'HealthAgeData'],
+    classifications: [cf('HealthCheckupData'), cf('LifestyleQuestionnaireData')],
+  };
+
+  // E. Executive 案件 + 未割当 → not ready・理由が出る
+  const e1 = evaluateReadiness({ ...base, requireExecutiveLink: true, executiveSubjectId: null });
+  eq('E: 未割当は not ready', e1.ready, false);
+  eq('E: 理由 executive_subject_unlinked',
+    e1.reasons.includes('executive_subject_unlinked'), true);
+  eq('E: 必須不足とは別建て', e1.missingRequired, []);
+
+  // I. 紐付ければ ready
+  const e2 = evaluateReadiness({
+    ...base, requireExecutiveLink: true, executiveSubjectId: '11111111-2222-3333-4444-555555555555',
+  });
+  eq('I: 紐付け済みは ready', e2.ready, true);
+  eq('I: 理由は空', e2.reasons, []);
+
+  // G. generic ad-hoc (既定 false) は未割当でも従来どおり ready
+  const g1 = evaluateReadiness({ ...base, executiveSubjectId: null });
+  eq('G: generic は未割当でも ready', g1.ready, true);
+  eq('G: generic に executive の理由は出ない',
+    g1.reasons.some((r) => r.includes('executive')), false);
+  const g2 = evaluateReadiness({ ...base, requireExecutiveLink: false, executiveSubjectId: null });
+  eq('G: false を明示しても同じ', g2.ready, true);
+
+  // F. 未割当が 1 人でもいれば assemble が skipped に入れ、write-guard が全体を止める
+  const code = stripComments(read(SERVICE));
+  eq('F: assemble は not ready を skipped へ入れる',
+    /skipped\.push\(\{ subjectNo: s\.subject_no, reason: readiness\.reasons\.join\(','\)/.test(code), true);
+  eq('F: assemble が requireExecutiveLink を渡している',
+    (code.match(/requireExecutiveLink: batch\.require_executive_link/g) ?? []).length >= 3, true);
+  eq('F: write-guard へ skipped をそのまま渡す',
+    /checkWriteGate\(\{ delivery, skipped \}\)/.test(code), true);
+}
+
+console.log('\n=== P. 分類確定と人物確定を Executive 案件では分ける ===');
+{
+  const code = stripComments(read(SERVICE));
+
+  /*
+   * H. Executive 案件では分類確定で identity を一括 confirmed にしない。
+   *
+   * **「無条件の一括 confirmed が無いこと」を正規表現の不在で見ない** —
+   * ガードの中にある同じコードにも当たってしまい、退行を注入しても通る (実際に通った)。
+   * **1 つしかない `admin_confirmed` が、ガードの内側の位置にあるか**を見る。
+   */
+  const marks = [...code.matchAll(/identity_reason: 'admin_confirmed'/g)].map((m) => m.index);
+  eq('H: 一括 confirmed は 1 か所だけ', marks.length, 1);
+  const guardAt = code.indexOf('if (!batch.require_executive_link) {');
+  eq('H: ガードが存在する', guardAt >= 0, true);
+  // ガードの開き括弧から対応する閉じ括弧までの範囲を求める
+  let depth = 0, guardEnd = -1;
+  for (let i = code.indexOf('{', guardAt); i < code.length && guardAt >= 0; i++) {
+    if (code[i] === '{') depth++;
+    else if (code[i] === '}' && --depth === 0) { guardEnd = i; break; }
+  }
+  eq('H: 一括 confirmed はガードの内側にある',
+    marks[0] > guardAt && marks[0] < guardEnd, true);
+
+  /*
+   * I/J. link / unlink の状態遷移を実物の分岐で動かす。
+   * **`patch` の宣言から `updateSubject` の呼び出し直前まで**を丸ごと取り出す
+   * (オブジェクトリテラルだけを取ると if 分岐が落ち、遷移を何も検査しないまま通る)。
+   */
+  const from = code.indexOf('const patch: Parameters<typeof store.updateSubject>[1] = {');
+  const to = code.indexOf('const updated = await store.updateSubject(input.subjectId, patch);');
+  eq('link の patch 組み立てが見つかる', from >= 0 && to > from, true);
+  const body = code.slice(from, to)
+    .replace('const patch: Parameters<typeof store.updateSubject>[1] =', 'const patch =');
+  eq('patch の分岐まで取れている', /identity_status/.test(body), true);
+  const run = new Function('subject', 'input', `${body}\nreturn patch;`);
+
+  const EX = '11111111-2222-3333-4444-555555555555';
+  // I. 未確定の人物を紐付け → confirmed / executive_linked
+  const i1 = run({ identity_status: 'needs_review', identity_reason: 'fp_collision' },
+    { executiveSubjectId: EX });
+  eq('I: 紐付けで confirmed', i1.identity_status, 'confirmed');
+  eq('I: 理由は executive_linked', i1.identity_reason, 'executive_linked');
+  eq('I: UUID を保存する', i1.executive_subject_id, EX);
+
+  // J-1. 紐付けで確定した人物を外す → needs_review へ戻る
+  const j1 = run({ identity_status: 'confirmed', identity_reason: 'executive_linked' },
+    { executiveSubjectId: null });
+  eq('J: 紐付け由来の確定は外すと needs_review', j1.identity_status, 'needs_review');
+  eq('J: 理由が残る', j1.identity_reason, 'executive_unlinked');
+  eq('J: UUID を外す', j1.executive_subject_id, null);
+
+  // J-2. **fingerprint で独立に確定していた人物を壊さない**
+  const j2 = run({ identity_status: 'confirmed', identity_reason: 'fp_match' },
+    { executiveSubjectId: null });
+  eq('J: fp_match の確定は unlink で壊さない', j2.identity_status, undefined);
+  eq('J: fp_match の理由も書き換えない', j2.identity_reason, undefined);
+  const j3 = run({ identity_status: 'confirmed', identity_reason: 'fp_match' },
+    { executiveSubjectId: EX });
+  eq('J: 既に確定済みなら理由を上書きしない', j3.identity_reason, undefined);
+
+  // 監査は残る
+  eq('紐付けの監査を残す', /kind: 'executive_link', linked:/.test(code), true);
+}
+
+console.log('\n=== Q. retry がサーバ側で未完了を正しく拾う ===');
+{
+  const code = stripComments(read(SERVICE));
+  eq('failed だけでなく done 以外を対象にする',
+    /const unfinished = pages\.filter\(\(p\) => p\.status !== 'done'\)\.map\(\(p\) => p\.page_no\)/.test(code), true);
+  eq('failed 限定の旧実装が残っていない',
+    /const failed = pages\.filter\(\(p\) => p\.status === 'failed'\)\.map\(\(p\) => p\.page_no\)/.test(code), false);
+  // **行が無いページを作らない** (存在しないページ番号を推測しない)
+  eq('page_count からページ番号を作っていない',
+    /targets\.push\([^)]*page_count/.test(code), false);
+
+  // 成功ページのキャッシュ = 再実行で LLM を呼び直さない仕組み (**変更していない**)
+  eq('done ページのキャッシュが残っている',
+    /const cached = await store\.findCachedPage\(file\.sha256, p\.page\);/.test(code), true);
+  eq('キャッシュ命中で Gemini を呼ばない',
+    /if \(cached && !options\.retryFailedOnly\) \{[\s\S]{0,400}?continue;/.test(code), true);
+  const st = stripComments(read(STORE));
+  eq("キャッシュは status='done' だけを引く",
+    /findCachedPage[\s\S]*?\.eq\('status', 'done'\)/.test(st), true);
+}
+
+console.log('\n=== R. require_executive_link がバッチに保存される ===');
+{
+  const st = stripComments(read(STORE));
+  const svc = stripComments(read(SERVICE));
+  const api = stripComments(read('src/pages/api/admin/ad-hoc-diagnosis/upload-ticket.ts'));
+  const mig = read(MIG_B1);
+
+  eq('migration が列を足している',
+    /add column if not exists require_executive_link boolean not null default false/i.test(mig), true);
+  eq('既定は false (generic は挙動不変)', /default false/i.test(mig), true);
+  eq('BatchRow に型がある', /require_executive_link: boolean;/.test(st), true);
+  eq('createBatch が保存する',
+    /require_executive_link: input\.requireExecutiveLink === true/.test(st), true);
+  eq('createBatchWithTicket が渡す',
+    /requireExecutiveLink: input\.requireExecutiveLink === true/.test(svc), true);
+  eq('upload-ticket API が受ける',
+    /requireExecutiveLink: body\.requireExecutiveLink === true/.test(api), true);
+  // **既存 migration は編集していない**
+  eq('20260910000020 を編集していない',
+    /require_executive_link/.test(read(MIG_AD_HOC)), false);
 }
 
 console.log('');
