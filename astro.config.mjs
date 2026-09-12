@@ -6,9 +6,11 @@ import vercel from '@astrojs/vercel';
 export default defineConfig({
   output: 'server',
   adapter: vercel({
-    // gemini-2.5-flash で密度の高い検査表 (~39 項目) を転記すると
-    // 30〜50 秒かかるため、デフォルト 10〜15 秒では足りない。
-    maxDuration: 60,
+    // 臨時診断バッチの classify は 150MB 級 ZIP を S3 Range GET しながら
+    // 全エントリの magic/sha256/分類/XLSX 解析まで同期実行する。
+    // 60 秒では実データで FUNCTION_INVOCATION_TIMEOUT になったため 300 秒へ延長。
+    // Elith への実書き込み可否は別の write-guard で制御しており、この変更では触らない。
+    maxDuration: 300,
   }),
   integrations: [tailwind()],
   server: {
