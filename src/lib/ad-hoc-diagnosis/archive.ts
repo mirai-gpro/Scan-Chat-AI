@@ -318,6 +318,16 @@ export interface OpenedArchive {
   listing: ArchiveListing;
   /** 採用したエントリの中身を読む。**1 件ずつ呼び、使い終わったら参照を捨てる。** */
   read(path: string): Promise<Uint8Array>;
+  /**
+   * **Central Directory の序数で 1 エントリだけ読む。**
+   *
+   * 分割分類 (1 リクエスト = 1 ファイル) の入口。`listing.entries` と同じ並び
+   * (= ZIP が持っている生の順) なので、**path を DB に保存しなくても**
+   * 「どのファイルか」を整数 1 つで指せる。
+   */
+  readByIndex(index: number): Promise<Uint8Array>;
+  /** Central Directory のエントリ総数 (`listing.entries.length` と同じ)。 */
+  entryCount: number;
   close(): Promise<void>;
 }
 
@@ -369,23 +379,48 @@ export async function openArchive(reader: Reader<unknown>): Promise<OpenedArchiv
     if (insp.rejected === null && !e.directory) byPath.set(insp.path, e);
   });
 
+  /** 1 エントリを読み出す共通処理。**path 版と index 版で同じ検査を通す。** */
+  const readEntry = async (e: FileEntry, label: string): Promise<Uint8Array> => {
+    const bytes = await e.getData(new Uint8ArrayWriter());
+    // **展開中も実バイト数で判定する** (申告値の詐称対策・spec §24.3)。
+    if (bytes.length > MAX_ENTRY_BYTES) {
+      throw new Error(`エントリの実サイズが上限を超えている: ${label} (${bytes.length})`);
+    }
+    const declared = Number(e.uncompressedSize ?? 0);
+    if (bytes.length !== declared) {
+      throw new Error(
+        `エントリの実サイズが申告値と違う: ${label} (申告 ${declared} / 実 ${bytes.length})`,
+      );
+    }
+    return bytes;
+  };
+
   return {
     listing: { entries, declaredTotal, rawCount: raw.length },
+    entryCount: entries.length,
     async read(path: string): Promise<Uint8Array> {
       const e = byPath.get(path);
       if (!e) throw new Error(`ZIP に該当エントリが無い: ${path}`);
-      const bytes = await e.getData(new Uint8ArrayWriter());
-      // **展開中も実バイト数で判定する** (申告値の詐称対策・spec §24.3)。
-      if (bytes.length > MAX_ENTRY_BYTES) {
-        throw new Error(`エントリの実サイズが上限を超えている: ${path} (${bytes.length})`);
+      return readEntry(e, path);
+    },
+    async readByIndex(index: number): Promise<Uint8Array> {
+      /*
+       * **範囲は必ず自分で検査する。** 呼び出し側 (API) はブラウザから来た数字を
+       * 渡してくるので、`raw[index]` が undefined のまま進むと
+       * 「別のエントリを黙って返す」より悪い壊れ方 (throw が読みにくい場所で出る) をする。
+       */
+      if (!Number.isInteger(index) || index < 0 || index >= raw.length) {
+        throw new Error(`entryIndex が範囲外: ${index} (0..${raw.length - 1})`);
       }
-      const declared = Number(e.uncompressedSize ?? 0);
-      if (bytes.length !== declared) {
-        throw new Error(
-          `エントリの実サイズが申告値と違う: ${path} (申告 ${declared} / 実 ${bytes.length})`,
-        );
+      const insp = entries[index];
+      // **採用しなかったエントリは読ませない** (ディレクトリ・暗号化・許可外拡張子など)。
+      if (insp.rejected !== null) {
+        throw new Error(`採用していないエントリ: index=${index} (${insp.rejected})`);
       }
-      return bytes;
+      const e = raw[index];
+      if (!e || e.directory) throw new Error(`ファイルでないエントリ: index=${index}`);
+      // ラベルに path を使わない (例外メッセージがログへ出るため・§8.1)。
+      return readEntry(e, `index=${index}`);
     },
     async close() {
       await zip.close();
