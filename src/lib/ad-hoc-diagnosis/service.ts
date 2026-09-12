@@ -43,6 +43,8 @@ export async function createBatchWithTicket(input: {
   contentType?: string;
   requiredFormats?: string[];
   optionalFormats?: string[];
+  /** Executive Diagnosis の案件か。**明示されたときだけ true**。既定は従来どおり false。 */
+  requireExecutiveLink?: boolean;
   retainOriginals?: boolean;
   actor: Actor;
 }) {
@@ -68,6 +70,7 @@ export async function createBatchWithTicket(input: {
     sourceKey: adHocZipKey(cfg, batchId),
     requiredFormats: input.requiredFormats ?? AD_HOC_REQUIRED_FORMATS,
     optionalFormats: input.optionalFormats ?? AD_HOC_OPTIONAL_FORMATS,
+    requireExecutiveLink: input.requireExecutiveLink === true,
     retainOriginals: input.retainOriginals,
     createdByUserId: input.actor.userId,
     createdByMasked: input.actor.masked,
@@ -132,6 +135,13 @@ export async function classifyBatch(batchId: string, actor: Actor) {
       let identity: store.SubjectIdentityStatus = 'confirmed';
       let reason: string | null = null;
       let clientId = newClientId();
+      /*
+       * **再分類で Executive の紐付けを消さない** (§7)。
+       * `replaceSubjects` は行を作り直すので、引き継がないと管理者が結んだ人物が
+       * 黙って外れる (しかも画面は「未割当」に見えるだけでエラーにならない)。
+       * 引き継ぐのは **fingerprint が一意に一致したときだけ**。
+       */
+      let executiveSubjectId: string | null = null;
 
       if (s.fingerprint) {
         const hits = await store.findSubjectsByFingerprint(batchId, s.fingerprint);
@@ -140,13 +150,21 @@ export async function classifyBatch(batchId: string, actor: Actor) {
           clientId = m.clientId;
           identity = 'confirmed';
           reason = 'fp_match';
+          // 一意一致なので候補は 1 件。**client_id と同じ行から取る。**
+          executiveSubjectId = hits[0]?.executive_subject_id ?? null;
         } else if (m.kind === 'fp_collision') {
           identity = 'needs_review';
           reason = 'fp_collision';
+          /*
+           * **衝突時は引き継がない。** 候補が複数あるのに 1 つ選ぶと、
+           * 別人の検査データを Executive 本人のものとして納品しかねない。
+           * 管理者が画面で結び直す (needs_review のまま出す)。
+           */
         }
       } else {
         identity = 'needs_review';
         reason = 'no_fingerprint';
+        // fingerprint が無い = 照合材料が無い。**推測して引き継がない。**
       }
 
       return {
@@ -156,6 +174,7 @@ export async function classifyBatch(batchId: string, actor: Actor) {
         diagnostic_id: newDiagnosticId(),
         identity_status: identity,
         identity_reason: reason,
+        executive_subject_id: executiveSubjectId,
       };
     }),
   );
@@ -257,6 +276,19 @@ function fileRowOf(
 // ③ status : 画面が見る状態
 // ---------------------------------------------------------------------------
 
+/**
+ * **その output は実際に納品できるか。**
+ *
+ * `generated` / `exported` で、かつ `error` でないものだけ。
+ * `warn` は納品してよい (例: 問診の `unmapped` — 写像できない設問があっても
+ * 人物ごと落とさない、が既存の約束)。
+ * **`failed` は数えない** — 未完成の遺伝子はここで確実に外れる。
+ */
+function isDeliverableOutput(o: store.OutputRow): boolean {
+  return (o.output_status === 'generated' || o.output_status === 'exported')
+    && o.validation_status !== 'error';
+}
+
 export async function batchStatus(batchId: string) {
   const batch = await store.getBatch(batchId);
   if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
@@ -281,11 +313,21 @@ export async function batchStatus(batchId: string) {
     },
     subjects: subjects.map((s) => {
       const own = files.filter((f) => f.subject_id === s.id);
-      const produced = (outputsBySubject.get(s.id) ?? []).map((o) => o.format_id);
+      /*
+       * **納品できる output だけを「揃っている」と数える。**
+       * 行が在ることと納品できることは別物で、以前は `failed` / `error` の行まで
+       * 数えていたため、**未完成の遺伝子を抱えたまま「納品可」と表示**されていた
+       * (そして納品時に黙って 1 ファイル減る)。判定は組み立て側と同じ規則。
+       */
+      const produced = (outputsBySubject.get(s.id) ?? [])
+        .filter(isDeliverableOutput)
+        .map((o) => o.format_id);
       const readiness = evaluateReadiness({
         producedFormats: produced,
         requiredFormats: batch.required_formats,
         optionalFormats: batch.optional_formats,
+        requireExecutiveLink: batch.require_executive_link,
+        executiveSubjectId: s.executive_subject_id,
         classifications: own.map((f) => ({
           sourceKind: f.source_kind,
           formatId: f.classified_format_id,
@@ -301,6 +343,11 @@ export async function batchStatus(batchId: string) {
         diagnostic_id: s.diagnostic_id,
         identity_status: s.identity_status,
         identity_reason: s.identity_reason,
+        /**
+         * **UUID だけ返す。** 誰なのかは Wellfort 側でしか引けない
+         * (画面は自分の Supabase から氏名を出し、こちらは照合用の ID を返すだけ)。
+         */
+        executive_subject_id: s.executive_subject_id,
         sex: s.sex,
         age: s.age,
         status: s.status,
@@ -347,9 +394,95 @@ function publicFile(f: store.FileRow) {
 // ④ classification/confirm : 管理者による分類の修正
 // ---------------------------------------------------------------------------
 
+/**
+ * 人物 ↔ Executive 人物マスタ の紐付け (Phase B1・§6)。
+ *
+ * **受け取るのは UUID だけ。** 氏名・メール・会社名・役職は引数にも DB にも入れない
+ * (`diagnosis` スキーマは PII を持たない)。`executiveSubjectId` が何者かは
+ * こちらでは一切解釈せず、**不透明な識別子として保存するだけ**。
+ *
+ * `executiveSubjectId: null` で解除。
+ */
+export async function linkExecutiveSubject(input: {
+  batchId: string;
+  subjectId: string;
+  executiveSubjectId: string | null;
+  actor: Actor;
+}) {
+  const batch = await store.getBatch(input.batchId);
+  if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
+
+  // **その人物が本当にこのバッチのものか**をサーバ側で確かめる
+  // (クライアントの申告どおりに書くと、別バッチの人物を書き換えられる)。
+  const subject = await store.getSubject(input.subjectId);
+  if (!subject || subject.batch_id !== input.batchId) {
+    return { ok: false as const, status: 404, error: 'subject_not_found' };
+  }
+
+  if (input.executiveSubjectId) {
+    // **同じバッチで同じ Executive を 2 人に割り当てない。**
+    // DB にも部分一意インデックスがあるが、409 を返すためここでも見る。
+    const siblings = await store.listSubjects(input.batchId);
+    const taken = siblings.find(
+      (s) => s.id !== input.subjectId && s.executive_subject_id === input.executiveSubjectId,
+    );
+    if (taken) {
+      return {
+        ok: false as const, status: 409, error: 'executive_already_linked',
+        detail: `このバッチの人物 No.${taken.subject_no} に既に紐付いています。`,
+      };
+    }
+  }
+
+  /*
+   * **紐付け = 人物を確定させる操作。** Executive 案件では分類確定が identity を
+   * 触らないので、ここが唯一の確定経路になる。
+   *
+   * ただし **既に confirmed の人物の理由を書き換えない** — fingerprint 一致
+   * (`fp_match`) 等で独立に確定していた人物を、あとで unlink したときに
+   * needs_review へ落としてしまう (紐付けと関係なく成立していた確定を壊す)。
+   * 戻すのは「紐付けたから確定した」人物だけ。
+   */
+  const patch: Parameters<typeof store.updateSubject>[1] = {
+    executive_subject_id: input.executiveSubjectId,
+  };
+  if (input.executiveSubjectId) {
+    if (subject.identity_status !== 'confirmed') {
+      patch.identity_status = 'confirmed';
+      patch.identity_reason = 'executive_linked';
+    }
+  } else if (subject.identity_reason === 'executive_linked') {
+    patch.identity_status = 'needs_review';
+    patch.identity_reason = 'executive_unlinked';
+  }
+
+  const updated = await store.updateSubject(input.subjectId, patch);
+  await store.logEvent({
+    batch_id: input.batchId,
+    event: 'override',
+    subject_id: input.subjectId,
+    actor_user_id: input.actor.userId,
+    actor_masked: input.actor.masked,
+    actor_sha256: input.actor.sha256,
+    // **UUID の有無だけ**を残す (誰かは Wellfort 側にしか無い)。
+    detail: { kind: 'executive_link', linked: input.executiveSubjectId !== null },
+  });
+  return {
+    ok: true as const,
+    subjectId: updated.id,
+    executiveSubjectId: updated.executive_subject_id,
+  };
+}
+
 export async function confirmClassification(input: {
   batchId: string;
-  changes: { fileId: string; formatId: FormatId | null; subjectId?: string | null }[];
+  changes: {
+    fileId: string;
+    formatId: FormatId | null;
+    subjectId?: string | null;
+    /** `YYYY-MM-DD` のみ。`null` で解除。未指定なら触らない。 */
+    testDate?: string | null;
+  }[];
   actor: Actor;
 }) {
   const batch = await store.getBatch(input.batchId);
@@ -363,6 +496,7 @@ export async function confirmClassification(input: {
       // **管理者が直したものは confirmed** (人が見たという事実を残す)
       classification_confidence: 'confirmed',
       ...(c.subjectId !== undefined ? { subject_id: c.subjectId } : {}),
+      ...(c.testDate !== undefined ? { test_date: c.testDate } : {}),
     });
     await store.logEvent({
       batch_id: input.batchId,
@@ -374,13 +508,40 @@ export async function confirmClassification(input: {
       // **値そのものでなく種類**を残す (§21)
       detail: { from: before.classified_format_id, to: c.formatId },
     });
+    /*
+     * **日付を人が直した事実だけ**を別に残す (§10)。
+     * `error_detail` に埋め込むと「解析が失敗した」と区別できなくなるので、
+     * 既存の `override` イベントを使う (**audit の schema は広げない**)。
+     * 値そのものは残さず、**設定したか解除したか**だけ。
+     */
+    if (c.testDate !== undefined && c.testDate !== before.test_date) {
+      await store.logEvent({
+        batch_id: input.batchId,
+        event: 'override',
+        file_id: c.fileId,
+        actor_user_id: input.actor.userId,
+        actor_masked: input.actor.masked,
+        actor_sha256: input.actor.sha256,
+        detail: { kind: 'manual_test_date', cleared: c.testDate === null },
+      });
+    }
   }
 
-  // 人物の識別も confirmed へ寄せる (管理者が画面で見たあと)
-  const subjects = await store.listSubjects(input.batchId);
-  for (const s of subjects) {
-    if (s.identity_status === 'needs_review') {
-      await store.updateSubject(s.id, { identity_status: 'confirmed', identity_reason: 'admin_confirmed' });
+  /*
+   * 人物の識別も confirmed へ寄せる (管理者が画面で見たあと)。
+   *
+   * **Executive 案件ではこれをやらない。** あちらは「分類が正しいか」と
+   * 「誰の検査か」が別の作業で、分類確定のボタン 1 つで人物まで確定させると
+   * **人物マスタへ紐付けないまま identity だけ confirmed になる**
+   * (誰の分か決まっていないのに「確認済み」と表示される)。
+   * Executive 案件で人物を確定させるのは `linkExecutiveSubject` だけ。
+   */
+  if (!batch.require_executive_link) {
+    const subjects = await store.listSubjects(input.batchId);
+    for (const s of subjects) {
+      if (s.identity_status === 'needs_review') {
+        await store.updateSubject(s.id, { identity_status: 'confirmed', identity_reason: 'admin_confirmed' });
+      }
     }
   }
 
@@ -552,23 +713,74 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
           return { page: p.page_no, section: parsed.section ?? null, items: parsed.items ?? [] };
         });
       const failed = pages.filter((p) => p.status === 'failed').length;
+      /*
+       * **読み切れていないページが 1 枚でもあるか** (failed / pending / processing)。
+       * `failed` だけを見ると、途中で止まった (pending のまま) PDF が
+       * 「失敗 0 件」として通ってしまう。
+       *
+       * **`page_count` は使わない** — あれは `countPdfPages` の正規表現による概算で、
+       * 外すと**操作で直せない状態で納品が永久に止まる**。ここで見るのは実在の行だけ。
+       */
+      const incomplete = pages.filter((p) => p.status !== 'done').length;
+      /*
+       * **遺伝子の日付は遺伝子ファイル自身のもの** (§10・Phase B1 で是正)。
+       * 以前は健診の `hcTestDate` を流用していたが、健診日と採取日は別物で、
+       * **納品 key の日付フォルダとファイル名がそのまま間違う** (Elith 側では
+       * 「その日に遺伝子検査をした」ようにしか見えない)。
+       * 取れないなら **null のまま**。今日でも健診日でも bundle_date でも埋めない。
+       */
+      const gTestDate = gFile.test_date ?? null;
+
+      /*
+       * **完成の条件は 1 つに決めて、output / parse_status / producedFormats の
+       * 3 つとも同じものを見る。**
+       *
+       * 以前は producedFormats だけ `incomplete` を見て、`validation_status` と
+       * `parse_status` は `failed` の件数しか見ていなかったため、
+       * **未処理 (pending) のページが残っていても `ok` / `done` と表示**された
+       * (画面は「完成」に見えるのに納品物には入らない、という食い違い)。
+       */
+      const geneticComplete = !!gTestDate && doneParts.length > 0 && incomplete === 0;
+
       if (doneParts.length > 0) {
         const built = buildGeneticJson({
-          clientId: s.client_id, parts: doneParts, testDate: hcTestDate,
+          clientId: s.client_id, parts: doneParts, testDate: gTestDate,
         });
         await store.upsertOutput({
           subject_id: s.id, format_id: 'GeneticTestResultData',
-          output_status: 'generated',
-          // **失敗ページが残っていれば warn。** 黙って完成扱いにしない。
-          validation_status: failed > 0 ? 'warn' : 'ok',
-          item_count: built.itemCount, test_date: hcTestDate,
+          // **完成していないものを `generated` と名乗らない。**
+          output_status: geneticComplete ? 'generated' : 'failed',
+          // 日付が取れていなければ納品できないので error。
+          // 読み切れていないページが残る間は warn (retry で解消する見込みがある)。
+          validation_status: !gTestDate ? 'error' : incomplete > 0 ? 'warn' : 'ok',
+          item_count: built.itemCount, test_date: gTestDate,
           generated_at: new Date().toISOString(),
-          error_detail: failed > 0 ? `failed_pages:${failed}` : null,
+          /*
+           * **未完了の内訳を残す。** `incomplete` には pending / processing も入るので、
+           * 失敗ページがあるときは `failed_pages` も併記して区別できるようにする
+           * (「retry で直る失敗」と「まだ送っていないページ」は対処が違う)。
+           */
+          error_detail: !gTestDate
+            ? 'test_date_unresolved'
+            : incomplete > 0
+              ? `incomplete_pages:${incomplete}${failed > 0 ? ` failed_pages:${failed}` : ''}`
+              : null,
         });
-        formats.push('GeneticTestResultData');
+        /*
+         * **納品物として数えるのは完成したときだけ** (§16-G)。
+         *
+         * 以前は成功ページが 1 枚でもあれば数えていたが、それだと
+         * **読めなかったページを落としたまま「遺伝子検査の結果」として納品**される。
+         * 未完了が残る間は `optional_present_but_not_ready:GeneticTestResultData` で
+         * ready が止まり、retry で全ページ成功して初めて納品対象になる。
+         * (`upsertOutput` は上で済ませてあるので、warn/error の記録は消えない。)
+         */
+        if (geneticComplete) formats.push('GeneticTestResultData');
       }
       await store.updateFile(gFile.id, {
-        parse_status: doneParts.length > 0 && failed === 0 ? 'done' : doneParts.length > 0 ? 'processing' : 'pending',
+        parse_status: doneParts.length > 0 && incomplete === 0
+          ? 'done'
+          : doneParts.length > 0 ? 'processing' : 'pending',
         page_count: gFile.page_count ?? pages.length,
       });
     }
@@ -595,6 +807,9 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
       producedFormats: formats,
       requiredFormats: batch.required_formats,
       optionalFormats: batch.optional_formats,
+      // **Executive 案件は人物マスタへ紐付くまで ready にしない** (検査が揃っていても)。
+      requireExecutiveLink: batch.require_executive_link,
+      executiveSubjectId: s.executive_subject_id,
       classifications: own.map((f) => ({
         sourceKind: f.source_kind, formatId: f.classified_format_id,
         confidence: f.classification_confidence, reason: '',
@@ -745,9 +960,25 @@ export async function assembleBatch(input: {
           const parsed = (p.parsed ?? {}) as { section?: string | null; items?: unknown[] };
           return { page: p.page_no, section: parsed.section ?? null, items: parsed.items ?? [] };
         });
-      if (parts.length > 0 && hcTestDate) {
-        const b = buildGeneticJson({ clientId: s.client_id, parts, testDate: hcTestDate });
-        built.push(toDeliveryFile(cfg.prefix, s.client_id, 'GeneticTestResultData', hcTestDate, b.json));
+      /*
+       * **遺伝子の日付は遺伝子ファイル自身のもの** (§10)。
+       * ここは納品 key を組む場所なので、健診日を流用すると
+       * `date/{YYYY_MM_DD}/GeneticTestResultData_date_{YYYY_MM_DD}_...` が
+       * まるごと誤った日付で S3 に置かれる。**取れないなら納品しない。**
+       */
+      const gTestDate = gFile.test_date ?? null;
+      /*
+       * **読み切れていないページがあれば組まない** (process 経路と同じ規則)。
+       * 成功ページだけで JSON を作ると、**落ちたページの中身が無いまま
+       * 「遺伝子検査の結果」として納品される** (受け取った側は欠けに気づけない)。
+       * ここで組まなければ readiness が
+       * `optional_present_but_not_ready:GeneticTestResultData` で止まり、
+       * retry で全ページ成功してから納品される。
+       */
+      const gIncomplete = pages.filter((p) => p.status !== 'done').length;
+      if (parts.length > 0 && gTestDate && gIncomplete === 0) {
+        const b = buildGeneticJson({ clientId: s.client_id, parts, testDate: gTestDate });
+        built.push(toDeliveryFile(cfg.prefix, s.client_id, 'GeneticTestResultData', gTestDate, b.json));
         formats.push('GeneticTestResultData');
       }
     }
@@ -766,6 +997,13 @@ export async function assembleBatch(input: {
       producedFormats: formats,
       requiredFormats: batch.required_formats,
       optionalFormats: batch.optional_formats,
+      /*
+       * **Executive 未割当は必ず skipped。**
+       * skipped が 1 件でもあれば Phase A の write-guard がバッチ全体を止めるので、
+       * 1 人でも紐付いていなければ S3 への PUT は 0 回になる。
+       */
+      requireExecutiveLink: batch.require_executive_link,
+      executiveSubjectId: s.executive_subject_id,
       classifications: own.map((f) => ({
         sourceKind: f.source_kind, formatId: f.classified_format_id,
         confidence: f.classification_confidence, reason: '',
@@ -873,8 +1111,17 @@ export async function retryBatch(batchId: string, actor: Actor) {
   for (const f of files) {
     if (f.classified_format_id !== 'GeneticTestResultData') continue;
     const pages = await store.listPages(f.id);
-    const failed = pages.filter((p) => p.status === 'failed').map((p) => p.page_no);
-    if (failed.length) targets.push({ fileId: f.id, pages: failed });
+    /*
+     * **`failed` だけでなく `pending` / `processing` も対象**にする
+     * (途中で止まった PDF は失敗 0 件のまま残る)。
+     *
+     * **行が無いページを推測して作らない。** ここに出せるのは実在の行だけで、
+     * 通信が切れて **行すら作られていないページ**は分からない。
+     * 実際のページ数はブラウザ側が PDF を開き直して数える (pdf.js) ので、
+     * この一覧は「サーバから見た未完了」の目安であって、再実行の範囲ではない。
+     */
+    const unfinished = pages.filter((p) => p.status !== 'done').map((p) => p.page_no);
+    if (unfinished.length) targets.push({ fileId: f.id, pages: unfinished });
   }
   for (const f of files) {
     if (f.parse_status === 'failed' && f.classified_format_id !== 'GeneticTestResultData') {

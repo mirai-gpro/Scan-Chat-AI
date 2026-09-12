@@ -52,6 +52,8 @@ export interface BatchRow {
   file_count: number;
   required_formats: string[];
   optional_formats: string[];
+  /** true = Executive Diagnosis。人物マスタへ紐付くまで納品しない。既定 false。 */
+  require_executive_link: boolean;
   retain_originals: boolean;
   created_by_user_id: string | null;
   created_by_masked: string | null;
@@ -75,6 +77,12 @@ export interface SubjectRow {
   sex: 'male' | 'female' | 'unknown';
   age: number | null;
   status: SubjectStatus;
+  /**
+   * Wellfort `public.executive_subjects.id` への **opaque な外部参照**。
+   * **UUID 以外は入れない** — 氏名・メール・会社名・役職は Wellfort 側にしか置かない
+   * (`diagnosis` スキーマは PII を持たない、が全体の設計前提)。
+   */
+  executive_subject_id: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -174,6 +182,8 @@ export async function createBatch(input: {
   sourceKey: string;
   requiredFormats: string[];
   optionalFormats: string[];
+  /** Executive Diagnosis のときだけ true。既定 false = 従来の臨時診断バッチ。 */
+  requireExecutiveLink?: boolean;
   retainOriginals?: boolean;
   createdByUserId?: string | null;
   createdByMasked?: string | null;
@@ -189,6 +199,7 @@ export async function createBatch(input: {
       source_key: input.sourceKey,
       required_formats: input.requiredFormats,
       optional_formats: input.optionalFormats,
+      require_executive_link: input.requireExecutiveLink === true,
       retain_originals: input.retainOriginals ?? false,
       created_by_user_id: input.createdByUserId ?? null,
       created_by_masked: input.createdByMasked ?? null,
@@ -258,6 +269,12 @@ export async function replaceSubjects(
     diagnostic_id: string;
     identity_status: SubjectIdentityStatus;
     identity_reason: string | null;
+    /**
+     * **再分類で消さないために引き継ぐ** (§7)。fingerprint が一意に一致した既存人物の
+     * 値だけを渡すこと。衝突・fingerprint 無しのときは null を渡す
+     * (**誰なのかを推測して勝手に引き継がない**)。
+     */
+    executive_subject_id?: string | null;
   }[],
 ): Promise<SubjectRow[]> {
   const d = need();
@@ -297,10 +314,25 @@ export async function findSubjectsByFingerprint(
   return (res.data as SubjectRow[]) ?? [];
 }
 
+/** 1 人だけ引く (batch 所属の確認に使う)。 */
+export async function getSubject(id: string): Promise<SubjectRow | null> {
+  const res = await need()
+    .from('ad_hoc_diagnosis_subjects')
+    .select('*')
+    .eq('id', id)
+    .maybeSingle();
+  if (res.error) throw new Error(`getSubject: ${res.error.message}`);
+  return (res.data as SubjectRow) ?? null;
+}
+
 export async function updateSubject(
   id: string,
   patch: Partial<
-    Pick<SubjectRow, 'identity_status' | 'identity_reason' | 'sex' | 'age' | 'status' | 'subject_fp' | 'subject_fp_source'>
+    Pick<
+      SubjectRow,
+      | 'identity_status' | 'identity_reason' | 'sex' | 'age' | 'status'
+      | 'subject_fp' | 'subject_fp_source' | 'executive_subject_id'
+    >
   >,
 ): Promise<SubjectRow> {
   const res = await need()

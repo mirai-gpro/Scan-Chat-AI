@@ -531,8 +531,19 @@ export interface ReadinessReport {
   present: string[];
   missingRequired: string[];
   presentOptional: string[];
+  /**
+   * **任意の format なのに、素材が在るのに出来上がっていないもの。**
+   *
+   * 「任意」は *無くてよい* という意味であって、*壊れていてよい* ではない。
+   * 素材ファイルが在るのに納品物へ到達していない (日付未確定・解析失敗・未完了) 人物を
+   * ready にすると、**その format だけ黙って納品から消える**。
+   */
+  presentOptionalSourceButNotProduced: string[];
   reasons: string[];
 }
+
+/** Executive 案件で人物マスタへ紐付いていないときの理由 (画面・skipped で共有する)。 */
+export const EXECUTIVE_UNLINKED_REASON = 'executive_subject_unlinked';
 
 /**
  * 人物 1 人が納品してよい状態か。
@@ -545,19 +556,61 @@ export function evaluateReadiness(input: {
   requiredFormats: readonly string[];
   optionalFormats: readonly string[];
   classifications: readonly Classification[];
+  /**
+   * Executive Diagnosis のバッチか (`batches.require_executive_link`)。
+   * **既定 false = 従来の臨時診断バッチと同じ判定**。
+   */
+  requireExecutiveLink?: boolean;
+  /** その人物が紐付いている Executive の UUID。未割当なら null。 */
+  executiveSubjectId?: string | null;
 }): ReadinessReport {
   const present = [...new Set(input.producedFormats)];
   const missingRequired = input.requiredFormats.filter((f) => !present.includes(f));
   const presentOptional = input.optionalFormats.filter((f) => present.includes(f));
+
+  /*
+   * **「素材が無い」と「素材が在るが仕上がっていない」を分ける。**
+   *
+   *   A. 遺伝子ファイルが無い        → 任意なので ready を妨げない
+   *   B. 遺伝子ファイルが在るが未完成 → ready にしない
+   *
+   * 判定材料は**人物に紐づく実ファイルの分類**だけ。`HealthAgeData` のような
+   * **派生データは元ファイルの分類を持たない**ので、ここには決して現れない
+   * (算出できなくても従来どおり ready を妨げない)。
+   */
+  const classifiedFormats = new Set(
+    input.classifications.map((c) => c.formatId).filter((f): f is FormatId => f !== null),
+  );
+  const presentOptionalSourceButNotProduced = input.optionalFormats.filter(
+    (f) => classifiedFormats.has(f as FormatId) && !present.includes(f),
+  );
+
   const reasons: string[] = [];
   if (missingRequired.length) reasons.push(`missing_required:${missingRequired.join(',')}`);
+  for (const f of presentOptionalSourceButNotProduced) {
+    reasons.push(`optional_present_but_not_ready:${f}`);
+  }
+
+  /*
+   * **Executive 案件は「誰の検査か」が決まるまで納品しない。**
+   * 検査が全部揃っていても、人物マスタへ紐付いていなければ
+   * 納品 JSON は client_id だけの匿名データになり、**後から誰の分か辿れない**。
+   * 従来の臨時診断バッチ (`require_executive_link=false`) では一切効かない。
+   */
+  const executiveUnlinked = input.requireExecutiveLink === true && !input.executiveSubjectId;
+  if (executiveUnlinked) reasons.push(EXECUTIVE_UNLINKED_REASON);
+
   const autoReady = subjectIsAutoReady(input.classifications);
   if (!autoReady) reasons.push('classification_needs_review');
   return {
-    ready: missingRequired.length === 0 && autoReady,
+    ready: missingRequired.length === 0
+      && presentOptionalSourceButNotProduced.length === 0
+      && !executiveUnlinked
+      && autoReady,
     present,
     missingRequired,
     presentOptional,
+    presentOptionalSourceButNotProduced,
     reasons,
   };
 }

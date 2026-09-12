@@ -17,8 +17,22 @@ export const POST: APIRoute = async ({ request }) => {
   const batchId = str(body?.batchId);
   if (!batchId || !isUuid(batchId)) return json({ ok: false, error: 'invalid_batch_id' }, 400);
 
+  /**
+   * 管理者が手で入れる実施日。**`YYYY-MM-DD` ちょうどだけ**を通す (§10)。
+   * 暦として存在しない日 (2026-02-30 等) も弾く — 通すと納品 key の日付フォルダが
+   * そのまま壊れる。
+   */
+  const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+  function validTestDate(v: string): boolean {
+    if (!ISO_DATE.test(v)) return false;
+    const d = new Date(`${v}T00:00:00Z`);
+    return !Number.isNaN(d.getTime()) && d.toISOString().slice(0, 10) === v;
+  }
+
   const raw = Array.isArray(body?.changes) ? (body!.changes as Record<string, unknown>[]) : [];
-  const changes: { fileId: string; formatId: never; subjectId?: string | null }[] = [];
+  const changes: {
+    fileId: string; formatId: never; subjectId?: string | null; testDate?: string | null;
+  }[] = [];
   for (const c of raw) {
     const fileId = str(c.fileId);
     if (!fileId || !isUuid(fileId)) continue;
@@ -28,10 +42,26 @@ export const POST: APIRoute = async ({ request }) => {
       return json({ ok: false, error: 'invalid_format_id', detail: f }, 400);
     }
     const subjectId = c.subjectId === null ? null : str(c.subjectId);
+
+    // **null は「解除」・未指定は「触らない」**。取り違えると黙って別物になる。
+    let testDate: string | null | undefined;
+    if (c.testDate !== undefined) {
+      if (c.testDate === null) {
+        testDate = null;
+      } else {
+        const v = str(c.testDate);
+        if (!v || !validTestDate(v)) {
+          return json({ ok: false, error: 'invalid_test_date', detail: 'YYYY-MM-DD のみ' }, 400);
+        }
+        testDate = v;
+      }
+    }
+
     changes.push({
       fileId,
       formatId: (f as never) ?? null,
       ...(c.subjectId !== undefined ? { subjectId } : {}),
+      ...(testDate !== undefined ? { testDate } : {}),
     });
   }
 

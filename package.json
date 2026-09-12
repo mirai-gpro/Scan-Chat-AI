@@ -44,7 +44,8 @@
     "verify:ad-hoc-parse": "node scripts/verify-ad-hoc-parse.mjs",
     "verify:ad-hoc": "npm run verify:ad-hoc-archive && npm run verify:ad-hoc-parse && npm run verify:ad-hoc-e2e && npm run verify:ad-hoc-write-guard",
     "verify:ad-hoc-write-guard": "node scripts/verify-ad-hoc-write-guard.mjs",
-    "verify:ad-hoc-e2e": "node scripts/verify-ad-hoc-e2e.mjs"
+    "verify:ad-hoc-e2e": "node scripts/verify-ad-hoc-e2e.mjs",
+    "verify:executive-diagnosis": "node scripts/verify-executive-diagnosis.mjs"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
