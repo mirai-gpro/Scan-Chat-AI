@@ -1652,6 +1652,7 @@ v0.3.1 は `actor_masked` + `actor_sha256` だけにしたため、**「誰が�
 | 版 | 日付 | 内容 |
 |---|---|---|
 | **0.4** | 2026-09-10 | **Phase D-0（ZIP/XLSX ライブラリの比較）を実施し §5.3 を「未決定」から「決定」へ格上げ。O8 CLOSE。** 候補 11 本を**一次資料から実測**（`registry.npmjs.org` / `api.osv.dev` / 各 README・`index.d.ts`）。**ZIP = `@zip.js/zip.js`**（直接依存 0・既知脆弱性 0・BSD-3-Clause・最終公開 2026-09-09。**ブラウザの `BlobReader` とサーバの Range GET を同じ `ZipReader` で賄えるので ZIP の解釈を 1 本に統一でき、§24.3 の検査も 1 か所で済む**。`filenameEncoding`/`decodeText` で CP932 も扱える）。**XLSX = `read-excel-file`**（MIT・既知脆弱性 0・最終公開 2026-08-10・ブラウザ/Node 両対応。**セル値を `Date` で返す**＝日付シリアル値の判定をライブラリが持つ。`test_date` は納品パスと 🎯 照合を決めるので自前判定で静かに 1 日ずらすわけにいかない）。**案 M（自作）は不採用**。**SheetJS `xlsx` / `node-xlsx` は採用不可** — `GHSA-5pgg-2g8v-p4x9`(HIGH) の advisory 本文が**「npm に修正版が存在しない」と明記**しており、実測でも npm は **0.18.5(2022-03-24) で停止**。もう 1 件 `GHSA-4r6h-8v6p-xvw6`(HIGH・Prototype Pollution) は**「細工されたファイルを読むとき」＝本機能そのもの**が該当（§5.3.6）。`adm-zip` も除外（`GHSA-vwc7-r8mq-g2x9` が `last_affected=0.6.0` ＝**最新版がまだ影響下で修正版が無い**）。`jszip` は全体メモリ展開で §11.5 に反するため不採用。**採用 2 本の弱点も隠さず記録**（`read-excel-file` の依存 4 本中 2 本が同一の単独メンテナ・v9 で API 破壊あり → 呼び出しをパーサ 1 枚に閉じ込める）。**まだ動かして確かめてはいない** — Phase D 冒頭で実測する 5 件を §5.3.9 に明記（full-ICU の有無・ブラウザ実機のピークメモリ・S3 Range の往復・実物 XLSX・バンドルサイズ）。 |
+| **1.2** | 2026-09-12 | **Range GET の粒度 (§32.11)。** 分割しただけでは足りず、本番バッチの最初の `classify-entry` が `FUNCTION_INVOCATION_TIMEOUT`。**原因は解析でなく S3 の I/O 粒度** — ①`readUint8Array()` のたびに `makeS3Client()` を呼び接続を使い回せていない ②zip.js の chunkSize が既定 64KiB のまま (`configuration.js` 実測) で compressed 15.73MB の PDF が約 241 往復。→ **S3Client は Reader の constructor で 1 個だけ**・**`chunkSize = S3_RANGE_CHUNK_BYTES = 16MiB`**。**timeout は 1 秒も伸ばしていない**。**ZIP 全体を 1 回で GET することにはならない** — 読み出し長は `min(chunkSize, そのエントリの compressedSize − 読んだ分)` で頭打ちで、`getEntries()` は chunkSize を通らず EOCD 探索の 22+65535=65,557 バイトが上限 (`zip-reader.js:1589`)。実測 (21.25MB エントリ): エントリの Range GET **327 → 4 回**・開くときは **2 回 / 最大 65,557 B のまま**・**読んだ総バイト数は同じ 21,256,529**(余計に取っていない・ZIP 26.26MB のうち 21.26MB だけ)。安全装置は 1 つも変更なし。検証 `verify:ad-hoc-archive` 85 → **110**、退行注入 6 種。 |
 | **1.1** | 2026-09-12 | **分割分類（§32）。** 159MB / 38 ファイルの ZIP が `maxDuration=800` でもタイムアウトしたので、**timeout を伸ばさず 1 リクエスト = ZIP 内 1 ファイル**に割った（`classify-plan` / `classify-entry` / `classify-finalize`。旧 `classify` は残す）。**リクエストをまたいで指すのは Central Directory の序数（整数）だけ** — path / 元ファイル名 / 人物フォルダ名は保存も応答も例外メッセージもしない（§8.1 不変）。**本丸は後工程**で、`process` / `health-age` / `export` / `GET /file` から `analyzeOpened()` を外し、分類時に保存した `normalized_payload` から復元する（残っていれば分割した意味が消え、しかも小さい ZIP では再現しない）。payload は **allow-list で組み書き込み前に deny-list で検査して throw**（`Date` セル・PII 見出し列・`notes`・`unmapped` を落とす。遺伝子は null）。**行は `(batch_id, archive_entry_index)` で冪等**・**plan は人物行を作り直さない**（cascade で Executive の紐付けと遺伝子のページが消えるため）・**採用外のエントリも行を残す**（finalize が「未処理」と区別できず永久に完了しないため）。**ZIP は上げ直さない** — `?batchId=` と「続きから再開」で `done` を飛ばす。migration は前進のみ（`20260912000010`・両列 nullable = 後方互換）。検証 176 + 40、退行注入 17 種で落ちることを確認。**Production 適用と再実行は未実施**（資格情報も admin セッションも無い）。 |
 | **1.0** | 2026-09-10 | **実装完了（§31）。** ZIP 投入 → S3 → 解析 → 人物分離 → 分類 → 健診/遺伝子/問診 → 人物整合 → ウェルネス年齢 → 管理者確認 → Elith JSON → 納品セット → dry-run → 管理 UI まで通した。**O5 を CLOSE**（発注者から 62 列の実列の提示。明示の写像表を実装し fuzzy 推測は使わない）。**DB 6 表を実コードから使用**（`store.ts` が唯一の口・migration を置いただけの状態を解消）。**Genoplan は既存 `scanGeneticPage` を再利用**しページ単位保存・キャッシュ・失敗ページ retry まで接続。**ウェルネス年齢は既存 `computeWellnessAge()` を呼ぶだけ**で、`unavailable` でも人物を failed にしない。**納品は既定 dry-run**（S3 key / JSON body / format / 検証 を書き込み前に確認できる）。検証は **archive 85 / parse 113 / e2e 92 / zip-digest 40**、`astro check` 0 errors、両リポジトリ build 成功、既存 A 層 11 本と `verify:screen` 47/47・`verify:scan-pages` 47/47 に回帰なし。実装中に直したもの: ①**ワークブックの二重読み**で片方の失敗がもう片方を道連れにしていた → 1 回読んで両方に使う ②`sanitizeMeasurementsForDelivery` の戻り値を配列と誤認（実際は `{ kept, anomalies }`） ③**単一選択の設問まで配列**にしていた（`multi` のときだけ配列が正） ④`S3RangeReader` が zip.js の Reader 契約（末尾をまたぐ要求）に合っておらず 416 を招く形だった → `clampReadLength()` で `min(length, size - offset)` に丸め、`offset >= size` は空を返す ⑤設定未了を 500 で返していた → **503 と理由**。 |
 | **0.5** | 2026-09-10 | **Phase D 着手前に、発注者指示で経路を 3 点 確定。** **A. ブラウザの SHA-256 を逐次計算へ（§11.6・新設）** — `SubtleCrypto.digest()` は **`BufferSource` を 1 個受け取る一発 API で `update()` を持たない**ので、`file.stream()` を読んでも結局全体を連結することになり省メモリにならない。→ **wellfort-site に `@noble/hashes` を追加**し `sha256.create()` → `update()` → `digest()` で計算する。**ZIP 全体を `arrayBuffer()` 化して `crypto.subtle.digest()` へ渡すのは禁止。** **①初回 ticket 発行前の `source_sha256` と ②再読込後の同一性照合を同じ実装で処理する**（別実装にすると「同じ ZIP なのに一致しない」が起き、**再開が黙って新規バッチになる**）。**`source_sha256 NOT NULL` の DB 設計は変更不要**（逐次でも ticket 前に確定する）。実測: 2.4.0 / MIT / 依存 0 / 既知脆弱性 0 / `engines: node>=20.19.0`、**import は `@noble/hashes/sha2.js` で `.js` 必須**（`exports` に `"./sha2"` は無い＝拡張子を落とすと解決失敗）、`create`/`update`/`digest` は `utils.d.ts:504/419/430`。 **B. サーバ側 ZIP は custom `Reader` → AWS SDK Range（§5.3.7.1・新設）** — **presigned GET は使わない**（署名付き URL という秘密を増やさない・既存の資格情報で完結する経路から外れない）。`readUint8Array(offset,length)` の中で `GetObjectCommand` に `Range: bytes=offset-(offset+length-1)` を付ける。**Range は両端を含む閉区間**なので終端に `offset+length` を書くと 1 バイト多く読み Central Directory の解釈がずれる=検証で固定。`ZipReader` はブラウザ側と同一なので **§24.3 の検査は 1 か所のまま**。`size` は §5.2.1 ② の `HeadObject` と同じ呼び出しで取る。 **C. `read-excel-file` はサーバ側だけ（§5.3.8.1・新設）** — ブラウザが触るのは ZIP 部分読み / SHA-256 / pdf.js の 3 つだけ。実物 XLSX で **Excel 日付 / カスタム日付書式 / 1900・1904 date system / 空欄と 0 / 日本語ヘッダー** の 5 点を必ず実測する。**カスタム日付書式は自動判定できない場合があるので、判定できないものを勝手に日付化しない** — 数値のまま持ち `needs_review` にする（シリアル値の変換は 1900/1904 の決め打ちが要り、**4 年ずれた日付を静かに作る**＝捏造）。**`test_date` が確定しない人物は納品しない**（今日の日付や別ファイルの日付を流用しない）。 |
@@ -1885,3 +1886,73 @@ plan の応答に path を載せる ／ finalize が残りの序数を返す ／
   期待値 = 人物 10 名 / ファイル 35 件（人物ファイル）＋ バッチ共通資料。
 - **`process` / dry-run / 実 Elith 納品へは進まない。**
   `AD_HOC_ELITH_WRITE_ENABLED` は unset（または `on` 以外）のまま。
+
+### 32.11 Range GET の粒度 (Phase B2.2・2026-09-12)
+
+**分割しただけでは足りなかった。** 本番バッチ `ef4a08d6-…` で
+`classify-plan` は成功 (人物 10 名 / 作業 37 件) したのに、**最初の `classify-entry` が
+`FUNCTION_INVOCATION_TIMEOUT`**。最初に処理される Genoplan PDF は
+uncompressed ≒21.25MB / compressed ≒15.73MB。
+
+**原因は解析ロジックでなく S3 Range Reader の I/O 粒度**
+(PDF の展開と走査そのものはローカルで 0.2 秒未満)。
+
+1. **`readUint8Array()` のたびに `makeS3Client()` を呼んでいた** —
+   資格情報の解決・署名器・HTTP ハンドラ (と接続プール) が毎回作り直され、
+   **接続を使い回せない**。
+2. **`@zip.js/zip.js` の chunkSize が既定の 64KiB のままだった**
+   (`lib/core/configuration.js` の `DEFAULT_CHUNK_SIZE = 64 * 1024`・実測 v2.14.0) —
+   エントリ本体は `zip-reader.js:951` の
+   `createReadable({ offset: dataOffset, size: compressedSize })` を経由し、
+   `io.js:95` が `Math.min(chunkSize, size - chunkOffset)` ずつ読むので
+   **1 本の PDF で約 241 往復**になる。
+
+**対処 (timeout は 1 秒も伸ばしていない)**:
+
+- `S3RangeReader` が **constructor で 1 個だけ** `S3Client` を作り、`init()` /
+  `readUint8Array()` はそれを使う。**`readUint8Array()` の中で `makeS3Client()` を呼ばない。**
+- `configure({ useWebWorkers: false, chunkSize: S3_RANGE_CHUNK_BYTES })`。
+  **`S3_RANGE_CHUNK_BYTES = 16 MiB`** (定数を 1 か所に置く)。
+
+**ZIP 全体を 1 回で GET することにはならない** (ここが誤解しやすい):
+
+- エントリ本体の読み出し長は常に `min(chunkSize, そのエントリの compressedSize − 読んだ分)`
+  で頭打ち = **1 エントリの上限であって ZIP の上限ではない**。
+- `getEntries()` は chunkSize を通らない。**ZIP の構造から算出した長さ**で読み、
+  最大は EOCD 探索の `Math.min(size, END_OF_CENTRAL_DIR_LENGTH + MAX_16_BITS)`
+  = 22 + 65535 = **65,557 バイト** (`zip-reader.js:1589` / `constants.js:30,48`)。
+  chunkSize を上げてもここは 1 バイトも増えない。
+
+**実測 (本番と同じ大きさ・メモリ上の ZIP で計測)**: 圧縮の効かない 21.25MB の
+エントリ 1 本 + 5MB 1 本 = ZIP 26,258,298 バイト。
+
+| | 64KiB (既定) | **16MiB (本 fix)** |
+|---|---|---|
+| 開くとき (`getEntries`) の Range GET | 2 回 / 最大 65,557 B | **2 回 / 最大 65,557 B (不変)** |
+| 1 エントリ読み出しの Range GET | **327 回** | **4 回** |
+| 1 エントリで読んだ総バイト数 | 21,256,529 | **21,256,529 (同じ)** |
+
+**総バイト数が同じ** = 余計に取っていない。ZIP 全体 26.26MB のうち 21.26MB しか読まない
+(2 本目のエントリを巻き込んでいない)。
+
+**安全性は 1 つも変えていない**: S3 Range のみ / presigned GET なし /
+ZIP path を DB へ入れない / PII をログへ出さない / `archive_entry_index` 方式 /
+SHA-256 照合 / magic check / ZIP Slip 等の検査 / `MAX_ENTRY_BYTES`(80MB) ほかの上限 /
+Elith write guard。
+
+**検証 `npm run verify:ad-hoc-archive` 110** (85 → 110)。新規は
+**A** constructor で S3Client を 1 個 / **B** `readUint8Array` を 5 回呼んでも増えず
+送信は全て同じクライアント / **C** 公開定数 ≥8MiB **かつ zip.js が実際に使う値**を
+実測 (定数だけ直して `configure()` へ渡し忘れる退行を捕まえる) / **D** Range の閉区間算術 (維持) /
+**E** `readByIndex` の範囲・種別検査を**実際に動かして**確認 (維持) /
+**F** 1 回の Range が ZIP 全体に達しない・読んだ総量が ZIP 全体より小さい・
+1 エントリが 4 往復以内。
+
+**退行注入 6 種で落ちることを確認**: ①`readUint8Array` で毎回 `makeS3Client`
+(→ クライアント 6 個) ②`chunkSize` を `configure()` へ渡し忘れ (→ 実測 65,536・24 往復)
+③定数を 64KiB へ ④`clampReadLength` が「そこから末尾まで」を返す (= 全体 GET)
+⑤`readByIndex` の範囲検査を外す ⑥ラベルを path にする (`verify:ad-hoc-chunked` が検出)。
+
+**⑤は最初すり抜けた** — 範囲検査を消しても `entries[index]` が undefined になって
+別の場所で TypeError が出るため、「何かが throw した」では退行を見抜けない。
+→ **自分の guard の文言まで見る**ように直した。
