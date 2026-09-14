@@ -18,10 +18,16 @@ import { headAdHocZip, deleteAdHocZip, createAdHocUploadTicket } from './ticket'
 import { openArchiveFromS3 } from './archive';
 import { matchByFingerprint, shortFingerprint, subjectFingerprint } from './fingerprint';
 import { questionnaireSummary, questionnaireIsUsable } from './questionnaire';
-import { buildEntryPayload, restoreHealthCheckupSheet, restoreQuestionnaire } from './normalized-payload';
+// **`restoreHealthCheckupSheet` はもう使わない** — 健診 XLSX は HealthCheckupData の
+// 生成元から外れた (spec §6.2・v1.1)。関数自体は分類時の保存と照合の補助に残っている。
+import { buildEntryPayload, restoreQuestionnaire } from './normalized-payload';
+// **本番の健診処理をそのまま使う** (spec §6.2/§6.5)。ad-hoc に整形を書き直さない。
+import { scanImageToParsed } from '../elith-export';
+import { finalizeHealthCheckup, isTrendMarkdown } from '../elith-hc-finalize';
+import { normalizeMarkers } from '../health-age';
 import {
   AD_HOC_OPTIONAL_FORMATS, AD_HOC_REQUIRED_FORMATS, analyzeEntry, analyzeOpened, buildGeneticJson,
-  buildHealthCheckupJson, buildQuestionnaireJson, computeSubjectWellnessAge, evaluateReadiness,
+  buildQuestionnaireJson, computeSubjectWellnessAge, evaluateReadiness,
   newClientId, newDiagnosticId, planArchive, toDeliveryFile,
   type AnalyzedFile, type DeliveryFile, type GeneticPagePart,
 } from './pipeline';
@@ -866,8 +872,51 @@ export async function confirmClassification(input: {
 export interface ProcessOptions {
   /** 遺伝子 PDF の 1 ページを画像化したもの。ブラウザ (pdf.js) が作って送る。 */
   geneticPages?: { fileId: string; page: number; imageBase64: string; mimeType: string }[];
+  /**
+   * 健診 PDF の 1 ページを画像化したもの (spec §6.5)。
+   *
+   * **遺伝子と違って対象ページの絞り込みは無い** — 健診票は数ページで、
+   * どのページにも検査値が印字され得るため全ページが対象。
+   * `pageCount` はブラウザの pdf.js が数えた総ページ数で、**完了判定の母数**になる
+   * (サーバ側の `countPdfPages` は正規表現による概算なので母数に使わない)。
+   */
+  healthPages?: {
+    fileId: string; page: number; pageCount: number;
+    imageBase64: string; mimeType: string;
+  }[];
   /** 失敗したページだけを対象にする。 */
   retryFailedOnly?: boolean;
+}
+
+/**
+ * 健診 PDF 1 ページぶんの、**DB に保存してよい形**。
+ *
+ * **生 Markdown (`scan.markdown`) は入れない** — 実在の人の検査票の生テキストは
+ * 氏名・患者 ID を含み得る (ゴールデンの見出しが実際にそうなっている)。
+ * spec §2.4「実在役員の raw PDF text を診断 DB へ新規保存しない」。
+ * 推移グラフページかどうかだけ**読んだ直後に判定して真偽値で残す**ので、
+ * finalize core は生 Markdown 無しで従来と同じ結果を出せる。
+ */
+interface HealthPageParsed {
+  measurements: unknown[];
+  notes: string[];
+  isTrendPage: boolean;
+  /** `scanImageToParsed` が読めた検査日。**`today` 由来は保存しない** (§6.4)。 */
+  testDate: string | null;
+  dateSource: string;
+}
+
+function restoreHealthPage(parsed: unknown): HealthPageParsed | null {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const o = parsed as Record<string, unknown>;
+  if (!Array.isArray(o.measurements)) return null;
+  return {
+    measurements: o.measurements,
+    notes: Array.isArray(o.notes) ? (o.notes as string[]) : [],
+    isTrendPage: o.isTrendPage === true,
+    testDate: typeof o.testDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(o.testDate) ? o.testDate : null,
+    dateSource: typeof o.dateSource === 'string' ? o.dateSource : 'unknown',
+  };
 }
 
 export async function processBatch(batchId: string, actor: Actor, options: ProcessOptions = {}) {
@@ -921,6 +970,75 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
   }
 
   /*
+   * 健診 PDF のページ取り込み (spec §6.5)。
+   *
+   * **既存 production の `scanImageToParsed()` をそのまま呼ぶ。** ad-hoc 専用の
+   * 読み取りも prompt も作らない (spec §4.3 / §18「独自 HealthCheckup JSON parser」禁止)。
+   * ここで S3 へは書かない — `elith-hc-merge` の `action=part` は元画像を S3 へ置くが、
+   * **Human Review より前に実書き込みをしてはならない** (§6.5)。だから API ではなく
+   * 関数を直接呼び、保存先は診断 DB の `ad_hoc_diagnosis_pages` だけにする。
+   */
+  for (const p of options.healthPages ?? []) {
+    const file = await store.getFile(p.fileId);
+    if (!file || file.batch_id !== batchId) continue;
+
+    // 遺伝子と同じキャッシュ規則 — 成功済みページは Gemini を呼ばない。
+    const cached = await store.findCachedPage(file.sha256, p.page);
+    if (cached && !options.retryFailedOnly) {
+      await store.upsertPage({
+        file_id: file.id, file_sha256: file.sha256, page_no: p.page,
+        status: 'done', parsed: cached.parsed, raw: null,
+      });
+      continue;
+    }
+
+    try {
+      const scan = await scanImageToParsed({ imageBase64: p.imageBase64, mimeType: p.mimeType });
+      /*
+       * **`today` に落ちた日付は保存しない** (spec §6.4 / E2E 受入 11)。
+       *
+       * `extractExamDate()` は検査票から日付を読めなかったとき `source:'today'` で
+       * **その日の日付を返す**。通常の admin バッチはそれで運用しているが、本案件では
+       * 「日付を推定・today 補完しない」が受入条件なので、**ここで捨てて未解決にする**。
+       * 落とした結果どの人物も日付が取れなければ、その人物は管理者確認へ回る。
+       */
+      const resolved = scan.dateSource !== 'today' ? scan.testDate : null;
+      const payload: HealthPageParsed = {
+        measurements: scan.measurements as unknown[],
+        notes: Array.isArray(scan.notes) ? scan.notes : [],
+        // **生 Markdown はここで使い切る。** 真偽値だけ残して本文は保存しない (§2.4)。
+        isTrendPage: isTrendMarkdown(scan.markdown),
+        testDate: resolved,
+        dateSource: scan.dateSource,
+      };
+      await store.upsertPage({
+        file_id: file.id, file_sha256: file.sha256, page_no: p.page,
+        status: 'done', parsed: payload, raw: null,
+      });
+      await store.logEvent({
+        batch_id: batchId, event: 'page_done', file_id: file.id,
+        // **件数とページ番号だけ。** 検査値も氏名もログに出さない (§16)。
+        detail: { page: p.page, items: payload.measurements.length, kind: 'health_checkup' },
+      });
+    } catch (err) {
+      const msg = String(err).slice(0, 200);
+      await store.upsertPage({
+        file_id: file.id, file_sha256: file.sha256, page_no: p.page,
+        status: 'failed', error_detail: msg,
+      });
+      await store.logEvent({ batch_id: batchId, event: 'page_failed', file_id: file.id, detail: { page: p.page, kind: 'health_checkup' } });
+    }
+
+    /*
+     * **総ページ数はブラウザが数えた値を正とする** (pdf.js が実際に開いて数えている)。
+     * サーバ側の `countPdfPages` は正規表現の概算なので、完了判定の母数にしない。
+     */
+    if (Number.isInteger(p.pageCount) && p.pageCount > 0 && file.page_count !== p.pageCount) {
+      await store.updateFile(file.id, { page_count: p.pageCount });
+    }
+  }
+
+  /*
    * **ZIP を開き直さない** (Phase B2.1)。
    *
    * 以前はここで `analyzeOpened` を呼び、159MB の ZIP を毎回まるごと展開していた。
@@ -937,42 +1055,100 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
     let markers: Record<string, number> = {};
     let hcTestDate: string | null = null;
 
-    // ── 健診 ──
+    // ── 健診 (spec §6.2 / §6.5) ──
+    /*
+     * **HealthCheckupData は健診 PDF から作る。**
+     *
+     * v1.0 はここで `health-checkup-xlsx.ts` の 39 列 XLSX を読んで JSON にしていたが、
+     * v1.1 で**本経路から外した** (§6.2 / §19-C)。全 10 名に健診 PDF があり、
+     * 標準タイプ2 と同じ「健診スキャン」経路を正とするため。XLSX は照合・
+     * Golden 作成の補助資料に降格 (§6.3) — 納品 JSON の生成元にはしない。
+     *
+     * 整形は**本番と同じ共通 core** (`finalizeHealthCheckup`)。ad-hoc 側に
+     * 検査値の抽出も正規化も書かない (§4.3)。
+     */
     const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
-    const hcSheet = hcFile ? restoreHealthCheckupSheet(hcFile.normalized_payload) : null;
-    if (hcFile && !hcSheet) {
+    if (hcFile) {
+      const hcPages = await store.listPages(hcFile.id);
+      const donePages = hcPages.filter((p) => p.status === 'done');
+      const expected = hcFile.page_count ?? 0;
       /*
-       * **黙って落とさない。** 分類はされているのに材料が無い = 分類前の古い行
-       * (`normalized_payload` が入る前のバッチ) か、読めなかった XLSX。
-       * どちらも「分類し直せば直る」ので、理由をそのまま画面へ出す。
+       * **完了は「1..総ページ数が全部 done」**。ページ番号の集合で見るので、
+       * 通信断で行すら作られなかったページも未完了として出る (遺伝子と同じ規則・§8.6)。
        */
-      await store.upsertOutput({
-        subject_id: s.id, format_id: 'HealthCheckupData',
-        output_status: 'failed', validation_status: 'error',
-        error_detail: 'normalized_payload_missing',
-      });
-    }
-    if (hcFile && hcSheet) {
-      const built = buildHealthCheckupJson({ clientId: s.client_id, sheet: hcSheet });
-      hcTestDate = built.testDate;
-      markers = built.markers as Record<string, number>;
-      if (built.testDate) {
-        await store.upsertOutput({
-          subject_id: s.id, format_id: 'HealthCheckupData',
-          output_status: 'generated', validation_status: built.itemCount > 0 ? 'ok' : 'warn',
-          item_count: built.itemCount, test_date: built.testDate,
-          generated_at: new Date().toISOString(),
-        });
-        formats.push('HealthCheckupData');
-      } else {
-        // **test_date が確定しない人物は納品しない** (§5.3.8.1)
+      const seen = new Set(donePages.map((p) => p.page_no));
+      const missingHc = expected > 0
+        ? Array.from({ length: expected }, (_, i) => i + 1).filter((n) => !seen.has(n))
+        : [];
+
+      const parts = donePages
+        .slice()
+        .sort((a, b) => a.page_no - b.page_no)
+        .map((p) => restoreHealthPage(p.parsed))
+        .filter((x): x is HealthPageParsed => x !== null);
+
+      /*
+       * **日付は読めたページからだけ採る。** `today` 由来は取り込み時に捨ててある。
+       * 読めた日付が食い違うときは**どちらかを選ばず**管理者確認へ回す (§6.4・推定しない)。
+       */
+      const hcDates = Array.from(new Set(parts.map((p) => p.testDate).filter((d): d is string => !!d)));
+      const hcDate = hcDates.length === 1 ? hcDates[0] : null;
+
+      if (parts.length === 0) {
+        /*
+         * **黙って落とさない。** PDF がまだ読まれていない (解析前) か、
+         * 健診が XLSX しか無い人物。どちらも「分類し直す / 解析を実行する」で直るので
+         * 理由をそのまま画面へ出す。**XLSX へ勝手に切り替えない** (§6.2)。
+         */
         await store.upsertOutput({
           subject_id: s.id, format_id: 'HealthCheckupData',
           output_status: 'failed', validation_status: 'error',
-          item_count: built.itemCount, error_detail: 'test_date_unresolved',
+          error_detail: hcFile.source_kind === 'person_file' && expected === 0
+            ? 'health_pdf_not_scanned'
+            : 'health_pages_missing',
         });
+      } else if (missingHc.length > 0) {
+        await store.upsertOutput({
+          subject_id: s.id, format_id: 'HealthCheckupData',
+          output_status: 'failed', validation_status: 'warn',
+          error_detail: `missing_pages:${missingHc.join(',')}`,
+        });
+      } else if (!hcDate) {
+        // **today も ZIP 作成日も他検査の日付も入れない** (§6.4)。
+        await store.upsertOutput({
+          subject_id: s.id, format_id: 'HealthCheckupData',
+          output_status: 'failed', validation_status: 'error',
+          error_detail: hcDates.length > 1 ? `test_date_conflict:${hcDates.join(',')}` : 'test_date_unresolved',
+        });
+      } else {
+        const fin = finalizeHealthCheckup({
+          clientId: s.client_id,
+          testDate: hcDate,
+          parts,
+          note: '臨時診断バッチ (健診PDF・既存 scanImageToParsed + 本番 finalize core)。',
+          // **生 Markdown を納品 JSON へ載せない** — 氏名を含み得る (§16)。
+          includeRawMarkdown: false,
+        });
+        hcTestDate = hcDate;
+        markers = normalizeMarkers(
+          fin.measurements.map((m) => ({
+            name: typeof m.name === 'string' ? m.name : '',
+            value: m.value == null ? null : String(m.value),
+          })) as never,
+        ) as Record<string, number>;
+        await store.upsertOutput({
+          subject_id: s.id, format_id: 'HealthCheckupData',
+          output_status: 'generated', validation_status: fin.rows > 0 ? 'ok' : 'warn',
+          item_count: fin.rows, test_date: hcDate,
+          generated_at: new Date().toISOString(),
+        });
+        formats.push('HealthCheckupData');
       }
-      await store.updateFile(hcFile.id, { parse_status: built.testDate ? 'done' : 'failed', test_date: built.testDate });
+      await store.updateFile(hcFile.id, {
+        parse_status: parts.length > 0 && missingHc.length === 0 && hcDate ? 'done'
+          : parts.length > 0 ? 'processing' : 'pending',
+        test_date: hcDate,
+      });
     }
 
     // ── 問診 ──
@@ -1168,12 +1344,36 @@ export async function healthAgeCheck(batchId: string) {
   // **ZIP を開かない** (Phase B2.1)。材料は分類時に保存済み。
   const subjects = await store.listSubjects(batchId);
   const files = await store.listFiles(batchId);
-  const rows = subjects.map((s) => {
+  const rows = await Promise.all(subjects.map(async (s) => {
     const own = files.filter((f) => f.subject_id === s.id);
     const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
-    const hc = hcFile ? restoreHealthCheckupSheet(hcFile.normalized_payload) : null;
-    const markers = hc ? buildHealthCheckupJson({ clientId: s.client_id, sheet: hc }).markers : {};
-    const testDate = hc?.testDate.status === 'resolved' ? hc.testDate.date : null;
+    /*
+     * **ウェルネス年齢の材料も健診 PDF から採る** (spec §6.2)。
+     * 納品 JSON を PDF から作るのに年齢だけ XLSX から作ると、
+     * **画面の数字と納品物の materials が食い違う**。材料は 1 つに揃える。
+     */
+    const hcPages = hcFile ? await store.listPages(hcFile.id) : [];
+    const hcParts = hcPages
+      .filter((p) => p.status === 'done')
+      .sort((a, b) => a.page_no - b.page_no)
+      .map((p) => restoreHealthPage(p.parsed))
+      .filter((x): x is HealthPageParsed => x !== null);
+    const hcDates = Array.from(new Set(hcParts.map((p) => p.testDate).filter((d): d is string => !!d)));
+    const testDate = hcDates.length === 1 ? hcDates[0] : null;
+    const markers = hcParts.length > 0
+      ? (normalizeMarkers(
+          finalizeHealthCheckup({
+            clientId: s.client_id,
+            // key を組まないので日付は表示用。**納品には使わない。**
+            testDate: testDate ?? '1970-01-01',
+            parts: hcParts,
+            includeRawMarkdown: false,
+          }).measurements.map((m) => ({
+            name: typeof m.name === 'string' ? m.name : '',
+            value: m.value == null ? null : String(m.value),
+          })) as never,
+        ) as Record<string, number>)
+      : {};
     const wa = computeSubjectWellnessAge({
       clientId: s.client_id,
       markers: markers as Record<string, number>,
@@ -1192,7 +1392,7 @@ export async function healthAgeCheck(batchId: string) {
       missing_simple: wa.result?.missing_simple ?? [],
       message: wa.message,
     };
-  });
+  }));
   return { ok: true as const, subjects: rows };
 }
 
@@ -1233,15 +1433,43 @@ export async function assembleBatch(input: {
     let hcTestDate: string | null = null;
     let markers: Record<string, number> = {};
 
-    // 健診
+    /*
+     * 健診 (spec §6.2 / §6.5)。**process 経路と同じ規則**で組む
+     * — 納品する JSON と画面で確認した JSON が別物になってはいけない。
+     * 材料は健診 PDF のページ解析結果。**XLSX からは作らない** (v1.1 で本経路から外した)。
+     */
     const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
-    const hc = hcFile ? restoreHealthCheckupSheet(hcFile.normalized_payload) : null;
-    if (hc) {
-      const b = buildHealthCheckupJson({ clientId: s.client_id, sheet: hc });
-      hcTestDate = b.testDate;
-      markers = b.markers as Record<string, number>;
-      if (b.testDate) {
-        built.push(toDeliveryFile(cfg.prefix, s.client_id, 'HealthCheckupData', b.testDate, b.json));
+    if (hcFile) {
+      const hcPages = await store.listPages(hcFile.id);
+      const doneHc = hcPages.filter((p) => p.status === 'done');
+      const expectedHc = hcFile.page_count ?? 0;
+      const seenHc = new Set(doneHc.map((p) => p.page_no));
+      const hcComplete = expectedHc > 0
+        && Array.from({ length: expectedHc }, (_, i) => i + 1).every((n) => seenHc.has(n));
+      const hcParts = doneHc
+        .slice()
+        .sort((a, b) => a.page_no - b.page_no)
+        .map((p) => restoreHealthPage(p.parsed))
+        .filter((x): x is HealthPageParsed => x !== null);
+      const hcDates = Array.from(new Set(hcParts.map((p) => p.testDate).filter((d): d is string => !!d)));
+      const hcDate = hcDates.length === 1 ? hcDates[0] : null;
+      // **欠けたページ・未確定の日付があれば組まない** (欠けたまま納品すると受け取った側は気づけない)。
+      if (hcParts.length > 0 && hcComplete && hcDate) {
+        const fin = finalizeHealthCheckup({
+          clientId: s.client_id,
+          testDate: hcDate,
+          parts: hcParts,
+          note: '臨時診断バッチ (健診PDF・既存 scanImageToParsed + 本番 finalize core)。',
+          includeRawMarkdown: false,
+        });
+        hcTestDate = hcDate;
+        markers = normalizeMarkers(
+          fin.measurements.map((m) => ({
+            name: typeof m.name === 'string' ? m.name : '',
+            value: m.value == null ? null : String(m.value),
+          })) as never,
+        ) as Record<string, number>;
+        built.push(toDeliveryFile(cfg.prefix, s.client_id, 'HealthCheckupData', hcDate, fin.json));
         formats.push('HealthCheckupData');
       }
     }

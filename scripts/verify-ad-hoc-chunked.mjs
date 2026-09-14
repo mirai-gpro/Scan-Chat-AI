@@ -546,15 +546,32 @@ console.log('\n=== L. 後工程が ZIP を開き直さない (分割した意味
   for (const [name, code] of [['processBatch', proc], ['healthAgeCheck', ha], ['assembleBatch', asm]]) {
     eq(`${name} が analyzeOpened を呼ばない`, /analyzeOpened\(/.test(code), false);
     eq(`${name} が openArchiveFromS3 を呼ばない`, /openArchiveFromS3\(/.test(code), false);
-    eq(`${name} が normalized_payload から復元する`,
-      /restoreHealthCheckupSheet\(|restoreQuestionnaire\(/.test(code), true);
+    /*
+     * **材料は DB から復元する** (ZIP を開き直さない)。
+     *
+     * 復元元は 2 つある:
+     *   - 問診 / 分類時の材料 … `normalized_payload` (`restoreQuestionnaire`)
+     *   - 健診 … `ad_hoc_diagnosis_pages` (`restoreHealthPage`)。v1.1 で健診が
+     *     XLSX の payload から**健診 PDF のページ解析結果**へ変わったため (spec §6.2)。
+     * **どちらでもよいが、どちらも無いのは駄目** — それは ZIP を開いているということ。
+     */
+    eq(`${name} が DB の材料から復元する`,
+      /restoreHealthCheckupSheet\(|restoreQuestionnaire\(|restoreHealthPage\(/.test(code), true);
   }
 
   /*
    * **materials が無いときに黙って空にしない。** 分類前の古い行は payload を持たない
    * ので、そのまま素通りさせると**納品物が 1 件減るだけ**で誰も気づけない。
    */
-  eq('材料が無ければ理由を残す', (proc.match(/normalized_payload_missing/g) ?? []).length >= 2, true);
+  /*
+   * 理由の語は経路ごとに違ってよいが、**黙って空にする経路があってはいけない**。
+   * 健診は v1.1 で `health_pdf_not_scanned` / `health_pages_missing` /
+   * `test_date_unresolved` / `test_date_conflict` を出すようになった (spec §6.4/§6.5)。
+   */
+  const missReasons = ['normalized_payload_missing', 'health_pdf_not_scanned', 'health_pages_missing'];
+  eq('材料が無ければ理由を残す', missReasons.every((r) => proc.includes(r)), true);
+  eq('健診の日付が確定しなければ理由を残す',
+    proc.includes('test_date_unresolved') && proc.includes('test_date_conflict'), true);
 
   // 一括分類 (`classifyBatch`) でも payload を保存する = 経路で挙動が変わらない。
   eq('fileRowOf が payload を作る', /normalized_payload: buildEntryPayload\(/.test(stripComments(svc)), true);

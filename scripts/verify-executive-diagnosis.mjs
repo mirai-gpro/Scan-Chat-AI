@@ -195,7 +195,15 @@ console.log('\n=== E/F. 遺伝子の test_date は遺伝子ファイル自身の
   eq('gTestDate を bundle_date で埋めていない', /gTestDate\s*=\s*[^;]*bundle_date/.test(code), false);
 
   // 他 format の日付の出どころ (取り違えていないこと)。
-  eq('健診は健診自身の testDate', /hcTestDate = built\.testDate/.test(code), true);
+  /*
+   * 健診の日付は**健診自身**から。v1.1 で出どころが XLSX の `built.testDate` から
+   * **健診 PDF のページが読んだ日付 (`hcDate`)** に変わった (spec §6.2)。
+   * 大事なのは「他検査の日付・today・bundle_date を流用していないこと」。
+   */
+  eq('健診は健診自身の testDate', /hcTestDate = hcDate;/.test(code), true);
+  eq('健診の日付に遺伝子の日付を流用していない', /hcTestDate\s*=\s*[^;]*gTestDate/.test(code), false);
+  eq('健診の日付を new Date() で埋めていない', /hcTestDate\s*=\s*[^;]*new Date\(/.test(code), false);
+  eq('健診の日付を bundle_date で埋めていない', /hcTestDate\s*=\s*[^;]*bundle_date/.test(code), false);
   eq('HealthAge は派生元健診の日付', /'HealthAgeData', hcTestDate/.test(code), true);
 }
 
@@ -370,11 +378,21 @@ console.log('\n=== L. 遺伝子の部分納品を禁止 (失敗/未処理ペー�
 {
   const code = stripComments(read(SERVICE));
 
-  // 「done でないページ」を数えていること (failed だけ見ていない = pending を見逃さない)
-  eq('process 側は done 以外を数える',
-    /const incomplete = pages\.filter\(\(p\) => p\.status !== 'done'\)\.length;/.test(code), true);
-  eq('assemble 側は done 以外を数える',
-    /const gIncomplete = pages\.filter\(\(p\) => p\.status !== 'done'\)\.length;/.test(code), true);
+  /*
+   * **必要なページの側から欠けを引いていること** (spec §8.6・v1.1)。
+   *
+   * 旧版はここが「登録済みの行のうち done でない数」だった。それだと
+   * failed だけでなく pending も数える点は正しかったが、
+   * **通信断で行が作られなかったページを数えられない**という穴が残っていた。
+   * `missingGenoplanV1Pages()` は必要な集合 (p10〜35) から引くので、
+   * 行が無いページも欠けとして出る = 旧方式より厳しい。
+   */
+  eq('process 側は必要ページ集合から欠けを引く',
+    /const missingPages = missingGenoplanV1Pages\(/.test(code), true);
+  eq('assemble 側も必要ページ集合から欠けを引く',
+    /const gIncomplete = missingGenoplanV1Pages\(/.test(code), true);
+  eq('「登録済み行が全部 done」方式へ戻っていない',
+    /pages\.filter\(\(p\) => p\.status !== 'done'\)\.length/.test(code), false);
   /*
    * **page_count (countPdfPages の概算) を納品の条件にしていない** —
    * 概算が実際とずれると**操作で直せないまま納品が永久に止まる**。
@@ -460,9 +478,15 @@ console.log('\n=== M. 遺伝子の状態が output / parse_status / produced で
   const pushExpr = /if \(([^)]*)\) formats\.push\('GeneticTestResultData'\)/.exec(code);
   eq('producedFormats のガードが見つかる', pushExpr !== null, true);
 
-  const run = new Function('gTestDate', 'doneCount', 'incomplete', 'failed', `
+  /*
+   * `missingPages` は v1.1 で入った「**必要な p10〜35 のうち欠けているページ**」
+   * (spec §8.6)。以前の `incomplete` は「登録済みの行のうち done でない数」で、
+   * 行が作られなかったページを数えられなかった。**`incomplete` はその長さ**。
+   */
+  const run = new Function('gTestDate', 'doneCount', 'missingPages', 'failed', `
     const s = { id: 'S1', client_id: 'C1' };
     const built = { itemCount: 42 };
+    const incomplete = missingPages.length;
     const doneParts = Array.from({ length: doneCount }, (_, i) => ({ page: i + 1 }));
     const geneticComplete = ${completeExpr?.[1] ?? 'false'};
     const output = doneParts.length > 0 ? ({${outCall ?? ''}}) : null;
@@ -472,21 +496,21 @@ console.log('\n=== M. 遺伝子の状態が output / parse_status / produced で
   `);
 
   // A. done + pending が混在 (failed は 0) → 完成扱いにしない
-  const a = run('2026-03-29', 3, 2, 0);
+  const a = run('2026-03-29', 3, [17, 18], 0);
   eq('A: output_status = failed', a.output.output_status, 'failed');
   eq('A: validation_status = warn', a.output.validation_status, 'warn');
-  eq('A: error_detail に incomplete_pages',
-    /^incomplete_pages:2$/.test(a.output.error_detail ?? ''), true);
+  eq('A: error_detail に欠けたページ番号が出る',
+    /^missing_pages:17,18$/.test(a.output.error_detail ?? ''), true);
   eq('A: parse_status = processing', a.parse_status, 'processing');
   eq('A: produced に入らない', a.produced, false);
 
   // A'. failed も混じるときは内訳が分かる (retry で直るものと未送信は対処が違う)
-  const a2 = run('2026-03-29', 3, 2, 1);
+  const a2 = run('2026-03-29', 3, [17, 18], 1);
   eq("A': error_detail に failed_pages も出る",
-    /incomplete_pages:2 failed_pages:1/.test(a2.output.error_detail ?? ''), true);
+    /missing_pages:17,18 failed_pages:1/.test(a2.output.error_detail ?? ''), true);
 
   // B. 全ページ done + 日付あり → 完成
-  const b = run('2026-03-29', 5, 0, 0);
+  const b = run('2026-03-29', 5, [], 0);
   eq('B: output_status = generated', b.output.output_status, 'generated');
   eq('B: validation_status = ok', b.output.validation_status, 'ok');
   eq('B: error_detail は空', b.output.error_detail, null);
@@ -494,19 +518,29 @@ console.log('\n=== M. 遺伝子の状態が output / parse_status / produced で
   eq('B: produced に入る', b.produced, true);
 
   // B'. 日付が無ければ完成しない (ページが全部 done でも)
-  const b2 = run(null, 5, 0, 0);
+  const b2 = run(null, 5, [], 0);
   eq("B': output_status = failed", b2.output.output_status, 'failed');
   eq("B': validation_status = error", b2.output.validation_status, 'error');
   eq("B': error_detail = test_date_unresolved", b2.output.error_detail, 'test_date_unresolved');
   eq("B': produced に入らない", b2.produced, false);
 
   // 成功ページ 0 → output を作らない・parse_status は pending
-  const z = run('2026-03-29', 0, 4, 0);
+  const z = run('2026-03-29', 0, [10, 11, 12, 13], 0);
   eq('done 0 件: output を作らない', z.output, null);
   eq('done 0 件: parse_status = pending', z.parse_status, 'pending');
 
+  /*
+   * **v1.1 が塞いだ穴そのもの** — 通信断で行が作られなかったページ。
+   * 旧方式 (登録済み行が全部 done か) では done 25 / failed 0 なので**完成扱い**だった。
+   * 新方式は必要な集合の側から引くので、行が無くても `missing_pages` に出る。
+   */
+  const hole = run('2026-03-29', 25, [35], 0);
+  eq('行すら無いページがあれば完成にしない', hole.output.output_status, 'failed');
+  eq('行すら無いページを名指しする', hole.output.error_detail, 'missing_pages:35');
+  eq('行すら無いページがあれば produced に入らない', hole.produced, false);
+
   // **3 者が同じ条件を見ている** (どれか 1 つだけ緩むのを防ぐ)
-  for (const [label, r] of [['A', a], ["B'", b2], ['B', b]]) {
+  for (const [label, r] of [['A', a], ["B'", b2], ['B', b], ['hole', hole]]) {
     eq(`${label}: produced と geneticComplete が一致`, r.produced, r.geneticComplete);
     if (r.output) {
       eq(`${label}: output_status と geneticComplete が一致`,

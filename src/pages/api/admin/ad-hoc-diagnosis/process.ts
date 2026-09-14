@@ -62,9 +62,27 @@ export const POST: APIRoute = async ({ request }) => {
     }, 400);
   }
 
+  /*
+   * 健診 PDF のページ (spec §6.5)。**遺伝子と違いページの絞り込みは無い**
+   * — 健診票は数ページで、どのページにも検査値が印字され得るため全ページが対象。
+   * `pageCount` はブラウザの pdf.js が数えた総ページ数で、完了判定の母数になる。
+   */
+  const healthRaw = Array.isArray(body?.healthPages) ? (body!.healthPages as Record<string, unknown>[]) : [];
+  const healthPages: { fileId: string; page: number; pageCount: number; imageBase64: string; mimeType: string }[] = [];
+  for (const p of healthRaw) {
+    const fileId = str(p.fileId);
+    const page = Number(p.page);
+    const pageCount = Number(p.pageCount);
+    const img = splitImage(p.image ?? p.imageBase64, str(p.mimeType) ?? 'image/jpeg');
+    if (!fileId || !isUuid(fileId) || !Number.isInteger(page) || page < 1 || !img) continue;
+    if (!Number.isInteger(pageCount) || pageCount < page) continue;
+    healthPages.push({ fileId, page, pageCount, imageBase64: img.base64, mimeType: img.mimeType });
+  }
+
   try {
     const r = await processBatch(batchId, actorFrom(request), {
       geneticPages,
+      healthPages,
       retryFailedOnly: body?.retryFailedOnly === true,
     });
     if (!r.ok) return json(r, r.status);
