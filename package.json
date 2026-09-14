@@ -52,6 +52,7 @@
     "verify:ad-hoc-write-guard": "node scripts/verify-ad-hoc-write-guard.mjs",
     "verify:ad-hoc-single-write": "node scripts/verify-ad-hoc-single-write.mjs",
     "verify:ad-hoc-payload-gate": "node scripts/verify-ad-hoc-payload-gate.mjs",
+    "verify:transcos-v3-preflight": "node scripts/verify-transcos-v3-preflight.mjs",
     "verify:ad-hoc-e2e": "node scripts/verify-ad-hoc-e2e.mjs",
     "verify:executive-diagnosis": "node scripts/verify-executive-diagnosis.mjs"
   },
@@ -67,6 +68,7 @@
     "@zip.js/zip.js": "^2.14.0",
     "astro": "^5.18.2",
     "marked": "^18.0.4",
+    "pdfjs-dist": "^4.10.38",
     "qrcode-generator": "^2.0.4",
     "read-excel-file": "^9.3.10",
     "sharp": "^0.35.3",

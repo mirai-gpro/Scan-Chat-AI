@@ -113,6 +113,13 @@ jobs:
       #     適用し、**要確認が 1 件でも残れば納品しない** (最終指示書 §3.2/§4/§5)。
       #     非該当なのに実質的な値 (薬名・喫煙本数) が入っていたら黙って捨てず人へ渡す。
       - run: npm run verify:ad-hoc-questionnaire-branch
+      # トランスコスモス10名 v3.0 の Preflight (§8/§9)。**identity は
+      # content-addressed** (相対パス + SHA-256 + バイト数) なので、ZIP の並び順や
+      # entryIndex が変わっても人物が入れ替わらないことを機械で固定する。
+      # 併せて **raw header digest を trim / NFKC しない**ことも見る —
+      # `read-excel-file` はセル前後の空白を必ず落とすため (実測)、あの経路で
+      # 見出しを取ると列 47 の末尾改行が消えて digest は**永久に一致しない**。
+      - run: npm run verify:transcos-v3-preflight
       # staging bridge (Edge Function 経路・2026-09-11 追加)。**鍵もサーバも要らない**
       # ので A 層。実物を transpile し、Edge Function は localhost のスタブ、
       # Supabase クライアントは記録用スタブに差し替えて動かす。
