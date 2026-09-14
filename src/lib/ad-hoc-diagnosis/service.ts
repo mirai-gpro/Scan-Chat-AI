@@ -24,6 +24,19 @@ import { buildEntryPayload, restoreQuestionnaire } from './normalized-payload';
 // **本番の健診処理をそのまま使う** (spec §6.2/§6.5)。ad-hoc に整形を書き直さない。
 import { scanImageToParsed } from '../elith-export';
 import { finalizeHealthCheckup, isTrendMarkdown } from '../elith-hc-finalize';
+import {
+  isManualQuestionnaireRecord, manualQuestionnaire, manualRecordIsConfirmed,
+  type ManualEntry, type ManualQuestionnaireRecord,
+} from './questionnaire-manual';
+import type { QuestionnaireNormalized } from './questionnaire';
+
+/**
+ * 問診の手入力を置くページ番号。
+ *
+ * **既存の `ad_hoc_diagnosis_pages` を使い回す** — 新しいテーブルも列も足さない
+ * (spec §2.4)。問診ファイルは 1 人 1 件なので 1 行で足りる。
+ */
+const MANUAL_QUESTIONNAIRE_PAGE_NO = 1;
 import { normalizeMarkers } from '../health-age';
 import {
   AD_HOC_OPTIONAL_FORMATS, AD_HOC_REQUIRED_FORMATS, analyzeEntry, analyzeOpened, buildGeneticJson,
@@ -919,6 +932,153 @@ function restoreHealthPage(parsed: unknown): HealthPageParsed | null {
   };
 }
 
+/**
+ * 問診の手入力 (PDF 用) を読み出す。**二重確認が済んでいるものだけ返す** (spec §7.4)。
+ *
+ * 保存先は既存の `ad_hoc_diagnosis_pages` (page_no=1)。**新しいテーブルを作らない**
+ * (§2.4「新 migration は原則不要。既存で成立するか先に検証する」)。
+ */
+async function resolveManualQuestionnaire(fileId: string): Promise<QuestionnaireNormalized | null> {
+  const pages = await store.listPages(fileId);
+  const row = pages.find((p) => p.page_no === MANUAL_QUESTIONNAIRE_PAGE_NO);
+  if (!row || !isManualQuestionnaireRecord(row.parsed)) return null;
+  const rec = row.parsed;
+  // **入力しただけでは使わない。** 別の目で見るところまでが仕様。
+  if (!manualRecordIsConfirmed(rec)) return null;
+  return manualQuestionnaire({
+    entries: rec.entries, completedAt: rec.completedAt, sex: rec.sex, age: rec.age,
+  }).normalized;
+}
+
+/** 手入力を待っている状態か (入力が無い / 確認がまだ)。画面に理由を出すため。 */
+async function manualEntryPending(file: store.FileRow | undefined): Promise<boolean> {
+  if (!file) return false;
+  // 手入力が要るのは **PDF の問診だけ**。XLSX は分類時に読めている。
+  if (!/\.pdf$/i.test(file.display_name ?? '')) return false;
+  const pages = await store.listPages(file.id);
+  const row = pages.find((p) => p.page_no === MANUAL_QUESTIONNAIRE_PAGE_NO);
+  if (!row || !isManualQuestionnaireRecord(row.parsed)) return true;
+  return !manualRecordIsConfirmed(row.parsed);
+}
+
+/**
+ * 保存済みの手入力を読み出す (画面の再表示用)。
+ *
+ * **確認済みかどうかに関わらず返す** — 画面は「入力済みだが未確認」を出す必要がある。
+ * 納品に使ってよいかを決めるのは `resolveManualQuestionnaire` の側。
+ */
+export async function readManualQuestionnaire(batchId: string, fileId: string) {
+  const batch = await store.getBatch(batchId);
+  if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
+  const file = await store.getFile(fileId);
+  if (!file || file.batch_id !== batchId) return { ok: false as const, status: 404, error: 'file_not_found' };
+  const pages = await store.listPages(file.id);
+  const row = pages.find((p) => p.page_no === MANUAL_QUESTIONNAIRE_PAGE_NO);
+  const rec = row && isManualQuestionnaireRecord(row.parsed) ? row.parsed : null;
+  return {
+    ok: true as const,
+    record: rec
+      ? { ...rec, confirmed: manualRecordIsConfirmed(rec), same_actor: !!rec.confirmedBy && rec.confirmedBy === rec.enteredBy }
+      : null,
+  };
+}
+
+/**
+ * 問診の手入力を保存する (spec §7.4)。
+ *
+ * `confirm: true` で**二重確認**。入力した人と確認した人が同じでも保存はするが、
+ * **誰が入力し誰が確認したかを必ず残す** (画面に出して人が判断できるようにする)。
+ */
+export async function saveManualQuestionnaire(input: {
+  batchId: string;
+  fileId: string;
+  entries: ManualEntry[];
+  completedAt?: string | null;
+  sex?: string | null;
+  age?: number | null;
+  confirm?: boolean;
+  actor: Actor;
+}) {
+  const batch = await store.getBatch(input.batchId);
+  if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
+  const file = await store.getFile(input.fileId);
+  if (!file || file.batch_id !== input.batchId) return { ok: false as const, status: 404, error: 'file_not_found' };
+  if (file.classified_format_id !== 'LifestyleQuestionnaireData') {
+    return { ok: false as const, status: 400, error: 'not_a_questionnaire' };
+  }
+
+  const pages = await store.listPages(file.id);
+  const prevRow = pages.find((p) => p.page_no === MANUAL_QUESTIONNAIRE_PAGE_NO);
+  const prev = prevRow && isManualQuestionnaireRecord(prevRow.parsed) ? prevRow.parsed : null;
+
+  /*
+   * **確認は「今ある入力」に対してしか出せない。**
+   * 入力を差し替えたら確認はやり直し — でないと「A を確認したつもりが B が納品される」。
+   */
+  const entries = Array.isArray(input.entries) ? input.entries : [];
+  const isConfirmOnly = input.confirm === true && entries.length === 0 && prev !== null;
+  const nextEntries = isConfirmOnly ? prev.entries : entries;
+
+  // **保存する前に検証する。** 弾かれた入力は保存もしない (画面へ返す)。
+  const result = manualQuestionnaire({
+    entries: nextEntries,
+    completedAt: isConfirmOnly ? prev.completedAt : (input.completedAt ?? null),
+    sex: isConfirmOnly ? prev.sex : input.sex,
+    age: isConfirmOnly ? prev.age : input.age,
+  });
+
+  // `Actor.masked` は wellfort-site の中継が検証済み user.id から作ったもの。
+  // **ブラウザ申告の氏名は入らない** (§21)。
+  const actorMask = input.actor.masked;
+  const now = new Date().toISOString();
+  const rec: ManualQuestionnaireRecord = {
+    kind: 'manual_questionnaire',
+    entries: nextEntries,
+    completedAt: isConfirmOnly ? prev.completedAt : (input.completedAt ?? null),
+    sex: isConfirmOnly ? prev.sex : (input.sex ?? null),
+    age: isConfirmOnly ? prev.age : (input.age ?? null),
+    enteredBy: isConfirmOnly ? prev.enteredBy : actorMask,
+    enteredAt: isConfirmOnly ? prev.enteredAt : now,
+    // **入力を差し替えたら確認は外れる。**
+    confirmedBy: input.confirm === true ? actorMask : null,
+    confirmedAt: input.confirm === true ? now : null,
+  };
+
+  await store.upsertPage({
+    file_id: file.id, file_sha256: file.sha256, page_no: MANUAL_QUESTIONNAIRE_PAGE_NO,
+    status: 'done', parsed: rec, raw: null,
+  });
+  await store.logEvent({
+    batch_id: input.batchId,
+    /*
+     * **既存の event 名を使う** — `event` には DB 側の CHECK 制約があり
+     * (`20260910000020_ad_hoc_diagnosis.sql:396`)、名前を増やすと DDL が要る。
+     * 本案件は migration を足さない方針 (§13) なので、
+     * 入力=`parsed` / 確認=`confirmed` に寄せ、区別は `detail.kind` で付ける。
+     */
+    event: input.confirm === true ? 'confirmed' : 'parsed',
+    file_id: file.id,
+    // **件数だけ。回答の中身はログに出さない** (§16)。
+    detail: {
+      kind: 'manual_questionnaire',
+      accepted: result.normalized.mappedCount,
+      rejected: result.rejected.length,
+    },
+  });
+
+  return {
+    ok: true as const,
+    accepted: result.normalized.mappedCount,
+    rejected: result.rejected,
+    confirmed: manualRecordIsConfirmed(rec),
+    entered_by: rec.enteredBy,
+    confirmed_by: rec.confirmedBy,
+    // **入力者と確認者が同じなら画面で分かるようにする** (§7.4 は「別の管理者または同等の二重確認」)。
+    same_actor: !!rec.confirmedBy && rec.confirmedBy === rec.enteredBy,
+    completed_at: result.normalized.completedAt,
+  };
+}
+
 export async function processBatch(batchId: string, actor: Actor, options: ProcessOptions = {}) {
   await refreshConfig();
   // **S3 は要らない** (Phase B2.1)。ここは ZIP を開かず DB の材料だけで組む。
@@ -1151,14 +1311,27 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
       });
     }
 
-    // ── 問診 ──
+    // ── 問診 (spec §7.3 / §7.4) ──
+    /*
+     * 材料の出どころは 2 つ。**順番が意味を持つ。**
+     *   ① 管理者の手入力 (PDF 用・二重確認済みのものだけ) … `resolveManualQuestionnaire`
+     *   ② 分類時に読んだ XLSX の `normalized_payload`
+     *
+     * **PDF を自動 parse した answers は無い** (v1.1 で本経路から外した・§7.4)。
+     * PDF の人物は ① が入るまで `needs_manual_entry` のまま = 納品対象にならない。
+     */
     const qFile = own.find((f) => f.classified_format_id === 'LifestyleQuestionnaireData');
-    const qRestored = qFile ? restoreQuestionnaire(qFile.normalized_payload) : null;
+    const qManual = qFile ? await resolveManualQuestionnaire(qFile.id) : null;
+    const qRestored = qManual ?? (qFile ? restoreQuestionnaire(qFile.normalized_payload) : null);
     if (qFile && !qRestored) {
       await store.upsertOutput({
         subject_id: s.id, format_id: 'LifestyleQuestionnaireData',
         output_status: 'failed', validation_status: 'error',
-        error_detail: 'normalized_payload_missing',
+        // **手入力待ちと材料欠落を区別する** — 対処がまるで違う
+        // (前者は人が入力する / 後者は分類し直す)。
+        error_detail: await manualEntryPending(qFile)
+          ? 'questionnaire_needs_manual_entry'
+          : 'normalized_payload_missing',
       });
     }
     if (qFile && qRestored) {

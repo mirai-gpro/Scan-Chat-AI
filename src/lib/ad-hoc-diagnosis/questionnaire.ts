@@ -276,14 +276,38 @@ export function normalizePdfText(text: string, profile: QuestionnaireProfile): Q
 }
 
 /**
- * 問診 PDF の入口。profile を判定してから対応する adapter へ。
+ * 問診 PDF の入口。
  *
- * **profile B (短縮) に既存 QUESTIONS へ完全対応しない設問があっても止めない** (発注者指示)。
- * 対応できたものだけ `answers` に入れ、残りは `unmapped` に積む。
+ * **【v1.1 で本経路から外した】** spec §7.4。
+ * 回答が radio / checkbox の**視覚的な選択状態**で表されているため、text 抽出では
+ * 選択済みの選択肢も未選択の選択肢も同じ文字列として出てくる。`normalizePdfText()` の
+ * 「同じ行か次の行を回答とみなす」方式では**正答を保証できない**。
+ * **LLM に選択状態を推測させるのも禁止** (§18)。
+ * 対象は 2 名だけなので、誤変換のリスクを負って自動化するより Human Review を採る。
+ *
+ * → 実際の回答は `questionnaire-manual.ts` の手入力経路から入る。
+ *
+ * **この関数は本経路から呼ばれない。** 残してあるのは履歴と、
+ * 「自動 parse がどう間違うか」を検査で示すため。**新しい呼び出しを足さないこと。**
  */
 export function normalizeQuestionnairePdf(text: string): QuestionnaireNormalized {
   const profile = detectPdfProfile(text);
   const out = normalizePdfText(text, profile);
+  if (profile === 'unknown') out.notes.push('pdf_profile_unknown');
+  return out;
+}
+
+/**
+ * 問診 PDF を見つけたときの**中身が空の入れ物**。
+ *
+ * 様式だけ記録し、`answers` は**作らない**。管理者が手で入力するまで
+ * `questionnaireIsUsable()` が `needs_review` を返すので、
+ * **回答が入っていない `LifestyleQuestionnaireData` は絶対に作られない。**
+ */
+export function manualEntryPlaceholder(profile: QuestionnaireProfile): QuestionnaireNormalized {
+  const out = emptyNormalized(profile, []);
+  // 画面に「手入力が要る」と出すための目印。
+  out.notes.push('needs_manual_entry');
   if (profile === 'unknown') out.notes.push('pdf_profile_unknown');
   return out;
 }
