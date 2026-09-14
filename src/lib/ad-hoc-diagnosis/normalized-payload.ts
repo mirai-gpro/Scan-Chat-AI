@@ -190,7 +190,10 @@ export interface QuestionnairePayload {
   completed_at: unknown;
   answers: Record<string, unknown>;
   mapped_count: number;
+  /** `needs_review` の件数。**中身 (回答値) は入れない** (§16)。 */
   unmapped_count: number;
+  /** 仕様として捨てた列の数 (53〜62 等)。**未対応と混ぜて数えない。** */
+  ignored_by_spec_count?: number;
 }
 
 export function buildQuestionnairePayload(q: QuestionnaireNormalized): QuestionnairePayload {
@@ -203,7 +206,14 @@ export function buildQuestionnairePayload(q: QuestionnaireNormalized): Questionn
     completed_at: q.completedAt,
     answers: q.answers as Record<string, unknown>,
     mapped_count: q.mappedCount,
-    unmapped_count: q.unmapped.length,
+    /*
+     * **件数だけ保存する。** `unmapped[].detail` には回答値が入るので永続化しない (§16)。
+     *
+     * `needsReviewCount` が無い呼び出し元へは `unmapped.length` で落とす —
+     * **件数が黙って 0 になる方が悪い** (画面から「要確認あり」が消える)。
+     */
+    unmapped_count: q.needsReviewCount ?? q.unmapped.length,
+    ignored_by_spec_count: q.ignoredBySpec ?? 0,
   };
   /*
    * **`answers` のキーは設問 ID** (`Q-SMOKE` 等) なので deny-list には当たらない。
@@ -266,8 +276,11 @@ export function restoreQuestionnaire(payload: unknown): QuestionnaireNormalized 
     answers: (p.answers ?? {}) as QuestionnaireNormalized['answers'],
     subject: { sex: p.sex ?? null, age: p.age ?? null },
     completedAt: (p.completed_at ?? { status: 'absent' }) as QuestionnaireNormalized['completedAt'],
+    // **中身は復元しない** (保存していない)。件数だけ持ち回って画面に出す。
     unmapped: [],
     mappedCount: p.mapped_count ?? 0,
+    ignoredBySpec: p.ignored_by_spec_count ?? 0,
+    needsReviewCount: p.unmapped_count ?? 0,
     notes: [],
   };
 }

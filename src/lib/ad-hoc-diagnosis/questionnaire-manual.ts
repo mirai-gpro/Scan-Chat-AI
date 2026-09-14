@@ -204,6 +204,9 @@ export function manualQuestionnaire(input: ManualQuestionnaireInput): ManualQues
       completedAt: completedAt as QuestionnaireNormalized['completedAt'],
       unmapped: rejected,
       mappedCount,
+      // 手入力に「仕様として捨てる列」は無い (人が設問を選んで入れるため)。
+      ignoredBySpec: 0,
+      needsReviewCount: rejected.length,
       notes,
     },
     rejected,

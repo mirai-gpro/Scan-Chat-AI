@@ -99,6 +99,9 @@ jobs:
       - run: npm run verify:ad-hoc-genoplan-pages
       - run: npm run verify:ad-hoc-health-wiring
       - run: npm run verify:ad-hoc-questionnaire-manual
+      #   - external-form … 62 列の入力契約 (列が 1 文字でも違えば止める・
+      #     未知値を「その他」へ寄せない・today で年齢を作らない)。**合成データのみ**
+      - run: npm run verify:ad-hoc-external-form
       # staging bridge (Edge Function 経路・2026-09-11 追加)。**鍵もサーバも要らない**
       # ので A 層。実物を transpile し、Edge Function は localhost のスタブ、
       # Supabase クライアントは記録用スタブに差し替えて動かす。

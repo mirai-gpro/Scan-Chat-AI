@@ -252,6 +252,9 @@ console.log('\n=== D. 問診 payload — unmapped の見出しと notes を保�
     // `UnmappedItem.header` は元の見出し = **DB へは保存しない**と型定義にも書いてある。
     unmapped: [{ header: '氏名（カナ）', value: 'ヤマダ タロウ' }],
     mappedCount: 2,
+    // v1.1 で追加。**件数だけ**を保存し、中身 (回答値) は保存しない。
+    needsReviewCount: 1,
+    ignoredBySpec: 10,
     notes: ['sheet=山田太郎'],
   };
   const p = PL.buildQuestionnairePayload(q);
@@ -260,6 +263,11 @@ console.log('\n=== D. 問診 payload — unmapped の見出しと notes を保�
   eq('unmapped の見出しが出ない', flat.includes('氏名'), false);
   eq('notes を持たない', 'notes' in p, false);
   eq('件数だけ残る', p.unmapped_count, 1);
+  // **仕様として捨てた列は「要確認」と別に数える** (混ぜると正常な除外が警告に見える)。
+  eq('仕様対象外の件数も別に残る', p.ignored_by_spec_count, 10);
+  // 呼び出し元が件数を渡し忘れても 0 にしない (黙って「要確認なし」にならない)。
+  eq('件数が無ければ unmapped の長さで補う',
+    PL.buildQuestionnairePayload({ ...q, needsReviewCount: undefined }).unmapped_count, 1);
   eq('設問 ID の answers は残る', p.answers['Q-SMOKE'], 'no');
   eq('性別・年齢は残る', [p.sex, p.age], ['male', 54]);
 

@@ -98,9 +98,10 @@ const loadedMods = {
   pipeline: await load('src/lib/ad-hoc-diagnosis/pipeline.ts'),
   questionnaire: await load('src/lib/ad-hoc-diagnosis/questionnaire.ts'),
   qmap: await load('src/lib/ad-hoc-diagnosis/questionnaire-map.ts'),
+  contract: await load('src/lib/ad-hoc-diagnosis/external-form-contract.ts'),
 };
 
-const { archive, pipeline, questionnaire, qmap } = loadedMods;
+const { archive, pipeline, questionnaire, qmap, contract } = loadedMods;
 
 const zipjs = await import('@zip.js/zip.js');
 zipjs.configure({ useWebWorkers: false });
@@ -129,31 +130,68 @@ async function healthCheckupXlsx(dateY, dateM, dateD, over = {}) {
   return buildXlsx({ headers, rows: [row], withCoverSheet: true });
 }
 
-// ── 問診 XLSX (外部フォームの 62 列型を模した縮小版・先頭 6 列は定型) ──
+// ── 問診 XLSX (**実物と同じ 62 列**・値は合成) ──
+//
+// 見出しは契約 (`external-form-contract.ts`) から取る。**ここで 62 本を書き写さない** —
+// 写すと契約とこの fixture が別々に育ち、どちらが正か分からなくなる。
+// 見出し文字列そのものの固定は `verify:ad-hoc-external-form` が 1 文字単位で行う。
+//
+// **値は合成データだけ。** 実在役員の回答・氏名・生年月日は 1 つも置かない (spec §7.4)。
+const Q_HEADERS = contract.EXTERNAL_FORM_V1_COLUMNS.map((c) => c.header);
 async function questionnaireXlsx(y, m, d) {
-  const headers = [
-    'ID', '開始時刻', '完了時刻', 'メール', '名前', '最終変更時刻',
-    '生物学的性別', '生年月日', '身長', '体重', '体重変化',
-    '自覚症状', '現在罹患している疾患', '過去に罹患した疾患',
-    '喫煙習慣', '1日の喫煙本数', '喫煙年数',
-    '飲酒習慣', '1回あたり飲酒量',
-    '野菜', 'フルーツ', '魚', '赤身肉・加工肉', '揚げ物', '塩分', '間食', 'カフェイン', 'ご飯',
-    '運動頻度', '運動時間', '歩行速度', '座位時間', '運動種類',
-    '薬・サプリ', '睡眠時間', '睡眠の質', 'ストレス',
-  ];
-  const row = [
-    T('R1'), D(serial1900(y, m, d)), D(serial1900(y, m, d)),
-    T('***@example.com'), T('-'), D(serial1900(y, m, d)),
-    T('男性'), T('1975-04-01'), T('170'), T('65'), T('該当するものはない'),
-    T('肩こり, 腰痛'), T('高血圧'), T('なし'),
-    T('過去に吸っていたが現在は吸わない'), T('11〜20本'), T('10〜20年'),
-    T('週2〜3日飲む'), T('1〜2合'),
-    T('週2〜3回'), T('週1回以下'), T('週2〜3回'), T('週4〜5回'), T('週1回以下'),
-    T('ほぼ毎日'), T('週2〜3回'), T('1日1〜2杯'), T('茶碗1杯（約150g）'),
-    T('週3〜4日'), T('30〜60分'), T('速い'), T('6〜9時間'), T('ウォーキング, 筋力トレーニング'),
-    T('ある'), T('6〜7時間'), T('普通'), T('6'),
-  ];
-  return buildXlsx({ headers, rows: [row], sheetName: '問診回答' });
+  const at = (n) => n - 1;
+  const row = new Array(62).fill(T(''));
+  const put = (n, cell) => { row[at(n)] = cell; };
+  put(1, T('R1'));
+  put(3, D(serial1900(y, m, d)));           // 完了時刻 = 問診実施日
+  put(4, T('***@example.invalid'));
+  put(5, T('-'));
+  put(6, D(serial1900(y, m, d)));
+  put(7, T('-'));
+  put(8, T('1975-04-01'));                  // 生年月日 (合成・年齢算出にだけ使われる)
+  put(9, T('男性'));
+  put(10, T('170'));
+  put(11, T('65'));
+  put(12, T('該当するものはない'));
+  put(13, T('肩こり;腰痛'));                 // **区切りは `;`** (契約)
+  put(14, T('高血圧'));
+  put(15, T('なし'));
+  put(18, T('過去に吸っていたが現在は吸わない'));
+  put(19, T('45'));                          // 禁煙年齢 → 40〜49歳
+  put(20, T('15'));                          // 本数 → 11〜20本
+  put(21, T('12'));                          // 年数 → 10〜20年
+  put(22, T('週2〜3日飲む'));
+  put(24, T('12'));                          // 飲酒年数 → 10〜20年
+  put(25, T('1〜2合'));
+  put(26, T('何でも食べる'));
+  put(27, T('週2〜3回'));
+  put(28, T('週1回以下'));
+  put(29, T('週2〜3回'));
+  put(30, T('週4〜5回'));
+  put(31, T('週1回以下'));
+  put(32, T('ほぼ毎日'));
+  put(33, T('週2〜3回'));
+  put(34, T('週2〜3回'));
+  put(35, T('ほぼ毎日'));
+  put(36, T('コーヒー約2杯'));               // → 1日1〜2杯
+  put(37, T('150g'));                        // → 茶碗1杯（約150g）
+  put(38, T('普通'));
+  put(39, T('食事制限していない'));
+  put(41, T('週3〜4日'));
+  put(42, T('30〜60分'));
+  put(43, T('速い'));
+  put(44, T('7'));                           // → 6〜9時間
+  put(45, T('ウォーキング'));                // **単一**。複数だと needs_review になる
+  put(46, T('ある'));
+  put(47, T('（合成）サプリメント'));
+  put(48, T('1年以上'));
+  put(49, T('毎日'));
+  put(50, T('6〜7時間'));
+  put(51, T('普通'));
+  put(52, T('6'));
+  put(53, T('704000056'));                   // 53〜62 は ignored_by_spec
+  put(62, T('同意する'));
+  return buildXlsx({ headers: Q_HEADERS, rows: [row], sheetName: '問診回答' });
 }
 
 // ── 遺伝子 PDF (Genoplan の目印つき・最小の PDF) ──
@@ -202,6 +240,7 @@ function memReader(bytes) {
 // ===========================================================================
 const hcA = await healthCheckupXlsx(2026, 3, 29);
 const hcB = await healthCheckupXlsx(2026, 4, 5, { height: 162, weight: 55 });
+
 const qA = await questionnaireXlsx(2026, 3, 29);
 const qB = await questionnaireXlsx(2026, 4, 5);
 const gA = genoplanPdf(3);
@@ -418,7 +457,22 @@ ok('e2e: 人物ごとに別の key になる',
   );
   eq('pdf: 短縮問診と判定', short.profile, 'ai_prevention_short_v1');
   eq('pdf: 対応する設問は写像', short.answers['S-STATUS'], '吸ったことはない');
-  ok('pdf: 未対応があっても止まらない', questionnaire.questionnaireIsUsable(short));
+  /*
+   * **未対応の設問があっても人物を失敗にしない** (不変条件)。
+   * ただし納品の可否は別条件も見る — v1.1 で `questionnaireIsUsable` に
+   * 「問診実施日が確定していること」が加わった (spec §6.4)。
+   * この fixture は日付を持たないので、**日付を足したうえで**不変条件を確かめる。
+   */
+  const shortDated = { ...short, completedAt: { status: 'resolved', date: '2026-03-29' } };
+  ok('pdf: 未対応があっても止まらない', questionnaire.questionnaireIsUsable(shortDated));
+  ok('pdf: 未対応は unmapped に出る', short.unmapped.length >= 0);
+  /*
+   * **日付が確定しなければ納品しない** (v1.1 で追加)。
+   * `buildElithInterviewJson()` は `completedAt` が無いと **実行時刻を完了日とみなし
+   * `test_date` を今日にする** (`interview-export.ts:250`)。通常のアプリでは正しいが、
+   * 過去の外部ファイルを取り込む本経路では捏造になるので、ここで止める。
+   */
+  eq('pdf: 日付が無ければ納品しない', questionnaire.questionnaireIsUsable(short), false);
   ok('pdf: 未対応は unmapped に出る', Array.isArray(short.unmapped));
 }
 

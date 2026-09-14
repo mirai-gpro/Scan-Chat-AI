@@ -1346,10 +1346,14 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
           subject_id: s.id, format_id: 'LifestyleQuestionnaireData',
           output_status: 'generated',
           // **未対応項目があっても人物を失敗にしない。** warn として残す。
-          validation_status: q.unmapped.length > 0 ? 'warn' : 'ok',
+          // **要確認だけを warn にする。** 仕様として捨てた列 (53〜62) は正常。
+          validation_status: q.needsReviewCount > 0 ? 'warn' : 'ok',
           item_count: built.answerCount, test_date: built.testDate,
           generated_at: new Date().toISOString(),
-          error_detail: q.unmapped.length ? `unmapped:${q.unmapped.length}` : null,
+          // **3 つを分けて残す** (契約)。件数だけ = 回答値は載せない (§16)。
+          error_detail: q.needsReviewCount
+            ? `needs_review:${q.needsReviewCount} ignored_by_spec:${q.ignoredBySpec}`
+            : null,
         });
         formats.push('LifestyleQuestionnaireData');
       } else {

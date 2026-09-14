@@ -69,6 +69,7 @@ const rel = (src) => src
   .replace(`from './questionnaire-map'`, `from './questionnaire-map.js'`)
   .replace(`from './health-checkup-xlsx'`, `from './health-checkup-xlsx.js'`)
   .replace(`from './questionnaire'`, `from './questionnaire.js'`)
+  .replace(`from './external-form-contract'`, `from './external-form-contract.js'`)
   .replace(`from './classify'`, `from './classify.js'`)
   .replace(`from '../../scripts/chat/interview-script'`, `from './interview-script.js'`);
 
@@ -83,6 +84,7 @@ writeTs('src/scripts/chat/interview-script.ts', 'interview-script.js');
 writeTs('src/lib/ad-hoc-diagnosis/classify.ts', 'classify.js');
 writeTs('src/lib/ad-hoc-diagnosis/health-checkup-xlsx.ts', 'health-checkup-xlsx.js');
 writeTs('src/lib/ad-hoc-diagnosis/questionnaire-map.ts', 'questionnaire-map.js');
+writeTs('src/lib/ad-hoc-diagnosis/external-form-contract.ts', 'external-form-contract.js');
 writeTs('src/lib/ad-hoc-diagnosis/questionnaire.ts', 'questionnaire.js');
 writeTs('src/lib/ad-hoc-diagnosis/questionnaire-manual.ts', 'questionnaire-manual.js');
 
