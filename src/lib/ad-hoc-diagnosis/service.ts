@@ -1656,7 +1656,7 @@ export async function healthAgeCheck(batchId: string) {
  * **readiness はここで見ない。** 「組めたか」と「納品してよいか」は別の判断で、
  * 後者は呼び出し側 (`evaluateReadiness` → write-guard) が持つ。
  */
-interface SubjectBuild {
+export interface SubjectBuild {
   built: DeliveryFile[];
   formats: string[];
   hcTestDate: string | null;
@@ -1674,7 +1674,7 @@ interface SubjectBuild {
   } | null;
 }
 
-async function buildSubjectDelivery(
+export async function buildSubjectDelivery(
   s: store.SubjectRow,
   own: store.FileRow[],
   cfg: { prefix: string },
