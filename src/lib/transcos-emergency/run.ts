@@ -264,6 +264,13 @@ export interface SubjectStatus {
   genetic: { pagesDone: number; pagesExpected: number };
   questionnaire: 'xlsx' | 'pdf_manual';
   questionnaireReady: boolean;
+  /**
+   * 画面が原本を取り出すための id (`file` API に渡す)。
+   * **氏名も path も含まない** — 不透明な UUID だけ。
+   */
+  fileIds: { health: string | null; genetic: string | null; questionnaire: string | null };
+  /** 読むべき entry 番号 (画面は manifest を持たない)。 */
+  entries: { health: number; genetic: number; questionnaire: number };
   outputs: { formatId: string; status: string; testDate: string | null }[];
   delivered: number;
   crossCheck: { mismatches: number; matched: number } | null;
@@ -343,6 +350,8 @@ export async function runStatus(runId: string): Promise<RunStatus | null> {
       genetic: { pagesDone: gPages, pagesExpected: geneticNeeded },
       questionnaire: qIsPdf ? 'pdf_manual' : 'xlsx',
       questionnaireReady: qReady,
+      fileIds: { health: hcFile?.id ?? null, genetic: gFile?.id ?? null, questionnaire: qFile?.id ?? null },
+      entries: { health: m.health, genetic: m.genoplan, questionnaire: m.questionnaire },
       outputs: outs.map((o) => ({ formatId: o.format_id, status: o.output_status, testDate: o.test_date })),
       delivered,
       crossCheck: null,
