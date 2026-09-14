@@ -168,25 +168,36 @@ export type WriteGateResult =
  * **同じこれを通る**。env の読み方・正規化・一致判定を 2 か所に書くと、片方だけ緩んでも
  * 気づけない。**ここを緩めると両方が緩む**ので、変更は必ず両方の検査で落ちる。
  */
-export function checkWriteTarget(): { ok: true; cfg: S3Config; target: string }
+export function checkWriteTarget(
+  /**
+   * 読む env の名前。**既定は臨時診断バッチのもの**なので、引数なしの呼び出しは
+   * 従来と 1 文字も変わらない。
+   *
+   * トランスコスモス v3 は **env を共用しない** (spec v3 §18.2) ので自分の 2 本を渡す。
+   * ここを引数にしたのは、**判定そのものを写さない**ため — 正規化と完全一致の規則を
+   * 2 か所に書くと、片方だけ緩んだときに誰も気づけない。
+   * 「どの env を読むか」だけが違い、「どう判定するか」は 1 つ。
+   */
+  envNames: { enabled: string; target: string } = { enabled: WRITE_ENABLED_ENV, target: WRITE_TARGET_ENV },
+): { ok: true; cfg: S3Config; target: string }
   | { ok: false; status: number; error: string; detail: string } {
   // ① 主スイッチ。未設定・`on` 以外はすべて無効 (fail-closed)。
-  const enabled = env(WRITE_ENABLED_ENV).trim();
+  const enabled = env(envNames.enabled).trim();
   if (enabled !== 'on') {
     return {
       ok: false, status: 403, error: 'write_disabled',
       detail: enabled
-        ? `${WRITE_ENABLED_ENV} が "on" ではありません。実書き込みは無効です。`
-        : `${WRITE_ENABLED_ENV} が未設定です。実書き込みは無効です。`,
+        ? `${envNames.enabled} が "on" ではありません。実書き込みは無効です。`
+        : `${envNames.enabled} が未設定です。実書き込みは無効です。`,
     };
   }
 
   // ② 書き込み先の明示宣言。既定値を持たせない。
-  const declared = env(WRITE_TARGET_ENV).trim();
+  const declared = env(envNames.target).trim();
   if (!declared) {
     return {
       ok: false, status: 403, error: 'write_target_unset',
-      detail: `${WRITE_TARGET_ENV} が未設定です。書き込み先を明示しない限り実書き込みしません。`,
+      detail: `${envNames.target} が未設定です。書き込み先を明示しない限り実書き込みしません。`,
     };
   }
 
@@ -200,7 +211,7 @@ export function checkWriteTarget(): { ok: true; cfg: S3Config; target: string }
   if (actual !== want) {
     return {
       ok: false, status: 403, error: 'write_target_mismatch',
-      detail: `${WRITE_TARGET_ENV} と実際の書き込み先が一致しません (宣言=${want} / 実際=${actual})。`,
+      detail: `${envNames.target} と実際の書き込み先が一致しません (宣言=${want} / 実際=${actual})。`,
     };
   }
 

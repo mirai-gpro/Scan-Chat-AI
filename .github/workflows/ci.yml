@@ -125,6 +125,11 @@ jobs:
       # 照合は名前が解決できないと比較 0 件で終わり、失敗も 0 件なので緑に見える —
       # そのまま通ると 5 名ぶんの健診が無検査で納品される。
       - run: npm run verify:transcos-v3-health
+      # 納品ゲート (§15〜§17) と S3 の同一性 (§18)。**取り返しがつかない側**。
+      # 間違えると他人のデータを上書きするか、中身が違うものを「納品済み」と記録する。
+      # とくに **ETag を同一性の根拠にしない** — マルチパートや SSE-KMS だと
+      # ETag は本文の SHA-256 と一致しないので、「ETag は合っているが中身が違う」で通る。
+      - run: npm run verify:transcos-v3-delivery
       # staging bridge (Edge Function 経路・2026-09-11 追加)。**鍵もサーバも要らない**
       # ので A 層。実物を transpile し、Edge Function は localhost のスタブ、
       # Supabase クライアントは記録用スタブに差し替えて動かす。
