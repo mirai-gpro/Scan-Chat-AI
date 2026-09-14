@@ -90,6 +90,10 @@ jobs:
       # E2E 確認用の 1 件書き出し (2026-09-14)。**通常納品の規則を緩めていないこと**を固定する
       # (部分納品禁止・create-only・key の形・batch を completed にしない)。
       - run: npm run verify:ad-hoc-single-write
+      # normalized_payload の PII ゲート (2026-09-14・実データ E2E で顕在化)。
+      # 判定を 2 か所で実装すると設問 id `M-NAME` が扉で拒否され classify-entry が落ちる。
+      # 「規則は 1 本」と「安全性は緩んでいない」を両方固定する。
+      - run: npm run verify:ad-hoc-payload-gate
       # 分割分類 (2026-09-12 Phase B2.1)。**鍵もサーバも ZIP も要らない**ので A 層
       # (PII ゲートと planArchive は実物を transpile して動かし、ZIP はダミーの
       # Central Directory を渡すだけ = 中身を 1 バイトも読まないことの証明にもなる)。

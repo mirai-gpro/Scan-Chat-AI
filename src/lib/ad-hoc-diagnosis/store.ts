@@ -13,7 +13,7 @@
 import { getServerSupabase } from '../supabase';
 import type { FormatId, Confidence, SourceKind } from './classify';
 import type { RejectReason } from './archive';
-import { assertNoPiiKeys } from './normalized-payload';
+import { assertNormalizedPayloadSafe } from './normalized-payload';
 
 // ---------------------------------------------------------------------------
 // 型 (DB の行)
@@ -115,7 +115,7 @@ export interface FileRow {
   /**
    * 健診 / 問診の正規化済み解析結果 (`normalized-payload.ts` が組む)。
    * **氏名・メール・会社名・役職・path・元ファイル名は禁止** — 書き込み前に
-   * `assertNoPiiKeys` が検査し、見つかれば **DB へ書かずに throw** する。
+   * `assertNormalizedPayloadSafe` が検査し、見つかれば **DB へ書かずに throw** する。
    * 遺伝子はページ表 (`ad_hoc_diagnosis_pages`) が持つので **null**。
    */
   normalized_payload: unknown;
@@ -423,10 +423,15 @@ export interface FileWrite {
  * 呼び出し側 (`normalized-payload.ts`) でも検査しているが、**書き込みの扉はここ 1 つ**
  * なので、新しい経路が増えても素通りしないようここでも通す。
  * 見つかったら**書かずに throw** する (保存してから消す、をしない)。
+ *
+ * **判定の規則はここに書かない。** `assertNormalizedPayloadSafe()` を呼ぶだけにする —
+ * 以前ここが `assertNoPiiKeys()` を**除外なしで**呼んでいたため、組み立て側が許した
+ * 設問 id `M-NAME` が扉で再び拒否され、実データ E2E が落ちた (2026-09-14)。
+ * **問診の設問 id の一覧をこちらへ複製しないこと。**
  */
 function guardPayload(files: readonly FileWrite[], where: string): void {
   files.forEach((f, i) => {
-    if (f.normalized_payload != null) assertNoPiiKeys(f.normalized_payload, `${where}[${i}]`);
+    if (f.normalized_payload != null) assertNormalizedPayloadSafe(f.normalized_payload, `${where}[${i}]`);
   });
 }
 
@@ -506,7 +511,7 @@ export async function updateFile(
     >
   >,
 ): Promise<FileRow> {
-  if (patch.normalized_payload != null) assertNoPiiKeys(patch.normalized_payload, 'updateFile');
+  if (patch.normalized_payload != null) assertNormalizedPayloadSafe(patch.normalized_payload, 'updateFile');
   const res = await need()
     .from('ad_hoc_diagnosis_files')
     .update(patch)

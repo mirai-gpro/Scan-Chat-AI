@@ -878,6 +878,51 @@ API は**実際にPUTした本文そのもの**を返し、管理画面から保
 とくに「通常納品の部分納品禁止が緩んでいないこと」「create-onlyのままであること」
 「batchをcompletedにしないこと」を機械で固定する。
 
+## 11.5 `normalized_payload` のPIIゲートは1本だけ（2026-09-14・実データE2Eで顕在化）
+
+実データE2Eで `classify-entry` が落ちた:
+
+```text
+normalized_payload に禁止キー: upsertFileByEntryIndex[0] [M-NAME]
+```
+
+**真因はPII判定を2か所で実装していたこと。**
+組み立て側（`normalized-payload.ts`）はproductionの設問idを完全一致で除外していたのに、
+**書き込みの扉（`store.ts` の `guardPayload()` / `updateFile`）が
+`assertNoPiiKeys()` を除外なしでもう一度呼んでいた**ため、
+`M-NAME` が `name` の部分一致で再び拒否された。
+
+### 規則は1本
+
+```ts
+export function assertNormalizedPayloadSafe(payload: unknown, where: string): void {
+  assertNoPiiKeys(payload, where, QUESTION_ID_KEYS);
+}
+```
+
+- 組み立て側（`buildQuestionnairePayload` / `buildEntryPayload` / `buildHealthCheckupPayload`）
+- 書き込みの扉（`store.guardPayload` / `store.updateFile`）
+
+**両方ともこれを通す。`QUESTION_ID_KEYS` をstore側へ複製しない**
+（複製すると片方だけ更新されて同じ事故が再発する）。
+
+### 安全性は緩めていない
+
+除外は**実在する設問idとの完全一致だけ**。
+
+| キー | 扱い |
+|---|---|
+| `M-NAME`（production `QUESTIONS` に実在） | 通す |
+| `display_name` / `full_name` / `file_name` / `name` | **拒否** |
+| email / birth / company 等 | **拒否** |
+| `UNKNOWN-NAME`（productionに無い） | **拒否** |
+
+### 検証
+
+`npm run verify:ad-hoc-payload-gate`（退行注入4種）。
+**Supabaseをスタブに差し替えて `upsertFileByEntryIndex` / `replaceFiles` / `updateFile` を
+実際に呼び、DB直前まで到達すること**まで見る（テキスト検査だけにしない）。
+
 ---
 
 # 12. Golden Sample
