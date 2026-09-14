@@ -120,6 +120,11 @@ jobs:
       # `read-excel-file` はセル前後の空白を必ず落とすため (実測)、あの経路で
       # 見出しを取ると列 47 の末尾改行が消えて digest は**永久に一致しない**。
       - run: npm run verify:transcos-v3-preflight
+      # Health の照合 (§10.4 Golden anchors / §10.5 必須 cross-check)。
+      # **守っているのは「一致したら緑」ではなく「一致していないなら必ず赤」**。
+      # 照合は名前が解決できないと比較 0 件で終わり、失敗も 0 件なので緑に見える —
+      # そのまま通ると 5 名ぶんの健診が無検査で納品される。
+      - run: npm run verify:transcos-v3-health
       # staging bridge (Edge Function 経路・2026-09-11 追加)。**鍵もサーバも要らない**
       # ので A 層。実物を transpile し、Edge Function は localhost のスタブ、
       # Supabase クライアントは記録用スタブに差し替えて動かす。
