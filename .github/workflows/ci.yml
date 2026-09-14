@@ -91,6 +91,14 @@ jobs:
       # (PII ゲートと planArchive は実物を transpile して動かし、ZIP はダミーの
       # Central Directory を渡すだけ = 中身を 1 バイトも読まないことの証明にもなる)。
       - run: npm run verify:ad-hoc-chunked
+      # 仕様 v1.1 (2026-09-14)。**鍵もサーバも要らない**ので A 層。
+      #   - genoplan-pages … 遺伝子は p10〜35 だけ (全 208/210 ページ走査への退行を落とす)
+      #   - health-wiring  … 健診は本番の HC 処理を通り、Human Review 前に S3 へ書かない
+      #   - questionnaire-manual … 問診 PDF を自動 parse せず、二重確認まで納品しない
+      #     (**合成データのみ**。実在役員の回答・氏名は repo に入れない)
+      - run: npm run verify:ad-hoc-genoplan-pages
+      - run: npm run verify:ad-hoc-health-wiring
+      - run: npm run verify:ad-hoc-questionnaire-manual
       # staging bridge (Edge Function 経路・2026-09-11 追加)。**鍵もサーバも要らない**
       # ので A 層。実物を transpile し、Edge Function は localhost のスタブ、
       # Supabase クライアントは記録用スタブに差し替えて動かす。
