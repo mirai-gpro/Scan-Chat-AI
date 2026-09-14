@@ -319,10 +319,19 @@ console.log('\n=== F. 書き込みの扉 (store) が必ず検査を通す ===');
 // ═══════════════════════════════════════════════════════════════════════════
 {
   const src = stripComments(read(STORE));
-  eq('store が assertNoPiiKeys を import している', /import \{ assertNoPiiKeys \} from '\.\/normalized-payload'/.test(read(STORE)), true);
+  /*
+   * **判定の正本は `assertNormalizedPayloadSafe()` 1 本**へ寄せた (2026-09-14)。
+   * 以前ここは `assertNoPiiKeys` を直に import していたが、**除外なしで呼ぶ**ため
+   * 設問 id `M-NAME` が扉で拒否され、実データ E2E の classify-entry が落ちた。
+   * 規則を 2 か所に持たないこと自体を固定する (詳細は verify:ad-hoc-payload-gate)。
+   */
+  eq('store が正本の検査関数を import している',
+    /import \{ assertNormalizedPayloadSafe \} from '\.\/normalized-payload'/.test(read(STORE)), true);
+  eq('store が除外なしの assertNoPiiKeys を呼ばない', /assertNoPiiKeys\(/.test(src), false);
   eq('replaceFiles が検査を通す', /guardPayload\(files, 'replaceFiles'\)/.test(src), true);
   eq('upsertFileByEntryIndex が検査を通す', /guardPayload\(\[file\], 'upsertFileByEntryIndex'\)/.test(src), true);
-  eq('updateFile が検査を通す', /assertNoPiiKeys\(patch\.normalized_payload, 'updateFile'\)/.test(src), true);
+  eq('updateFile が検査を通す',
+    /assertNormalizedPayloadSafe\(patch\.normalized_payload, 'updateFile'\)/.test(src), true);
 
   // **検査が insert / update より前に在る**こと (後ろだと書いてから落ちる)。
   const fn = src.slice(src.indexOf('export async function upsertFileByEntryIndex'));

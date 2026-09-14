@@ -17,7 +17,7 @@ import { QUESTIONS } from '../../scripts/chat/interview-script';
  *
  * `answers` のキーは設問 id (`M-NAME` = 「服用中の薬の名前」等) で、**個人情報ではない**。
  * しかし deny-list は `name` を部分一致で見るので `M-NAME` に当たり、
- * **服薬ありと答えた人物の保存が丸ごと throw していた** (実測 2026-09-14)。
+ * **服薬ありと答えた人物の保存が丸ごと throw していた** (実測 2026-09-14・実データ E2E)。
  *
  * 緩めるのは**既存 `QUESTIONS` に実在する id と完全一致するものだけ**。
  * 「`name` を含むキーを全部許す」にはしない — それだと `display_name` も通ってしまう。
@@ -100,6 +100,29 @@ export function assertNoPiiKeys(
   }
 }
 
+/**
+ * **`normalized_payload` を検査する正本。この 1 本だけを呼ぶ。**
+ *
+ * 【なぜ要るか】実データ E2E で `classify-entry` が
+ * `normalized_payload に禁止キー: upsertFileByEntryIndex[0] [M-NAME]` で落ちた (2026-09-14)。
+ * 原因は **PII 判定を 2 か所で実装していたこと** —
+ * こちらの組み立て側は設問 id を除外していたのに、
+ * `store.ts` の書き込み扉が `assertNoPiiKeys()` を**除外なしで**もう一度呼んでいたため、
+ * `M-NAME` が `name` の部分一致で再び拒否されていた。
+ *
+ * → **ルールを 2 つ持たない。** 組み立て側 (`buildQuestionnairePayload` /
+ * `buildEntryPayload`) も書き込みの扉 (`store.guardPayload` / `updateFile`) も
+ * この関数を通す。`QUESTION_ID_KEYS` を store 側へ複製しない
+ * (複製すると片方だけ更新されて同じ事故が再発する)。
+ *
+ * **安全性は緩めていない**: 除外は実在する設問 id との**完全一致だけ**なので、
+ * `display_name` / `full_name` / `file_name` / `name` / email / birth / company は
+ * 今までどおり止まる。
+ */
+export function assertNormalizedPayloadSafe(payload: unknown, where: string): void {
+  assertNoPiiKeys(payload, where, QUESTION_ID_KEYS);
+}
+
 // ---------------------------------------------------------------------------
 // 健診 XLSX
 // ---------------------------------------------------------------------------
@@ -164,7 +187,8 @@ export function buildHealthCheckupPayload(sheet: HealthCheckupSheet): HealthChec
     rows,
     dropped_pii_columns: dropped,
   };
-  assertNoPiiKeys(payload, 'health_checkup');
+  // **判定は 1 本に寄せる** (ここも `assertNormalizedPayloadSafe` を通す)。
+  assertNormalizedPayloadSafe(payload, 'health_checkup');
   return payload;
 }
 
@@ -254,7 +278,7 @@ export function buildQuestionnairePayload(q: QuestionnaireNormalized): Questionn
    * **服薬ありと答えた人物の保存が丸ごと落ちる** (実測 2026-09-14)。
    * 除外は完全一致のみ = `display_name` のような本物の PII キーは今までどおり止まる。
    */
-  assertNoPiiKeys(payload, 'questionnaire', QUESTION_ID_KEYS);
+  assertNormalizedPayloadSafe(payload, 'questionnaire');
   return payload;
 }
 
@@ -291,7 +315,7 @@ export function buildEntryPayload(input: {
   if (input.healthCheckup) out.health_checkup = buildHealthCheckupPayload(input.healthCheckup);
   if (input.questionnaire) out.questionnaire = buildQuestionnairePayload(input.questionnaire);
   if (!out.health_checkup && !out.questionnaire) return null;
-  assertNoPiiKeys(out, 'entry', QUESTION_ID_KEYS);
+  assertNormalizedPayloadSafe(out, 'entry');
   return out;
 }
 
