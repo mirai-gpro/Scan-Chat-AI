@@ -458,13 +458,23 @@ ok('e2e: 人物ごとに別の key になる',
   eq('pdf: 短縮問診と判定', short.profile, 'ai_prevention_short_v1');
   eq('pdf: 対応する設問は写像', short.answers['S-STATUS'], '吸ったことはない');
   /*
-   * **未対応の設問があっても人物を失敗にしない** (不変条件)。
-   * ただし納品の可否は別条件も見る — v1.1 で `questionnaireIsUsable` に
-   * 「問診実施日が確定していること」が加わった (spec §6.4)。
-   * この fixture は日付を持たないので、**日付を足したうえで**不変条件を確かめる。
+   * **【最終指示書 §4 で反転した条件】**
+   *
+   * 以前は「未対応が 1 つあっても人物を失敗にしない」を不変条件にしていたが、
+   * それだと**一部だけ写像できた `LifestyleQuestionnaireData` が完成品として出る**
+   * (受け取った側は欠けに気づけない)。v1.1 の「未知値を勝手に切り捨てず Human Review」
+   * と正面から食い違うので、**要確認が 1 件でも残れば納品しない**へ変えた。
+   *
+   * 写像表に無い見出しは**設問ではない行**なので要確認に積まない (従来どおり)。
+   * 積むのは「写像表に在る見出しなのに値が読めなかった」ときだけ。
    */
   const shortDated = { ...short, completedAt: { status: 'resolved', date: '2026-03-29' } };
-  ok('pdf: 未対応があっても止まらない', questionnaire.questionnaireIsUsable(shortDated));
+  eq('pdf: 写像表に無い行は要確認に積まない', shortDated.reviewQuestionIds.length, 0);
+  ok('pdf: 要確認が無ければ納品できる', questionnaire.questionnaireIsUsable(shortDated));
+  eq('pdf: 要確認が 1 件でもあれば納品しない',
+    questionnaire.questionnaireIsUsable({
+      ...shortDated, reviewQuestionIds: ['S-COUNT'], needsReviewCount: 1,
+    }), false);
   ok('pdf: 未対応は unmapped に出る', short.unmapped.length >= 0);
   /*
    * **日付が確定しなければ納品しない** (v1.1 で追加)。

@@ -53,7 +53,9 @@ ok('pipeline は空の入れ物だけ作る', pipelineSrc.includes('manualEntryP
 const serviceSrc = strip(read('src/lib/ad-hoc-diagnosis/service.ts'));
 ok('service も自動 parser を呼ばない',
   !serviceSrc.includes('normalizeQuestionnairePdf(') && !serviceSrc.includes('normalizePdfText('));
-ok('service は手入力を先に見る', serviceSrc.includes('resolveManualQuestionnaire('));
+// 手入力は **確認済みのものだけ**を読み出し、決定論写像と合成する (最終指示書 §5.2)。
+ok('service が確認済みの手入力を読み出す', serviceSrc.includes('resolveManualRecord('));
+ok('service が合成と分岐適用を通す', serviceSrc.includes('finalizeQuestionnaire('));
 // **LLM に選択状態を推測させない** (§18)。問診まわりに Gemini 呼び出しが無いこと。
 const qSrc = strip(read('src/lib/ad-hoc-diagnosis/questionnaire.ts'));
 const mSrc = strip(read('src/lib/ad-hoc-diagnosis/questionnaire-manual.ts'));
@@ -103,7 +105,7 @@ ok('入れ物に needs_manual_entry が付く', ph.notes.includes('needs_manual_
 const catalog = mq.questionCatalog();
 ok('カタログが既存 QUESTIONS を全部返す', catalog.length > 20, `${catalog.length} 件`);
 ok('カタログに id / question / kind がある',
-  catalog.every((c) => c.id && c.question && ['text', 'number', 'single', 'multiple'].includes(c.kind)));
+  catalog.every((c) => c.id && c.question && ['text', 'number', 'single', 'multiple', 'matrix'].includes(c.kind)));
 
 const single = catalog.find((c) => c.kind === 'single' && c.options.length > 1);
 const multiple = catalog.find((c) => c.kind === 'multiple' && c.options.length > 1);
@@ -166,7 +168,22 @@ eq('性別は読める', built.normalized.subject.sex, 'male');
 eq('年齢は読める', built.normalized.subject.age, 54);
 eq('日付は読める', built.normalized.completedAt.date, '2026-03-29');
 ok('手入力の目印が付く', built.normalized.notes.includes('manual_entry'));
-eq('納品対象になる', q.questionnaireIsUsable(built.normalized), true);
+/*
+ * **弾かれた入力が 1 件でもあれば納品しない** (最終指示書 §4)。
+ * 以前は「1 件でも通っていれば納品」だったが、それだと
+ * **一部だけ写像できた LifestyleQuestionnaireData が完成品として出る**。
+ */
+eq('弾かれた入力が残る間は納品しない', q.questionnaireIsUsable(built.normalized), false);
+deepEq('何を直せばよいかが id で分かる', built.normalized.reviewQuestionIds, ['NO-SUCH-Q']);
+
+const clean = mq.manualQuestionnaire({
+  entries: [
+    { questionId: single.id, value: single.options[0] },
+    { questionId: multiple.id, value: [multiple.options[0]] },
+  ],
+  completedAt: '2026-03-29', sex: '男性', age: 54,
+});
+eq('全部通れば納品対象になる', q.questionnaireIsUsable(clean.normalized), true);
 
 // **同じ設問を 2 回入れたら後勝ちにしない** (どちらが正か決められない)。
 const dup = mq.manualQuestionnaire({

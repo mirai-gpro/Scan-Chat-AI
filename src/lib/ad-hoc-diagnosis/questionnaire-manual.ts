@@ -82,13 +82,13 @@ export function validateManualEntry(entry: ManualEntry):
   if (q.answer_kind === 'slider') {
     const n = typeof entry.value === 'number' ? entry.value : Number(entry.value);
     if (!Number.isFinite(n)) {
-      return { status: 'rejected', item: { header: id, reason: 'unknown_value', detail: '数値でない' } };
+      return { status: 'rejected', item: { header: id, questionId: id, reason: 'unknown_value', detail: '数値でない' } };
     }
     const lo = q.slider_min ?? 0;
     const hi = q.slider_max ?? 100;
     if (n < lo || n > hi) {
       // **範囲外は丸めない。** 丸めると人が入力を間違えたことが見えなくなる。
-      return { status: 'rejected', item: { header: id, reason: 'unknown_value', detail: `範囲外 (${lo}〜${hi})` } };
+      return { status: 'rejected', item: { header: id, questionId: id, reason: 'unknown_value', detail: `範囲外 (${lo}〜${hi})` } };
     }
     return { status: 'ok', questionId: id, value: n };
   }
@@ -98,12 +98,43 @@ export function validateManualEntry(entry: ManualEntry):
     const s = typeof entry.value === 'string' ? entry.value.trim() : '';
     if (s === '') {
       // **空は「未回答」。** 入れずに落とす (空文字を答えとして保存しない)。
-      return { status: 'rejected', item: { header: id, reason: 'unknown_value', detail: '空欄' } };
+      return { status: 'rejected', item: { header: id, questionId: id, reason: 'unknown_value', detail: '空欄' } };
     }
     if (q.numeric && !Number.isFinite(Number(s))) {
-      return { status: 'rejected', item: { header: id, reason: 'unknown_value', detail: '数値で入力する設問' } };
+      return { status: 'rejected', item: { header: id, questionId: id, reason: 'unknown_value', detail: '数値で入力する設問' } };
     }
     return { status: 'ok', questionId: id, value: s };
+  }
+
+  // ── matrix (行 × 列) ──
+  if (q.answer_kind === 'matrix') {
+    /*
+     * **行→列ラベルの対応表として受ける。** XLSX 側は 1 行 = 1 列 (食品 9 列) なので、
+     * 要確認になった行だけを人が入れ直せるようにする。
+     * **行・列とも既存 `QUESTIONS` のラベルと完全一致でなければ拒否** (寄せない)。
+     */
+    const rows = (q.matrix_rows ?? []) as readonly string[];
+    const cols = matrixColLabels(q.id);
+    const v = entry.value;
+    if (!v || typeof v !== 'object' || Array.isArray(v)) {
+      return { status: 'rejected', item: { header: id, questionId: id, reason: 'unknown_value', detail: '行→頻度の対応で入力する設問' } };
+    }
+    const out: Record<string, string> = {};
+    for (const [rawRow, rawCol] of Object.entries(v as Record<string, unknown>)) {
+      const row = rows.find((r) => normalizeCell(r) === normalizeCell(rawRow));
+      const col = cols.find((c) => normalizeCell(c) === normalizeCell(rawCol));
+      if (!row || !col) {
+        return {
+          status: 'rejected',
+          item: { header: id, questionId: id, reason: 'unknown_value', detail: `行または頻度が選択肢に無い: ${String(rawRow).slice(0, 20)}` },
+        };
+      }
+      out[row] = col;
+    }
+    if (Object.keys(out).length === 0) {
+      return { status: 'rejected', item: { header: id, questionId: id, reason: 'unknown_value', detail: '空欄' } };
+    }
+    return { status: 'ok', questionId: id, value: out as unknown as AnswerValue };
   }
 
   // ── 選択式 ──
@@ -128,26 +159,26 @@ export function validateManualEntry(entry: ManualEntry):
       if (l === null) {
         return {
           status: 'rejected',
-          item: { header: id, reason: 'unknown_value', detail: `選択肢に無い値: ${String(v).slice(0, 40)}` },
+          item: { header: id, questionId: id, reason: 'unknown_value', detail: `選択肢に無い値: ${String(v).slice(0, 40)}` },
         };
       }
       if (!picked.includes(l)) picked.push(l);
     }
     if (picked.length === 0) {
-      return { status: 'rejected', item: { header: id, reason: 'unknown_value', detail: '空欄' } };
+      return { status: 'rejected', item: { header: id, questionId: id, reason: 'unknown_value', detail: '空欄' } };
     }
     return { status: 'ok', questionId: id, value: picked };
   }
 
   if (Array.isArray(entry.value)) {
     // 単一選択の設問に配列が来た = 入力側の取り違え。**先頭を採らない。**
-    return { status: 'rejected', item: { header: id, reason: 'unknown_value', detail: '単一選択の設問に複数の値' } };
+    return { status: 'rejected', item: { header: id, questionId: id, reason: 'unknown_value', detail: '単一選択の設問に複数の値' } };
   }
   const l = pick(entry.value);
   if (l === null) {
     return {
       status: 'rejected',
-      item: { header: id, reason: 'unknown_value', detail: `選択肢に無い値: ${String(entry.value).slice(0, 40)}` },
+      item: { header: id, questionId: id, reason: 'unknown_value', detail: `選択肢に無い値: ${String(entry.value).slice(0, 40)}` },
     };
   }
   return { status: 'ok', questionId: id, value: l };
@@ -169,7 +200,7 @@ export function manualQuestionnaire(input: ManualQuestionnaireInput): ManualQues
     if (r.status === 'rejected') { rejected.push(r.item); continue; }
     // **同じ設問を 2 回入れたら後勝ちにしない** — どちらが正か決められないので拒否する。
     if (answers[r.questionId] !== undefined) {
-      rejected.push({ header: r.questionId, reason: 'unknown_value', detail: '同じ設問が 2 回入力されている' });
+      rejected.push({ header: r.questionId, questionId: r.questionId, reason: 'unknown_value', detail: '同じ設問が 2 回入力されている' });
       continue;
     }
     answers[r.questionId] = r.value;
@@ -207,6 +238,13 @@ export function manualQuestionnaire(input: ManualQuestionnaireInput): ManualQues
       // 手入力に「仕様として捨てる列」は無い (人が設問を選んで入れるため)。
       ignoredBySpec: 0,
       needsReviewCount: rejected.length,
+      /*
+       * **弾いた入力の設問 id**。最終指示書 §4 により 1 件でも残れば納品しない。
+       * 「保存はしたが値として通っていない」ものを、件数だけでなく id で示す。
+       */
+      reviewQuestionIds: Array.from(new Set(rejected.map((r) => r.questionId ?? r.header))),
+      subjectReview: [],
+      ignoredByBranch: 0,
       notes,
     },
     rejected,
@@ -253,8 +291,10 @@ export interface CatalogQuestion {
   id: string;
   section: string;
   question: string;
-  kind: 'text' | 'number' | 'single' | 'multiple';
+  kind: 'text' | 'number' | 'single' | 'multiple' | 'matrix';
   options: string[];
+  /** matrix のときだけ: 行 (食品名) の一覧。 */
+  rows?: string[];
   /** slider の範囲 (kind='number' のとき)。 */
   min?: number;
   max?: number;
@@ -274,7 +314,8 @@ export function questionCatalog(): CatalogQuestion[] {
     const kind: CatalogQuestion['kind'] =
       q.answer_kind === 'slider' ? 'number'
         : q.answer_kind === 'text' ? 'text'
-          : isMulti(q) ? 'multiple' : 'single';
+          : q.answer_kind === 'matrix' ? 'matrix'
+            : isMulti(q) ? 'multiple' : 'single';
     const out: CatalogQuestion = {
       id: q.id,
       section: q.section_title,
@@ -286,6 +327,7 @@ export function questionCatalog(): CatalogQuestion[] {
       out.min = q.slider_min ?? 0;
       out.max = q.slider_max ?? 100;
     }
+    if (q.answer_kind === 'matrix') out.rows = [...(q.matrix_rows ?? [])];
     return out;
   });
 }

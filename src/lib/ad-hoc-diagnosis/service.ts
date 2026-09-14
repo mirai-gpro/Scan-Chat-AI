@@ -28,6 +28,8 @@ import {
   isManualQuestionnaireRecord, manualQuestionnaire, manualRecordIsConfirmed,
   type ManualEntry, type ManualQuestionnaireRecord,
 } from './questionnaire-manual';
+// **Phase B — production の分岐と手入力の合成。** 納品前に必ずここを通す (最終指示書 §3.2/§5.2)。
+import { finalizeQuestionnaire } from './questionnaire-branch';
 import type { QuestionnaireNormalized } from './questionnaire';
 
 /**
@@ -617,6 +619,26 @@ export async function batchStatus(batchId: string) {
     outputsBySubject.set(o.subject_id, list);
   }
 
+  /*
+   * **問診の「あと何を人が入れれば納品できるか」を画面へ配る** (最終指示書 §5.2)。
+   *
+   * `error_detail` の文字列を画面でパースさせない — 表示のための文字列と
+   * 機械が読む値を兼ねると、文言を直した瞬間に画面が黙って壊れる。
+   * **設問 id だけ**を返す (未知の回答値は返さない・§5.1)。
+   */
+  const reviewByFile = new Map<string, { review_question_ids: string[]; subject_review: string[]; ignored_by_branch: number; usable: boolean }>();
+  for (const f of files) {
+    if (f.classified_format_id !== 'LifestyleQuestionnaireData') continue;
+    const q = await resolveQuestionnaireForDelivery(f);
+    if (!q) continue;
+    reviewByFile.set(f.id, {
+      review_question_ids: [...(q.reviewQuestionIds ?? [])],
+      subject_review: [...(q.subjectReview ?? [])],
+      ignored_by_branch: q.ignoredByBranch ?? 0,
+      usable: questionnaireIsUsable(q),
+    });
+  }
+
   return {
     ok: true as const,
     batch: {
@@ -672,7 +694,11 @@ export async function batchStatus(batchId: string) {
         sex: s.sex,
         age: s.age,
         status: s.status,
-        files: own.map(publicFile),
+        files: own.map((f) => {
+          const pub = publicFile(f) as Record<string, unknown>;
+          const rv = reviewByFile.get(f.id);
+          return rv ? { ...pub, questionnaire_review: rv } : pub;
+        }),
         outputs: (outputsBySubject.get(s.id) ?? []).map((o) => ({
           format_id: o.format_id,
           output_status: o.output_status,
@@ -938,16 +964,33 @@ function restoreHealthPage(parsed: unknown): HealthPageParsed | null {
  * 保存先は既存の `ad_hoc_diagnosis_pages` (page_no=1)。**新しいテーブルを作らない**
  * (§2.4「新 migration は原則不要。既存で成立するか先に検証する」)。
  */
-async function resolveManualQuestionnaire(fileId: string): Promise<QuestionnaireNormalized | null> {
+async function resolveManualRecord(fileId: string): Promise<ManualQuestionnaireRecord | null> {
   const pages = await store.listPages(fileId);
   const row = pages.find((p) => p.page_no === MANUAL_QUESTIONNAIRE_PAGE_NO);
   if (!row || !isManualQuestionnaireRecord(row.parsed)) return null;
   const rec = row.parsed;
   // **入力しただけでは使わない。** 別の目で見るところまでが仕様。
   if (!manualRecordIsConfirmed(rec)) return null;
-  return manualQuestionnaire({
-    entries: rec.entries, completedAt: rec.completedAt, sex: rec.sex, age: rec.age,
-  }).normalized;
+  return rec;
+}
+
+/**
+ * 納品に使う問診を作る。**材料の合成と分岐の適用はここ 1 か所だけ** (§3.2/§5.2)。
+ *
+ *   XLSX の決定論写像 (Phase A)
+ *     + 確認済みの手入力 (XLSX の要確認を解決 / PDF は手入力だけ)
+ *     → production `resolvePath()` で分岐を適用
+ *     → final answers
+ *
+ * plan と deliver の両方がこれを呼ぶ (片方だけ分岐を当てると画面と納品物が食い違う)。
+ */
+async function resolveQuestionnaireForDelivery(
+  file: store.FileRow | undefined,
+): Promise<QuestionnaireNormalized | null> {
+  if (!file) return null;
+  const base = restoreQuestionnaire(file.normalized_payload);
+  const rec = await resolveManualRecord(file.id);
+  return finalizeQuestionnaire(base, rec);
 }
 
 /** 手入力を待っている状態か (入力が無い / 確認がまだ)。画面に理由を出すため。 */
@@ -965,7 +1008,7 @@ async function manualEntryPending(file: store.FileRow | undefined): Promise<bool
  * 保存済みの手入力を読み出す (画面の再表示用)。
  *
  * **確認済みかどうかに関わらず返す** — 画面は「入力済みだが未確認」を出す必要がある。
- * 納品に使ってよいかを決めるのは `resolveManualQuestionnaire` の側。
+ * 納品に使ってよいかを決めるのは `resolveManualRecord` / `finalizeQuestionnaire` の側。
  */
 export async function readManualQuestionnaire(batchId: string, fileId: string) {
   const batch = await store.getBatch(batchId);
@@ -1314,15 +1357,17 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
     // ── 問診 (spec §7.3 / §7.4) ──
     /*
      * 材料の出どころは 2 つ。**順番が意味を持つ。**
-     *   ① 管理者の手入力 (PDF 用・二重確認済みのものだけ) … `resolveManualQuestionnaire`
-     *   ② 分類時に読んだ XLSX の `normalized_payload`
+     *   ① 分類時に読んだ XLSX の `normalized_payload` (Phase A の決定論写像)
+     *   ② 管理者の手入力 (**二重確認済みのものだけ**)。PDF は②だけ / XLSX は①を②が上書き
+     *
+     * 合成したあと **production の分岐 (`resolvePath`) を適用**して active な answers にする。
+     * 全部 `resolveQuestionnaireForDelivery()` の中 (§3.2/§5.2)。
      *
      * **PDF を自動 parse した answers は無い** (v1.1 で本経路から外した・§7.4)。
      * PDF の人物は ① が入るまで `needs_manual_entry` のまま = 納品対象にならない。
      */
     const qFile = own.find((f) => f.classified_format_id === 'LifestyleQuestionnaireData');
-    const qManual = qFile ? await resolveManualQuestionnaire(qFile.id) : null;
-    const qRestored = qManual ?? (qFile ? restoreQuestionnaire(qFile.normalized_payload) : null);
+    const qRestored = await resolveQuestionnaireForDelivery(qFile);
     if (qFile && !qRestored) {
       await store.upsertOutput({
         subject_id: s.id, format_id: 'LifestyleQuestionnaireData',
@@ -1347,20 +1392,40 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
           output_status: 'generated',
           // **未対応項目があっても人物を失敗にしない。** warn として残す。
           // **要確認だけを warn にする。** 仕様として捨てた列 (53〜62) は正常。
-          validation_status: q.needsReviewCount > 0 ? 'warn' : 'ok',
+          /*
+           * **ここへ来た時点で要確認は 0 件** (§4 のゲートを通っている)。
+           * warn になり得るのは「分岐で落とした設問がある」ときだけ = 正常。
+           */
+          validation_status: 'ok',
           item_count: built.answerCount, test_date: built.testDate,
           generated_at: new Date().toISOString(),
           // **3 つを分けて残す** (契約)。件数だけ = 回答値は載せない (§16)。
-          error_detail: q.needsReviewCount
-            ? `needs_review:${q.needsReviewCount} ignored_by_spec:${q.ignoredBySpec}`
+          error_detail: q.ignoredBySpec || q.ignoredByBranch
+            ? `ignored_by_spec:${q.ignoredBySpec} ignored_by_branch:${q.ignoredByBranch}`
             : null,
         });
         formats.push('LifestyleQuestionnaireData');
       } else {
+        /*
+         * **なぜ納品しないのかを区別して残す** — 対処が違う。
+         *   needs_review … 管理者が原本を見て手入力で確定する (§5.2)
+         *   date         … 完了時刻が読めない (today で埋めない)
+         *   schema       … 62 列の契約と食い違う
+         *   no_answers   … 写像が 0 件
+         */
+        const why = (q.reviewQuestionIds?.length ?? 0) > 0
+          ? `needs_review:${q.reviewQuestionIds.length} ids:${q.reviewQuestionIds.slice(0, 12).join(',')}`
+          : (q.subjectReview?.length ?? 0) > 0
+            ? `subject_review:${q.subjectReview.join(',')}`
+            : q.schema && !q.schema.ok
+              ? `schema_mismatch:${q.schema.mismatches.length}`
+              : q.completedAt.status !== 'resolved'
+                ? 'completed_at_unresolved'
+                : 'no_answers_mapped';
         await store.upsertOutput({
           subject_id: s.id, format_id: 'LifestyleQuestionnaireData',
           output_status: 'failed', validation_status: 'error',
-          error_detail: 'no_answers_mapped',
+          error_detail: why,
         });
       }
       await store.updateFile(qFile.id, {
@@ -1653,7 +1718,8 @@ export async function assembleBatch(input: {
 
     // 問診
     const qFile = own.find((f) => f.classified_format_id === 'LifestyleQuestionnaireData');
-    const q = qFile ? restoreQuestionnaire(qFile.normalized_payload) : null;
+    // **plan と同じ合成・同じ分岐を通す** (ここだけ素の payload を使うと納品物が画面と食い違う)。
+    const q = await resolveQuestionnaireForDelivery(qFile);
     if (q && questionnaireIsUsable(q)) {
       const b = buildQuestionnaireJson({
         clientId: s.client_id, diagnosticId: s.diagnostic_id ?? s.client_id, normalized: q,

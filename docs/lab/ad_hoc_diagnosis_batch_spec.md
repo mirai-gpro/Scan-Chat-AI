@@ -493,6 +493,91 @@ PDF本文のテキスト抽出では、選択・未選択の両方の選択肢�
 
 2名だけの臨時入力であるため、誤変換リスクを負って自動化するよりHuman Reviewを優先する。
 
+## 7.5 production分岐の適用と納品ゲート（最終指示書 §3〜§5・2026-09-14）
+
+§7.4 の決定論写像（Phase A）だけでは**production の問診票として成立しない**。
+`QUESTIONS[].when` の分岐が最終 answers へ適用されておらず、
+`buildElithInterviewJson()` は渡された answers をそのまま出すためである。
+
+### Phase A / Phase B の2段
+
+```text
+raw XLSX
+  ↓  Phase A  external-form-contract.ts の決定論写像（§7.4）
+tentative answers
+  ↓  Phase B  production resolvePath() / QUESTIONS[].when を**共用**
+active answers
+  ↓
+buildElithInterviewJson()          ← 既存関数だけ
+LifestyleQuestionnaireData
+```
+
+**独自のwhenロジックをコピーしない。** `interview-script.ts` の `resolvePath()` を
+そのまま呼ぶ。同じ条件式を2か所に置くと問診票を直したとき必ず片方が腐る。
+
+### inactive question の扱い
+
+productionで質問されない設問は `LifestyleQuestionnaireData` に入れない。
+件数は `ignored_by_branch` として監査用に持つ（DB migrationは不要。
+既存 `normalized_payload jsonb` の中で足りる）。
+
+ただし**黙って医療情報を捨てない**。
+
+| inactive な設問の値 | 扱い |
+|---|---|
+| `なし` / `摂取していない` / 空欄 / `0` | 通常の branch ignore |
+| `E-TIME` / `E-TYPE`（運動の時間・種類） | 値の中身に関わらず branch ignore |
+| それ以外の実質的な値（実薬名・喫煙本数・飲酒量・治療状況 等） | **矛盾として `needs_review`** |
+
+例:
+- `E-FREQ = ほとんどしない` → `E-TIME` / `E-TYPE` は納品 answers へ入れない（`ignored_by_branch`）
+- `M-HAS = ない` + `M-NAME = なし` → branch ignore
+- `M-HAS = ない` + 実薬名 → `needs_review`（薬情報を黙って捨てない）
+- `S-STATUS = 吸ったことはない` + `0`/空 → branch ignore
+- 非喫煙なのに正数の喫煙本数 → `needs_review`
+
+### 納品ゲート（最重要）
+
+`questionnaireIsUsable()` が true になるのは次の**すべて**を満たすときだけ。
+
+```text
+schema OK
+completedAt resolved
+mapped answers > 0
+未解決の active な要確認 = 0
+```
+
+**一部だけ写像できた `LifestyleQuestionnaireData` を完成品として出さない。**
+要確認が1件でも残る人物は納品しない。
+
+### Human Review による解決
+
+PDF用に作った `questionnaire-manual.ts` / `questionnaire-answers` API /
+`QUESTIONS` による厳密validation / confirmation を**そのまま再利用する**。
+新しい自由形式parserを作らない。
+
+```text
+deterministic answers + confirmed manual overrides → production分岐 → final answers
+```
+
+- 保存してよいのは `review_question_ids: string[]` と `ignored_by_branch_count: number` の
+  **question_idと件数だけ**。未知の生回答値そのものは永続化しない。
+- 原本のraw回答値を診断DBへ保存しない。管理者は既存
+  `GET /api/admin/ad-hoc-diagnosis/file?batchId=...&fileId=...` で原本を開いて確認する
+  （新しいファイル保存機構は作らない）。
+- wellfort-site の画面には 要確認 question_id / production設問文 / production選択肢 /
+  「原本を開く」/ 回答入力 / 確認 を出す。**PDFと同じ confirmation 機構**。
+- 未確認の手入力は納品に使わない。入力を差し替えたら確認は外れる。
+
+### 既知の落とし穴（実測 2026-09-14）
+
+`assertNoPiiKeys()` の deny-list は `name` を部分一致で見るため、
+**設問id `M-NAME` に当たって「服薬あり」と答えた人物の保存が丸ごと throw していた。**
+→ 除外は**実在する設問idとの完全一致のみ**。`display_name` のような本物のPIIキーは
+今までどおり止める（部分一致での除外にしてはならない）。
+
+---
+
 ### Golden / fixture の取り扱い
 
 実在役員の氏名・問診回答・健康情報をGitリポジトリへfixtureとしてcommitしてはならない。

@@ -43,7 +43,15 @@ export interface UnmappedItem {
   header: string;
   reason: 'unknown_column' | 'unknown_value';
   detail: string;
+  /**
+   * production の設問 id。**手入力で解決できるものだけ埋まる。**
+   * 列の schema 違い・日付・性別のように設問へ落ちないものは undefined。
+   */
+  questionId?: string;
 }
+
+/** 設問へ落ちない要確認 (被験者属性・実施日)。手入力の sex/age/completedAt で解消する。 */
+export type SubjectReviewKey = 'sex' | 'birth_date' | 'completed_at';
 
 export interface QuestionnaireNormalized {
   profile: QuestionnaireProfile;
@@ -71,6 +79,20 @@ export interface QuestionnaireNormalized {
    * 復元した問診では `unmapped` は空でこの数だけが残る。
    */
   needsReviewCount: number;
+  /**
+   * **要確認の設問 id** (最終指示書 §5.1)。
+   *
+   * 件数だけでは「管理者が何を入力すれば解決するのか」が分からないので、
+   * **question_id だけ**を持つ。**未知の生回答値そのものは持たない・保存しない** (§5.1)。
+   */
+  reviewQuestionIds: string[];
+  /** 設問へ落ちない要確認 (性別・生年月日・完了時刻)。 */
+  subjectReview: SubjectReviewKey[];
+  /**
+   * production の分岐 (`QUESTIONS[].when`) で落とした設問の数 (§3.2 `ignored_by_branch`)。
+   * **要確認ではない** — production なら質問されない設問なので正常に落ちたもの。
+   */
+  ignoredByBranch: number;
   /** 62 列 schema の検査結果 (外部フォームのときだけ)。 */
   schema?: SchemaCheck;
   notes: string[];
@@ -106,6 +128,9 @@ function emptyNormalized(profile: QuestionnaireProfile, notes: string[]): Questi
     mappedCount: 0,
     ignoredBySpec: 0,
     needsReviewCount: 0,
+    reviewQuestionIds: [],
+    subjectReview: [],
+    ignoredByBranch: 0,
     notes,
   };
 }
@@ -198,6 +223,7 @@ export function normalizeExternalFormRow(
         if (sex) out.subject.sex = sex;
         else if (normalizeForm(raw) !== '') {
           out.unmapped.push({ header: '生物学的性別', reason: 'unknown_value', detail: `未知の性別値` });
+          out.subjectReview.push('sex');
         }
         break;
       }
@@ -215,7 +241,14 @@ export function normalizeExternalFormRow(
             out.mappedCount++;
           }
         } else if (r.status === 'needs_review') {
-          out.unmapped.push({ header: spec.questionId!, reason: 'unknown_value', detail: r.detail });
+          // **設問 id を必ず添える。** 管理者はこの id で手入力して解決する (§5.2)。
+          out.unmapped.push({
+            header: spec.questionId!, reason: 'unknown_value', detail: r.detail,
+            questionId: spec.questionId!,
+          });
+          if (!out.reviewQuestionIds.includes(spec.questionId!)) {
+            out.reviewQuestionIds.push(spec.questionId!);
+          }
         }
         // skipped (空欄・条件分岐で対象外) は何もしない = review にしない。
         break;
@@ -248,6 +281,7 @@ export function normalizeExternalFormRow(
     out.subject.age = ageFrom(dob, new Date(`${out.completedAt.date}T00:00:00Z`));
     if (dob && out.subject.age === null) {
       out.unmapped.push({ header: '生年月日', reason: 'unknown_value', detail: '生年月日を読めない' });
+      out.subjectReview.push('birth_date');
     }
   } else {
     out.subject.age = null;
@@ -257,6 +291,7 @@ export function normalizeExternalFormRow(
       reason: 'unknown_value',
       detail: '問診実施日が確定しないため年齢を出していない (today で埋めない)',
     });
+    out.subjectReview.push('completed_at');
   }
 
   if (out.mappedCount === 0) out.notes.push('no_answers_mapped');
@@ -411,8 +446,17 @@ export function manualEntryPlaceholder(profile: QuestionnaireProfile): Questionn
 /**
  * この問診を納品してよいか。
  *
- * - **1 項目でも写像できていれば納品対象にする** (未対応が 1 つあるだけで人物を落とさない)。
- * - **0 件なら `needs_review`** (空の LifestyleQuestionnaireData を作らない)。
+ * **【最終指示書 §4】`needs_review` が 1 件でも残れば納品しない。**
+ * 以前は「1 項目でも写像できていれば納品対象」にしていたが、それだと
+ * **一部だけ写像できた `LifestyleQuestionnaireData` が完成品として出てしまう**
+ * (受け取った側は欠けに気づけない)。v1.1 の「未知値を勝手に切り捨てず Human Review」
+ * と正面から食い違うので、**4 条件すべてを満たしたときだけ true** にする。
+ *
+ *   schema OK / completedAt resolved / mapped answers > 0 / 未解決の要確認 = 0
+ *
+ * 要確認は `finalizeQuestionnaire()` が
+ * **production の分岐を適用したあとの active な設問だけ**に絞ってある
+ * (production が質問しない設問の未知値で人物を止めない)。
  */
 export function questionnaireIsUsable(n: QuestionnaireNormalized): boolean {
   /*
@@ -432,7 +476,15 @@ export function questionnaireIsUsable(n: QuestionnaireNormalized): boolean {
    */
   if (n.schema && !n.schema.ok) return false;
   if (n.completedAt.status !== 'resolved') return false;
-  return n.mappedCount > 0;
+  if (n.mappedCount <= 0) return false;
+  /*
+   * **ここが §4 の最重要修正。** 件数で見る (`needsReviewCount`) のは、
+   * DB から復元した問診では `unmapped` の中身を持たないため
+   * (回答値は永続化しない)。id は `reviewQuestionIds` に残っている。
+   */
+  const pending = (n.reviewQuestionIds?.length ?? 0) + (n.subjectReview?.length ?? 0);
+  if (pending > 0) return false;
+  return (n.needsReviewCount ?? 0) === 0;
 }
 
 /** 画面に出す要約。**回答の中身は出さない** (見出しと件数だけ)。 */
@@ -446,7 +498,11 @@ export function questionnaireSummary(n: QuestionnaireNormalized): string {
    */
   const parts = [`様式=${n.profile}`, `写像=${n.mappedCount}件`];
   if (n.ignoredBySpec) parts.push(`仕様対象外=${n.ignoredBySpec}件`);
-  if (n.needsReviewCount) parts.push(`要確認=${n.needsReviewCount}件`);
+  if (n.ignoredByBranch) parts.push(`分岐対象外=${n.ignoredByBranch}件`);
+  if (n.needsReviewCount) {
+    const ids = (n.reviewQuestionIds ?? []).slice(0, 8).join(',');
+    parts.push(`要確認=${n.needsReviewCount}件${ids ? ` (${ids})` : ''}`);
+  }
   if (n.schema && !n.schema.ok) parts.push(`**列が契約と違う (${n.schema.mismatches.length}件)**`);
   if (n.completedAt.status === 'resolved') parts.push(`完了=${n.completedAt.date}`);
   else parts.push('完了時刻=未確定');

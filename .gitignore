@@ -37,3 +37,6 @@ __pycache__/
 
 # 検証スクリプトが transpile 結果を置く一時ディレクトリ (node_modules 解決のためリポジトリ内に作る)
 .verify-adhoc-*/
+# verify スクリプトの作業ディレクトリ。正常終了時は自分で消すが、
+# **途中で落ちると残る** ので commit されないようにしておく。
+.verify-*/

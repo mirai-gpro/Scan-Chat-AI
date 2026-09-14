@@ -157,8 +157,17 @@ let PL = null;
     .replace(/HealthCheckupSheet \| null/g, 'any')
     .replace(/: CellValue/g, ': any')
     .replace(/isBlankCell\(/g, 'BLANK(');
+  /*
+   * **`QUESTIONS` は実物から起こす。** import を落とす作りなので、ここで足さないと
+   * `QUESTION_ID_KEYS` が未定義で落ちる。定数表を手で書き写すと問診票を直したときに
+   * 黙って食い違うので、`interview-script.ts` の `id:` を読んで作る。
+   */
+  const questionIds = [...read('src/scripts/chat/interview-script.ts').matchAll(/\bid: '([A-Z][A-Z-]*)'/g)]
+    .map((m) => m[1]);
+  eq('設問 id を実物から拾えている', questionIds.length > 20, true);
+  const stub = `const QUESTIONS = ${JSON.stringify(Object.fromEntries(questionIds.map((i) => [i, {}])))};`;
   PL = await transpileToModule(
-    `const BLANK = (v) => v === null || v === undefined || (typeof v === 'string' && v.trim() === '');\n${src}`,
+    `const BLANK = (v) => v === null || v === undefined || (typeof v === 'string' && v.trim() === '');\n${stub}\n${src}`,
     'verify-b21-payload.mjs',
   );
 
