@@ -6,7 +6,10 @@
 // (同じ処理を 2 つの口から呼べるようにするため。§22「API 同士を HTTP で呼ばない」)。
 
 import { getS3Config } from '../s3';
-import { checkWriteGate, preflightNoExistingObjects, putDeliveryFilesCreateOnly } from './write-guard';
+import {
+  checkWriteGate, checkSingleFileWriteGate, headDeliveryObject,
+  preflightNoExistingObjects, putDeliveryFilesCreateOnly,
+} from './write-guard';
 import { refreshConfig } from '../app-config';
 import {
   GENOPLAN_V1_REQUIRED_PAGES, isGenoplanV1RequiredPage, missingGenoplanV1Pages,
@@ -1642,6 +1645,159 @@ export async function healthAgeCheck(batchId: string) {
 // ⑦⑧ finalize / export : 納品セットを組む → dry-run か 実書き込み
 // ---------------------------------------------------------------------------
 
+/**
+ * **1 人ぶんの納品ファイルを組む。ここが納品 JSON の唯一の生成点。**
+ *
+ * `assembleBatch()` (通常の dry-run / 本番納品) と
+ * `exportSingleDeliveryFile()` (E2E 確認の 1 件書き出し) が**同じこれを呼ぶ**ので、
+ * **どちらの経路でも body はバイト単位で同じ**になる。
+ * E2E 用に別の builder を作らない (作ると「確認した JSON と納品した JSON が別物」になる)。
+ *
+ * **readiness はここで見ない。** 「組めたか」と「納品してよいか」は別の判断で、
+ * 後者は呼び出し側 (`evaluateReadiness` → write-guard) が持つ。
+ */
+interface SubjectBuild {
+  built: DeliveryFile[];
+  formats: string[];
+  hcTestDate: string | null;
+  /**
+   * 健診 JSON の来歴 (監査用・納品 JSON には入れない)。
+   * **「健診 PDF のページを本番 finalize core へ通した」以外の作り方をしていない**ことを
+   * 画面と報告に出すために持つ (§5 / v1.1 §6.5)。
+   */
+  hcSource: {
+    fileName: string | null;
+    pagesDone: number;
+    pagesExpected: number;
+    /** 本番 `scanImageToParsed()` → `finalizeHealthCheckup()` を通ったか。 */
+    finalizeCore: boolean;
+  } | null;
+}
+
+async function buildSubjectDelivery(
+  s: store.SubjectRow,
+  own: store.FileRow[],
+  cfg: { prefix: string },
+): Promise<SubjectBuild> {
+  const formats: string[] = [];
+  const built: DeliveryFile[] = [];
+  let hcTestDate: string | null = null;
+  let hcSource: SubjectBuild['hcSource'] = null;
+  let markers: Record<string, number> = {};
+
+  /*
+   * 健診 (spec §6.2 / §6.5)。**process 経路と同じ規則**で組む
+   * — 納品する JSON と画面で確認した JSON が別物になってはいけない。
+   * 材料は健診 PDF のページ解析結果。**XLSX からは作らない** (v1.1 で本経路から外した)。
+   */
+  const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
+  if (hcFile) {
+    const hcPages = await store.listPages(hcFile.id);
+    const doneHc = hcPages.filter((p) => p.status === 'done');
+    const expectedHc = hcFile.page_count ?? 0;
+    const seenHc = new Set(doneHc.map((p) => p.page_no));
+    const hcComplete = expectedHc > 0
+      && Array.from({ length: expectedHc }, (_, i) => i + 1).every((n) => seenHc.has(n));
+    const hcParts = doneHc
+      .slice()
+      .sort((a, b) => a.page_no - b.page_no)
+      .map((p) => restoreHealthPage(p.parsed))
+      .filter((x): x is HealthPageParsed => x !== null);
+    const hcDates = Array.from(new Set(hcParts.map((p) => p.testDate).filter((d): d is string => !!d)));
+    const hcDate = hcDates.length === 1 ? hcDates[0] : null;
+    // **欠けたページ・未確定の日付があれば組まない** (欠けたまま納品すると受け取った側は気づけない)。
+    if (hcParts.length > 0 && hcComplete && hcDate) {
+      const fin = finalizeHealthCheckup({
+        clientId: s.client_id,
+        testDate: hcDate,
+        parts: hcParts,
+        note: '臨時診断バッチ (健診PDF・既存 scanImageToParsed + 本番 finalize core)。',
+        includeRawMarkdown: false,
+      });
+      hcTestDate = hcDate;
+      markers = normalizeMarkers(
+        fin.measurements.map((m) => ({
+          name: typeof m.name === 'string' ? m.name : '',
+          value: m.value == null ? null : String(m.value),
+        })) as never,
+      ) as Record<string, number>;
+      built.push(toDeliveryFile(cfg.prefix, s.client_id, 'HealthCheckupData', hcDate, fin.json));
+      formats.push('HealthCheckupData');
+      /*
+       * **来歴を残す。** ここへ来ている時点で材料は健診 PDF のページ解析結果
+       * (`scanImageToParsed` の保存物) で、`finalizeHealthCheckup()` を通っている。
+       * **`health-checkup-xlsx.ts` の経路はここに無い** (v1.1 で本経路から外した)。
+       */
+      hcSource = {
+        fileName: hcFile.display_name ?? null,
+        pagesDone: doneHc.length,
+        pagesExpected: expectedHc,
+        finalizeCore: true,
+      };
+    }
+  }
+
+  // 問診
+  const qFile = own.find((f) => f.classified_format_id === 'LifestyleQuestionnaireData');
+  // **plan と同じ合成・同じ分岐を通す** (ここだけ素の payload を使うと納品物が画面と食い違う)。
+  const q = await resolveQuestionnaireForDelivery(qFile);
+  if (q && questionnaireIsUsable(q)) {
+    const b = buildQuestionnaireJson({
+      clientId: s.client_id, diagnosticId: s.diagnostic_id ?? s.client_id, normalized: q,
+    });
+    built.push(toDeliveryFile(cfg.prefix, s.client_id, 'LifestyleQuestionnaireData', b.testDate, b.json));
+    formats.push('LifestyleQuestionnaireData');
+  }
+
+  // 遺伝子
+  const gFile = own.find((f) => f.classified_format_id === 'GeneticTestResultData');
+  if (gFile) {
+    const pages = await store.listPages(gFile.id);
+    const parts: GeneticPagePart[] = pages
+      // **対象外ページを納品へ混ぜない** (spec §8.5)。process 経路と同じ規則。
+      .filter((p) => p.status === 'done' && isGenoplanV1RequiredPage(p.page_no))
+      .map((p) => {
+        const parsed = (p.parsed ?? {}) as { section?: string | null; items?: unknown[] };
+        return { page: p.page_no, section: parsed.section ?? null, items: parsed.items ?? [] };
+      });
+    /*
+     * **遺伝子の日付は遺伝子ファイル自身のもの** (§10)。
+     * ここは納品 key を組む場所なので、健診日を流用すると
+     * `date/{YYYY_MM_DD}/GeneticTestResultData_date_{YYYY_MM_DD}_...` が
+     * まるごと誤った日付で S3 に置かれる。**取れないなら納品しない。**
+     */
+    const gTestDate = gFile.test_date ?? null;
+    /*
+     * **必要な p10〜35 が 1 枚でも欠けていれば組まない** (process 経路と同じ規則)。
+     * 成功ページだけで JSON を作ると、**落ちたページの中身が無いまま
+     * 「遺伝子検査の結果」として納品される** (受け取った側は欠けに気づけない)。
+     * ここで組まなければ readiness が
+     * `optional_present_but_not_ready:GeneticTestResultData` で止まり、
+     * retry で全ページ成功してから納品される。
+     */
+    const gIncomplete = missingGenoplanV1Pages(
+      pages.filter((p) => p.status === 'done').map((p) => p.page_no),
+    ).length;
+    if (parts.length > 0 && gTestDate && gIncomplete === 0) {
+      const b = buildGeneticJson({ clientId: s.client_id, parts, testDate: gTestDate });
+      built.push(toDeliveryFile(cfg.prefix, s.client_id, 'GeneticTestResultData', gTestDate, b.json));
+      formats.push('GeneticTestResultData');
+    }
+  }
+
+  // ウェルネス年齢 (任意)
+  const wa = computeSubjectWellnessAge({
+    clientId: s.client_id, markers, age: s.age,
+    sex: s.sex === 'unknown' ? null : s.sex, testDate: hcTestDate,
+  });
+  if (wa.json && hcTestDate) {
+    built.push(toDeliveryFile(cfg.prefix, s.client_id, 'HealthAgeData', hcTestDate, wa.json));
+    formats.push('HealthAgeData');
+  }
+
+  return { built, formats, hcTestDate, hcSource };
+}
+
 export interface AssemblyResult {
   ok: true;
   dryRun: boolean;
@@ -1670,109 +1826,10 @@ export async function assembleBatch(input: {
 
   for (const s of subjects) {
     const own = files.filter((f) => f.subject_id === s.id);
-    const formats: string[] = [];
-    const built: DeliveryFile[] = [];
-    let hcTestDate: string | null = null;
-    let markers: Record<string, number> = {};
-
-    /*
-     * 健診 (spec §6.2 / §6.5)。**process 経路と同じ規則**で組む
-     * — 納品する JSON と画面で確認した JSON が別物になってはいけない。
-     * 材料は健診 PDF のページ解析結果。**XLSX からは作らない** (v1.1 で本経路から外した)。
-     */
-    const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
-    if (hcFile) {
-      const hcPages = await store.listPages(hcFile.id);
-      const doneHc = hcPages.filter((p) => p.status === 'done');
-      const expectedHc = hcFile.page_count ?? 0;
-      const seenHc = new Set(doneHc.map((p) => p.page_no));
-      const hcComplete = expectedHc > 0
-        && Array.from({ length: expectedHc }, (_, i) => i + 1).every((n) => seenHc.has(n));
-      const hcParts = doneHc
-        .slice()
-        .sort((a, b) => a.page_no - b.page_no)
-        .map((p) => restoreHealthPage(p.parsed))
-        .filter((x): x is HealthPageParsed => x !== null);
-      const hcDates = Array.from(new Set(hcParts.map((p) => p.testDate).filter((d): d is string => !!d)));
-      const hcDate = hcDates.length === 1 ? hcDates[0] : null;
-      // **欠けたページ・未確定の日付があれば組まない** (欠けたまま納品すると受け取った側は気づけない)。
-      if (hcParts.length > 0 && hcComplete && hcDate) {
-        const fin = finalizeHealthCheckup({
-          clientId: s.client_id,
-          testDate: hcDate,
-          parts: hcParts,
-          note: '臨時診断バッチ (健診PDF・既存 scanImageToParsed + 本番 finalize core)。',
-          includeRawMarkdown: false,
-        });
-        hcTestDate = hcDate;
-        markers = normalizeMarkers(
-          fin.measurements.map((m) => ({
-            name: typeof m.name === 'string' ? m.name : '',
-            value: m.value == null ? null : String(m.value),
-          })) as never,
-        ) as Record<string, number>;
-        built.push(toDeliveryFile(cfg.prefix, s.client_id, 'HealthCheckupData', hcDate, fin.json));
-        formats.push('HealthCheckupData');
-      }
-    }
-
-    // 問診
-    const qFile = own.find((f) => f.classified_format_id === 'LifestyleQuestionnaireData');
-    // **plan と同じ合成・同じ分岐を通す** (ここだけ素の payload を使うと納品物が画面と食い違う)。
-    const q = await resolveQuestionnaireForDelivery(qFile);
-    if (q && questionnaireIsUsable(q)) {
-      const b = buildQuestionnaireJson({
-        clientId: s.client_id, diagnosticId: s.diagnostic_id ?? s.client_id, normalized: q,
-      });
-      built.push(toDeliveryFile(cfg.prefix, s.client_id, 'LifestyleQuestionnaireData', b.testDate, b.json));
-      formats.push('LifestyleQuestionnaireData');
-    }
-
-    // 遺伝子
-    const gFile = own.find((f) => f.classified_format_id === 'GeneticTestResultData');
-    if (gFile) {
-      const pages = await store.listPages(gFile.id);
-      const parts: GeneticPagePart[] = pages
-        // **対象外ページを納品へ混ぜない** (spec §8.5)。process 経路と同じ規則。
-        .filter((p) => p.status === 'done' && isGenoplanV1RequiredPage(p.page_no))
-        .map((p) => {
-          const parsed = (p.parsed ?? {}) as { section?: string | null; items?: unknown[] };
-          return { page: p.page_no, section: parsed.section ?? null, items: parsed.items ?? [] };
-        });
-      /*
-       * **遺伝子の日付は遺伝子ファイル自身のもの** (§10)。
-       * ここは納品 key を組む場所なので、健診日を流用すると
-       * `date/{YYYY_MM_DD}/GeneticTestResultData_date_{YYYY_MM_DD}_...` が
-       * まるごと誤った日付で S3 に置かれる。**取れないなら納品しない。**
-       */
-      const gTestDate = gFile.test_date ?? null;
-      /*
-       * **必要な p10〜35 が 1 枚でも欠けていれば組まない** (process 経路と同じ規則)。
-       * 成功ページだけで JSON を作ると、**落ちたページの中身が無いまま
-       * 「遺伝子検査の結果」として納品される** (受け取った側は欠けに気づけない)。
-       * ここで組まなければ readiness が
-       * `optional_present_but_not_ready:GeneticTestResultData` で止まり、
-       * retry で全ページ成功してから納品される。
-       */
-      const gIncomplete = missingGenoplanV1Pages(
-        pages.filter((p) => p.status === 'done').map((p) => p.page_no),
-      ).length;
-      if (parts.length > 0 && gTestDate && gIncomplete === 0) {
-        const b = buildGeneticJson({ clientId: s.client_id, parts, testDate: gTestDate });
-        built.push(toDeliveryFile(cfg.prefix, s.client_id, 'GeneticTestResultData', gTestDate, b.json));
-        formats.push('GeneticTestResultData');
-      }
-    }
-
-    // ウェルネス年齢 (任意)
-    const wa = computeSubjectWellnessAge({
-      clientId: s.client_id, markers, age: s.age,
-      sex: s.sex === 'unknown' ? null : s.sex, testDate: hcTestDate,
-    });
-    if (wa.json && hcTestDate) {
-      built.push(toDeliveryFile(cfg.prefix, s.client_id, 'HealthAgeData', hcTestDate, wa.json));
-      formats.push('HealthAgeData');
-    }
+    // **納品ファイルの組み立ては 1 か所だけ** (E2E の 1 件書き出しも同じこれを呼ぶ)。
+    const b = await buildSubjectDelivery(s, own, cfg);
+    const built = b.built;
+    const formats = b.formats;
 
     const readiness = evaluateReadiness({
       producedFormats: formats,
@@ -1877,6 +1934,208 @@ export async function assembleBatch(input: {
   return {
     ok: true, dryRun: false, files: listed, skipped, totalBytes,
     written: written.map((w) => ({ key: w.key, uri: w.uri })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ⑧′ E2E 確認用: 1 ファイルだけを実際の Elith 納品先へ書く
+// ---------------------------------------------------------------------------
+
+export interface SingleWriteResult {
+  ok: true;
+  batchId: string;
+  subjectNo: number;
+  clientId: string;
+  formatId: string;
+  testDate: string;
+  bucket: string;
+  key: string;
+  bytes: number;
+  existingBefore: false;
+  writeResult: 'created';
+  existsAfter: boolean;
+  etag: string | null;
+  /** 健診 JSON の来歴 (§5 の確認項目)。 */
+  source: { healthSource: string | null; pagesDone: number; pagesExpected: number; finalizeCore: boolean; xlsxGenerated: false } | null;
+  /**
+   * **実際に PUT した本文そのもの。**
+   *
+   * 「S3 に 1 ファイル在ったこと」では確認にならない (§10) ので、原本 PDF と
+   * 突き合わせられるよう本文を返す。**ログには出さない**・**repo にも入れない**。
+   * 納品 JSON は設計上 PII を含まない (`client_id` は UUID) ので、
+   * 認可済みの管理画面へ返してよい。
+   */
+  body: string;
+}
+
+type SingleWriteFail = { ok: false; status: number; error: string; detail?: string };
+
+/**
+ * **坂田氏 1 名の E2E 確認のための「1 JSON だけ実書き込み」** (最終指示書 §1〜§12)。
+ *
+ * これは**正式なバッチ納品ではない**。したがって
+ *   - `batch.status` を `completed` にしない
+ *   - 他 format の output を `exported` にしない
+ *   - 通常 export の完了イベント (`exported`) を発火しない
+ * → 通常の一括納品から見ると、このバッチは**引き続き未納品**のまま (§8)。
+ *
+ * **通常納品の規則は 1 つも緩めていない** — `assembleBatch()` も
+ * `checkWriteGate()` の部分納品禁止も 1 文字も変えていない (§2)。
+ * 書く本文は `buildSubjectDelivery()` が作った `DeliveryFile.body` そのもので、
+ * **通常納品時に S3 へ書く JSON と完全に同じ** (§3)。
+ */
+export async function exportSingleDeliveryFile(input: {
+  batchId: string;
+  subjectId: string;
+  formatId: string;
+  /** 操作者が原資料から読み取った検査日。**食い違えば書かない** (today 混入の番人・§5)。 */
+  expectTestDate: string;
+  actor: Actor;
+}): Promise<SingleWriteResult | SingleWriteFail> {
+  const cfg = getS3Config();
+  if (!cfg) return { ok: false, status: 503, error: 's3_not_configured' };
+  const batch = await store.getBatch(input.batchId);
+  if (!batch) return { ok: false, status: 404, error: 'batch_not_found' };
+
+  const subjects = await store.listSubjects(input.batchId);
+  const s = subjects.find((x) => x.id === input.subjectId);
+  if (!s) return { ok: false, status: 404, error: 'subject_not_found' };
+
+  /*
+   * **人物が実在の役員へ明示的に紐付いていること** (§5)。
+   * ここを飛ばすと「誰のものか確定していない JSON」を本番の納品先へ置くことになる。
+   */
+  if (!s.executive_subject_id) {
+    return {
+      ok: false, status: 409, error: 'executive_not_linked',
+      detail: 'Executive Subject が紐付いていません。誰の結果か確定しないまま書き込みません。',
+    };
+  }
+
+  const files = await store.listFiles(input.batchId);
+  const own = files.filter((f) => f.subject_id === s.id);
+  // **通常納品と同じ組み立て。** E2E 用の builder は作らない (§3)。
+  const b = await buildSubjectDelivery(s, own, cfg);
+
+  /*
+   * **ちょうど 1 件でなければ書かない** (§4)。0 件は「まだ組めていない」、
+   * 2 件以上は「どれを書くか決められない」。どちらも PUT を始めない。
+   */
+  const hits = b.built.filter((f) => f.formatId === input.formatId);
+  if (hits.length !== 1) {
+    return {
+      ok: false, status: 409, error: 'not_exactly_one_file',
+      detail: `${input.formatId} の納品ファイルが ${hits.length} 件です (ちょうど 1 件のときだけ書き込みます)。`,
+    };
+  }
+  const file = hits[0];
+
+  /*
+   * **日付の番人** (§5「today fallback は禁止」)。
+   * 組み上がった `test_date` は健診 PDF から読んだ日付で、`dateSource==='today'` は
+   * 上流で捨ててある。ここではさらに**操作者が原資料で確認した日付との一致**を要求する。
+   * 一致しなければ書かない — 誤った日付フォルダへ置くと後から直せない。
+   */
+  if (file.testDate !== input.expectTestDate) {
+    return {
+      ok: false, status: 409, error: 'test_date_mismatch',
+      detail: `test_date が一致しません (生成=${file.testDate} / 指定=${input.expectTestDate})。`,
+    };
+  }
+  /*
+   * **本文そのものを検査する** (§10)。key の形は `validateDeliveryKey()` が見るが、
+   * それは**ファイル名の話**で、中身の `client_id` / `format_id` / `test_date` が
+   * 揃っていることの証明にはならない。置いたあとで気づいても消せないので先に見る。
+   */
+  let parsed: { format_id?: unknown; client_id?: unknown; test_date?: unknown };
+  try {
+    parsed = JSON.parse(file.body) as typeof parsed;
+  } catch {
+    return { ok: false, status: 500, error: 'body_not_json', detail: '納品 JSON を読めませんでした。' };
+  }
+  const mismatches: string[] = [];
+  if (parsed.format_id !== input.formatId) mismatches.push(`format_id=${String(parsed.format_id)}`);
+  if (parsed.client_id !== s.client_id) mismatches.push('client_id が人物の既存値と違う');
+  if (parsed.test_date !== input.expectTestDate) mismatches.push(`test_date=${String(parsed.test_date)}`);
+  if (mismatches.length > 0) {
+    return {
+      ok: false, status: 409, error: 'body_mismatch',
+      detail: `納品 JSON の中身が想定と違います (${mismatches.join(' / ')})。`,
+    };
+  }
+
+  // env 2 本 + 書き込み先の完全一致 + key の形。**安全側の検査は 1 つも外さない。**
+  const gate = checkSingleFileWriteGate(file);
+  if (!gate.ok) return { ok: false, status: gate.status, error: gate.error, detail: gate.detail };
+
+  /*
+   * **既に在れば止める** (§6)。上書きしない・消して書き直さない。
+   * 確認に失敗した場合も書かない (`preflightNoExistingObjects` が中止する)。
+   */
+  const pre = await preflightNoExistingObjects([file.key], gate.cfg);
+  if (!pre.ok) return { ok: false, status: pre.status, error: pre.error, detail: pre.detail };
+
+  try {
+    await putDeliveryFilesCreateOnly(
+      [{ key: file.key, body: file.body, bytes: file.bytes }],
+      gate.cfg,
+    );
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    /*
+     * **バッチの status を触らない。** これは正式な納品ではないので、
+     * 失敗しても `failed` にしない (通常の納品フローの状態を汚さない)。
+     */
+    return { ok: false, status: 502, error: 'single_write_failed', detail };
+  }
+
+  // **PUT したら必ず読み戻す** (§9)。書けたつもりで終わらせない。
+  const after = await headDeliveryObject(file.key, gate.cfg);
+
+  /*
+   * **監査だけは残す。** `event` は DB 側に CHECK 制約があるので既存の名前を使い、
+   * 区別は `detail.kind` で付ける (新しい migration を足さない)。
+   * **本文も値もログに出さない** — 件数と key だけ。
+   */
+  await store.logEvent({
+    batch_id: input.batchId,
+    event: 'override',
+    subject_id: s.id,
+    actor_user_id: input.actor.userId, actor_masked: input.actor.masked, actor_sha256: input.actor.sha256,
+    detail: {
+      kind: 'e2e_single_write',
+      format_id: file.formatId,
+      key: file.key,
+      bytes: file.bytes,
+      test_date: file.testDate,
+    },
+  });
+
+  return {
+    ok: true,
+    batchId: input.batchId,
+    subjectNo: s.subject_no,
+    clientId: s.client_id,
+    formatId: file.formatId,
+    testDate: file.testDate,
+    bucket: gate.cfg.bucket,
+    key: file.key,
+    bytes: file.bytes,
+    existingBefore: false,
+    writeResult: 'created',
+    existsAfter: after.exists,
+    etag: after.etag,
+    source: b.hcSource && file.formatId === 'HealthCheckupData'
+      ? {
+        healthSource: b.hcSource.fileName,
+        pagesDone: b.hcSource.pagesDone,
+        pagesExpected: b.hcSource.pagesExpected,
+        finalizeCore: b.hcSource.finalizeCore,
+        // **健診 XLSX からは作らない** (v1.1 で本経路から外した)。
+        xlsxGenerated: false,
+      }
+      : null,
+    body: file.body,
   };
 }
 

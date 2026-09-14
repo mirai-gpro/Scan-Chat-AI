@@ -558,7 +558,15 @@ console.log('\n=== L. 後工程が ZIP を開き直さない (分割した意味
 
   const proc = region('export async function processBatch', 'export async function healthAgeCheck');
   const ha = region('export async function healthAgeCheck', 'export interface AssemblyResult');
-  const asm = region('export async function assembleBatch', 'export async function retryBatch');
+  /*
+   * **`assembleBatch` は組み立てを `buildSubjectDelivery()` へ委譲する**ので、
+   * 材料の復元はそちらに在る (E2E の 1 件書き出しと同じ 1 か所を使うため)。
+   * 検査範囲に含めないと「復元していない」と誤判定するが、**委譲先も ZIP を
+   * 開いていないこと**は同じように見る必要があるので、両方をまとめて見る。
+   */
+  const asm = region('async function buildSubjectDelivery', 'export async function retryBatch');
+  eq('assembleBatch が組み立てを委譲している',
+    /buildSubjectDelivery\(s, own, cfg\)/.test(stripComments(svc)), true);
 
   for (const [name, code] of [['processBatch', proc], ['healthAgeCheck', ha], ['assembleBatch', asm]]) {
     eq(`${name} が analyzeOpened を呼ばない`, /analyzeOpened\(/.test(code), false);

@@ -161,7 +161,15 @@ export type WriteGateResult =
  * 順序に意味がある — 「安全検査で弾かれただけなのに exporting にしてしまう」ことを
  * 避けるため、**呼び出し側はこれが ok を返してから status を進める**。
  */
-export function checkWriteGate(input: WriteGateInput): WriteGateResult {
+/**
+ * **書き込み先そのものの検査だけ** (env 2 本 + 実際の解決先との完全一致)。
+ *
+ * `checkWriteGate()` (通常納品) と `checkSingleFileWriteGate()` (E2E の 1 件書き出し) が
+ * **同じこれを通る**。env の読み方・正規化・一致判定を 2 か所に書くと、片方だけ緩んでも
+ * 気づけない。**ここを緩めると両方が緩む**ので、変更は必ず両方の検査で落ちる。
+ */
+export function checkWriteTarget(): { ok: true; cfg: S3Config; target: string }
+  | { ok: false; status: number; error: string; detail: string } {
   // ① 主スイッチ。未設定・`on` 以外はすべて無効 (fail-closed)。
   const enabled = env(WRITE_ENABLED_ENV).trim();
   if (enabled !== 'on') {
@@ -195,6 +203,17 @@ export function checkWriteGate(input: WriteGateInput): WriteGateResult {
       detail: `${WRITE_TARGET_ENV} と実際の書き込み先が一致しません (宣言=${want} / 実際=${actual})。`,
     };
   }
+
+  return { ok: true, cfg, target: actual };
+}
+
+/**
+ * 通常納品のゲート。**部分納品を禁止する**のはここだけ (E2E の 1 件書き出しは別関数)。
+ */
+export function checkWriteGate(input: WriteGateInput): WriteGateResult {
+  const t = checkWriteTarget();
+  if (!t.ok) return t;
+  const { cfg, target: actual } = t;
 
   // ④ 部分納品の禁止。1 人でも ready でなければ全体を止める。
   if (input.skipped.length > 0) {
@@ -312,4 +331,63 @@ export async function putDeliveryFilesCreateOnly(
     uploaded.push({ key: f.key, bytes: f.bytes, uri: `s3://${cfg.bucket}/${f.key}` });
   }
   return uploaded;
+}
+
+// ---------------------------------------------------------------------------
+// E2E 確認用: 1 ファイルだけの書き出し
+// ---------------------------------------------------------------------------
+
+/**
+ * **1 ファイルだけを実際の Elith 納品先へ書くためのゲート。**
+ *
+ * 【なぜ別関数なのか】通常納品は「1 人でも未完成なら全部止める」(部分納品禁止) が要件で、
+ * それは**緩めない**。一方 E2E 確認は「坂田氏の `HealthCheckupData` 1 件だけを実際に置いて
+ * 中身を確かめる」ことが目的なので、**部分納品禁止に引っかかるのが正常**。
+ * だから `checkWriteGate()` に例外分岐を足すのではなく、
+ * **経路そのものを分けて**「通常納品の規則は 1 文字も変えない」を保つ。
+ *
+ * 【それでも共有するもの】env 2 本・書き込み先の完全一致 (`checkWriteTarget`) と
+ * key の形 (`validateDeliveryKey`)・create-only PUT・既存 key の事前確認。
+ * **安全側の検査は 1 つも外さない。**
+ */
+export function checkSingleFileWriteGate(
+  file: Pick<DeliveryFile, 'key' | 'formatId' | 'testDate'>,
+): WriteGateResult {
+  const t = checkWriteTarget();
+  if (!t.ok) return t;
+  const v = validateDeliveryKey(file, t.cfg);
+  if (!v.ok) {
+    return {
+      ok: false, status: 400, error: 'invalid_delivery_key',
+      detail: `納品先 key が想定外です (${v.reason})。`,
+    };
+  }
+  return t;
+}
+
+export interface HeadResult {
+  exists: boolean;
+  bytes: number | null;
+  etag: string | null;
+}
+
+/**
+ * 1 つの key の存在を確かめる。
+ *
+ * **「確認できなかった」を「無い」にしない。** 権限不足・通信断は例外として投げ、
+ * 呼び出し側が中止する。`exists:false` を返すのは **S3 が 404 を返したときだけ**。
+ */
+export async function headDeliveryObject(key: string, cfg: S3Config): Promise<HeadResult> {
+  const client = makeS3Client(cfg);
+  try {
+    const r = await client.send(new HeadObjectCommand({ Bucket: cfg.bucket, Key: key }));
+    return {
+      exists: true,
+      bytes: typeof r.ContentLength === 'number' ? r.ContentLength : null,
+      etag: typeof r.ETag === 'string' ? r.ETag.replace(/^"|"$/g, '') : null,
+    };
+  } catch (e) {
+    if (isNotFound(e)) return { exists: false, bytes: null, etag: null };
+    throw e;
+  }
 }

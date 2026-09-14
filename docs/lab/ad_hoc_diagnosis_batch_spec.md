@@ -824,6 +824,60 @@ Elithへ渡す最終構成は既存Elith handoff / assembly仕様を正とする
 
 管理者が最終承認してから書き込む。
 
+## 11.4 E2E確認用「1 JSONだけS3へ書く」経路（2026-09-14・発注者指示）
+
+**正式なバッチ納品ではない。** 1名のE2E確認として、生成済みの `HealthCheckupData` JSON
+**1ファイルだけ**を実際のElith納品先へ置き、中身を原本と突き合わせるための口。
+
+### 通常納品との関係
+
+**通常の `assembleBatch` / write-guard / 部分納品禁止は1文字も変えない。**
+「1人でも未完成なら部分納品しない」という規則を緩めるのではなく、
+**経路そのものを分ける**（`exportSingleDeliveryFile()` / `POST /export-one`）。
+E2E確認では部分納品禁止に引っかかるのが**正常**なので、例外分岐を足すのではなく別経路にする。
+
+### 新しいJSONを作らない
+
+納品ファイルの組み立ては `buildSubjectDelivery()` **1か所だけ**で、
+通常の dry-run / 本番納品と **同じこれ**を呼ぶ。
+→ PUTするbodyは通常納品時にS3へ書くJSONと**バイト単位で同じ**。
+E2E用の builder を作らない（作ると「確認したJSONと納品したJSONが別物」になる）。
+
+### PUT前の条件（すべて満たさなければ書かない）
+
+| | 内容 |
+|---|---|
+| 人物 | Executive Subject が紐付いていること（誰のものか確定しないまま置かない） |
+| 件数 | 指定 subject × 指定 format で**ちょうど1件**（0件・2件以上は失敗） |
+| 日付 | 操作者が原本で確認した `expectTestDate` と生成された `test_date` が一致（**省略不可**・today混入の番人） |
+| 本文 | JSON本文の `format_id` / `client_id` / `test_date` が想定と一致 |
+| env | `AD_HOC_ELITH_WRITE_ENABLED=on` かつ `AD_HOC_ELITH_WRITE_TARGET` が実際の bucket+prefix と完全一致 |
+| key | `validateDeliveryKey()` を通ること（`DeliveryFile.key` をそのまま使う・手で組み直さない） |
+| 既存 | `HeadObject` で既存を確認し、**在れば中止**（上書きしない・削除して再実行もしない） |
+| PUT | `IfNoneMatch: '*'` の create-only |
+| 事後 | `HeadObject` で読み戻して存在を確認 |
+
+### 書いてもバッチを納品済みにしない
+
+- `batch.status` を `completed` にしない（失敗しても `failed` にしない）
+- 他 format の output を `exported` にしない
+- 通常exportの完了イベント（`exported`）を発火しない
+- 監査だけは既存 event 名 `override` + `detail.kind = 'e2e_single_write'` で残す（**新 migration なし**）
+
+→ 通常の一括納品から見ると、バッチは**引き続き未納品**。
+
+### 確認は「1ファイル在ったこと」では終わらない
+
+API は**実際にPUTした本文そのもの**を返し、管理画面から保存できる。
+原本の健診PDFと 身長/体重/BMI/血圧/HbA1c/AST/ALT/γ-GTP/HDL/TG/LDL を突き合わせて
+初めて PASS とする。**本文はログに出さない・repoにcommitしない。**
+
+### 検証
+
+`npm run verify:ad-hoc-single-write`（退行注入10種）。
+とくに「通常納品の部分納品禁止が緩んでいないこと」「create-onlyのままであること」
+「batchをcompletedにしないこと」を機械で固定する。
+
 ---
 
 # 12. Golden Sample
