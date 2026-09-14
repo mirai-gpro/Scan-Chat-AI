@@ -112,6 +112,11 @@ export interface StructureResult {
   /** 読む計画。構造が噛み合っていなければ空 (= 1 バイトも読まない)。 */
   plan: PlanItem[];
   fileCount: number;
+  /**
+   * **実 ZIP に在った**人物フォルダの数。期待値 (`personFolders`) ではない。
+   * 要約へ定数を出すと「常に 10/10」になり、**何を見ても緑に見える**ので観測値を持つ。
+   */
+  personFolders: number;
 }
 
 /** root を**ちょうど 1 段だけ**外す。root 配下でなければ null (§8.2)。 */
@@ -249,6 +254,7 @@ export function preflightStructure(src: PreflightSource): StructureResult {
     // **構造が噛み合わないうちは 1 バイトも読まない** (読むと別人のファイルを掴む)。
     plan: structureOk ? plan : [],
     fileCount: files.length,
+    personFolders: folders.size,
   };
 }
 
@@ -393,7 +399,8 @@ export function preflightFinish(
     checks,
     summary: {
       files: ratio(structure.fileCount, TRANSCOS_ZIP.fileEntries),
-      subjects: ratio(TRANSCOS_SUBJECTS.length, TRANSCOS_ZIP.personFolders),
+      // **観測値**。manifest の定数を出すと常に 10/10 になり検査にならない。
+      subjects: ratio(structure.personFolders, TRANSCOS_ZIP.personFolders),
       health: ratio(okSha('HEALTH_PDF'), countRole('HEALTH_PDF')),
       genoplan: ratio(okSha('GENOPLAN_PDF'), countRole('GENOPLAN_PDF')),
       questionnaireXlsx: ratio(okSha('QUESTIONNAIRE_XLSX'), countRole('QUESTIONNAIRE_XLSX')),

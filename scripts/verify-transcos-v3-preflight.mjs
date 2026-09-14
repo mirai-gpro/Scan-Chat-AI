@@ -237,7 +237,26 @@ const failedIds = (r) => r.checks.filter((c) => !c.ok).map((c) => c.id);
   eq('問診 PDF 2/2', r.summary.questionnairePdf, '2/2');
   eq('健診補助 5/5', r.summary.healthSupport, '5/5');
   eq('Executive 10/10', r.summary.executives, '10/10');
+  eq('人物 10/10', r.summary.subjects, '10/10');
   ok('§8 の表示になる', P.formatPreflight(r).startsWith('実ZIP確認: PASS'));
+}
+/*
+ * **要約は観測でなければならない** (§21 Stage A の `subjects 10/10` は観測の報告)。
+ * manifest の定数を出すと **どんな ZIP でも 10/10** になり、要約だけ見ている人には
+ * 常に緑に見える。人物フォルダを 1 つに潰した世界で 10/10 のままなら退行。
+ */
+{
+  const w = buildWorld((x) => {
+    for (const e of x.source.rawEntries) {
+      if (e.directory) continue;
+      const rest = e.path.slice(`${M.EXPECTED_ROOT}/`.length);
+      if (rest.includes('/')) e.path = `${M.EXPECTED_ROOT}/ひとつだけ/${rest.slice(rest.indexOf('/') + 1)}`;
+    }
+  });
+  const r = await runWorld(w);
+  ok('人物フォルダを潰したら要約も 10/10 でなくなる', r.summary.subjects !== '10/10',
+    `実際 ${r.summary.subjects}`);
+  ok('そのとき 9-folders が落ちる', failedIds(r).includes('9-folders'), JSON.stringify(failedIds(r)));
 }
 // **index をひっくり返しても PASS する = index は identity でない** (§3.1)
 {

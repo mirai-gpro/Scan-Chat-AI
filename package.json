@@ -53,6 +53,7 @@
     "verify:ad-hoc-single-write": "node scripts/verify-ad-hoc-single-write.mjs",
     "verify:ad-hoc-payload-gate": "node scripts/verify-ad-hoc-payload-gate.mjs",
     "verify:transcos-v3-preflight": "node scripts/verify-transcos-v3-preflight.mjs",
+    "verify:transcos-v3-real-zip": "node scripts/verify-transcos-v3-real-zip.mjs",
     "verify:ad-hoc-e2e": "node scripts/verify-ad-hoc-e2e.mjs",
     "verify:executive-diagnosis": "node scripts/verify-executive-diagnosis.mjs"
   },
