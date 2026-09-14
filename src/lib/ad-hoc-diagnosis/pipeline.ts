@@ -24,7 +24,7 @@ import {
   type CellValue, type HealthCheckupSheet,
 } from './health-checkup-xlsx';
 import {
-  normalizeExternalFormSheet, normalizeQuestionnairePdf, questionnaireIsUsable,
+  detectPdfProfile, manualEntryPlaceholder, normalizeExternalFormSheet,
   type QuestionnaireNormalized,
 } from './questionnaire';
 import { normalizeMarkers, type HealthAgeMarkers, type RawItem } from '../health-age';
@@ -221,9 +221,19 @@ export async function analyzeOpened(archive: OpenedArchive): Promise<AnalyzeResu
       pdfText,
     });
 
-    // 問診 PDF なら正規化する
+    /*
+     * **問診 PDF は自動で answers にしない** (spec v1.1 §7.4)。
+     *
+     * 回答が radio / checkbox の**視覚的な選択状態**で表されているため、
+     * text 抽出では選択済みも未選択も同じ文字列として出てくる。
+     * 「同じ行か次の行を回答とみなす」方式では正答を保証できず、
+     * **LLM に選択状態を推測させるのも禁止**。
+     * → 管理者が PDF を見て入力し、二重確認してから使う (`questionnaire-manual.ts`)。
+     *
+     * ここでは**様式の判定だけ**しておく (操作者への手掛かり。answers は作らない)。
+     */
     if (file.classification.formatId === 'LifestyleQuestionnaireData' && e.ext === '.pdf' && pdfText) {
-      file.questionnaire = normalizeQuestionnairePdf(pdfText);
+      file.questionnaire = manualEntryPlaceholder(detectPdfProfile(pdfText));
     }
 
     // 検査日
@@ -480,8 +490,9 @@ export async function analyzeEntry(
     pdfText,
   });
 
+  // **問診 PDF は自動で answers にしない** (spec v1.1 §7.4)。上と同じ理由。
   if (out.classification.formatId === 'LifestyleQuestionnaireData' && item.ext === '.pdf' && pdfText) {
-    out.questionnaire = normalizeQuestionnairePdf(pdfText);
+    out.questionnaire = manualEntryPlaceholder(detectPdfProfile(pdfText));
   }
 
   if (out.classification.formatId === 'HealthCheckupData' && out.healthCheckup?.testDate.status === 'resolved') {

@@ -157,8 +157,17 @@ let PL = null;
     .replace(/HealthCheckupSheet \| null/g, 'any')
     .replace(/: CellValue/g, ': any')
     .replace(/isBlankCell\(/g, 'BLANK(');
+  /*
+   * **`QUESTIONS` は実物から起こす。** import を落とす作りなので、ここで足さないと
+   * `QUESTION_ID_KEYS` が未定義で落ちる。定数表を手で書き写すと問診票を直したときに
+   * 黙って食い違うので、`interview-script.ts` の `id:` を読んで作る。
+   */
+  const questionIds = [...read('src/scripts/chat/interview-script.ts').matchAll(/\bid: '([A-Z][A-Z-]*)'/g)]
+    .map((m) => m[1]);
+  eq('設問 id を実物から拾えている', questionIds.length > 20, true);
+  const stub = `const QUESTIONS = ${JSON.stringify(Object.fromEntries(questionIds.map((i) => [i, {}])))};`;
   PL = await transpileToModule(
-    `const BLANK = (v) => v === null || v === undefined || (typeof v === 'string' && v.trim() === '');\n${src}`,
+    `const BLANK = (v) => v === null || v === undefined || (typeof v === 'string' && v.trim() === '');\n${stub}\n${src}`,
     'verify-b21-payload.mjs',
   );
 
@@ -252,6 +261,9 @@ console.log('\n=== D. 問診 payload — unmapped の見出しと notes を保�
     // `UnmappedItem.header` は元の見出し = **DB へは保存しない**と型定義にも書いてある。
     unmapped: [{ header: '氏名（カナ）', value: 'ヤマダ タロウ' }],
     mappedCount: 2,
+    // v1.1 で追加。**件数だけ**を保存し、中身 (回答値) は保存しない。
+    needsReviewCount: 1,
+    ignoredBySpec: 10,
     notes: ['sheet=山田太郎'],
   };
   const p = PL.buildQuestionnairePayload(q);
@@ -260,6 +272,11 @@ console.log('\n=== D. 問診 payload — unmapped の見出しと notes を保�
   eq('unmapped の見出しが出ない', flat.includes('氏名'), false);
   eq('notes を持たない', 'notes' in p, false);
   eq('件数だけ残る', p.unmapped_count, 1);
+  // **仕様として捨てた列は「要確認」と別に数える** (混ぜると正常な除外が警告に見える)。
+  eq('仕様対象外の件数も別に残る', p.ignored_by_spec_count, 10);
+  // 呼び出し元が件数を渡し忘れても 0 にしない (黙って「要確認なし」にならない)。
+  eq('件数が無ければ unmapped の長さで補う',
+    PL.buildQuestionnairePayload({ ...q, needsReviewCount: undefined }).unmapped_count, 1);
   eq('設問 ID の answers は残る', p.answers['Q-SMOKE'], 'no');
   eq('性別・年齢は残る', [p.sex, p.age], ['male', 54]);
 
@@ -541,20 +558,45 @@ console.log('\n=== L. 後工程が ZIP を開き直さない (分割した意味
 
   const proc = region('export async function processBatch', 'export async function healthAgeCheck');
   const ha = region('export async function healthAgeCheck', 'export interface AssemblyResult');
-  const asm = region('export async function assembleBatch', 'export async function retryBatch');
+  /*
+   * **`assembleBatch` は組み立てを `buildSubjectDelivery()` へ委譲する**ので、
+   * 材料の復元はそちらに在る (E2E の 1 件書き出しと同じ 1 か所を使うため)。
+   * 検査範囲に含めないと「復元していない」と誤判定するが、**委譲先も ZIP を
+   * 開いていないこと**は同じように見る必要があるので、両方をまとめて見る。
+   */
+  const asm = region('async function buildSubjectDelivery', 'export async function retryBatch');
+  eq('assembleBatch が組み立てを委譲している',
+    /buildSubjectDelivery\(s, own, cfg\)/.test(stripComments(svc)), true);
 
   for (const [name, code] of [['processBatch', proc], ['healthAgeCheck', ha], ['assembleBatch', asm]]) {
     eq(`${name} が analyzeOpened を呼ばない`, /analyzeOpened\(/.test(code), false);
     eq(`${name} が openArchiveFromS3 を呼ばない`, /openArchiveFromS3\(/.test(code), false);
-    eq(`${name} が normalized_payload から復元する`,
-      /restoreHealthCheckupSheet\(|restoreQuestionnaire\(/.test(code), true);
+    /*
+     * **材料は DB から復元する** (ZIP を開き直さない)。
+     *
+     * 復元元は 2 つある:
+     *   - 問診 / 分類時の材料 … `normalized_payload` (`restoreQuestionnaire`)
+     *   - 健診 … `ad_hoc_diagnosis_pages` (`restoreHealthPage`)。v1.1 で健診が
+     *     XLSX の payload から**健診 PDF のページ解析結果**へ変わったため (spec §6.2)。
+     * **どちらでもよいが、どちらも無いのは駄目** — それは ZIP を開いているということ。
+     */
+    eq(`${name} が DB の材料から復元する`,
+      /restoreHealthCheckupSheet\(|restoreQuestionnaire\(|restoreHealthPage\(/.test(code), true);
   }
 
   /*
    * **materials が無いときに黙って空にしない。** 分類前の古い行は payload を持たない
    * ので、そのまま素通りさせると**納品物が 1 件減るだけ**で誰も気づけない。
    */
-  eq('材料が無ければ理由を残す', (proc.match(/normalized_payload_missing/g) ?? []).length >= 2, true);
+  /*
+   * 理由の語は経路ごとに違ってよいが、**黙って空にする経路があってはいけない**。
+   * 健診は v1.1 で `health_pdf_not_scanned` / `health_pages_missing` /
+   * `test_date_unresolved` / `test_date_conflict` を出すようになった (spec §6.4/§6.5)。
+   */
+  const missReasons = ['normalized_payload_missing', 'health_pdf_not_scanned', 'health_pages_missing'];
+  eq('材料が無ければ理由を残す', missReasons.every((r) => proc.includes(r)), true);
+  eq('健診の日付が確定しなければ理由を残す',
+    proc.includes('test_date_unresolved') && proc.includes('test_date_conflict'), true);
 
   // 一括分類 (`classifyBatch`) でも payload を保存する = 経路で挙動が変わらない。
   eq('fileRowOf が payload を作る', /normalized_payload: buildEntryPayload\(/.test(stripComments(svc)), true);

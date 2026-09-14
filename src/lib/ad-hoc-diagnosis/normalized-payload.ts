@@ -10,6 +10,19 @@
 // だから「何を入れるか」を allow-list で組み立て、**書き込み前にもう一度 deny-list で検査**する。
 import { isBlankCell, type CellValue, type HealthCheckupSheet } from './health-checkup-xlsx';
 import type { QuestionnaireNormalized } from './questionnaire';
+import { QUESTIONS } from '../../scripts/chat/interview-script';
+
+/**
+ * **問診の設問 id は deny-list の対象外にする。**
+ *
+ * `answers` のキーは設問 id (`M-NAME` = 「服用中の薬の名前」等) で、**個人情報ではない**。
+ * しかし deny-list は `name` を部分一致で見るので `M-NAME` に当たり、
+ * **服薬ありと答えた人物の保存が丸ごと throw していた** (実測 2026-09-14)。
+ *
+ * 緩めるのは**既存 `QUESTIONS` に実在する id と完全一致するものだけ**。
+ * 「`name` を含むキーを全部許す」にはしない — それだと `display_name` も通ってしまう。
+ */
+const QUESTION_ID_KEYS: ReadonlySet<string> = new Set(Object.keys(QUESTIONS));
 
 // ---------------------------------------------------------------------------
 // deny-list
@@ -65,11 +78,17 @@ function collectKeys(value: unknown, out: Set<string>, depth = 0): void {
  * 「保存してから消す」ではなく「保存させない」。診断側の DB に一度でも氏名が入ると、
  * バックアップにも監査ログにも残り、後から取り消せない。
  */
-export function assertNoPiiKeys(payload: unknown, where: string): void {
+export function assertNoPiiKeys(
+  payload: unknown,
+  where: string,
+  /** **完全一致でだけ除外する**キー (問診の設問 id)。部分一致では除外しない。 */
+  allowKeys: ReadonlySet<string> = new Set<string>(),
+): void {
   const keys = new Set<string>();
   collectKeys(payload, keys);
   const hits: string[] = [];
   for (const k of keys) {
+    if (allowKeys.has(k)) continue;
     const lower = k.toLowerCase();
     for (const bad of FORBIDDEN_PAYLOAD_KEYS) {
       if (lower.includes(bad)) { hits.push(k); break; }
@@ -190,7 +209,19 @@ export interface QuestionnairePayload {
   completed_at: unknown;
   answers: Record<string, unknown>;
   mapped_count: number;
+  /** `needs_review` の件数。**中身 (回答値) は入れない** (§16)。 */
   unmapped_count: number;
+  /** 仕様として捨てた列の数 (53〜62 等)。**未対応と混ぜて数えない。** */
+  ignored_by_spec_count?: number;
+  /**
+   * **要確認の設問 id** (最終指示書 §5.1)。
+   *
+   * 件数だけだと管理者が「何を入れ直せば納品できるのか」を知れないので id を残す。
+   * **`question_id` だけ。未知の生回答値そのものは永続化しない** (§5.1 / spec §16)。
+   */
+  review_question_ids?: string[];
+  /** 設問へ落ちない要確認 (性別・生年月日・完了時刻)。 */
+  subject_review?: string[];
 }
 
 export function buildQuestionnairePayload(q: QuestionnaireNormalized): QuestionnairePayload {
@@ -203,14 +234,27 @@ export function buildQuestionnairePayload(q: QuestionnaireNormalized): Questionn
     completed_at: q.completedAt,
     answers: q.answers as Record<string, unknown>,
     mapped_count: q.mappedCount,
-    unmapped_count: q.unmapped.length,
+    /*
+     * **件数だけ保存する。** `unmapped[].detail` には回答値が入るので永続化しない (§16)。
+     *
+     * `needsReviewCount` が無い呼び出し元へは `unmapped.length` で落とす —
+     * **件数が黙って 0 になる方が悪い** (画面から「要確認あり」が消える)。
+     */
+    unmapped_count: q.needsReviewCount ?? q.unmapped.length,
+    ignored_by_spec_count: q.ignoredBySpec ?? 0,
+    // **id だけ** (回答値は入らない)。分岐適用は読み出し側で毎回やり直す。
+    review_question_ids: [...(q.reviewQuestionIds ?? [])],
+    subject_review: [...(q.subjectReview ?? [])],
   };
   /*
-   * **`answers` のキーは設問 ID** (`Q-SMOKE` 等) なので deny-list には当たらない。
-   * 当たったとしたら設問 ID の付け方が変わったということなので、そこで気づけるよう
-   * ここでも検査を通す (通してから DB へ渡す)。
+   * **書き込む前にもう一度 deny-list を通す** (通してから DB へ渡す)。
+   *
+   * `answers` のキーは設問 id なので、**実在する設問 id だけ**を除外して検査する。
+   * 除外しないと `M-NAME` が `name` に部分一致して throw し、
+   * **服薬ありと答えた人物の保存が丸ごと落ちる** (実測 2026-09-14)。
+   * 除外は完全一致のみ = `display_name` のような本物の PII キーは今までどおり止まる。
    */
-  assertNoPiiKeys(payload, 'questionnaire');
+  assertNoPiiKeys(payload, 'questionnaire', QUESTION_ID_KEYS);
   return payload;
 }
 
@@ -247,7 +291,7 @@ export function buildEntryPayload(input: {
   if (input.healthCheckup) out.health_checkup = buildHealthCheckupPayload(input.healthCheckup);
   if (input.questionnaire) out.questionnaire = buildQuestionnairePayload(input.questionnaire);
   if (!out.health_checkup && !out.questionnaire) return null;
-  assertNoPiiKeys(out, 'entry');
+  assertNoPiiKeys(out, 'entry', QUESTION_ID_KEYS);
   return out;
 }
 
@@ -266,8 +310,19 @@ export function restoreQuestionnaire(payload: unknown): QuestionnaireNormalized 
     answers: (p.answers ?? {}) as QuestionnaireNormalized['answers'],
     subject: { sex: p.sex ?? null, age: p.age ?? null },
     completedAt: (p.completed_at ?? { status: 'absent' }) as QuestionnaireNormalized['completedAt'],
+    // **中身は復元しない** (保存していない)。件数だけ持ち回って画面に出す。
     unmapped: [],
     mappedCount: p.mapped_count ?? 0,
+    ignoredBySpec: p.ignored_by_spec_count ?? 0,
+    needsReviewCount: p.unmapped_count ?? 0,
+    reviewQuestionIds: [...(p.review_question_ids ?? [])],
+    subjectReview: (p.subject_review ?? []) as QuestionnaireNormalized['subjectReview'],
+    /*
+     * **分岐の結果は保存しない。** `answers` は Phase A の暫定形 (分岐を見ていない) で、
+     * 手入力の上書きが入ると分岐の結果も変わるため、読み出すたびに
+     * `finalizeQuestionnaire()` で計算し直す。ここでは 0 を入れておく。
+     */
+    ignoredByBranch: 0,
     notes: [],
   };
 }

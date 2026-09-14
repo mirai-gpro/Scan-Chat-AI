@@ -6,19 +6,46 @@
 // (同じ処理を 2 つの口から呼べるようにするため。§22「API 同士を HTTP で呼ばない」)。
 
 import { getS3Config } from '../s3';
-import { checkWriteGate, preflightNoExistingObjects, putDeliveryFilesCreateOnly } from './write-guard';
+import {
+  checkWriteGate, checkSingleFileWriteGate, headDeliveryObject,
+  preflightNoExistingObjects, putDeliveryFilesCreateOnly,
+} from './write-guard';
 import { refreshConfig } from '../app-config';
-import { scanGeneticPage } from '../elith-genetic';
+import {
+  GENOPLAN_V1_REQUIRED_PAGES, isGenoplanV1RequiredPage, missingGenoplanV1Pages,
+  scanGeneticPage,
+} from '../elith-genetic';
 import * as store from './store';
 import { adHocZipKey } from './keys';
 import { headAdHocZip, deleteAdHocZip, createAdHocUploadTicket } from './ticket';
 import { openArchiveFromS3 } from './archive';
 import { matchByFingerprint, shortFingerprint, subjectFingerprint } from './fingerprint';
 import { questionnaireSummary, questionnaireIsUsable } from './questionnaire';
-import { buildEntryPayload, restoreHealthCheckupSheet, restoreQuestionnaire } from './normalized-payload';
+// **`restoreHealthCheckupSheet` はもう使わない** — 健診 XLSX は HealthCheckupData の
+// 生成元から外れた (spec §6.2・v1.1)。関数自体は分類時の保存と照合の補助に残っている。
+import { buildEntryPayload, restoreQuestionnaire } from './normalized-payload';
+// **本番の健診処理をそのまま使う** (spec §6.2/§6.5)。ad-hoc に整形を書き直さない。
+import { scanImageToParsed } from '../elith-export';
+import { finalizeHealthCheckup, isTrendMarkdown } from '../elith-hc-finalize';
+import {
+  isManualQuestionnaireRecord, manualQuestionnaire, manualRecordIsConfirmed,
+  type ManualEntry, type ManualQuestionnaireRecord,
+} from './questionnaire-manual';
+// **Phase B — production の分岐と手入力の合成。** 納品前に必ずここを通す (最終指示書 §3.2/§5.2)。
+import { finalizeQuestionnaire } from './questionnaire-branch';
+import type { QuestionnaireNormalized } from './questionnaire';
+
+/**
+ * 問診の手入力を置くページ番号。
+ *
+ * **既存の `ad_hoc_diagnosis_pages` を使い回す** — 新しいテーブルも列も足さない
+ * (spec §2.4)。問診ファイルは 1 人 1 件なので 1 行で足りる。
+ */
+const MANUAL_QUESTIONNAIRE_PAGE_NO = 1;
+import { normalizeMarkers } from '../health-age';
 import {
   AD_HOC_OPTIONAL_FORMATS, AD_HOC_REQUIRED_FORMATS, analyzeEntry, analyzeOpened, buildGeneticJson,
-  buildHealthCheckupJson, buildQuestionnaireJson, computeSubjectWellnessAge, evaluateReadiness,
+  buildQuestionnaireJson, computeSubjectWellnessAge, evaluateReadiness,
   newClientId, newDiagnosticId, planArchive, toDeliveryFile,
   type AnalyzedFile, type DeliveryFile, type GeneticPagePart,
 } from './pipeline';
@@ -595,6 +622,26 @@ export async function batchStatus(batchId: string) {
     outputsBySubject.set(o.subject_id, list);
   }
 
+  /*
+   * **問診の「あと何を人が入れれば納品できるか」を画面へ配る** (最終指示書 §5.2)。
+   *
+   * `error_detail` の文字列を画面でパースさせない — 表示のための文字列と
+   * 機械が読む値を兼ねると、文言を直した瞬間に画面が黙って壊れる。
+   * **設問 id だけ**を返す (未知の回答値は返さない・§5.1)。
+   */
+  const reviewByFile = new Map<string, { review_question_ids: string[]; subject_review: string[]; ignored_by_branch: number; usable: boolean }>();
+  for (const f of files) {
+    if (f.classified_format_id !== 'LifestyleQuestionnaireData') continue;
+    const q = await resolveQuestionnaireForDelivery(f);
+    if (!q) continue;
+    reviewByFile.set(f.id, {
+      review_question_ids: [...(q.reviewQuestionIds ?? [])],
+      subject_review: [...(q.subjectReview ?? [])],
+      ignored_by_branch: q.ignoredByBranch ?? 0,
+      usable: questionnaireIsUsable(q),
+    });
+  }
+
   return {
     ok: true as const,
     batch: {
@@ -602,6 +649,14 @@ export async function batchStatus(batchId: string) {
       // **fingerprint は先頭 8 文字だけ** (§6.2.1)
       source_sha256_short: batch.source_sha256.slice(0, 8),
     },
+    /*
+     * **Genoplan の対象ページを API から配る** (spec §8.5・v1.1)。
+     *
+     * wellfort-site に `10` / `35` を独立した正本として持たせない。UI は
+     * この配列に在るページだけを画像化して送る。正本は
+     * `elith-genetic.ts` の `GENOPLAN_V1_REQUIRED_PAGES` ひとつ。
+     */
+    geneticRequiredPages: GENOPLAN_V1_REQUIRED_PAGES,
     subjects: subjects.map((s) => {
       const own = files.filter((f) => f.subject_id === s.id);
       /*
@@ -642,7 +697,11 @@ export async function batchStatus(batchId: string) {
         sex: s.sex,
         age: s.age,
         status: s.status,
-        files: own.map(publicFile),
+        files: own.map((f) => {
+          const pub = publicFile(f) as Record<string, unknown>;
+          const rv = reviewByFile.get(f.id);
+          return rv ? { ...pub, questionnaire_review: rv } : pub;
+        }),
         outputs: (outputsBySubject.get(s.id) ?? []).map((o) => ({
           format_id: o.format_id,
           output_status: o.output_status,
@@ -855,8 +914,215 @@ export async function confirmClassification(input: {
 export interface ProcessOptions {
   /** 遺伝子 PDF の 1 ページを画像化したもの。ブラウザ (pdf.js) が作って送る。 */
   geneticPages?: { fileId: string; page: number; imageBase64: string; mimeType: string }[];
+  /**
+   * 健診 PDF の 1 ページを画像化したもの (spec §6.5)。
+   *
+   * **遺伝子と違って対象ページの絞り込みは無い** — 健診票は数ページで、
+   * どのページにも検査値が印字され得るため全ページが対象。
+   * `pageCount` はブラウザの pdf.js が数えた総ページ数で、**完了判定の母数**になる
+   * (サーバ側の `countPdfPages` は正規表現による概算なので母数に使わない)。
+   */
+  healthPages?: {
+    fileId: string; page: number; pageCount: number;
+    imageBase64: string; mimeType: string;
+  }[];
   /** 失敗したページだけを対象にする。 */
   retryFailedOnly?: boolean;
+}
+
+/**
+ * 健診 PDF 1 ページぶんの、**DB に保存してよい形**。
+ *
+ * **生 Markdown (`scan.markdown`) は入れない** — 実在の人の検査票の生テキストは
+ * 氏名・患者 ID を含み得る (ゴールデンの見出しが実際にそうなっている)。
+ * spec §2.4「実在役員の raw PDF text を診断 DB へ新規保存しない」。
+ * 推移グラフページかどうかだけ**読んだ直後に判定して真偽値で残す**ので、
+ * finalize core は生 Markdown 無しで従来と同じ結果を出せる。
+ */
+interface HealthPageParsed {
+  measurements: unknown[];
+  notes: string[];
+  isTrendPage: boolean;
+  /** `scanImageToParsed` が読めた検査日。**`today` 由来は保存しない** (§6.4)。 */
+  testDate: string | null;
+  dateSource: string;
+}
+
+function restoreHealthPage(parsed: unknown): HealthPageParsed | null {
+  if (!parsed || typeof parsed !== 'object') return null;
+  const o = parsed as Record<string, unknown>;
+  if (!Array.isArray(o.measurements)) return null;
+  return {
+    measurements: o.measurements,
+    notes: Array.isArray(o.notes) ? (o.notes as string[]) : [],
+    isTrendPage: o.isTrendPage === true,
+    testDate: typeof o.testDate === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(o.testDate) ? o.testDate : null,
+    dateSource: typeof o.dateSource === 'string' ? o.dateSource : 'unknown',
+  };
+}
+
+/**
+ * 問診の手入力 (PDF 用) を読み出す。**二重確認が済んでいるものだけ返す** (spec §7.4)。
+ *
+ * 保存先は既存の `ad_hoc_diagnosis_pages` (page_no=1)。**新しいテーブルを作らない**
+ * (§2.4「新 migration は原則不要。既存で成立するか先に検証する」)。
+ */
+async function resolveManualRecord(fileId: string): Promise<ManualQuestionnaireRecord | null> {
+  const pages = await store.listPages(fileId);
+  const row = pages.find((p) => p.page_no === MANUAL_QUESTIONNAIRE_PAGE_NO);
+  if (!row || !isManualQuestionnaireRecord(row.parsed)) return null;
+  const rec = row.parsed;
+  // **入力しただけでは使わない。** 別の目で見るところまでが仕様。
+  if (!manualRecordIsConfirmed(rec)) return null;
+  return rec;
+}
+
+/**
+ * 納品に使う問診を作る。**材料の合成と分岐の適用はここ 1 か所だけ** (§3.2/§5.2)。
+ *
+ *   XLSX の決定論写像 (Phase A)
+ *     + 確認済みの手入力 (XLSX の要確認を解決 / PDF は手入力だけ)
+ *     → production `resolvePath()` で分岐を適用
+ *     → final answers
+ *
+ * plan と deliver の両方がこれを呼ぶ (片方だけ分岐を当てると画面と納品物が食い違う)。
+ */
+async function resolveQuestionnaireForDelivery(
+  file: store.FileRow | undefined,
+): Promise<QuestionnaireNormalized | null> {
+  if (!file) return null;
+  const base = restoreQuestionnaire(file.normalized_payload);
+  const rec = await resolveManualRecord(file.id);
+  return finalizeQuestionnaire(base, rec);
+}
+
+/** 手入力を待っている状態か (入力が無い / 確認がまだ)。画面に理由を出すため。 */
+async function manualEntryPending(file: store.FileRow | undefined): Promise<boolean> {
+  if (!file) return false;
+  // 手入力が要るのは **PDF の問診だけ**。XLSX は分類時に読めている。
+  if (!/\.pdf$/i.test(file.display_name ?? '')) return false;
+  const pages = await store.listPages(file.id);
+  const row = pages.find((p) => p.page_no === MANUAL_QUESTIONNAIRE_PAGE_NO);
+  if (!row || !isManualQuestionnaireRecord(row.parsed)) return true;
+  return !manualRecordIsConfirmed(row.parsed);
+}
+
+/**
+ * 保存済みの手入力を読み出す (画面の再表示用)。
+ *
+ * **確認済みかどうかに関わらず返す** — 画面は「入力済みだが未確認」を出す必要がある。
+ * 納品に使ってよいかを決めるのは `resolveManualRecord` / `finalizeQuestionnaire` の側。
+ */
+export async function readManualQuestionnaire(batchId: string, fileId: string) {
+  const batch = await store.getBatch(batchId);
+  if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
+  const file = await store.getFile(fileId);
+  if (!file || file.batch_id !== batchId) return { ok: false as const, status: 404, error: 'file_not_found' };
+  const pages = await store.listPages(file.id);
+  const row = pages.find((p) => p.page_no === MANUAL_QUESTIONNAIRE_PAGE_NO);
+  const rec = row && isManualQuestionnaireRecord(row.parsed) ? row.parsed : null;
+  return {
+    ok: true as const,
+    record: rec
+      ? { ...rec, confirmed: manualRecordIsConfirmed(rec), same_actor: !!rec.confirmedBy && rec.confirmedBy === rec.enteredBy }
+      : null,
+  };
+}
+
+/**
+ * 問診の手入力を保存する (spec §7.4)。
+ *
+ * `confirm: true` で**二重確認**。入力した人と確認した人が同じでも保存はするが、
+ * **誰が入力し誰が確認したかを必ず残す** (画面に出して人が判断できるようにする)。
+ */
+export async function saveManualQuestionnaire(input: {
+  batchId: string;
+  fileId: string;
+  entries: ManualEntry[];
+  completedAt?: string | null;
+  sex?: string | null;
+  age?: number | null;
+  confirm?: boolean;
+  actor: Actor;
+}) {
+  const batch = await store.getBatch(input.batchId);
+  if (!batch) return { ok: false as const, status: 404, error: 'batch_not_found' };
+  const file = await store.getFile(input.fileId);
+  if (!file || file.batch_id !== input.batchId) return { ok: false as const, status: 404, error: 'file_not_found' };
+  if (file.classified_format_id !== 'LifestyleQuestionnaireData') {
+    return { ok: false as const, status: 400, error: 'not_a_questionnaire' };
+  }
+
+  const pages = await store.listPages(file.id);
+  const prevRow = pages.find((p) => p.page_no === MANUAL_QUESTIONNAIRE_PAGE_NO);
+  const prev = prevRow && isManualQuestionnaireRecord(prevRow.parsed) ? prevRow.parsed : null;
+
+  /*
+   * **確認は「今ある入力」に対してしか出せない。**
+   * 入力を差し替えたら確認はやり直し — でないと「A を確認したつもりが B が納品される」。
+   */
+  const entries = Array.isArray(input.entries) ? input.entries : [];
+  const isConfirmOnly = input.confirm === true && entries.length === 0 && prev !== null;
+  const nextEntries = isConfirmOnly ? prev.entries : entries;
+
+  // **保存する前に検証する。** 弾かれた入力は保存もしない (画面へ返す)。
+  const result = manualQuestionnaire({
+    entries: nextEntries,
+    completedAt: isConfirmOnly ? prev.completedAt : (input.completedAt ?? null),
+    sex: isConfirmOnly ? prev.sex : input.sex,
+    age: isConfirmOnly ? prev.age : input.age,
+  });
+
+  // `Actor.masked` は wellfort-site の中継が検証済み user.id から作ったもの。
+  // **ブラウザ申告の氏名は入らない** (§21)。
+  const actorMask = input.actor.masked;
+  const now = new Date().toISOString();
+  const rec: ManualQuestionnaireRecord = {
+    kind: 'manual_questionnaire',
+    entries: nextEntries,
+    completedAt: isConfirmOnly ? prev.completedAt : (input.completedAt ?? null),
+    sex: isConfirmOnly ? prev.sex : (input.sex ?? null),
+    age: isConfirmOnly ? prev.age : (input.age ?? null),
+    enteredBy: isConfirmOnly ? prev.enteredBy : actorMask,
+    enteredAt: isConfirmOnly ? prev.enteredAt : now,
+    // **入力を差し替えたら確認は外れる。**
+    confirmedBy: input.confirm === true ? actorMask : null,
+    confirmedAt: input.confirm === true ? now : null,
+  };
+
+  await store.upsertPage({
+    file_id: file.id, file_sha256: file.sha256, page_no: MANUAL_QUESTIONNAIRE_PAGE_NO,
+    status: 'done', parsed: rec, raw: null,
+  });
+  await store.logEvent({
+    batch_id: input.batchId,
+    /*
+     * **既存の event 名を使う** — `event` には DB 側の CHECK 制約があり
+     * (`20260910000020_ad_hoc_diagnosis.sql:396`)、名前を増やすと DDL が要る。
+     * 本案件は migration を足さない方針 (§13) なので、
+     * 入力=`parsed` / 確認=`confirmed` に寄せ、区別は `detail.kind` で付ける。
+     */
+    event: input.confirm === true ? 'confirmed' : 'parsed',
+    file_id: file.id,
+    // **件数だけ。回答の中身はログに出さない** (§16)。
+    detail: {
+      kind: 'manual_questionnaire',
+      accepted: result.normalized.mappedCount,
+      rejected: result.rejected.length,
+    },
+  });
+
+  return {
+    ok: true as const,
+    accepted: result.normalized.mappedCount,
+    rejected: result.rejected,
+    confirmed: manualRecordIsConfirmed(rec),
+    entered_by: rec.enteredBy,
+    confirmed_by: rec.confirmedBy,
+    // **入力者と確認者が同じなら画面で分かるようにする** (§7.4 は「別の管理者または同等の二重確認」)。
+    same_actor: !!rec.confirmedBy && rec.confirmedBy === rec.enteredBy,
+    completed_at: result.normalized.completedAt,
+  };
 }
 
 export async function processBatch(batchId: string, actor: Actor, options: ProcessOptions = {}) {
@@ -910,6 +1176,75 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
   }
 
   /*
+   * 健診 PDF のページ取り込み (spec §6.5)。
+   *
+   * **既存 production の `scanImageToParsed()` をそのまま呼ぶ。** ad-hoc 専用の
+   * 読み取りも prompt も作らない (spec §4.3 / §18「独自 HealthCheckup JSON parser」禁止)。
+   * ここで S3 へは書かない — `elith-hc-merge` の `action=part` は元画像を S3 へ置くが、
+   * **Human Review より前に実書き込みをしてはならない** (§6.5)。だから API ではなく
+   * 関数を直接呼び、保存先は診断 DB の `ad_hoc_diagnosis_pages` だけにする。
+   */
+  for (const p of options.healthPages ?? []) {
+    const file = await store.getFile(p.fileId);
+    if (!file || file.batch_id !== batchId) continue;
+
+    // 遺伝子と同じキャッシュ規則 — 成功済みページは Gemini を呼ばない。
+    const cached = await store.findCachedPage(file.sha256, p.page);
+    if (cached && !options.retryFailedOnly) {
+      await store.upsertPage({
+        file_id: file.id, file_sha256: file.sha256, page_no: p.page,
+        status: 'done', parsed: cached.parsed, raw: null,
+      });
+      continue;
+    }
+
+    try {
+      const scan = await scanImageToParsed({ imageBase64: p.imageBase64, mimeType: p.mimeType });
+      /*
+       * **`today` に落ちた日付は保存しない** (spec §6.4 / E2E 受入 11)。
+       *
+       * `extractExamDate()` は検査票から日付を読めなかったとき `source:'today'` で
+       * **その日の日付を返す**。通常の admin バッチはそれで運用しているが、本案件では
+       * 「日付を推定・today 補完しない」が受入条件なので、**ここで捨てて未解決にする**。
+       * 落とした結果どの人物も日付が取れなければ、その人物は管理者確認へ回る。
+       */
+      const resolved = scan.dateSource !== 'today' ? scan.testDate : null;
+      const payload: HealthPageParsed = {
+        measurements: scan.measurements as unknown[],
+        notes: Array.isArray(scan.notes) ? scan.notes : [],
+        // **生 Markdown はここで使い切る。** 真偽値だけ残して本文は保存しない (§2.4)。
+        isTrendPage: isTrendMarkdown(scan.markdown),
+        testDate: resolved,
+        dateSource: scan.dateSource,
+      };
+      await store.upsertPage({
+        file_id: file.id, file_sha256: file.sha256, page_no: p.page,
+        status: 'done', parsed: payload, raw: null,
+      });
+      await store.logEvent({
+        batch_id: batchId, event: 'page_done', file_id: file.id,
+        // **件数とページ番号だけ。** 検査値も氏名もログに出さない (§16)。
+        detail: { page: p.page, items: payload.measurements.length, kind: 'health_checkup' },
+      });
+    } catch (err) {
+      const msg = String(err).slice(0, 200);
+      await store.upsertPage({
+        file_id: file.id, file_sha256: file.sha256, page_no: p.page,
+        status: 'failed', error_detail: msg,
+      });
+      await store.logEvent({ batch_id: batchId, event: 'page_failed', file_id: file.id, detail: { page: p.page, kind: 'health_checkup' } });
+    }
+
+    /*
+     * **総ページ数はブラウザが数えた値を正とする** (pdf.js が実際に開いて数えている)。
+     * サーバ側の `countPdfPages` は正規表現の概算なので、完了判定の母数にしない。
+     */
+    if (Number.isInteger(p.pageCount) && p.pageCount > 0 && file.page_count !== p.pageCount) {
+      await store.updateFile(file.id, { page_count: p.pageCount });
+    }
+  }
+
+  /*
    * **ZIP を開き直さない** (Phase B2.1)。
    *
    * 以前はここで `analyzeOpened` を呼び、159MB の ZIP を毎回まるごと展開していた。
@@ -926,52 +1261,125 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
     let markers: Record<string, number> = {};
     let hcTestDate: string | null = null;
 
-    // ── 健診 ──
+    // ── 健診 (spec §6.2 / §6.5) ──
+    /*
+     * **HealthCheckupData は健診 PDF から作る。**
+     *
+     * v1.0 はここで `health-checkup-xlsx.ts` の 39 列 XLSX を読んで JSON にしていたが、
+     * v1.1 で**本経路から外した** (§6.2 / §19-C)。全 10 名に健診 PDF があり、
+     * 標準タイプ2 と同じ「健診スキャン」経路を正とするため。XLSX は照合・
+     * Golden 作成の補助資料に降格 (§6.3) — 納品 JSON の生成元にはしない。
+     *
+     * 整形は**本番と同じ共通 core** (`finalizeHealthCheckup`)。ad-hoc 側に
+     * 検査値の抽出も正規化も書かない (§4.3)。
+     */
     const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
-    const hcSheet = hcFile ? restoreHealthCheckupSheet(hcFile.normalized_payload) : null;
-    if (hcFile && !hcSheet) {
+    if (hcFile) {
+      const hcPages = await store.listPages(hcFile.id);
+      const donePages = hcPages.filter((p) => p.status === 'done');
+      const expected = hcFile.page_count ?? 0;
       /*
-       * **黙って落とさない。** 分類はされているのに材料が無い = 分類前の古い行
-       * (`normalized_payload` が入る前のバッチ) か、読めなかった XLSX。
-       * どちらも「分類し直せば直る」ので、理由をそのまま画面へ出す。
+       * **完了は「1..総ページ数が全部 done」**。ページ番号の集合で見るので、
+       * 通信断で行すら作られなかったページも未完了として出る (遺伝子と同じ規則・§8.6)。
        */
-      await store.upsertOutput({
-        subject_id: s.id, format_id: 'HealthCheckupData',
-        output_status: 'failed', validation_status: 'error',
-        error_detail: 'normalized_payload_missing',
-      });
-    }
-    if (hcFile && hcSheet) {
-      const built = buildHealthCheckupJson({ clientId: s.client_id, sheet: hcSheet });
-      hcTestDate = built.testDate;
-      markers = built.markers as Record<string, number>;
-      if (built.testDate) {
-        await store.upsertOutput({
-          subject_id: s.id, format_id: 'HealthCheckupData',
-          output_status: 'generated', validation_status: built.itemCount > 0 ? 'ok' : 'warn',
-          item_count: built.itemCount, test_date: built.testDate,
-          generated_at: new Date().toISOString(),
-        });
-        formats.push('HealthCheckupData');
-      } else {
-        // **test_date が確定しない人物は納品しない** (§5.3.8.1)
+      const seen = new Set(donePages.map((p) => p.page_no));
+      const missingHc = expected > 0
+        ? Array.from({ length: expected }, (_, i) => i + 1).filter((n) => !seen.has(n))
+        : [];
+
+      const parts = donePages
+        .slice()
+        .sort((a, b) => a.page_no - b.page_no)
+        .map((p) => restoreHealthPage(p.parsed))
+        .filter((x): x is HealthPageParsed => x !== null);
+
+      /*
+       * **日付は読めたページからだけ採る。** `today` 由来は取り込み時に捨ててある。
+       * 読めた日付が食い違うときは**どちらかを選ばず**管理者確認へ回す (§6.4・推定しない)。
+       */
+      const hcDates = Array.from(new Set(parts.map((p) => p.testDate).filter((d): d is string => !!d)));
+      const hcDate = hcDates.length === 1 ? hcDates[0] : null;
+
+      if (parts.length === 0) {
+        /*
+         * **黙って落とさない。** PDF がまだ読まれていない (解析前) か、
+         * 健診が XLSX しか無い人物。どちらも「分類し直す / 解析を実行する」で直るので
+         * 理由をそのまま画面へ出す。**XLSX へ勝手に切り替えない** (§6.2)。
+         */
         await store.upsertOutput({
           subject_id: s.id, format_id: 'HealthCheckupData',
           output_status: 'failed', validation_status: 'error',
-          item_count: built.itemCount, error_detail: 'test_date_unresolved',
+          error_detail: hcFile.source_kind === 'person_file' && expected === 0
+            ? 'health_pdf_not_scanned'
+            : 'health_pages_missing',
         });
+      } else if (missingHc.length > 0) {
+        await store.upsertOutput({
+          subject_id: s.id, format_id: 'HealthCheckupData',
+          output_status: 'failed', validation_status: 'warn',
+          error_detail: `missing_pages:${missingHc.join(',')}`,
+        });
+      } else if (!hcDate) {
+        // **today も ZIP 作成日も他検査の日付も入れない** (§6.4)。
+        await store.upsertOutput({
+          subject_id: s.id, format_id: 'HealthCheckupData',
+          output_status: 'failed', validation_status: 'error',
+          error_detail: hcDates.length > 1 ? `test_date_conflict:${hcDates.join(',')}` : 'test_date_unresolved',
+        });
+      } else {
+        const fin = finalizeHealthCheckup({
+          clientId: s.client_id,
+          testDate: hcDate,
+          parts,
+          note: '臨時診断バッチ (健診PDF・既存 scanImageToParsed + 本番 finalize core)。',
+          // **生 Markdown を納品 JSON へ載せない** — 氏名を含み得る (§16)。
+          includeRawMarkdown: false,
+        });
+        hcTestDate = hcDate;
+        markers = normalizeMarkers(
+          fin.measurements.map((m) => ({
+            name: typeof m.name === 'string' ? m.name : '',
+            value: m.value == null ? null : String(m.value),
+          })) as never,
+        ) as Record<string, number>;
+        await store.upsertOutput({
+          subject_id: s.id, format_id: 'HealthCheckupData',
+          output_status: 'generated', validation_status: fin.rows > 0 ? 'ok' : 'warn',
+          item_count: fin.rows, test_date: hcDate,
+          generated_at: new Date().toISOString(),
+        });
+        formats.push('HealthCheckupData');
       }
-      await store.updateFile(hcFile.id, { parse_status: built.testDate ? 'done' : 'failed', test_date: built.testDate });
+      await store.updateFile(hcFile.id, {
+        parse_status: parts.length > 0 && missingHc.length === 0 && hcDate ? 'done'
+          : parts.length > 0 ? 'processing' : 'pending',
+        test_date: hcDate,
+      });
     }
 
-    // ── 問診 ──
+    // ── 問診 (spec §7.3 / §7.4) ──
+    /*
+     * 材料の出どころは 2 つ。**順番が意味を持つ。**
+     *   ① 分類時に読んだ XLSX の `normalized_payload` (Phase A の決定論写像)
+     *   ② 管理者の手入力 (**二重確認済みのものだけ**)。PDF は②だけ / XLSX は①を②が上書き
+     *
+     * 合成したあと **production の分岐 (`resolvePath`) を適用**して active な answers にする。
+     * 全部 `resolveQuestionnaireForDelivery()` の中 (§3.2/§5.2)。
+     *
+     * **PDF を自動 parse した answers は無い** (v1.1 で本経路から外した・§7.4)。
+     * PDF の人物は ① が入るまで `needs_manual_entry` のまま = 納品対象にならない。
+     */
     const qFile = own.find((f) => f.classified_format_id === 'LifestyleQuestionnaireData');
-    const qRestored = qFile ? restoreQuestionnaire(qFile.normalized_payload) : null;
+    const qRestored = await resolveQuestionnaireForDelivery(qFile);
     if (qFile && !qRestored) {
       await store.upsertOutput({
         subject_id: s.id, format_id: 'LifestyleQuestionnaireData',
         output_status: 'failed', validation_status: 'error',
-        error_detail: 'normalized_payload_missing',
+        // **手入力待ちと材料欠落を区別する** — 対処がまるで違う
+        // (前者は人が入力する / 後者は分類し直す)。
+        error_detail: await manualEntryPending(qFile)
+          ? 'questionnaire_needs_manual_entry'
+          : 'normalized_payload_missing',
       });
     }
     if (qFile && qRestored) {
@@ -986,17 +1394,41 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
           subject_id: s.id, format_id: 'LifestyleQuestionnaireData',
           output_status: 'generated',
           // **未対応項目があっても人物を失敗にしない。** warn として残す。
-          validation_status: q.unmapped.length > 0 ? 'warn' : 'ok',
+          // **要確認だけを warn にする。** 仕様として捨てた列 (53〜62) は正常。
+          /*
+           * **ここへ来た時点で要確認は 0 件** (§4 のゲートを通っている)。
+           * warn になり得るのは「分岐で落とした設問がある」ときだけ = 正常。
+           */
+          validation_status: 'ok',
           item_count: built.answerCount, test_date: built.testDate,
           generated_at: new Date().toISOString(),
-          error_detail: q.unmapped.length ? `unmapped:${q.unmapped.length}` : null,
+          // **3 つを分けて残す** (契約)。件数だけ = 回答値は載せない (§16)。
+          error_detail: q.ignoredBySpec || q.ignoredByBranch
+            ? `ignored_by_spec:${q.ignoredBySpec} ignored_by_branch:${q.ignoredByBranch}`
+            : null,
         });
         formats.push('LifestyleQuestionnaireData');
       } else {
+        /*
+         * **なぜ納品しないのかを区別して残す** — 対処が違う。
+         *   needs_review … 管理者が原本を見て手入力で確定する (§5.2)
+         *   date         … 完了時刻が読めない (today で埋めない)
+         *   schema       … 62 列の契約と食い違う
+         *   no_answers   … 写像が 0 件
+         */
+        const why = (q.reviewQuestionIds?.length ?? 0) > 0
+          ? `needs_review:${q.reviewQuestionIds.length} ids:${q.reviewQuestionIds.slice(0, 12).join(',')}`
+          : (q.subjectReview?.length ?? 0) > 0
+            ? `subject_review:${q.subjectReview.join(',')}`
+            : q.schema && !q.schema.ok
+              ? `schema_mismatch:${q.schema.mismatches.length}`
+              : q.completedAt.status !== 'resolved'
+                ? 'completed_at_unresolved'
+                : 'no_answers_mapped';
         await store.upsertOutput({
           subject_id: s.id, format_id: 'LifestyleQuestionnaireData',
           output_status: 'failed', validation_status: 'error',
-          error_detail: 'no_answers_mapped',
+          error_detail: why,
         });
       }
       await store.updateFile(qFile.id, {
@@ -1010,21 +1442,31 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
     if (gFile) {
       const pages = await store.listPages(gFile.id);
       const doneParts: GeneticPagePart[] = pages
-        .filter((p) => p.status === 'done')
+        // **対象外ページの結果は納品へ混ぜない** (spec §8.5/§12.3)。
+        // 過去のバッチで p1〜9 / p36 以降の行が残っていても、v1 の納品物には入れない。
+        .filter((p) => p.status === 'done' && isGenoplanV1RequiredPage(p.page_no))
         .map((p) => {
           const parsed = (p.parsed ?? {}) as { section?: string | null; items?: unknown[] };
           return { page: p.page_no, section: parsed.section ?? null, items: parsed.items ?? [] };
         });
-      const failed = pages.filter((p) => p.status === 'failed').length;
+      const failed = pages.filter((p) => p.status === 'failed' && isGenoplanV1RequiredPage(p.page_no)).length;
       /*
-       * **読み切れていないページが 1 枚でもあるか** (failed / pending / processing)。
-       * `failed` だけを見ると、途中で止まった (pending のまま) PDF が
-       * 「失敗 0 件」として通ってしまう。
+       * **完了判定は「必要な p10〜35 が揃っているか」で見る** (spec §8.6・v1.1)。
+       *
+       * 以前はここが「登録済みの行が全部 done か」だった。その方式には穴があり、
+       * **通信断でそのページの行自体が作られなかった場合に完了扱いになる**
+       * (サーバはそのページの存在を知らないので、数えようがない)。
+       * 必要な集合の側から引けば、行が無いページも `missing` として出る。
        *
        * **`page_count` は使わない** — あれは `countPdfPages` の正規表現による概算で、
-       * 外すと**操作で直せない状態で納品が永久に止まる**。ここで見るのは実在の行だけ。
+       * 外すと操作で直せない状態で納品が永久に止まる。
+       * **p1〜9 / p36 以降の行が過去のバッチで残っていても母数に含めない**
+       * (`missingGenoplanV1Pages` が対象外を落とす)。
        */
-      const incomplete = pages.filter((p) => p.status !== 'done').length;
+      const missingPages = missingGenoplanV1Pages(
+        pages.filter((p) => p.status === 'done').map((p) => p.page_no),
+      );
+      const incomplete = missingPages.length;
       /*
        * **遺伝子の日付は遺伝子ファイル自身のもの** (§10・Phase B1 で是正)。
        * 以前は健診の `hcTestDate` を流用していたが、健診日と採取日は別物で、
@@ -1066,7 +1508,10 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
           error_detail: !gTestDate
             ? 'test_date_unresolved'
             : incomplete > 0
-              ? `incomplete_pages:${incomplete}${failed > 0 ? ` failed_pages:${failed}` : ''}`
+              // **どのページが足りないかまで出す** — 「26 枚中 25 枚」だけでは
+              // 現場が retry 後も同じページで止まっていることに気づけない。
+              // 出すのはページ番号だけ (健康情報を error へ写さない・spec §16)。
+              ? `missing_pages:${missingPages.join(',')}${failed > 0 ? ` failed_pages:${failed}` : ''}`
               : null,
         });
         /*
@@ -1144,12 +1589,36 @@ export async function healthAgeCheck(batchId: string) {
   // **ZIP を開かない** (Phase B2.1)。材料は分類時に保存済み。
   const subjects = await store.listSubjects(batchId);
   const files = await store.listFiles(batchId);
-  const rows = subjects.map((s) => {
+  const rows = await Promise.all(subjects.map(async (s) => {
     const own = files.filter((f) => f.subject_id === s.id);
     const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
-    const hc = hcFile ? restoreHealthCheckupSheet(hcFile.normalized_payload) : null;
-    const markers = hc ? buildHealthCheckupJson({ clientId: s.client_id, sheet: hc }).markers : {};
-    const testDate = hc?.testDate.status === 'resolved' ? hc.testDate.date : null;
+    /*
+     * **ウェルネス年齢の材料も健診 PDF から採る** (spec §6.2)。
+     * 納品 JSON を PDF から作るのに年齢だけ XLSX から作ると、
+     * **画面の数字と納品物の materials が食い違う**。材料は 1 つに揃える。
+     */
+    const hcPages = hcFile ? await store.listPages(hcFile.id) : [];
+    const hcParts = hcPages
+      .filter((p) => p.status === 'done')
+      .sort((a, b) => a.page_no - b.page_no)
+      .map((p) => restoreHealthPage(p.parsed))
+      .filter((x): x is HealthPageParsed => x !== null);
+    const hcDates = Array.from(new Set(hcParts.map((p) => p.testDate).filter((d): d is string => !!d)));
+    const testDate = hcDates.length === 1 ? hcDates[0] : null;
+    const markers = hcParts.length > 0
+      ? (normalizeMarkers(
+          finalizeHealthCheckup({
+            clientId: s.client_id,
+            // key を組まないので日付は表示用。**納品には使わない。**
+            testDate: testDate ?? '1970-01-01',
+            parts: hcParts,
+            includeRawMarkdown: false,
+          }).measurements.map((m) => ({
+            name: typeof m.name === 'string' ? m.name : '',
+            value: m.value == null ? null : String(m.value),
+          })) as never,
+        ) as Record<string, number>)
+      : {};
     const wa = computeSubjectWellnessAge({
       clientId: s.client_id,
       markers: markers as Record<string, number>,
@@ -1168,13 +1637,166 @@ export async function healthAgeCheck(batchId: string) {
       missing_simple: wa.result?.missing_simple ?? [],
       message: wa.message,
     };
-  });
+  }));
   return { ok: true as const, subjects: rows };
 }
 
 // ---------------------------------------------------------------------------
 // ⑦⑧ finalize / export : 納品セットを組む → dry-run か 実書き込み
 // ---------------------------------------------------------------------------
+
+/**
+ * **1 人ぶんの納品ファイルを組む。ここが納品 JSON の唯一の生成点。**
+ *
+ * `assembleBatch()` (通常の dry-run / 本番納品) と
+ * `exportSingleDeliveryFile()` (E2E 確認の 1 件書き出し) が**同じこれを呼ぶ**ので、
+ * **どちらの経路でも body はバイト単位で同じ**になる。
+ * E2E 用に別の builder を作らない (作ると「確認した JSON と納品した JSON が別物」になる)。
+ *
+ * **readiness はここで見ない。** 「組めたか」と「納品してよいか」は別の判断で、
+ * 後者は呼び出し側 (`evaluateReadiness` → write-guard) が持つ。
+ */
+interface SubjectBuild {
+  built: DeliveryFile[];
+  formats: string[];
+  hcTestDate: string | null;
+  /**
+   * 健診 JSON の来歴 (監査用・納品 JSON には入れない)。
+   * **「健診 PDF のページを本番 finalize core へ通した」以外の作り方をしていない**ことを
+   * 画面と報告に出すために持つ (§5 / v1.1 §6.5)。
+   */
+  hcSource: {
+    fileName: string | null;
+    pagesDone: number;
+    pagesExpected: number;
+    /** 本番 `scanImageToParsed()` → `finalizeHealthCheckup()` を通ったか。 */
+    finalizeCore: boolean;
+  } | null;
+}
+
+async function buildSubjectDelivery(
+  s: store.SubjectRow,
+  own: store.FileRow[],
+  cfg: { prefix: string },
+): Promise<SubjectBuild> {
+  const formats: string[] = [];
+  const built: DeliveryFile[] = [];
+  let hcTestDate: string | null = null;
+  let hcSource: SubjectBuild['hcSource'] = null;
+  let markers: Record<string, number> = {};
+
+  /*
+   * 健診 (spec §6.2 / §6.5)。**process 経路と同じ規則**で組む
+   * — 納品する JSON と画面で確認した JSON が別物になってはいけない。
+   * 材料は健診 PDF のページ解析結果。**XLSX からは作らない** (v1.1 で本経路から外した)。
+   */
+  const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
+  if (hcFile) {
+    const hcPages = await store.listPages(hcFile.id);
+    const doneHc = hcPages.filter((p) => p.status === 'done');
+    const expectedHc = hcFile.page_count ?? 0;
+    const seenHc = new Set(doneHc.map((p) => p.page_no));
+    const hcComplete = expectedHc > 0
+      && Array.from({ length: expectedHc }, (_, i) => i + 1).every((n) => seenHc.has(n));
+    const hcParts = doneHc
+      .slice()
+      .sort((a, b) => a.page_no - b.page_no)
+      .map((p) => restoreHealthPage(p.parsed))
+      .filter((x): x is HealthPageParsed => x !== null);
+    const hcDates = Array.from(new Set(hcParts.map((p) => p.testDate).filter((d): d is string => !!d)));
+    const hcDate = hcDates.length === 1 ? hcDates[0] : null;
+    // **欠けたページ・未確定の日付があれば組まない** (欠けたまま納品すると受け取った側は気づけない)。
+    if (hcParts.length > 0 && hcComplete && hcDate) {
+      const fin = finalizeHealthCheckup({
+        clientId: s.client_id,
+        testDate: hcDate,
+        parts: hcParts,
+        note: '臨時診断バッチ (健診PDF・既存 scanImageToParsed + 本番 finalize core)。',
+        includeRawMarkdown: false,
+      });
+      hcTestDate = hcDate;
+      markers = normalizeMarkers(
+        fin.measurements.map((m) => ({
+          name: typeof m.name === 'string' ? m.name : '',
+          value: m.value == null ? null : String(m.value),
+        })) as never,
+      ) as Record<string, number>;
+      built.push(toDeliveryFile(cfg.prefix, s.client_id, 'HealthCheckupData', hcDate, fin.json));
+      formats.push('HealthCheckupData');
+      /*
+       * **来歴を残す。** ここへ来ている時点で材料は健診 PDF のページ解析結果
+       * (`scanImageToParsed` の保存物) で、`finalizeHealthCheckup()` を通っている。
+       * **`health-checkup-xlsx.ts` の経路はここに無い** (v1.1 で本経路から外した)。
+       */
+      hcSource = {
+        fileName: hcFile.display_name ?? null,
+        pagesDone: doneHc.length,
+        pagesExpected: expectedHc,
+        finalizeCore: true,
+      };
+    }
+  }
+
+  // 問診
+  const qFile = own.find((f) => f.classified_format_id === 'LifestyleQuestionnaireData');
+  // **plan と同じ合成・同じ分岐を通す** (ここだけ素の payload を使うと納品物が画面と食い違う)。
+  const q = await resolveQuestionnaireForDelivery(qFile);
+  if (q && questionnaireIsUsable(q)) {
+    const b = buildQuestionnaireJson({
+      clientId: s.client_id, diagnosticId: s.diagnostic_id ?? s.client_id, normalized: q,
+    });
+    built.push(toDeliveryFile(cfg.prefix, s.client_id, 'LifestyleQuestionnaireData', b.testDate, b.json));
+    formats.push('LifestyleQuestionnaireData');
+  }
+
+  // 遺伝子
+  const gFile = own.find((f) => f.classified_format_id === 'GeneticTestResultData');
+  if (gFile) {
+    const pages = await store.listPages(gFile.id);
+    const parts: GeneticPagePart[] = pages
+      // **対象外ページを納品へ混ぜない** (spec §8.5)。process 経路と同じ規則。
+      .filter((p) => p.status === 'done' && isGenoplanV1RequiredPage(p.page_no))
+      .map((p) => {
+        const parsed = (p.parsed ?? {}) as { section?: string | null; items?: unknown[] };
+        return { page: p.page_no, section: parsed.section ?? null, items: parsed.items ?? [] };
+      });
+    /*
+     * **遺伝子の日付は遺伝子ファイル自身のもの** (§10)。
+     * ここは納品 key を組む場所なので、健診日を流用すると
+     * `date/{YYYY_MM_DD}/GeneticTestResultData_date_{YYYY_MM_DD}_...` が
+     * まるごと誤った日付で S3 に置かれる。**取れないなら納品しない。**
+     */
+    const gTestDate = gFile.test_date ?? null;
+    /*
+     * **必要な p10〜35 が 1 枚でも欠けていれば組まない** (process 経路と同じ規則)。
+     * 成功ページだけで JSON を作ると、**落ちたページの中身が無いまま
+     * 「遺伝子検査の結果」として納品される** (受け取った側は欠けに気づけない)。
+     * ここで組まなければ readiness が
+     * `optional_present_but_not_ready:GeneticTestResultData` で止まり、
+     * retry で全ページ成功してから納品される。
+     */
+    const gIncomplete = missingGenoplanV1Pages(
+      pages.filter((p) => p.status === 'done').map((p) => p.page_no),
+    ).length;
+    if (parts.length > 0 && gTestDate && gIncomplete === 0) {
+      const b = buildGeneticJson({ clientId: s.client_id, parts, testDate: gTestDate });
+      built.push(toDeliveryFile(cfg.prefix, s.client_id, 'GeneticTestResultData', gTestDate, b.json));
+      formats.push('GeneticTestResultData');
+    }
+  }
+
+  // ウェルネス年齢 (任意)
+  const wa = computeSubjectWellnessAge({
+    clientId: s.client_id, markers, age: s.age,
+    sex: s.sex === 'unknown' ? null : s.sex, testDate: hcTestDate,
+  });
+  if (wa.json && hcTestDate) {
+    built.push(toDeliveryFile(cfg.prefix, s.client_id, 'HealthAgeData', hcTestDate, wa.json));
+    formats.push('HealthAgeData');
+  }
+
+  return { built, formats, hcTestDate, hcSource };
+}
 
 export interface AssemblyResult {
   ok: true;
@@ -1204,77 +1826,10 @@ export async function assembleBatch(input: {
 
   for (const s of subjects) {
     const own = files.filter((f) => f.subject_id === s.id);
-    const formats: string[] = [];
-    const built: DeliveryFile[] = [];
-    let hcTestDate: string | null = null;
-    let markers: Record<string, number> = {};
-
-    // 健診
-    const hcFile = own.find((f) => f.classified_format_id === 'HealthCheckupData');
-    const hc = hcFile ? restoreHealthCheckupSheet(hcFile.normalized_payload) : null;
-    if (hc) {
-      const b = buildHealthCheckupJson({ clientId: s.client_id, sheet: hc });
-      hcTestDate = b.testDate;
-      markers = b.markers as Record<string, number>;
-      if (b.testDate) {
-        built.push(toDeliveryFile(cfg.prefix, s.client_id, 'HealthCheckupData', b.testDate, b.json));
-        formats.push('HealthCheckupData');
-      }
-    }
-
-    // 問診
-    const qFile = own.find((f) => f.classified_format_id === 'LifestyleQuestionnaireData');
-    const q = qFile ? restoreQuestionnaire(qFile.normalized_payload) : null;
-    if (q && questionnaireIsUsable(q)) {
-      const b = buildQuestionnaireJson({
-        clientId: s.client_id, diagnosticId: s.diagnostic_id ?? s.client_id, normalized: q,
-      });
-      built.push(toDeliveryFile(cfg.prefix, s.client_id, 'LifestyleQuestionnaireData', b.testDate, b.json));
-      formats.push('LifestyleQuestionnaireData');
-    }
-
-    // 遺伝子
-    const gFile = own.find((f) => f.classified_format_id === 'GeneticTestResultData');
-    if (gFile) {
-      const pages = await store.listPages(gFile.id);
-      const parts: GeneticPagePart[] = pages
-        .filter((p) => p.status === 'done')
-        .map((p) => {
-          const parsed = (p.parsed ?? {}) as { section?: string | null; items?: unknown[] };
-          return { page: p.page_no, section: parsed.section ?? null, items: parsed.items ?? [] };
-        });
-      /*
-       * **遺伝子の日付は遺伝子ファイル自身のもの** (§10)。
-       * ここは納品 key を組む場所なので、健診日を流用すると
-       * `date/{YYYY_MM_DD}/GeneticTestResultData_date_{YYYY_MM_DD}_...` が
-       * まるごと誤った日付で S3 に置かれる。**取れないなら納品しない。**
-       */
-      const gTestDate = gFile.test_date ?? null;
-      /*
-       * **読み切れていないページがあれば組まない** (process 経路と同じ規則)。
-       * 成功ページだけで JSON を作ると、**落ちたページの中身が無いまま
-       * 「遺伝子検査の結果」として納品される** (受け取った側は欠けに気づけない)。
-       * ここで組まなければ readiness が
-       * `optional_present_but_not_ready:GeneticTestResultData` で止まり、
-       * retry で全ページ成功してから納品される。
-       */
-      const gIncomplete = pages.filter((p) => p.status !== 'done').length;
-      if (parts.length > 0 && gTestDate && gIncomplete === 0) {
-        const b = buildGeneticJson({ clientId: s.client_id, parts, testDate: gTestDate });
-        built.push(toDeliveryFile(cfg.prefix, s.client_id, 'GeneticTestResultData', gTestDate, b.json));
-        formats.push('GeneticTestResultData');
-      }
-    }
-
-    // ウェルネス年齢 (任意)
-    const wa = computeSubjectWellnessAge({
-      clientId: s.client_id, markers, age: s.age,
-      sex: s.sex === 'unknown' ? null : s.sex, testDate: hcTestDate,
-    });
-    if (wa.json && hcTestDate) {
-      built.push(toDeliveryFile(cfg.prefix, s.client_id, 'HealthAgeData', hcTestDate, wa.json));
-      formats.push('HealthAgeData');
-    }
+    // **納品ファイルの組み立ては 1 か所だけ** (E2E の 1 件書き出しも同じこれを呼ぶ)。
+    const b = await buildSubjectDelivery(s, own, cfg);
+    const built = b.built;
+    const formats = b.formats;
 
     const readiness = evaluateReadiness({
       producedFormats: formats,
@@ -1379,6 +1934,208 @@ export async function assembleBatch(input: {
   return {
     ok: true, dryRun: false, files: listed, skipped, totalBytes,
     written: written.map((w) => ({ key: w.key, uri: w.uri })),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// ⑧′ E2E 確認用: 1 ファイルだけを実際の Elith 納品先へ書く
+// ---------------------------------------------------------------------------
+
+export interface SingleWriteResult {
+  ok: true;
+  batchId: string;
+  subjectNo: number;
+  clientId: string;
+  formatId: string;
+  testDate: string;
+  bucket: string;
+  key: string;
+  bytes: number;
+  existingBefore: false;
+  writeResult: 'created';
+  existsAfter: boolean;
+  etag: string | null;
+  /** 健診 JSON の来歴 (§5 の確認項目)。 */
+  source: { healthSource: string | null; pagesDone: number; pagesExpected: number; finalizeCore: boolean; xlsxGenerated: false } | null;
+  /**
+   * **実際に PUT した本文そのもの。**
+   *
+   * 「S3 に 1 ファイル在ったこと」では確認にならない (§10) ので、原本 PDF と
+   * 突き合わせられるよう本文を返す。**ログには出さない**・**repo にも入れない**。
+   * 納品 JSON は設計上 PII を含まない (`client_id` は UUID) ので、
+   * 認可済みの管理画面へ返してよい。
+   */
+  body: string;
+}
+
+type SingleWriteFail = { ok: false; status: number; error: string; detail?: string };
+
+/**
+ * **坂田氏 1 名の E2E 確認のための「1 JSON だけ実書き込み」** (最終指示書 §1〜§12)。
+ *
+ * これは**正式なバッチ納品ではない**。したがって
+ *   - `batch.status` を `completed` にしない
+ *   - 他 format の output を `exported` にしない
+ *   - 通常 export の完了イベント (`exported`) を発火しない
+ * → 通常の一括納品から見ると、このバッチは**引き続き未納品**のまま (§8)。
+ *
+ * **通常納品の規則は 1 つも緩めていない** — `assembleBatch()` も
+ * `checkWriteGate()` の部分納品禁止も 1 文字も変えていない (§2)。
+ * 書く本文は `buildSubjectDelivery()` が作った `DeliveryFile.body` そのもので、
+ * **通常納品時に S3 へ書く JSON と完全に同じ** (§3)。
+ */
+export async function exportSingleDeliveryFile(input: {
+  batchId: string;
+  subjectId: string;
+  formatId: string;
+  /** 操作者が原資料から読み取った検査日。**食い違えば書かない** (today 混入の番人・§5)。 */
+  expectTestDate: string;
+  actor: Actor;
+}): Promise<SingleWriteResult | SingleWriteFail> {
+  const cfg = getS3Config();
+  if (!cfg) return { ok: false, status: 503, error: 's3_not_configured' };
+  const batch = await store.getBatch(input.batchId);
+  if (!batch) return { ok: false, status: 404, error: 'batch_not_found' };
+
+  const subjects = await store.listSubjects(input.batchId);
+  const s = subjects.find((x) => x.id === input.subjectId);
+  if (!s) return { ok: false, status: 404, error: 'subject_not_found' };
+
+  /*
+   * **人物が実在の役員へ明示的に紐付いていること** (§5)。
+   * ここを飛ばすと「誰のものか確定していない JSON」を本番の納品先へ置くことになる。
+   */
+  if (!s.executive_subject_id) {
+    return {
+      ok: false, status: 409, error: 'executive_not_linked',
+      detail: 'Executive Subject が紐付いていません。誰の結果か確定しないまま書き込みません。',
+    };
+  }
+
+  const files = await store.listFiles(input.batchId);
+  const own = files.filter((f) => f.subject_id === s.id);
+  // **通常納品と同じ組み立て。** E2E 用の builder は作らない (§3)。
+  const b = await buildSubjectDelivery(s, own, cfg);
+
+  /*
+   * **ちょうど 1 件でなければ書かない** (§4)。0 件は「まだ組めていない」、
+   * 2 件以上は「どれを書くか決められない」。どちらも PUT を始めない。
+   */
+  const hits = b.built.filter((f) => f.formatId === input.formatId);
+  if (hits.length !== 1) {
+    return {
+      ok: false, status: 409, error: 'not_exactly_one_file',
+      detail: `${input.formatId} の納品ファイルが ${hits.length} 件です (ちょうど 1 件のときだけ書き込みます)。`,
+    };
+  }
+  const file = hits[0];
+
+  /*
+   * **日付の番人** (§5「today fallback は禁止」)。
+   * 組み上がった `test_date` は健診 PDF から読んだ日付で、`dateSource==='today'` は
+   * 上流で捨ててある。ここではさらに**操作者が原資料で確認した日付との一致**を要求する。
+   * 一致しなければ書かない — 誤った日付フォルダへ置くと後から直せない。
+   */
+  if (file.testDate !== input.expectTestDate) {
+    return {
+      ok: false, status: 409, error: 'test_date_mismatch',
+      detail: `test_date が一致しません (生成=${file.testDate} / 指定=${input.expectTestDate})。`,
+    };
+  }
+  /*
+   * **本文そのものを検査する** (§10)。key の形は `validateDeliveryKey()` が見るが、
+   * それは**ファイル名の話**で、中身の `client_id` / `format_id` / `test_date` が
+   * 揃っていることの証明にはならない。置いたあとで気づいても消せないので先に見る。
+   */
+  let parsed: { format_id?: unknown; client_id?: unknown; test_date?: unknown };
+  try {
+    parsed = JSON.parse(file.body) as typeof parsed;
+  } catch {
+    return { ok: false, status: 500, error: 'body_not_json', detail: '納品 JSON を読めませんでした。' };
+  }
+  const mismatches: string[] = [];
+  if (parsed.format_id !== input.formatId) mismatches.push(`format_id=${String(parsed.format_id)}`);
+  if (parsed.client_id !== s.client_id) mismatches.push('client_id が人物の既存値と違う');
+  if (parsed.test_date !== input.expectTestDate) mismatches.push(`test_date=${String(parsed.test_date)}`);
+  if (mismatches.length > 0) {
+    return {
+      ok: false, status: 409, error: 'body_mismatch',
+      detail: `納品 JSON の中身が想定と違います (${mismatches.join(' / ')})。`,
+    };
+  }
+
+  // env 2 本 + 書き込み先の完全一致 + key の形。**安全側の検査は 1 つも外さない。**
+  const gate = checkSingleFileWriteGate(file);
+  if (!gate.ok) return { ok: false, status: gate.status, error: gate.error, detail: gate.detail };
+
+  /*
+   * **既に在れば止める** (§6)。上書きしない・消して書き直さない。
+   * 確認に失敗した場合も書かない (`preflightNoExistingObjects` が中止する)。
+   */
+  const pre = await preflightNoExistingObjects([file.key], gate.cfg);
+  if (!pre.ok) return { ok: false, status: pre.status, error: pre.error, detail: pre.detail };
+
+  try {
+    await putDeliveryFilesCreateOnly(
+      [{ key: file.key, body: file.body, bytes: file.bytes }],
+      gate.cfg,
+    );
+  } catch (e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    /*
+     * **バッチの status を触らない。** これは正式な納品ではないので、
+     * 失敗しても `failed` にしない (通常の納品フローの状態を汚さない)。
+     */
+    return { ok: false, status: 502, error: 'single_write_failed', detail };
+  }
+
+  // **PUT したら必ず読み戻す** (§9)。書けたつもりで終わらせない。
+  const after = await headDeliveryObject(file.key, gate.cfg);
+
+  /*
+   * **監査だけは残す。** `event` は DB 側に CHECK 制約があるので既存の名前を使い、
+   * 区別は `detail.kind` で付ける (新しい migration を足さない)。
+   * **本文も値もログに出さない** — 件数と key だけ。
+   */
+  await store.logEvent({
+    batch_id: input.batchId,
+    event: 'override',
+    subject_id: s.id,
+    actor_user_id: input.actor.userId, actor_masked: input.actor.masked, actor_sha256: input.actor.sha256,
+    detail: {
+      kind: 'e2e_single_write',
+      format_id: file.formatId,
+      key: file.key,
+      bytes: file.bytes,
+      test_date: file.testDate,
+    },
+  });
+
+  return {
+    ok: true,
+    batchId: input.batchId,
+    subjectNo: s.subject_no,
+    clientId: s.client_id,
+    formatId: file.formatId,
+    testDate: file.testDate,
+    bucket: gate.cfg.bucket,
+    key: file.key,
+    bytes: file.bytes,
+    existingBefore: false,
+    writeResult: 'created',
+    existsAfter: after.exists,
+    etag: after.etag,
+    source: b.hcSource && file.formatId === 'HealthCheckupData'
+      ? {
+        healthSource: b.hcSource.fileName,
+        pagesDone: b.hcSource.pagesDone,
+        pagesExpected: b.hcSource.pagesExpected,
+        finalizeCore: b.hcSource.finalizeCore,
+        // **健診 XLSX からは作らない** (v1.1 で本経路から外した)。
+        xlsxGenerated: false,
+      }
+      : null,
+    body: file.body,
   };
 }
 

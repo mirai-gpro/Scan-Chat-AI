@@ -35,4 +35,5 @@
 | `ai_prevention_report_REVERT_LIST.md` | 1 回目のリバート記録。作業は完了済み |
 | `2026-08-30_admin判定とデモゲートの試行錯誤.md` | **デモ＝admin 限定**だった頃の §4.6 と、その日の試行錯誤・撤回した仮説・実装バグの記録。現行は「本線＝デモ用アカウント (uid) / 追加＝admin」で、順序も違う（`docs/operations/デモ用アカウント_仕様書.md` が正） |
 | `総合テスト向け_入場制御とデモ表示_変更連絡.md` | 「**admin の管理者メンバーだけがデモを見る**」と宣言した連絡文。**前提が変わった**（現行は本線＝デモ用アカウント）。参照ブランチ `claude/ai-prevention-report-feature-fedsqt` とコミット 4 件も現行の本番ブランチのものではない |
+| `臨時診断バッチ/ad_hoc_diagnosis_batch_spec.md` | 臨時診断バッチ **v1.0**（150KB）。現行は **v1.1**（`docs/lab/ad_hoc_diagnosis_batch_spec.md`）。食い違う点 = ①健診を ad-hoc 独自 XLSX parser で `HealthCheckupData` にしていた（現行は **production HealthCheckup scan へ結線**）②Genoplan を全 208/210 ページ走査していた（現行は **p10〜35 のみ**・cache は走査の理由にならない）③問診の写像表を「実装済み・CLOSE」としていた（現行は**実物 62 列 schema で作り直し**、PDF は**手動確認入力**） |
 | `AI疾病予防報告書_リバート一覧_20260830.md` | 2026-08-30 セッションのリバート候補一覧。**リバートは実施しない判断になった**（該当の実装は現行として生きている）ので、記録としてのみ残す |
