@@ -56,7 +56,8 @@
     "verify:transcos-zip-shape": "node scripts/verify-transcos-zip-shape.mjs",
     "verify:transcos-real-zip": "node scripts/verify-transcos-real-zip.mjs",
     "verify:transcos-pipeline": "node scripts/verify-transcos-pipeline.mjs",
-    "verify:transcos": "npm run verify:transcos-manifest && npm run verify:transcos-zip-shape && npm run verify:transcos-pipeline",
+    "verify:transcos-api": "node scripts/verify-transcos-api.mjs",
+    "verify:transcos": "npm run verify:transcos-manifest && npm run verify:transcos-zip-shape && npm run verify:transcos-pipeline && npm run verify:transcos-api",
     "verify:ad-hoc-e2e": "node scripts/verify-ad-hoc-e2e.mjs",
     "verify:executive-diagnosis": "node scripts/verify-executive-diagnosis.mjs"
   },

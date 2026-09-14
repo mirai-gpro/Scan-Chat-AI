@@ -928,6 +928,16 @@ export interface ProcessOptions {
   }[];
   /** 失敗したページだけを対象にする。 */
   retryFailedOnly?: boolean;
+  /**
+   * **ページの取り込みだけで止める** (既定 false = 従来どおり組み立てまで進む)。
+   *
+   * 1 ページ = 1 リクエストで 200 ページ以上を送る経路では、
+   * 毎回 10 人ぶんの組み立てをやり直すと**取り込みより組み立ての方が高くつく**。
+   * 組み立ては最後に 1 回呼べば同じ結果になる (材料は DB に在る) ので、
+   * 呼び出し側が明示したときだけ手前で返す。
+   * **既存の呼び出しは指定しないので挙動は変わらない。**
+   */
+  pagesOnly?: boolean;
 }
 
 /**
@@ -1251,6 +1261,14 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
    * 分割分類を入れても、**この 1 か所が残っていれば結局タイムアウトする**。
    * 材料は分類のときに `normalized_payload` として保存済みなので、DB から復元する。
    */
+  if (options.pagesOnly === true) {
+    // **取り込みだけ。** 組み立ては呼び出し側が最後に 1 回行う。
+    return {
+      ok: true as const, batchId, pages: pageResults, subjects: [], ready: false,
+      pagesOnly: true as const,
+    };
+  }
+
   const subjects = await store.listSubjects(batchId);
   const files = await store.listFiles(batchId);
   const produced: { subjectId: string; formats: string[] }[] = [];
