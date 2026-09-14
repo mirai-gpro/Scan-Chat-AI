@@ -8,7 +8,10 @@
 import { getS3Config } from '../s3';
 import { checkWriteGate, preflightNoExistingObjects, putDeliveryFilesCreateOnly } from './write-guard';
 import { refreshConfig } from '../app-config';
-import { scanGeneticPage } from '../elith-genetic';
+import {
+  GENOPLAN_V1_REQUIRED_PAGES, isGenoplanV1RequiredPage, missingGenoplanV1Pages,
+  scanGeneticPage,
+} from '../elith-genetic';
 import * as store from './store';
 import { adHocZipKey } from './keys';
 import { headAdHocZip, deleteAdHocZip, createAdHocUploadTicket } from './ticket';
@@ -602,6 +605,14 @@ export async function batchStatus(batchId: string) {
       // **fingerprint は先頭 8 文字だけ** (§6.2.1)
       source_sha256_short: batch.source_sha256.slice(0, 8),
     },
+    /*
+     * **Genoplan の対象ページを API から配る** (spec §8.5・v1.1)。
+     *
+     * wellfort-site に `10` / `35` を独立した正本として持たせない。UI は
+     * この配列に在るページだけを画像化して送る。正本は
+     * `elith-genetic.ts` の `GENOPLAN_V1_REQUIRED_PAGES` ひとつ。
+     */
+    geneticRequiredPages: GENOPLAN_V1_REQUIRED_PAGES,
     subjects: subjects.map((s) => {
       const own = files.filter((f) => f.subject_id === s.id);
       /*
@@ -1010,21 +1021,31 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
     if (gFile) {
       const pages = await store.listPages(gFile.id);
       const doneParts: GeneticPagePart[] = pages
-        .filter((p) => p.status === 'done')
+        // **対象外ページの結果は納品へ混ぜない** (spec §8.5/§12.3)。
+        // 過去のバッチで p1〜9 / p36 以降の行が残っていても、v1 の納品物には入れない。
+        .filter((p) => p.status === 'done' && isGenoplanV1RequiredPage(p.page_no))
         .map((p) => {
           const parsed = (p.parsed ?? {}) as { section?: string | null; items?: unknown[] };
           return { page: p.page_no, section: parsed.section ?? null, items: parsed.items ?? [] };
         });
-      const failed = pages.filter((p) => p.status === 'failed').length;
+      const failed = pages.filter((p) => p.status === 'failed' && isGenoplanV1RequiredPage(p.page_no)).length;
       /*
-       * **読み切れていないページが 1 枚でもあるか** (failed / pending / processing)。
-       * `failed` だけを見ると、途中で止まった (pending のまま) PDF が
-       * 「失敗 0 件」として通ってしまう。
+       * **完了判定は「必要な p10〜35 が揃っているか」で見る** (spec §8.6・v1.1)。
+       *
+       * 以前はここが「登録済みの行が全部 done か」だった。その方式には穴があり、
+       * **通信断でそのページの行自体が作られなかった場合に完了扱いになる**
+       * (サーバはそのページの存在を知らないので、数えようがない)。
+       * 必要な集合の側から引けば、行が無いページも `missing` として出る。
        *
        * **`page_count` は使わない** — あれは `countPdfPages` の正規表現による概算で、
-       * 外すと**操作で直せない状態で納品が永久に止まる**。ここで見るのは実在の行だけ。
+       * 外すと操作で直せない状態で納品が永久に止まる。
+       * **p1〜9 / p36 以降の行が過去のバッチで残っていても母数に含めない**
+       * (`missingGenoplanV1Pages` が対象外を落とす)。
        */
-      const incomplete = pages.filter((p) => p.status !== 'done').length;
+      const missingPages = missingGenoplanV1Pages(
+        pages.filter((p) => p.status === 'done').map((p) => p.page_no),
+      );
+      const incomplete = missingPages.length;
       /*
        * **遺伝子の日付は遺伝子ファイル自身のもの** (§10・Phase B1 で是正)。
        * 以前は健診の `hcTestDate` を流用していたが、健診日と採取日は別物で、
@@ -1066,7 +1087,10 @@ export async function processBatch(batchId: string, actor: Actor, options: Proce
           error_detail: !gTestDate
             ? 'test_date_unresolved'
             : incomplete > 0
-              ? `incomplete_pages:${incomplete}${failed > 0 ? ` failed_pages:${failed}` : ''}`
+              // **どのページが足りないかまで出す** — 「26 枚中 25 枚」だけでは
+              // 現場が retry 後も同じページで止まっていることに気づけない。
+              // 出すのはページ番号だけ (健康情報を error へ写さない・spec §16)。
+              ? `missing_pages:${missingPages.join(',')}${failed > 0 ? ` failed_pages:${failed}` : ''}`
               : null,
         });
         /*
@@ -1238,7 +1262,8 @@ export async function assembleBatch(input: {
     if (gFile) {
       const pages = await store.listPages(gFile.id);
       const parts: GeneticPagePart[] = pages
-        .filter((p) => p.status === 'done')
+        // **対象外ページを納品へ混ぜない** (spec §8.5)。process 経路と同じ規則。
+        .filter((p) => p.status === 'done' && isGenoplanV1RequiredPage(p.page_no))
         .map((p) => {
           const parsed = (p.parsed ?? {}) as { section?: string | null; items?: unknown[] };
           return { page: p.page_no, section: parsed.section ?? null, items: parsed.items ?? [] };
@@ -1251,14 +1276,16 @@ export async function assembleBatch(input: {
        */
       const gTestDate = gFile.test_date ?? null;
       /*
-       * **読み切れていないページがあれば組まない** (process 経路と同じ規則)。
+       * **必要な p10〜35 が 1 枚でも欠けていれば組まない** (process 経路と同じ規則)。
        * 成功ページだけで JSON を作ると、**落ちたページの中身が無いまま
        * 「遺伝子検査の結果」として納品される** (受け取った側は欠けに気づけない)。
        * ここで組まなければ readiness が
        * `optional_present_but_not_ready:GeneticTestResultData` で止まり、
        * retry で全ページ成功してから納品される。
        */
-      const gIncomplete = pages.filter((p) => p.status !== 'done').length;
+      const gIncomplete = missingGenoplanV1Pages(
+        pages.filter((p) => p.status === 'done').map((p) => p.page_no),
+      ).length;
       if (parts.length > 0 && gTestDate && gIncomplete === 0) {
         const b = buildGeneticJson({ clientId: s.client_id, parts, testDate: gTestDate });
         built.push(toDeliveryFile(cfg.prefix, s.client_id, 'GeneticTestResultData', gTestDate, b.json));
