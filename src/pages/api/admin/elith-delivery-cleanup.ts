@@ -77,9 +77,16 @@ export const POST: APIRoute = async ({ request }) => {
   const kept = new Map<string, number>();
   const extra = new Map<string, string[]>();
   let unknown = 0;
+  const unknownSample: string[] = [];
   for (const o of objs) {
     const id = clientIdOf(o.key, deliveryPrefix);
-    if (!id) { unknown++; continue; } // 形が違うものは**触らない**
+    if (!id) {
+      // 形が違うものは**触らない**。ただし黙って数から消えると合計が合わなくなるので、
+      // 件数と実例を返す (実測 2026-09-15: 216 のうち 184 がこれで、正体不明のままだった)。
+      unknown++;
+      if (unknownSample.length < 5) unknownSample.push(o.key.slice(deliveryPrefix.length));
+      continue;
+    }
     if (keep.has(id.toLowerCase())) {
       kept.set(id, (kept.get(id) ?? 0) + 1);
       continue;
@@ -128,6 +135,7 @@ export const POST: APIRoute = async ({ request }) => {
     extra: [...extra].map(([clientId, keys]) => ({ clientId, files: keys.length, sample: keys[0] })),
     extra_objects: [...extra.values()].reduce((n, k) => n + k.length, 0),
     untouched_other_shape: unknown,
+    untouched_sample: unknownSample,
   };
 
   if (mode === 'list') return json({ ...summary, mode: 'list' });
