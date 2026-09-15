@@ -8,6 +8,8 @@ import { testTypeLabel, formatJpDate } from '../lib/dashboard-queries';
 import { qrSvgPath } from '../lib/qr';
 import { publicUrl } from '../lib/public-url';
 import { resolveViewer } from '../lib/viewer';
+import { isSpecialAccount } from '../lib/special-accounts';
+import { refreshConfig } from '../lib/app-config';
 import { noStore } from '../lib/http-cache';
 
 export const prerender = false;
@@ -30,6 +32,31 @@ const url = new URL(Astro.request.url);
 const viewer = await resolveViewer(Astro);
 const diagnosticUserId = viewer.uid;
 const uploads = diagnosticUserId ? await getUserUploads(diagnosticUserId) : [];
+
+/*
+ * ══════════════════════════════════════════════════════════════════════
+ * **複数年アップロード** (スペシャルアカウントのみ・発注者指示 2026-09-15)。
+ * ══════════════════════════════════════════════════════════════════════
+ * 正本 `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md` §4。
+ *
+ * **1 回の送信 = 1 回分 (1 年分) の検査**。1 回の検査は 4〜10 枚の紙になるので、
+ * 何枚まとめて送っても 1 件の `test_artifacts` になるのは**正しい**。
+ * 足りなかったのは**回の区切り**だけ — 送り終えたあとに
+ * 「他の年度分も続けてアップしますか?」を尋ねる導線が無く、そのまま /chat へ飛んでいた。
+ *
+ * **一般の利用者の画面は変えない。** 通常の単品購入・コースプランは「今回の検査」1 回分で、
+ * 過去の年度を遡って入れる運用ではない (確定事項)。
+ */
+await refreshConfig();
+const multiYear = isSpecialAccount(diagnosticUserId);
+/** 上限 5 年分 (発注者指示 2026-09-15「1年分から最大5年分」)。 */
+const MAX_ROUNDS = 5;
+/*
+ * **済んだ回数はサーバの事実から数える** (`test_artifacts` の health_checkup)。
+ * 端末のカウンタだと、途中で別の端末に変えたときに 1 からやり直しになる。
+ */
+const roundsDone = uploads.filter((a) => a.test_type === 'health_checkup').length;
+const canAddMore = multiYear && roundsDone < MAX_ROUNDS;
 const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnosticUserId)}` : '/dashboard';
 ---
 
@@ -346,7 +373,7 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
     <section id="panel-review" class="flex flex-1 flex-col gap-4" hidden>
       <div class="flex items-center justify-between gap-3">
         <p class="text-base font-semibold text-navy-800">
-          <span id="review-count">0</span> 枚を送信します
+          {multiYear && <span class="tnum">{roundsDone + 1} 回目 ・ </span>}<span id="review-count">0</span> 枚を送信します
         </p>
         <button id="review-restart" type="button"
           class="inline-flex min-h-touch shrink-0 items-center gap-1.5 rounded-full border border-slate-500 bg-white px-3 text-sm font-medium text-slate-700 transition hover:bg-slate-50">
@@ -357,6 +384,22 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
       <p class="text-sm text-slate-700">
         この内容で読み取ります。読み取りは全ページまとめて行うため、少し時間がかかります。
       </p>
+
+      {/*
+        **1 回の送信 = 1 回分 (1 年分)**。1 回の検査は 4〜10 枚の紙になるので、
+        「何枚送るか」ではなく「**この回はこれで揃っているか**」を尋ねるのが本題
+        (仕様書 §4)。別の年度は送信後に続けて追加できることも先に伝える
+        — 知らないと「全部まとめて選ばないといけない」と読まれる。
+      */}
+      {multiYear && (
+        <div class="rounded-xl border border-brand-600 bg-brand-50 px-3 py-2.5 text-sm text-slate-700">
+          <p class="font-semibold text-brand-700">この 1 回分（1 年分）はこれで完了ですか？</p>
+          <p class="mt-1">
+            1 回の検査は 4〜10 枚になります。<b>同じ受診回の紙をすべて</b>入れてから送信してください。
+            <b>別の年度</b>は、送信したあとに続けて追加できます（最大 {MAX_ROUNDS} 年分）。
+          </p>
+        </div>
+      )}
 
       {/*
         読み込めなかったファイルの控え。複数選択で 1 つだけ大きすぎた場合などに、
@@ -493,6 +536,49 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
       </div>
     </div>
 
+    {/*
+      ==============================================================
+      パネル: done — **複数年 (スペシャルアカウント) のときだけ**。
+      ==============================================================
+      通常の利用者は従来どおり送信後そのまま /chat へ飛ぶ (挙動不変)。
+      複数年は「1 回分 = 1 年分」を繰り返すので、**行き先をここで尋ねる**
+      (`docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md` §4)。
+    */}
+    {multiYear && (
+      <section id="panel-done" class="flex flex-1 flex-col items-center justify-center gap-6 text-center" hidden>
+        <div class="flex h-20 w-20 items-center justify-center rounded-3xl bg-brand-50 text-brand-700">
+          <AppIcon name="ok" size={40} />
+        </div>
+        <div class="flex flex-col gap-2">
+          <h2 class="text-lg font-bold text-navy-800">
+            <span class="tnum">{roundsDone + 1}</span> 回目を登録しました
+          </h2>
+          {/*
+            **残り回数を言い切らない。** 実際に何年分あるかは本人しか知らないので、
+            「あと N 年分あります」ではなく「最大 N 年分まで」と枠だけを伝える。
+          */}
+          <p class="text-sm text-slate-700">
+            {canAddMore
+              ? `別の年度の検診・人間ドックも続けて登録できます（最大 ${MAX_ROUNDS} 年分）。`
+              : `${MAX_ROUNDS} 年分そろいました。`}
+          </p>
+        </div>
+        <div class="flex w-full max-w-sm flex-col gap-2">
+          {canAddMore && (
+            <button id="done-add-year" type="button" class="btn-primary !py-4 text-lg">
+              <AppIcon name="add" size={20} /> 別の年度を続けて登録する
+            </button>
+          )}
+          <a href="/chat" class="btn-secondary flex items-center justify-center gap-1.5">
+            <AppIcon name="interview" size={20} /> AI 問診へ進む
+          </a>
+          <a href={dashUrl} class="text-sm font-medium text-brand-700 hover:underline">
+            マイページに戻る
+          </a>
+        </div>
+      </section>
+    )}
+
     <!-- ============================================================== -->
     <!-- パネル: error                                                   -->
     <!-- ============================================================== -->
@@ -529,8 +615,8 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
   // 直近の読込元ファイル名 (アップロード経由のみ。書き出しファイル名に組み込む)
   let lastSourceFileName: string | null = null;
 
-  type Panel = 'ready' | 'active' | 'confirm' | 'review' | 'result' | 'error';
-  const panels: Record<Panel, HTMLElement> = {
+  type Panel = 'ready' | 'active' | 'confirm' | 'review' | 'result' | 'error' | 'done';
+  const panels: Partial<Record<Panel, HTMLElement>> = {
     ready: $('panel-ready'),
     active: $('panel-active'),
     confirm: $('panel-confirm'),
@@ -538,10 +624,17 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
     result: $('panel-result'),
     error: $('panel-error'),
   };
+  /*
+   * **`done` は複数年 (スペシャルアカウント) のときだけ DOM に在る。**
+   * フラグを別に渡さず、**要素の有無そのものを条件にする** — 値と DOM が
+   * 食い違う余地を作らない (通常の利用者には要素ごと存在しない = 挙動不変)。
+   */
+  const doneEl = document.getElementById('panel-done');
+  if (doneEl) panels.done = doneEl;
 
   function show(panel: Panel): void {
     (Object.keys(panels) as Panel[]).forEach((key) => {
-      panels[key].hidden = key !== panel;
+      panels[key]!.hidden = key !== panel;
     });
   }
 
@@ -861,8 +954,13 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
         rowEditCellsContainer: $('row-edit-cells'),
         rowEditSaveBtn: $<HTMLButtonElement>('row-edit-save'),
         rowEditCancelBtn: $<HTMLButtonElement>('row-edit-cancel'),
-        // 完了 (確認して送信) 時に S3 へ自動書き出ししてから /chat へ遷移
+        // 完了 (確認して送信) 時に S3 へ自動書き出し
         onBeforeSubmit: exportScanToS3,
+        /*
+         * **行き先。** 通常は渡さない = 従来どおり /chat へ遷移する (挙動不変)。
+         * 複数年のときだけ「別の年度を続けますか?」を尋ねる画面で止める。
+         */
+        onSubmitted: doneEl ? () => { show('done'); window.scrollTo(0, 0); } : undefined,
       },
       r,
       diagnosticId,
@@ -886,6 +984,16 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
       }
     };
   }
+
+  /*
+   * **次の回は「ページを開き直す」。** 回数 (`roundsDone`) はサーバが
+   * `test_artifacts` を数えて出しているので、開き直せば
+   * 直前に保存した 1 件が反映された状態から始まる。
+   * クライアントでカウンタを進めると、保存が失敗した回まで数えてしまう。
+   */
+  document.getElementById('done-add-year')?.addEventListener('click', () => {
+    window.location.href = `${window.location.pathname}${window.location.search}`;
+  });
 
   document.addEventListener('DOMContentLoaded', () => {
     const controller = camera = initCameraScan({

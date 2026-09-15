@@ -242,6 +242,16 @@ export interface VerificationRefs {
 
   /** 「確認して送信」確定時に awaited で呼ばれる (S3 書き出し等)。失敗してもよい。 */
   onBeforeSubmit?: () => Promise<void> | void;
+
+  /**
+   * **送信が終わったあとの行き先を呼び出し側が決める** (複数年アップロード用・2026-09-15)。
+   *
+   * 渡されていなければ**従来どおり `/chat` へ遷移する** (挙動不変)。
+   * 渡されていれば遷移せずにこれを呼ぶ — スペシャルアカウントは
+   * 「他の年度分も続けてアップしますか?」を尋ねてから行き先を決めるため
+   * (`docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md` §4)。
+   */
+  onSubmitted?: () => void;
 }
 
 interface RegionView {
@@ -874,8 +884,14 @@ export class ScanVerificationController {
   private bindSubmit(): void {
     this.refs.submitBtn.addEventListener('click', async () => {
       if (this.refs.submitBtn.disabled) return;
+      /*
+       * **確認の文言も行き先に合わせる。** 続きを尋ねる画面へ行くのに
+       * 「問診に進みますか?」と聞くと、押した先と言っていることが食い違う。
+       */
       const ok = window.confirm(
-        'この内容で確定し、問診に進みますか?\n確定後は同じ画面で編集できません。',
+        this.refs.onSubmitted
+          ? 'この 1 回分 (1 年分) を確定しますか?\n確定後は同じ画面で編集できません。'
+          : 'この内容で確定し、問診に進みますか?\n確定後は同じ画面で編集できません。',
       );
       if (!ok) return;
       // 完了時に確定結果を S3 (Elith 連携) へ自動書き出し (best-effort)。
@@ -888,7 +904,14 @@ export class ScanVerificationController {
           /* テスト用途のため失敗は握りつぶし、遷移は続行 */
         }
       }
-      // Phase 0: メモリ保持で /chat に遷移。
+      /*
+       * **行き先は呼び出し側が決める。** 渡されていなければ従来どおり /chat
+       * (Phase 0: メモリ保持で遷移)。複数年のときだけ「続けますか?」を挟む。
+       */
+      if (this.refs.onSubmitted) {
+        this.refs.onSubmitted();
+        return;
+      }
       window.location.href = '/chat';
     });
   }
