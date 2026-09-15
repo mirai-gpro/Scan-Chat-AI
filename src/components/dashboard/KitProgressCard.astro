@@ -1,7 +1,7 @@
 ---
 import AppIcon from '../../components/AppIcon.astro';
 import type { KitShipment } from '../../types/supabase';
-import { shipmentLabel, testTypeLabel, formatJpDate, SHIPMENT_STAGES } from '../../lib/dashboard-queries';
+import KitProgressRows from './KitProgressRows.astro';
 
 /**
  * ホーム用のキット進捗サマリ。詳細は /kit ページ。
@@ -26,10 +26,6 @@ interface Props {
   detailHref?: string;
 }
 const { shipments, nextTestAt, planName, diagnosticUserId, detailHref = '/kit' } = Astro.props as Props;
-const active = shipments.filter((s) => !s.lab_completed_at).slice(0, 2);
-
-/* 横 1 行に畳むので、日付から曜日を落とす (formatJpDate は「2026年8月25日 (火)」を返す)。 */
-const shortJpDate = (iso: string | null | undefined) => formatJpDate(iso).replace(/\s*\(.\)$/, '');
 ---
 
 <section class="card">
@@ -50,99 +46,5 @@ const shortJpDate = (iso: string | null | undefined) => formatJpDate(iso).replac
     </div>
   </header>
 
-  {active.length === 0 ? (
-    <div class="rounded-xl border border-dashed border-slate-300 p-4 text-center text-base text-slate-600 sm:p-5">
-      進行中のキットはありません
-      {nextTestAt && (
-        <p class="mt-2">
-          次回検査: <span class="font-medium text-slate-800">{formatJpDate(nextTestAt)}</span>
-        </p>
-      )}
-    </div>
-  ) : (
-    <div class="grid grid-cols-1 gap-3">
-      {active.map((s) => {
-        const tt = testTypeLabel(s.test_type);
-        const status = shipmentLabel(s);
-        return (
-          <article class="flex flex-wrap items-center gap-x-3 gap-y-2.5 rounded-xl border border-slate-200 bg-white p-3 xl:flex-nowrap xl:gap-4">
-            <span class="order-1 grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-mist text-navy-800">
-              <AppIcon name={tt.icon} size={20} />
-            </span>
-
-            <span class="order-2 flex min-w-0 flex-1 flex-col xl:w-32 xl:flex-none">
-              <span class="text-base font-semibold text-navy-800">{tt.name}</span>
-              <span class="truncate text-sm text-slate-600">{s.lab_name ?? '検査会社未定'}</span>
-            </span>
-
-            <span class={`order-3 shrink-0 xl:order-5 status-pill ${status.tone === 'ok' ? 'status-ok' : status.tone === 'active' ? 'status-active' : 'status-unknown'}`}>
-              <AppIcon name={status.icon} size={14} />{status.label}
-            </span>
-
-            {/* 6 段階ステッパー (詳細は /kit) */}
-            <span class="order-4 flex min-w-0 basis-full flex-col gap-1.5 xl:basis-auto xl:flex-1">
-              <span class="grid grid-cols-6 gap-1" role="img" aria-label={`全 6 段階のうち ${status.step} 段階目 (${status.label})`}>
-                {SHIPMENT_STAGES.map((st) => (
-                  <span class={`h-1.5 rounded-full ${status.step >= st.step ? 'bg-brand-600' : 'bg-slate-200'}`}></span>
-                ))}
-              </span>
-              {/* 1 行に留める (溢れたら省略)。伝票番号を含む全文は /kit にある。 */}
-              <span class="truncate text-sm text-slate-600">
-                {s.shipped_at
-                  ? <><span class="tnum">{shortJpDate(s.shipped_at)}</span> 発送</>
-                  : '発送準備中'}
-                {s.tracking_no && (
-                  s.carrier_tracking_url ? (
-                    <> ・ <a href={s.carrier_tracking_url} target="_blank" rel="noopener" class="font-medium text-brand-700 hover:underline">
-                      追跡 <span class="tnum">{s.tracking_no}</span>
-                    </a></>
-                  ) : (
-                    <> ・ <span class="tnum">{s.tracking_no}</span></>
-                  )
-                )}
-              </span>
-            </span>
-
-            {/* 自己申告ボタン */}
-            {!s.user_received_at && s.shipped_at && (
-              <button
-                type="button"
-                data-self-report
-                data-shipment-id={s.id}
-                data-action="received"
-                data-diagnostic-user-id={diagnosticUserId}
-                class="order-5 flex min-h-touch shrink-0 items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-3.5 text-base font-semibold text-slate-800 transition hover:bg-brand-50 disabled:cursor-wait disabled:opacity-60 xl:order-6"
-              >
-                <AppIcon name="kit" size={18} />受け取りました
-              </button>
-            )}
-            {s.user_received_at && !s.user_returned_at && (
-              <button
-                type="button"
-                data-self-report
-                data-shipment-id={s.id}
-                data-action="returned"
-                data-diagnostic-user-id={diagnosticUserId}
-                class="order-5 flex min-h-touch shrink-0 items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-3.5 text-base font-semibold text-slate-800 transition hover:bg-brand-50 disabled:cursor-wait disabled:opacity-60 xl:order-6"
-              >
-                <AppIcon name="send" size={18} />返送しました
-              </button>
-            )}
-          </article>
-        );
-      })}
-    </div>
-  )}
-
-  {nextTestAt && active.length > 0 && (
-    <p class="mt-3 text-sm text-slate-600">
-      次回検査予定: <span class="font-medium text-slate-800">{formatJpDate(nextTestAt)}</span>
-    </p>
-  )}
+  <KitProgressRows shipments={shipments} nextTestAt={nextTestAt} diagnosticUserId={diagnosticUserId} />
 </section>
-
-<script>
-  /* 処理の実体は kit.astro と共有 (src/scripts/kit-self-report.ts)。 */
-  import { initKitSelfReport } from '../../scripts/kit-self-report';
-  initKitSelfReport();
-</script>

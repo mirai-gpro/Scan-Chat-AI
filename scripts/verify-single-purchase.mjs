@@ -79,19 +79,42 @@ console.log('\n① 単品購入モードの判定\n');
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n② 埋まらない枠を並べない\n');
 {
-  ok('単品購入ではキット進捗を出さない',
-    /\{!singlePurchase && \(\s*<KitProgressCard/.test(dash),
-    '単品購入にキットは 1 つも無い。出すと「進行中のキットはありません」だけの枠が居座る');
+  /*
+   * **進捗は 1 つのセクションに統合した** (発注者指示 2026-09-15)。
+   * コースプランでも最初に AI問診と検診・人間ドックのスキャンが要るので、
+   * 「検査キットだけの進捗」では次に何をすればよいか分からない。
+   */
+  ok('進捗セクションは 1 つ (キット専用の枠を別に置かない)',
+    /<ProgressSection/.test(dash) && !/<KitProgressCard/.test(dash),
+    'キット専用の枠を残すと、AI問診とスキャンが進捗の外に置き去りになる');
 
-  ok('単品購入では進捗カードを出す',
-    /\{singlePurchase && \(\s*<SinglePurchaseProgressCard/.test(dash),
-    'AI問診 → 検診・人間ドックのアップロード → 報告書 の 3 ステップ');
+  ok('入口で中身を変える (mode を渡している)',
+    /mode=\{singlePurchase \? 'single' : 'course'\}/.test(dash),
+    'course は検査キットの行を持ち、single は持たない');
+
+  const sec = read('src/components/dashboard/ProgressSection.astro');
+  /*
+   * **キットの行そのものが `course` で囲まれていること**を見る。
+   * 単に「ファイル内に `{course && (` がある」では**効かない** — ヘッダーの
+   * 「進捗の詳細を見る」も同じ条件で囲まれているので、行側のガードを外しても通ってしまう
+   * (この検査を書いた日に退行注入で実際に素通りした)。**行から遡って確かめる。**
+   */
+  ok('単品購入では検査キットの行を出さない',
+    /\{course && \(\s*<li[\s\S]{0,400}?<KitProgressRows/.test(sec),
+    '単品購入にキットは 1 つも無い');
+  ok('キットの行は KitProgressRows に一本化されている',
+    !/data-self-report/.test(sec),
+    '自己申告ボタンは kit-self-report.ts と組。写して増やすと片方だけ腐る');
+  ok('コースプランでも AI問診とスキャンを出す',
+    /title: 'AI 問診'/.test(sec) && /title: '検診・人間ドックのスキャン'/.test(sec)
+      && !/course \?[^\n]*title: 'AI 問診'/.test(sec),
+    'コースプランでも最初にこの 2 つが要る (発注者指示 2026-09-15)');
 
   /*
    * **進捗は検査結果より上。** この入口の人にとって「次にすること」が本題で、
    * 検査結果はその結果として後から埋まる。逆だと、まだ空のカードを越えた先に本題が来る。
    */
-  const iProgress = dash.indexOf('<SinglePurchaseProgressCard');
+  const iProgress = dash.indexOf('<ProgressSection');
   const iTests = dash.indexOf('<TestResultsSection');
   ok('進捗カードが検査結果より上にある', iProgress >= 0 && iTests >= 0 && iProgress < iTests,
     'まだ空の検査カードを越えた先に本題が来てしまう');
@@ -99,6 +122,13 @@ console.log('\n② 埋まらない枠を並べない\n');
   ok('単品購入では検査を人間ドックの 1 種に絞る',
     /onlyTypes=\{singlePurchase \? \['health_checkup'\] : undefined\}/.test(dash),
     '血液 / がんリスク / AI疾病予測 / 遺伝子 は構造的に来ない = 行き止まりが 4 つ並ぶ');
+
+  ok('単品購入でもプラン名を出す',
+    /planName=\{singlePurchase \? singlePurchasePlanName : data\?\.subscription\?\.plan_name\}/.test(dash),
+    '発注者指示 2026-09-15。単品は EC 購入が無く契約から引けないので app_config の文言を出す');
+  ok('その文言は app_config にある',
+    read('src/lib/app-config.ts').includes("key: 'ui.single_purchase_plan_name'"),
+    'setConfig が未知キーとして弾く / admin から差し替えられない');
 
   ok('単品購入では主要導線 (⑥) を出さない',
     /\{!singlePurchase && \(\s*<section aria-label="主要な操作">/.test(dash),
@@ -281,10 +311,20 @@ export const getServerSupabase = () => ({
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n⑥ 進捗カードの文言\n');
 {
-  const card = read('src/components/dashboard/SinglePurchaseProgressCard.astro');
-  ok('「済んだ」はアイコン + テキスト + 色の 3 点で出す',
-    /AppIcon name=\{s\.done \? 'check'/.test(card),
-    '色だけで状態を表さない (UI 確定事項)');
+  const card = read('src/components/dashboard/ProgressSection.astro');
+  /*
+   * **「未実行」と「完了済」の 2 語で言い切る** (発注者指示 2026-09-15)。
+   * 状態はアイコン + テキスト + 色の 3 点セット (UI 確定事項) — 色だけで表さない。
+   */
+  ok('未実行 / 完了済 の 2 語で出す',
+    /\{s\.done \? '完了済' : '未実行'\}/.test(card));
+  ok('状態はアイコン + テキスト + 色の 3 点',
+    /status-pill \$\{s\.done \? 'status-ok' : 'status-action'\}/.test(card)
+      && /AppIcon name=\{s\.done \? 'ok' : 'action'\}/.test(card),
+    '色だけで状態を表さない');
+  ok('未実行のときは実行を促す',
+    /実行してください/.test(stripComments(card)) && /を実行する/.test(card),
+    '「未実行」とだけ出して、何をすればよいかを書かない画面にしない');
   ok('届いていない報告書に予測を書かない',
     !/もうすぐ|まもなく|準備中です|作成中/.test(stripComments(card)),
     '作成の時期を当社は知らない');

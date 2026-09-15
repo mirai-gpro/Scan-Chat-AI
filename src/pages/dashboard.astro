@@ -7,8 +7,7 @@ import UrgentAlertBanner from '../components/dashboard/UrgentAlertBanner.astro';
 import DailyQuests from '../components/dashboard/DailyQuests.astro';
 import OnlineConsultCard from '../components/dashboard/OnlineConsultCard.astro';
 import SituationalCards from '../components/dashboard/SituationalCards.astro';
-import KitProgressCard from '../components/dashboard/KitProgressCard.astro';
-import SinglePurchaseProgressCard from '../components/dashboard/SinglePurchaseProgressCard.astro';
+import ProgressSection from '../components/dashboard/ProgressSection.astro';
 import TestResultsSection from '../components/dashboard/TestResultsSection.astro';
 import HealthInsightCard from '../components/dashboard/HealthInsightCard.astro';
 import HealthAgeCard from '../components/dashboard/HealthAgeCard.astro';
@@ -159,6 +158,13 @@ const reportAvailable = !!data?.latestResult || demoShown;
 // 画面文言 (app_config)。未設定なら空文字が返り、UI 側で非表示になる。
 const healthAgeFollowup = cfg('ui.health_age_followup');
 const supportContact = cfg('ui.support_contact');
+/*
+ * **単品購入でもプラン名を出す** (発注者指示 2026-09-15)。
+ * コースプランは契約 (`subscription.plan_name`) から引くが、単品購入は EC 購入が無いので
+ * 引ける契約が存在しない。**当社が名乗る表示名**なので app_config に置いて差し替え可にする
+ * (画面文言は app_config = CLAUDE.md の流儀)。
+ */
+const singlePurchasePlanName = cfg('ui.single_purchase_plan_name');
 
 const greeting    = data ? formatGreeting(data) : '';
 const sections    = data?.elithSections ?? [];
@@ -274,20 +280,27 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
         )}
 
         {/*
-          ②-3 **単品購入の進捗は、検査結果より上に置く** (発注者指示 2026-09-15)。
-          この入口の人にとって「次にすること」は AI問診と検診・人間ドックのアップロードで、
-          検査結果は**その結果として後から埋まる**もの。順番を逆にすると、
-          まだ何も無い検査カードを越えた先に本題があることになる。
+          ②-3 **進捗は検査結果より上に置く** (発注者指示 2026-09-15)。
+          利用者にとって「次にすること」が本題で、検査結果は**その結果として後から埋まる**もの。
+          順番を逆にすると、まだ何も無い検査カードを越えた先に本題が来る。
+
+          **中身は入口で変わる** (`ProgressSection`):
+            course … ① AI問診 → ② スキャン → ③ 検査キット → ④ 報告書
+            single … ① AI問診 → ② スキャン →           ③ 報告書
         */}
-        {singlePurchase && (
-          <SinglePurchaseProgressCard
-            interviewCompletedAt={interviewDone?.completedAt ?? null}
-            checkupCount={checkups.length}
-            latestCheckupDate={checkups[0]?.test_date ?? null}
-            reportReceivedAt={data?.latestResult?.received_at ?? null}
-            q={q}
-          />
-        )}
+        <ProgressSection
+          mode={singlePurchase ? 'single' : 'course'}
+          planName={singlePurchase ? singlePurchasePlanName : data?.subscription?.plan_name}
+          interviewCompletedAt={interviewDone?.completedAt ?? null}
+          checkupCount={checkups.length}
+          latestCheckupDate={checkups[0]?.test_date ?? null}
+          reportReceivedAt={data?.latestResult?.received_at ?? null}
+          shipments={data?.shipments ?? []}
+          nextTestAt={data?.subscription?.next_test_at}
+          diagnosticUserId={data?.diagnosticUserId ?? ''}
+          detailHref={`/kit${q}`}
+          q={q}
+        />
 
         {/* ③ 次にすること — 非表示 (本日の健康クエスト): <DailyQuests quests={quests} /> */}
 
@@ -298,22 +311,6 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
         */}
         <TestResultsSection artifacts={data?.artifacts ?? []} q={q} onlyTypes={singlePurchase ? ['health_checkup'] : undefined} />
 
-        {/*
-          ⑤ 進捗。**入口によって中身が違う。**
-            コースプラン   … 検査キットの進捗 (タカセ出荷 → 検体返送 → 検査完了)
-            単品購入 (スペシャル) … AI問診 → 検診・人間ドックのアップロード → 報告書
-          単品購入にキットは 1 つも無いので、キット進捗を出すと
-          「進行中のキットはありません」しか言わない枠が居座る。
-        */}
-        {!singlePurchase && (
-          <KitProgressCard
-            shipments={data?.shipments ?? []}
-            nextTestAt={data?.subscription?.next_test_at}
-            planName={data?.subscription?.plan_name}
-            diagnosticUserId={data?.diagnosticUserId ?? ''}
-            detailHref={`/kit${q}`}
-          />
-        )}
 
         {/*
           ⑥ 主要導線。AI スキャンと AI 問診は**同格**なので同じ淡色にする
