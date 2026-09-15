@@ -41,6 +41,12 @@ async function call(body: unknown, auth = true) {
   return { status: res.status, json: JSON.parse(await res.text()) };
 }
 
+// 納品先へ移すのは .json だけ（画像は format_id 接頭辞で始まり取り違えうるため）
+{
+  const { promoteKey: pk } = await import('../src/pages/api/admin/elith-delivery-promote');
+  ok('画像もキーの写し替え自体は同じ規則', pk(`${P}user/${ID}/date/d/a_01.jpg`, P, keep) === `user/${ID}/date/d/a_01.jpg`);
+}
+
 eq('鍵が無ければ断る', (await call({ mode: 'copy', keep: [ID] }, false)).status, 401);
 eq('keep なしは断る', (await call({ mode: 'copy' })).json.error, 'keep_required');
 eq('keep が空なら断る', (await call({ mode: 'copy', keep: [] })).json.error, 'keep_required');

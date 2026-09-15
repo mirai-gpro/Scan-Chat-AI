@@ -11,6 +11,10 @@
  *   - 複製元は `{AWS_S3_PREFIX}user/{keep の client_id}/…` に完全一致するものだけ。
  *   - 複製先は `user/` + 同じ相対パス。**キーの組み替えをしない**（取り違え防止）。
  *   - **元は消さない**（複製のみ）。削除はこのエンドポイントでは一切行わない。
+ *   - **納品先へ移すのは `.json` だけ**。健診のページ画像は当社の監査用で納品物ではなく、
+ *     名前が `HealthCheckupData_…_01.jpg` と **format_id 接頭辞で始まる**ため、
+ *     受け手が `HealthCheckupData_*` で拾う実装だと JSON と取り違えうる。
+ *     画像は検証用プレフィックス側に残す（`includeNonJson: true` で明示したときだけ移す）。
  *   - 既定は `mode='list'`（何が複製されるかを先に見る）。
  *   - `AWS_S3_PREFIX` が空なら何もしない（防御。ただし **env では空にできない** —
  *     `s3.ts` の `env()` が空文字を未設定とみなし既定へ戻すため。実測 2026-09-15）。
@@ -49,7 +53,7 @@ export const POST: APIRoute = async ({ request }) => {
   if (!isS3Configured()) {
     return json({ ok: false, error: 's3_not_configured', detail: 'AWS_REGION 未設定' }, 400);
   }
-  let body: { mode?: unknown; keep?: unknown };
+  let body: { mode?: unknown; keep?: unknown; includeNonJson?: unknown };
   try { body = await request.json(); }
   catch { return json({ ok: false, error: 'Invalid JSON body' }, 400); }
 
@@ -74,15 +78,20 @@ export const POST: APIRoute = async ({ request }) => {
   try { objs = await listObjects(`${fromPrefix}user/`); }
   catch (err) { return json({ ok: false, error: 'list_failed', detail: String(err instanceof Error ? err.message : err) }, 502); }
 
+  const includeNonJson = body.includeNonJson === true;
   const pairs: { from: string; to: string }[] = [];
+  let skippedNonJson = 0;
   for (const o of objs) {
     const to = promoteKey(o.key, fromPrefix, keep);
-    if (to) pairs.push({ from: o.key, to });
+    if (!to) continue;
+    if (!includeNonJson && !to.toLowerCase().endsWith('.json')) { skippedNonJson++; continue; }
+    pairs.push({ from: o.key, to });
   }
   const jsonCount = pairs.filter((p) => p.to.toLowerCase().endsWith('.json')).length;
   const summary = {
     ok: true, from_prefix: fromPrefix, to_prefix: 'user/',
     planned: pairs.length, planned_json: jsonCount,
+    skipped_non_json: skippedNonJson,
     people: new Set(pairs.map((p) => p.to.split('/')[1])).size,
     sample: pairs.slice(0, 3).map((p) => p.to),
   };
