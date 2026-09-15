@@ -56,6 +56,62 @@ export function qualitativeEqual(a: unknown, b: unknown): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// §10.5.1 v3 validation 専用の固定表
+// ---------------------------------------------------------------------------
+
+/**
+ * 名前の正規化。**NFKC + 連続空白を 1 個へ縮約 + trim だけ** (§10.5.1-3)。
+ *
+ * **ハイフン削除・substring・fuzzy・意味推定はしない。**
+ * `HDL-コレステロール` が `HDLコレステロール` になるのは「ハイフンを消す規則」ではなく、
+ * **下の固定表にその名前が 1 行在るから**。規則にしてしまうと、表に無い名前まで
+ * 黙って寄ってしまう (`LDL-C` や `non-HDL` のような別物まで当たる)。
+ */
+export function normalizeValidationName(raw: unknown): string {
+  return String(raw ?? '').normalize('NFKC').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * §10.5.1。production `findByAlias()` で解決しなかった名前だけを受ける第 2 段。
+ *
+ * **これは Health JSON を書き換える alias ではない。照合時の名前解決にしか使わない** —
+ * production `STANDARD_MASTER` へ synonym を足すのは §10.5 末尾で禁止されており、
+ * 足せば**納品 JSON の項目名そのものが変わる**。ここは読む側だけを直す。
+ *
+ * **FINAL が許可した名前だけを書く。** `中性脂肪` / `TG` / `トリグリセライド` /
+ * `血糖` / `SBP` / `DBP` / `FPG` は**入れない** — source から意味が確定していない
+ * (`中性脂肪` が空腹時かどうかは印字だけでは決まらない)。未解決のままにする。
+ */
+const V3_VALIDATION_NAME_PAIRS: readonly (readonly [string, string])[] = [
+  ['HDL-コレステロール', 'HDLコレステロール'],
+  ['LDL-コレステロール', 'LDLコレステロール'],
+  ['AST(GOT)', 'GOT(AST)'],
+  ['AST (GOT)', 'GOT(AST)'],
+  ['ALT(GPT)', 'GPT(ALT)'],
+  ['ALT (GPT)', 'GPT(ALT)'],
+  ['HbA1c', 'HbA1c(NGSP)'],
+  ['収縮期血圧', '最高血圧'],
+  ['拡張期血圧', '最低血圧'],
+];
+
+/** 引くときと同じ規則でキーを作る (表と検索で正規化がずれない)。 */
+export const V3_VALIDATION_NAME_TABLE: ReadonlyMap<string, string> = new Map(
+  V3_VALIDATION_NAME_PAIRS.map(([from, to]) => [normalizeValidationName(from), to]),
+);
+
+/**
+ * 1 つの印字名を canonical へ。**① `findByAlias()` → ② 固定表** の順 (§10.5.1-1)。
+ * どちらでも解決しなければ null — **推測で寄せない。**
+ */
+export function resolveItemCanonical(rawName: unknown): string | null {
+  const name = normalizeValidationName(rawName);
+  if (name === '') return null;
+  const viaMaster = findByAlias(name);
+  if (viaMaster) return viaMaster.canonical_name;
+  return V3_VALIDATION_NAME_TABLE.get(name) ?? null;
+}
+
+// ---------------------------------------------------------------------------
 // production 側の measurement を canonical で引く (§10.5-3/4)
 // ---------------------------------------------------------------------------
 
@@ -73,19 +129,15 @@ export type ResolveOutcome =
   | { kind: 'duplicate'; count: number };
 
 /**
- * production 出力から canonical 1 件を引く。**`findByAlias()` だけを使う** (§10.5-3)。
+ * production 出力から canonical 1 件を引く。名前解決は
+ * **① `findByAlias()` → ② §10.5.1 固定表** (`resolveItemCanonical`)。
  * 0 件も 2 件以上も FAIL — **「1 件目を採る」をしない** (どちらが本物か決められないため)。
  */
 export function resolveByCanonical(
   measurements: readonly LeanMeasurement[],
   canonical: string,
 ): ResolveOutcome {
-  const hit = measurements.filter((m) => {
-    const name = typeof m.item_name === 'string' ? m.item_name : '';
-    if (name === '') return false;
-    if (name === canonical) return true;
-    return findByAlias(name)?.canonical_name === canonical;
-  });
+  const hit = measurements.filter((m) => resolveItemCanonical(m.item_name) === canonical);
   if (hit.length === 1) return { kind: 'one', measurement: hit[0] };
   if (hit.length === 0) return { kind: 'none' };
   return { kind: 'duplicate', count: hit.length };
@@ -99,8 +151,10 @@ export function resolveByCanonical(
 export function unresolvedNames(measurements: readonly LeanMeasurement[]): string[] {
   const out = new Set<string>();
   for (const m of measurements) {
-    const name = typeof m.item_name === 'string' ? m.item_name.trim() : '';
-    if (name !== '' && !findByAlias(name)) out.add(name);
+    const name = normalizeValidationName(m.item_name);
+    // **①②の両方で解決しなかったものだけ**。固定表で解決した名前をここへ出すと、
+    // 直っているのに「未解決」と表示され続ける。
+    if (name !== '' && resolveItemCanonical(name) == null) out.add(name);
   }
   return [...out].sort();
 }
@@ -196,6 +250,9 @@ export interface CrossResult {
   detail?: string;
 }
 
+/** §10.5.1-6。名前が解決できずに止まったときの識別子。 */
+export const HEALTH_CROSSCHECK_NAME_UNRESOLVED = 'health_crosscheck_name_unresolved' as const;
+
 export interface CrossCheckResult {
   subject: string;
   ok: boolean;
@@ -203,7 +260,21 @@ export interface CrossCheckResult {
   compared: number;
   required: number;
   items: CrossResult[];
-  /** production 側で canonical へ解決しなかった印字名 (原因を読むためだけ)。 */
+  /**
+   * §10.5.1-6。名前解決で止まったときだけ立つ。
+   * 値違い (mismatch) で止まった場合は立たない — **原因が別物なので混ぜない。**
+   */
+  errorCode: typeof HEALTH_CROSSCHECK_NAME_UNRESOLVED | null;
+  /** production 側に 1 件も見つからなかった required canonical (§10.5.1-6)。 */
+  missingRequiredCanonicals: string[];
+  /**
+   * ①②のどちらでも解決しなかった production の印字名 (§10.5.1-6)。
+   *
+   * **上の `missingRequiredCanonicals` と 1 対 1 に並べない。**
+   * 「解決しない名前が 1 つ / 足りない canonical が 1 つ」でも、その 2 つが
+   * 同じ項目である保証はどこにも無い。**対応付けは人が原本を見て決める**ので、
+   * ここは 2 つの一覧を**別々に**返すだけにする (§10.5.1-6 末尾)。
+   */
   unresolvedProductionNames: string[];
 }
 
@@ -276,6 +347,9 @@ export function validateCrossCheck(
   }
 
   const compared = items.filter((i) => i.status === 'match').length;
+  const missingRequiredCanonicals = items
+    .filter((i) => i.status === 'unresolved' && i.canonical !== '—')
+    .map((i) => i.canonical);
   return {
     subject,
     // **`match` 以外が 1 件でもあれば FAIL** (§10.5-7)。`not_compared` で逃がさない。
@@ -283,6 +357,8 @@ export function validateCrossCheck(
     compared,
     required: items.length,
     items,
+    errorCode: missingRequiredCanonicals.length > 0 ? HEALTH_CROSSCHECK_NAME_UNRESOLVED : null,
+    missingRequiredCanonicals,
     unresolvedProductionNames: unresolvedNames(measurements),
   };
 }
@@ -335,6 +411,12 @@ export interface HealthPassResult {
   cross: CrossCheckResult | null;
   /** 落ちた理由を人が読める形で。空なら PASS。 */
   reasons: string[];
+  /**
+   * §10.5.1-6/7。名前解決で止まったときだけ立つ。
+   * **operator に canonical を選ばせない** — 再解析しても解決しなければ開発者確認。
+   * JSON を補完したり 39列XLSX の値で置き換えたりはしない。
+   */
+  errorCode: typeof HEALTH_CROSSCHECK_NAME_UNRESOLVED | null;
 }
 
 export function evaluateHealth(input: HealthPassInput): HealthPassResult {
@@ -370,7 +452,10 @@ export function evaluateHealth(input: HealthPassInput): HealthPassResult {
     }
   }
 
-  return { subject: input.subject, ok: reasons.length === 0, golden, cross, reasons };
+  return {
+    subject: input.subject, ok: reasons.length === 0, golden, cross, reasons,
+    errorCode: cross?.errorCode ?? null,
+  };
 }
 
 /** 人物名からこの人が §10.5 の対象かを引く (`hasHealthSupport`)。 */

@@ -71,6 +71,65 @@ const H = await import(pathToFileURL(join(tmp, 'health-validate.js')).href);
 }
 
 // ===========================================================================
+// ①-2 §10.5.1 名前解決 — ① findByAlias → ② v3 validation 専用固定表
+// ===========================================================================
+{
+  // 正規化は NFKC + 連続空白の縮約 + trim **だけ**
+  eq('NFKC で全角を畳む', H.normalizeValidationName('ＨＤＬ－コレステロール'), 'HDL-コレステロール');
+  eq('連続空白は 1 個へ', H.normalizeValidationName('AST   (GOT)'), 'AST (GOT)');
+  eq('前後の空白は落とす', H.normalizeValidationName('  身長  '), '身長');
+  // **ハイフンを消す規則ではない** — 消していたら `HDL-コレステロール` がここで `HDLコレステロール` になる
+  ok('ハイフンを消さない', H.normalizeValidationName('HDL-コレステロール').includes('-'));
+
+  // required canonical 15 件は自分自身へ解決する
+  for (const p of M.HEALTH_CROSS_CHECK) {
+    eq(`canonical ${p.canonical} は自分へ解決`, H.resolveItemCanonical(p.canonical), p.canonical);
+  }
+  // FINAL が許可した名前
+  for (const [from, to] of [
+    ['HDL-コレステロール', 'HDLコレステロール'], ['LDL-コレステロール', 'LDLコレステロール'],
+    ['AST(GOT)', 'GOT(AST)'], ['AST (GOT)', 'GOT(AST)'],
+    ['ALT(GPT)', 'GPT(ALT)'], ['ALT (GPT)', 'GPT(ALT)'],
+    ['HbA1c', 'HbA1c(NGSP)'], ['収縮期血圧', '最高血圧'], ['拡張期血圧', '最低血圧'],
+  ]) {
+    eq(`許可名 ${from} → ${to}`, H.resolveItemCanonical(from), to);
+  }
+  // **寄せない名前** (§10.5.1-5)
+  for (const n of ['中性脂肪', 'TG', 'トリグリセライド', '血糖', 'SBP', 'DBP', 'FPG']) {
+    eq(`${n} は未解決のまま`, H.resolveItemCanonical(n), null);
+  }
+  /*
+   * **②の固定表は substring / fuzzy をしない。**
+   * (`HDL` 単体は **production `STANDARD_MASTER` に元から在る synonym** なので
+   *  ①で解決する。あれは production の既存挙動で、ここの担当ではない —
+   *  `STANDARD_MASTER` は変更禁止。②が余計に寄せていないかだけを見る。)
+   */
+  eq('後ろに語が付いたら寄せない', H.resolveItemCanonical('HDL-コレステロール(直接法)'), null);
+  eq('前に語が付いたら寄せない', H.resolveItemCanonical('血清HDL-コレステロール'), null);
+  eq('表の行き先を逆に引かない', H.resolveItemCanonical('GOT'), 'GOT(AST)'); // ① 由来 (production synonym)
+  eq('空は null', H.resolveItemCanonical('   '), null);
+  eq('固定表の件数', H.V3_VALIDATION_NAME_TABLE.size, 9);
+
+  /*
+   * **固定表は validation 専用で、production master を書き換えない** (§10.5.1-2)。
+   * `STANDARD_MASTER` に `HDL-コレステロール` が synonym として入っていたら、
+   * **納品 JSON の項目名そのものが変わる**ので落とす。
+   */
+  const forbidden = ['HDL-コレステロール', 'LDL-コレステロール', '中性脂肪', 'TG', '血糖', 'SBP', 'DBP'];
+  for (const n of forbidden) {
+    const hit = SM.STANDARD_MASTER.filter((i) =>
+      i.canonical_name === n || (i.synonyms ?? []).includes(n));
+    ok(`production master に ${n} を足していない`, hit.length === 0,
+      `${hit.map((h) => h.canonical_name).join(',')} に入っている`);
+  }
+  // 固定表の値は必ず required canonical のどれか (表から新しい概念を生やさない)
+  const req = new Set(M.HEALTH_CROSS_CHECK.map((p) => p.canonical));
+  for (const [from, to] of H.V3_VALIDATION_NAME_TABLE) {
+    ok(`固定表の行き先 ${to} は required canonical`, req.has(to), `${from} → ${to}`);
+  }
+}
+
+// ===========================================================================
 // ② 値の比較 — 書式差だけ許し、近似は許さない
 // ===========================================================================
 {
@@ -105,9 +164,13 @@ const H = await import(pathToFileURL(join(tmp, 'health-validate.js')).href);
   const r = H.resolveByCanonical(dup, '最高血圧');
   eq('2 件なら duplicate', r.kind, 'duplicate');
   ok('duplicate で 1 件目を採らない', r.measurement === undefined);
+  // **①②のどちらでも解決しなかったものだけ**を返す。
+  // `HDL-コレステロール` は §10.5.1 の固定表で解決するのでここには出ない。
   eq('解決しない印字名を名指しで返す',
-    H.unresolvedNames([{ item_name: 'HDL-コレステロール' }, { item_name: '身長' }]),
-    ['HDL-コレステロール']);
+    H.unresolvedNames([
+      { item_name: '中性脂肪' }, { item_name: 'HDL-コレステロール' }, { item_name: '身長' },
+    ]),
+    ['中性脂肪']);
 }
 
 // ===========================================================================
@@ -181,13 +244,68 @@ const DATE = '2025-09-25';
   eq('その status は unresolved', drop.items.find((i) => i.header === 'HDL-コレステロール').status, 'unresolved');
   ok('compared が 16 未満になる', drop.compared < 16, `実際 ${drop.compared}`);
 
-  // (b) **印字ゆれ** — production が `HDL-コレステロール` と印字した場合 (実測で未解決)
-  const printed = H.validateCrossCheck(SUB.displayName, DATE, { ...SRC, 健診日: DATE },
-    PROD.map((m) => m.item_name === 'HDLコレステロール'
-      ? { item_name: 'HDL-コレステロール', value_num: m.value_num } : m));
-  ok('印字ゆれは黙って通さない', !printed.ok);
-  ok('原因の印字名を名指しで返す', printed.unresolvedProductionNames.includes('HDL-コレステロール'),
-    JSON.stringify(printed.unresolvedProductionNames));
+  /*
+   * (b) **§10.5.1 の固定表で解決する印字名は PASS する**。
+   * 以前は `HDL-コレステロール` が未解決で 5 名が hard FAIL していた。
+   * FINAL §10.5.1 が「① findByAlias → ② v3 validation 専用固定表」と裁定したので、
+   * **許可された名前だけ**が 2 段目で解決する。
+   */
+  const renamed = (from, to) => H.validateCrossCheck(SUB.displayName, DATE, { ...SRC, 健診日: DATE },
+    PROD.map((m) => m.item_name === to ? { item_name: from, value_num: m.value_num } : m));
+  for (const [from, to] of [
+    ['HDL-コレステロール', 'HDLコレステロール'],
+    ['LDL-コレステロール', 'LDLコレステロール'],
+    ['AST (GOT)', 'GOT(AST)'],
+    ['ALT (GPT)', 'GPT(ALT)'],
+    ['HbA1c', 'HbA1c(NGSP)'],
+    ['収縮期血圧', '最高血圧'],
+    ['拡張期血圧', '最低血圧'],
+  ]) {
+    const r = renamed(from, to);
+    ok(`§10.5.1 許可名 ${from} は PASS`, r.ok, JSON.stringify(r.items.filter((i) => i.status !== 'match')));
+    eq(`${from} は未解決一覧に出ない`, r.unresolvedProductionNames, []);
+    eq(`${from} で errorCode は立たない`, r.errorCode, null);
+  }
+  // 全角で印字されても NFKC で同じキーになる (**ハイフンを消す規則ではない**)
+  const zenkaku = renamed('ＨＤＬ－コレステロール', 'HDLコレステロール');
+  ok('全角の許可名も PASS', zenkaku.ok, JSON.stringify(zenkaku.items.filter((i) => i.status !== 'match')));
+  // 連続空白は 1 個へ縮約する (§10.5.1-3)
+  ok('連続空白は 1 個へ縮約', renamed('AST   (GOT)', 'GOT(AST)').ok);
+
+  /*
+   * (b2) **固定表に無い名前は寄せない** (§10.5.1-5)。
+   * `中性脂肪` が空腹時かどうかは印字だけでは決まらない。
+   * **黙って `空腹時中性脂肪` へ当てると、別の検体の値が納品 JSON の照合を通ってしまう。**
+   */
+  for (const [from, to] of [
+    ['中性脂肪', '空腹時中性脂肪'], ['TG', '空腹時中性脂肪'],
+    ['トリグリセライド', '空腹時中性脂肪'], ['血糖', '空腹時血糖'],
+    ['SBP', '最高血圧'], ['DBP', '最低血圧'], ['FPG', '空腹時血糖'],
+  ]) {
+    const r = renamed(from, to);
+    ok(`§10.5.1-5 ${from} は寄せない (FAIL)`, !r.ok);
+    ok(`${from} は未解決として名指しされる`, r.unresolvedProductionNames.includes(from),
+      JSON.stringify(r.unresolvedProductionNames));
+    eq(`${from} で errorCode が立つ`, r.errorCode, H.HEALTH_CROSSCHECK_NAME_UNRESOLVED);
+    eq(`${from} で足りない canonical が出る`, r.missingRequiredCanonicals, [to]);
+  }
+
+  /*
+   * (b3) **足りない canonical と未解決名を 1 対 1 に並べない** (§10.5.1-6 末尾)。
+   * 数が同じでも同じ項目とは限らない。**対応付けは人が原本を見て決める。**
+   */
+  const two = H.validateCrossCheck(SUB.displayName, DATE, { ...SRC, 健診日: DATE },
+    PROD.map((m) => m.item_name === '空腹時中性脂肪' ? { item_name: '中性脂肪', value_num: m.value_num }
+      : m.item_name === '空腹時血糖' ? { item_name: '血糖', value_num: m.value_num } : m));
+  eq('未解決名は 2 件', two.unresolvedProductionNames.length, 2);
+  eq('足りない canonical も 2 件', two.missingRequiredCanonicals.length, 2);
+  ok('2 つの一覧は別々に返る (組にしない)',
+    !JSON.stringify(two).includes('"pairs"') && !JSON.stringify(two).includes('"mapping"'));
+
+  // 名前解決ではなく**値違い**で落ちたときは errorCode を立てない (原因を混ぜない)
+  const valueOnly = H.validateCrossCheck(SUB.displayName, DATE, { ...SRC, 健診日: DATE, 体重: 61 }, PROD);
+  ok('値違いは FAIL', !valueOnly.ok);
+  eq('値違いでは errorCode を立てない', valueOnly.errorCode, null);
 
   // (c) 値違い
   const diff = H.validateCrossCheck(SUB.displayName, DATE, { ...SRC, 健診日: DATE, 体重: 61 }, PROD);
