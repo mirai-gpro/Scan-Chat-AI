@@ -93,7 +93,7 @@ export const POST: APIRoute = async ({ request }) => {
    * 残す側の内訳。**件数だけだと「想定と違う」に気づけない** (実測 2026-09-15: 30 のはずが 216)。
    * 日付フォルダ別・拡張子別に数える。1 人 1 回なら date は 1 つ、json は 3 つになる。
    */
-  const detail = new Map<string, Map<string, { json: number; other: number }>>();
+  const detail = new Map<string, Map<string, { json: number; other: number; otherSample: string[] }>>();
   for (const o of objs) {
     const id = clientIdOf(o.key, deliveryPrefix);
     if (!id || !keep.has(id.toLowerCase())) continue;
@@ -101,8 +101,14 @@ export const POST: APIRoute = async ({ request }) => {
     const date = seg[2] ?? '(直下)'; // {id}/date/{YYYY_MM_DD}/...
     const byDate = detail.get(id) ?? new Map();
     detail.set(id, byDate);
-    const cell = byDate.get(date) ?? { json: 0, other: 0 };
-    if (o.key.toLowerCase().endsWith('.json')) cell.json++; else cell.other++;
+    const cell = byDate.get(date) ?? { json: 0, other: 0, otherSample: [] };
+    if (o.key.toLowerCase().endsWith('.json')) {
+      cell.json++;
+    } else {
+      cell.other++;
+      // **名前を見ないと何のファイルか分からない**ので、先頭 3 件だけ持ち帰る。
+      if (cell.otherSample.length < 3) cell.otherSample.push(o.key.split('/').pop() ?? '');
+    }
     byDate.set(date, cell);
   }
 
@@ -113,7 +119,7 @@ export const POST: APIRoute = async ({ request }) => {
     kept: [...kept].map(([clientId, files]) => ({ clientId, files })),
     kept_detail: [...detail].map(([clientId, byDate]) => ({
       clientId,
-      dates: [...byDate].map(([date, c]) => ({ date, json: c.json, other: c.other })),
+      dates: [...byDate].map(([date, c]) => ({ date, json: c.json, other: c.other, otherSample: c.otherSample })),
     })),
     kept_json: objs.filter((o) => {
       const id = clientIdOf(o.key, deliveryPrefix);
