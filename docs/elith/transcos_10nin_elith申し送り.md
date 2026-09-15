@@ -254,11 +254,13 @@ A 氏と同じ理由で、そのままでは**サプリメント名が欠落**�
 | 9 | `61da3cb6-ec1e-4cb0-aeb4-8b74c15ccce3` | `2025_09_04` |
 | 10 | `0a2b33b8-67c3-4aaa-906d-de06695cfe62` | `2026_01_14` |
 
+- 置き場所は **バケット直下**の
+  `user/{client_id}/date/{YYYY_MM_DD}/{format_id}_date_{YYYY_MM_DD}_user_{client_id}.json`
+  です（`elith_s3_data_handoff_spec` §2 の規則どおり）。
 - **各フォルダに 3 ファイル**（`HealthCheckupData` / `GeneticTestResultData` /
   `LifestyleQuestionnaireData`）、合計 **30 ファイル**です。
-- 一部のフォルダには、健診の**元画像（`HealthCheckupData_..._01.jpg`）が同居**します。
-  当社の監査用で、**納品データではありません**（従来の admin バッチ経路と同じ扱いです）。
-  読み取り対象は `.json` のみとご理解ください。
+- **納品先に置いてあるのは `.json` だけです。** 当社の監査用に残している元画像は
+  別のプレフィックス配下にあり、納品先には含めていません。
 
 ### 7-2. 起動トリガ
 
