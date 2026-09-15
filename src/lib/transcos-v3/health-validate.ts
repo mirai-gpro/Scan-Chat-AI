@@ -72,31 +72,48 @@ export function normalizeValidationName(raw: unknown): string {
 }
 
 /**
- * §10.5.1。production `findByAlias()` で解決しなかった名前だけを受ける第 2 段。
+ * §10.5.1 の固定表。production `findByAlias()` で解決しなかった名前だけを受ける第 2 段。
  *
- * **これは Health JSON を書き換える alias ではない。照合時の名前解決にしか使わない** —
+ * **これは Health JSON を書き換える alias 表ではない。** validation 上、
+ * **どの output name をどの required canonical として照合してよいか**だけを決める。
  * production `STANDARD_MASTER` へ synonym を足すのは §10.5 末尾で禁止されており、
  * 足せば**納品 JSON の項目名そのものが変わる**。ここは読む側だけを直す。
  *
- * **FINAL が許可した名前だけを書く。** `中性脂肪` / `TG` / `トリグリセライド` /
- * `血糖` / `SBP` / `DBP` / `FPG` は**入れない** — source から意味が確定していない
- * (`中性脂肪` が空腹時かどうかは印字だけでは決まらない)。未解決のままにする。
+ * **仕様の表をそのまま写す** (§10.5.1)。行を勝手に増やさない。
+ * 根拠 = 補助XLSX 対象 5 名の原本健診PDF を再確認し、脂質は 5 名とも
+ * `HDL-コレステロール` / `空腹時中性脂肪` / `LDL-コレステロール` と印字されていて、
+ * 曖昧な `中性脂肪` 単独ではなかった、という実確認。
+ *
+ * **`中性脂肪` 単独を `空腹時中性脂肪` とみなさない** — production master が
+ * 空腹時/随時を区別しているので、これは意味解釈になる。
+ * **`LDLコレステロール(F式)` も `LDLコレステロール` の代用にしない。**
  */
-const V3_VALIDATION_NAME_PAIRS: readonly (readonly [string, string])[] = [
-  ['HDL-コレステロール', 'HDLコレステロール'],
-  ['LDL-コレステロール', 'LDLコレステロール'],
-  ['AST(GOT)', 'GOT(AST)'],
-  ['AST (GOT)', 'GOT(AST)'],
-  ['ALT(GPT)', 'GPT(ALT)'],
-  ['ALT (GPT)', 'GPT(ALT)'],
-  ['HbA1c', 'HbA1c(NGSP)'],
-  ['収縮期血圧', '最高血圧'],
-  ['拡張期血圧', '最低血圧'],
+export const V3_VALIDATION_NAME_CONTRACT: readonly {
+  canonical: string;
+  /** production output に現れてよい item name。**ここに無い名前は未解決。** */
+  allowed: readonly string[];
+}[] = [
+  { canonical: '身長', allowed: ['身長'] },
+  { canonical: '体重', allowed: ['体重'] },
+  { canonical: 'BMI', allowed: ['BMI', '体格指数'] },
+  { canonical: '最高血圧', allowed: ['最高血圧', '最大血圧', '収縮期血圧', '血圧最高'] },
+  { canonical: '最低血圧', allowed: ['最低血圧', '最小血圧', '拡張期血圧', '血圧最低'] },
+  { canonical: '赤血球数', allowed: ['赤血球数', '赤血球', 'RBC'] },
+  { canonical: '血色素量', allowed: ['血色素量', 'ヘモグロビン', 'Hb', '血色素'] },
+  { canonical: '空腹時血糖', allowed: ['空腹時血糖', '空腹時血糖(FBS)', 'FBS'] },
+  { canonical: 'HbA1c(NGSP)', allowed: ['HbA1c(NGSP)', 'HbA1c (NGSP)', 'HbA1c', 'ヘモグロビンA1c', 'HbA1cNGSP'] },
+  { canonical: 'GOT(AST)', allowed: ['GOT(AST)', 'AST(GOT)', 'AST (GOT)', 'AST', 'GOT'] },
+  { canonical: 'GPT(ALT)', allowed: ['GPT(ALT)', 'ALT(GPT)', 'ALT (GPT)', 'ALT', 'GPT'] },
+  { canonical: 'γ-GTP', allowed: ['γ-GTP', 'γGTP', 'ガンマGTP', 'GGT', 'Y-GTP', 'YGTP', 'Y-GTP(γ-GTP)'] },
+  { canonical: 'HDLコレステロール', allowed: ['HDLコレステロール', 'HDL-コレステロール', 'HDL', 'HDL-C'] },
+  { canonical: '空腹時中性脂肪', allowed: ['空腹時中性脂肪', '空腹時TG'] },
+  { canonical: 'LDLコレステロール', allowed: ['LDLコレステロール', 'LDL-コレステロール', 'LDL', 'LDL-C'] },
 ];
 
 /** 引くときと同じ規則でキーを作る (表と検索で正規化がずれない)。 */
 export const V3_VALIDATION_NAME_TABLE: ReadonlyMap<string, string> = new Map(
-  V3_VALIDATION_NAME_PAIRS.map(([from, to]) => [normalizeValidationName(from), to]),
+  V3_VALIDATION_NAME_CONTRACT.flatMap((row) =>
+    row.allowed.map((name) => [normalizeValidationName(name), row.canonical] as const)),
 );
 
 /**

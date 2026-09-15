@@ -469,6 +469,33 @@ async function buildXlsxNumericHeader() {
   ok('raw reader は日付へ変換しない', !/Date\b/.test(rh));
 }
 
+// ===========================================================================
+// ⑧ §14.5 / R2 — v3 の経路から run 跨ぎ cache を触らない
+// ===========================================================================
+/*
+ * `processBatch()` は `findCachedPage(file_sha256, page_no)` を内包していて、
+ * **別の run で読んだページの結果をそのまま返す**。v3 は「この run で読んだものだけ」で
+ * resume を判定する契約 (§14.5) なので、両立しない。
+ *
+ * これは**黙って壊れる**類の違反 — cache が当たると処理は速く終わり、
+ * 結果も一見それらしいので、**誰も気づかないまま別 run の読取結果が納品される**。
+ * テストでは捕まえられない (cache が空なら同じ挙動になる) ので、
+ * **v3 のソースにその呼び出しが 1 つも無いこと**を機械で見る。
+ */
+{
+  const { readdirSync } = await import('node:fs');
+  const dir = join(repoRoot, 'src/lib/transcos-v3');
+  const files = readdirSync(dir).filter((f) => f.endsWith('.ts'));
+  ok('v3 のソースが 1 本以上ある', files.length > 0);
+  for (const f of files) {
+    const body = strip(readFileSync(join(dir, f), 'utf8'));
+    for (const banned of ['findCachedPage', 'processBatch']) {
+      ok(`${f} が ${banned} を呼んでいない`, !body.includes(banned),
+        '§14.5: run 跨ぎ cache は v3 の経路から触らない');
+    }
+  }
+}
+
 rmSync(tmp, { recursive: true, force: true });
 console.log('');
 if (failures.length > 0) {

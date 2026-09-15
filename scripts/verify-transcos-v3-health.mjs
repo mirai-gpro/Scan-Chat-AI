@@ -85,14 +85,23 @@ const H = await import(pathToFileURL(join(tmp, 'health-validate.js')).href);
   for (const p of M.HEALTH_CROSS_CHECK) {
     eq(`canonical ${p.canonical} は自分へ解決`, H.resolveItemCanonical(p.canonical), p.canonical);
   }
-  // FINAL が許可した名前
-  for (const [from, to] of [
-    ['HDL-コレステロール', 'HDLコレステロール'], ['LDL-コレステロール', 'LDLコレステロール'],
-    ['AST(GOT)', 'GOT(AST)'], ['AST (GOT)', 'GOT(AST)'],
-    ['ALT(GPT)', 'GPT(ALT)'], ['ALT (GPT)', 'GPT(ALT)'],
-    ['HbA1c', 'HbA1c(NGSP)'], ['収縮期血圧', '最高血圧'], ['拡張期血圧', '最低血圧'],
-  ]) {
-    eq(`許可名 ${from} → ${to}`, H.resolveItemCanonical(from), to);
+  /*
+   * **§10.5.1 の表そのものを網羅する**。1 行ずつ書き出さず表から回すので、
+   * 表に行を足したら自動で検査される (表と検査がずれない)。
+   */
+  eq('§10.5.1 の canonical は 15 件', H.V3_VALIDATION_NAME_CONTRACT.length, 15);
+  const required = new Set(M.HEALTH_CROSS_CHECK.map((p) => p.canonical));
+  for (const row of H.V3_VALIDATION_NAME_CONTRACT) {
+    ok(`${row.canonical} は required canonical`, required.has(row.canonical));
+    ok(`${row.canonical} の allowed に自分自身が入っている`, row.allowed.includes(row.canonical));
+    for (const name of row.allowed) {
+      eq(`許可名 ${name} → ${row.canonical}`, H.resolveItemCanonical(name), row.canonical);
+    }
+  }
+  // 15 canonical すべてが表に在る (1 つでも欠けるとその項目だけ静かに未解決になる)
+  for (const p of M.HEALTH_CROSS_CHECK) {
+    ok(`${p.canonical} が §10.5.1 の表に在る`,
+      H.V3_VALIDATION_NAME_CONTRACT.some((r) => r.canonical === p.canonical));
   }
   // **寄せない名前** (§10.5.1-5)
   for (const n of ['中性脂肪', 'TG', 'トリグリセライド', '血糖', 'SBP', 'DBP', 'FPG']) {
@@ -106,9 +115,23 @@ const H = await import(pathToFileURL(join(tmp, 'health-validate.js')).href);
    */
   eq('後ろに語が付いたら寄せない', H.resolveItemCanonical('HDL-コレステロール(直接法)'), null);
   eq('前に語が付いたら寄せない', H.resolveItemCanonical('血清HDL-コレステロール'), null);
-  eq('表の行き先を逆に引かない', H.resolveItemCanonical('GOT'), 'GOT(AST)'); // ① 由来 (production synonym)
   eq('空は null', H.resolveItemCanonical('   '), null);
-  eq('固定表の件数', H.V3_VALIDATION_NAME_TABLE.size, 9);
+
+  /*
+   * **`LDLコレステロール(F式)` を `LDLコレステロール` の代用にしない** (§10.5.1 末尾)。
+   * production master では別 canonical なので ① がそのまま別物として返す。
+   * ここが崩れると **F式の計算値が実測値の照合を通ってしまう。**
+   */
+  ok('LDLコレステロール(F式) は LDLコレステロール にならない',
+    H.resolveItemCanonical('LDLコレステロール(F式)') !== 'LDLコレステロール',
+    String(H.resolveItemCanonical('LDLコレステロール(F式)')));
+  ok('LDL(F式) も LDLコレステロール にならない',
+    H.resolveItemCanonical('LDL(F式)') !== 'LDLコレステロール',
+    String(H.resolveItemCanonical('LDL(F式)')));
+  // non-HDL も HDL へ寄らない
+  ok('non-HDLコレステロール は HDLコレステロール にならない',
+    H.resolveItemCanonical('non-HDLコレステロール') !== 'HDLコレステロール',
+    String(H.resolveItemCanonical('non-HDLコレステロール')));
 
   /*
    * **固定表は validation 専用で、production master を書き換えない** (§10.5.1-2)。
@@ -252,19 +275,15 @@ const DATE = '2025-09-25';
    */
   const renamed = (from, to) => H.validateCrossCheck(SUB.displayName, DATE, { ...SRC, 健診日: DATE },
     PROD.map((m) => m.item_name === to ? { item_name: from, value_num: m.value_num } : m));
-  for (const [from, to] of [
-    ['HDL-コレステロール', 'HDLコレステロール'],
-    ['LDL-コレステロール', 'LDLコレステロール'],
-    ['AST (GOT)', 'GOT(AST)'],
-    ['ALT (GPT)', 'GPT(ALT)'],
-    ['HbA1c', 'HbA1c(NGSP)'],
-    ['収縮期血圧', '最高血圧'],
-    ['拡張期血圧', '最低血圧'],
-  ]) {
-    const r = renamed(from, to);
-    ok(`§10.5.1 許可名 ${from} は PASS`, r.ok, JSON.stringify(r.items.filter((i) => i.status !== 'match')));
-    eq(`${from} は未解決一覧に出ない`, r.unresolvedProductionNames, []);
-    eq(`${from} で errorCode は立たない`, r.errorCode, null);
+  // **表の許可名を全部、実際の照合経路で通す** (解決できても照合で落ちれば意味がない)
+  for (const row of H.V3_VALIDATION_NAME_CONTRACT) {
+    for (const from of row.allowed) {
+      const r = renamed(from, row.canonical);
+      ok(`§10.5.1 許可名 ${from} は PASS`, r.ok,
+        JSON.stringify(r.items.filter((i) => i.status !== 'match')));
+      eq(`${from} は未解決一覧に出ない`, r.unresolvedProductionNames, []);
+      eq(`${from} で errorCode は立たない`, r.errorCode, null);
+    }
   }
   // 全角で印字されても NFKC で同じキーになる (**ハイフンを消す規則ではない**)
   const zenkaku = renamed('ＨＤＬ－コレステロール', 'HDLコレステロール');
