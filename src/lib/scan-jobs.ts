@@ -32,6 +32,10 @@ export interface ScanJob {
   done_count: number;
   failed_pages: number;
   hint: string | null;
+  /** Elith 納品フォルダ名に使う診断 ID (端末採番)。null ならワーカーが採番する。 */
+  diagnostic_id: string | null;
+  /** 読込元ファイル名。納品ファイル名のスラグにだけ使う。 */
+  source_file_name: string | null;
   result_markdown: string | null;
   artifact_id: string | null;
   error: string | null;
@@ -62,11 +66,13 @@ function table() {
  * @param uid **Cookie から解決した本人の uid**。リクエスト本文の申告は使わない
  *   (他人のスキャンを作れてしまうため。`/api/scan/save` と同じ規律)。
  * @param keys S3 のキー。**順番が紙の順番**なのでそのまま配列で持つ。
+ * @param meta 納品書き出しに要る控え (`hint` / `diagnosticId` / `sourceFileName`)。
+ *   **どれも無くてよい**。無ければ納品フォルダはサーバ採番、ファイル名はスラグ無しになる。
  */
 export async function enqueueScanJob(
   uid: string,
   keys: string[],
-  hint: string | null,
+  meta: { hint?: string | null; diagnosticId?: string | null; sourceFileName?: string | null } = {},
 ): Promise<{ ok: true; id: string } | { ok: false; error: string }> {
   const t = table();
   if (!t) return { ok: false, error: 'supabase_not_configured' };
@@ -75,7 +81,9 @@ export async function enqueueScanJob(
       diagnostic_user_id: uid,
       image_keys: keys,
       page_count: keys.length,
-      hint: hint || null,
+      hint: meta.hint || null,
+      diagnostic_id: meta.diagnosticId || null,
+      source_file_name: meta.sourceFileName || null,
     })
     .select('id')
     .single();

@@ -7,7 +7,7 @@
  * ブラウザが presigned PUT で S3 へ置いてあるので、**関数を通らない**
  * (Vercel のリクエスト本文 4.5MB 制限にかからない)。
  *
- * 入力  { keys: string[], hint?: string }
+ * 入力  { keys: string[], hint?: string, diagnosticId?: string, sourceFileName?: string }
  * 出力  { ok: true, job_id }
  *
  * **本人の行としてしか作らない。** uid は Cookie から解決したものだけを使い、
@@ -20,6 +20,8 @@ import { isScanUploadKey } from '../../../lib/scan-upload-ticket';
 import { enqueueScanJob } from '../../../lib/scan-jobs';
 
 export const prerender = false;
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -63,7 +65,21 @@ export const POST: APIRoute = async (ctx) => {
   }
 
   const hint = typeof body.hint === 'string' ? body.hint.slice(0, 500) : null;
-  const r = await enqueueScanJob(uid, keys, hint);
+
+  /*
+   * **Elith 納品の書き出しに要る控え** (§4.4)。ワーカーは前景と同じ納品物を
+   * 作るのでこの 2 つを預かる。**無くてよい** — 無ければフォルダはサーバ採番、
+   * ファイル名はスラグ無しになるだけで、書き出しは止めない。
+   *
+   * `diagnosticId` は**形が UUID のものだけ**受ける (納品先フォルダ名になるので、
+   * 任意の文字列を通すと隣のフォルダを指せてしまう)。
+   */
+  const dRaw = typeof body.diagnosticId === 'string' ? body.diagnosticId.trim() : '';
+  const diagnosticId = UUID_RE.test(dRaw) ? dRaw : null;
+  const sourceFileName =
+    typeof body.sourceFileName === 'string' ? body.sourceFileName.slice(0, 200) : null;
+
+  const r = await enqueueScanJob(uid, keys, { hint, diagnosticId, sourceFileName });
   if (!r.ok) return json({ ok: false, error: r.error }, 500);
   return json({ ok: true, job_id: r.id, page_count: keys.length });
 };

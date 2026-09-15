@@ -32,6 +32,7 @@ const upload = read('src/scripts/scan-upload.ts');
 const jobs = read('src/lib/scan-jobs.ts');
 const worker = read('src/pages/api/cron/scan-worker.ts');
 const jobsApi = read('src/pages/api/scan/jobs.ts');
+const exportApi = read('src/pages/api/scan/export.ts');
 
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n① 全ページが S3 に載る (P2)\n');
@@ -135,6 +136,36 @@ console.log('\n④ ワーカー (P3)\n');
   ok('失敗を黙って消さない',
     /await failJob\(job\.id, job\.attempts, msg\);/.test(worker),
     'ユーザーには出さないので、残らないと誰も気づけない');
+}
+
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n④-2 Elith 納品の書き出しが前景と同じ\n');
+{
+  /*
+   * 前景経路 (`exportScanToS3`) は DB 保存と**一緒に**納品 JSON を S3 へ書いていた。
+   * 背景化でワーカー側にも要るのに落ちていた、というのがこの節の由来。
+   * **画面から送っても背景で読まれても同じ納品物が出る**ことを固定する。
+   */
+  ok('書き出しの入口は 1 つ',
+    /export async function putScanExport\(/.test(read('src/lib/scan-export-put.ts')),
+    '納品整形と同じで、書き出しも 1 箇所に集約する');
+  ok('前景 API もその 1 つを通る',
+    /putScanExport\(/.test(exportApi) && !/buildScanExportBundle\(/.test(exportApi),
+    'API 側に組み立てを残すと 2 系統になる (見るのは呼び出し。注意書きの文中は数えない)');
+  ok('ワーカーも同じ関数で書き出す',
+    /putScanExport\(markdownClean, \{/.test(worker),
+    'これが無いと背景で読まれた回だけ Elith へ納品されない');
+  ok('納品に失敗しても検査結果は取り消さない',
+    /try \{\s*const ex = await putScanExport/.test(worker)
+      && /Elith 納品の書き出しに失敗/.test(worker),
+    '投げるとジョブが失敗扱いになり、同じ紙を二度読んで検査が二重になる');
+  ok('納品フォルダ名の控えを預かる',
+    /diagnostic_id: meta\.diagnosticId \|\| null/.test(jobs)
+      && /diagnosticId: getOrCreateDiagnosticId\(\)/.test(scan),
+    '前景と同じ診断 ID のフォルダへ出すため');
+  ok('診断 ID は UUID の形だけ受ける',
+    /UUID_RE\.test\(dRaw\) \? dRaw : null/.test(jobsApi),
+    '任意の文字列を通すと納品先の隣のフォルダを指せる');
 }
 
 console.log('\n⑤ cron と監視 (P4 / P5)\n');

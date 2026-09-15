@@ -19,8 +19,7 @@
  */
 
 import type { APIRoute } from 'astro';
-import { buildScanExportBundle } from '../../../lib/scan-export';
-import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
+import { putScanExport } from '../../../lib/scan-export-put';
 
 export const prerender = false;
 
@@ -59,24 +58,22 @@ export const POST: APIRoute = async ({ request }) => {
   const capturedAt = capturedRaw && !Number.isNaN(Date.parse(capturedRaw)) ? new Date(capturedRaw) : undefined;
   const exportedAt = new Date();
 
-  const cfg = getS3Config();
-  const prefix = cfg?.prefix ?? '';
+  /*
+   * **書き出しは `scan-export-put.ts` に集約**。cron ワーカー (背景経路) も
+   * 同じ関数を呼ぶので、**前景で送っても背景で読まれても同じ納品物**が出る。
+   * ここで直接 buildScanExportBundle + putFiles を書かないこと。
+   */
+  const r = await putScanExport(markdownClean, {
+    diagnosticId,
+    diagnosticUserId,
+    model: str(body.model),
+    hint: str(body.hint),
+    sourceFileName: str(body.sourceFileName),
+    capturedAt,
+    exportedAt,
+  });
 
-  const bundle = buildScanExportBundle(
-    markdownClean,
-    {
-      diagnosticId,
-      diagnosticUserId,
-      model: str(body.model),
-      hint: str(body.hint),
-      sourceFileName: str(body.sourceFileName),
-      capturedAt,
-      exportedAt,
-    },
-    prefix,
-  );
-
-  if (!isS3Configured() || !cfg) {
+  if (!r.configured) {
     // ドライラン: 生成物のプレビューを返す (S3 未設定でも変換結果を確認できる)
     return json({
       ok: false,
@@ -84,30 +81,29 @@ export const POST: APIRoute = async ({ request }) => {
       reason: 's3_not_configured',
       message: 'AWS_S3_BUCKET / AWS_REGION 未設定のため S3 へは書き出していません。生成物のプレビューを返します。',
       diagnostic_id: diagnosticId,
-      folder: bundle.folder,
-      files: bundle.files.map((f) => ({ name: f.name, bytes: f.bytes, contentType: f.contentType })),
-      json: bundle.json,
+      folder: r.folder,
+      files: r.files,
+      json: r.json,
     });
   }
 
-  try {
-    const uploaded = await putFiles(bundle.files);
-    return json({
-      ok: true,
-      configured: true,
-      bucket: cfg.bucket,
-      region: cfg.region,
-      diagnostic_id: diagnosticId,
-      folder: bundle.folder,
-      uploaded,
-      json: bundle.json,
-    });
-  } catch (err) {
+  if (!r.ok) {
     return json(
-      { ok: false, configured: true, error: 'S3 upload failed', detail: String(err), folder: bundle.folder },
+      { ok: false, configured: true, error: 'S3 upload failed', detail: r.error, folder: r.folder },
       502,
     );
   }
+
+  return json({
+    ok: true,
+    configured: true,
+    bucket: r.bucket,
+    region: r.region,
+    diagnostic_id: diagnosticId,
+    folder: r.folder,
+    uploaded: r.uploaded,
+    json: r.json,
+  });
 };
 
 function json(data: unknown, status = 200): Response {

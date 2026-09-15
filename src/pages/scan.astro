@@ -1065,10 +1065,20 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
   async function enqueueScanJob(keys: string[]): Promise<boolean> {
     try {
       const hint = ($('scan-hint') as HTMLInputElement | null)?.value?.trim() || undefined;
+      /*
+       * **Elith 納品の書き出しに要る控えも一緒に預ける。**
+       * 前景経路 (`exportScanToS3`) はこの 2 つを付けて `/api/scan/export` を
+       * 呼んでいた。背景経路でも同じ納品物が出るよう、ワーカーへ渡す。
+       */
       const res = await fetch('/api/scan/jobs', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ keys, hint }),
+        body: JSON.stringify({
+          keys,
+          hint,
+          diagnosticId: getOrCreateDiagnosticId(),
+          sourceFileName: lastSourceFileName ?? undefined,
+        }),
       });
       const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
       return res.ok && data.ok === true;

@@ -22,6 +22,7 @@ import { fetchScanUpload } from '../../../lib/scan-upload-ticket';
 import { readScanPage } from '../../../lib/scan-read-page';
 import { stripColumnFromTables, joinPageMarkdown } from '../../../lib/scan-markdown';
 import { saveScanResult } from '../../../lib/scan-persist';
+import { putScanExport } from '../../../lib/scan-export-put';
 import { deleteObjects } from '../../../lib/s3';
 import {
   claimNextJob, advanceJob, extendLock, finishJob, failJob, MAX_ATTEMPTS,
@@ -148,6 +149,35 @@ async function runJob(
      * (発注者判断 2026-09-10「確認は任意にする」= 案B)。ここを書き忘れると辿れない。
      */
     await finishJob(job.id, saved.artifactId);
+
+    /*
+     * ── Elith 納品 JSON を S3 へ ─────────────────────────────────
+     * **前景経路 (`exportScanToS3`) が DB 保存と一緒にやっていたこと。**
+     * 背景で読んだ回だけ納品が出ない、という食い違いを作らないため、
+     * ワーカーからも**同じ関数** (`scan-export-put.ts`) を呼ぶ。
+     *
+     * **落ちても検査結果の保存は取り消さない。** 読み取り自体は成功していて
+     * `test_artifacts` に残っており、画面にも出る。納品だけをやり直せばよい
+     * (再納品の口は §8 の宿題)。ここで投げるとジョブが失敗扱いになり、
+     * **同じ紙をもう一度読む** = 検査が二重に作られる。
+     */
+    try {
+      const ex = await putScanExport(markdownClean, {
+        diagnosticId: job.diagnostic_id ?? crypto.randomUUID(),
+        diagnosticUserId: job.diagnostic_user_id,
+        hint: job.hint,
+        sourceFileName: job.source_file_name,
+      });
+      if (!ex.ok) {
+        // **黙って落とさない。** admin の監視 (`/api/admin/scan-jobs`) は
+        // ジョブの状態しか見ないので、ここはログに残す。
+        console.error(
+          `[scan-worker] Elith 納品の書き出しに失敗 (job=${job.id}): ${ex.configured ? ex.error : 's3_not_configured'}`,
+        );
+      }
+    } catch (e) {
+      console.error('[scan-worker] Elith 納品の書き出しで例外:', e instanceof Error ? e.message : e);
+    }
 
     /*
      * **読み終わったら画像を消す** (§4.4-5)。失敗しても投げない —
