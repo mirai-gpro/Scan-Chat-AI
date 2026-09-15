@@ -6,6 +6,8 @@
  *   をそのまま消費するため、H2 + bbox HTML コメントで領域メタを埋め込む。
  */
 
+import { stripColumnFromTables } from '../lib/scan-markdown';
+
 /** 1 領域分のデータ (Markdown を parse した結果) */
 export interface RegionResult {
   /** 領域ラベル (H2 見出し) */
@@ -375,44 +377,6 @@ function stripMarkdownCodeFence(text: string): string {
   return m ? m[1].trim() : t;
 }
 
-/**
- * Markdown 内の GFM テーブルから指定列名の列を削除する。
- * - 表は連続するパイプ行 (\`^\\s*\\|\`) で検出。途切れたら次の表とみなす。
- * - 列名マッチはヘッダ行で空白除去して部分一致 (Gemini の微妙な表記揺れ吸収)。
- * - 区切り行 (\`|---|---|\`) のセルも同じインデックスで削除。
- * - 該当列が無い表は無加工で通す。
- * - パイプ行以外の本文 (H2 / bbox コメント / 箇条書き / 段落) は変更しない。
- */
-function stripColumnFromTables(md: string, columnNames: string[]): string {
-  const targets = columnNames.map((n) => n.replace(/\s+/g, ''));
-  const lines = md.split('\n');
-  const out: string[] = [];
-  let colIndex = -1; // -1 = 表の外
-  for (const line of lines) {
-    if (!/^\s*\|/.test(line)) {
-      colIndex = -1;
-      out.push(line);
-      continue;
-    }
-    // 両端の境界パイプを落としてからセル分解
-    const inner = line.replace(/^\s*\|/, '').replace(/\|\s*$/, '');
-    const cells = inner.split('|');
-    if (colIndex === -1) {
-      // 各表の最初のパイプ行 = ヘッダとみなして対象列を確定
-      colIndex = cells.findIndex((c) =>
-        targets.some((t) => c.trim().replace(/\s+/g, '').includes(t)),
-      );
-      if (colIndex === -1) {
-        // 対象列が無い表は無加工
-        out.push(line);
-        continue;
-      }
-    }
-    if (colIndex < cells.length) cells.splice(colIndex, 1);
-    out.push('| ' + cells.map((c) => c.trim()).join(' | ') + ' |');
-  }
-  return out.join('\n');
-}
 
 async function readErrorMessage(res: Response): Promise<string> {
   try {

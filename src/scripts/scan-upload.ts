@@ -87,9 +87,19 @@ export async function prepareScanUpload(file: File): Promise<PreparedUpload> {
     );
   }
 
-  // 予算内ならそのまま送る = 従来どおり無劣化・往復も増えない。PDF も HEIC もここを通る。
+  /*
+   * ── 予算内 ──────────────────────────────────────────────────────
+   * **従来どおり dataUrl も持つ**（表示がこれに乗っているので画面は 1 px も変わらない）。
+   * 加えて **S3 にも置く**。バックグラウンド処理は送信後にサーバが読み直すので、
+   * **全ページに S3 のキーが要る**（`docs/scan/スキャン非同期処理_仕様書.md` §3.1）。
+   *
+   * **S3 が落ちても投げない。** キーが無い回は送信時に前景処理へ落ちるだけで、
+   * 読み取り自体は今までどおり成立する（待たされるが失敗はしない）。
+   */
   if (file.size <= WIRE_BUDGET_BYTES) {
-    return { dataUrl: await readFileAsDataUrl(file), kind };
+    const dataUrl = await readFileAsDataUrl(file);
+    const smallKey = await uploadViaS3(file);
+    return { dataUrl, imageKey: smallKey ?? undefined, kind };
   }
 
   // ── 予算超え。まず S3 直アップロードを試す (無劣化で送れる) ──
@@ -131,6 +141,27 @@ export async function prepareScanUpload(file: File): Promise<PreparedUpload> {
     `画像を縮小しても送信できる大きさ (${mb(WIRE_BUDGET_BYTES)} 相当) に収まりませんでした。` +
       `紙面を分けて撮影してください。`,
   );
+}
+
+/**
+ * **撮影した 1 枚を S3 へ置く。** カメラ経路は `File` を持たない（canvas の data URL）ので、
+ * ここで Blob に直してから**アップロードと同じ presigned PUT に載せる**
+ * (`docs/scan/スキャン非同期処理_仕様書.md` §3.1「カメラ撮影も S3 へ」)。
+ *
+ * **新しい置き場を作らない** — キーの形も検査 (`isScanUploadKey`) も既存のまま。
+ * **失敗しても投げない**（null を返す）。キーが無い回は送信時に前景処理へ落ちるだけ。
+ */
+export async function uploadDataUrlToS3(dataUrl: string): Promise<string | null> {
+  try {
+    const m = /^data:([^;,]+)[^,]*,/.exec(dataUrl);
+    if (!m) return null;
+    const blob = await (await fetch(dataUrl)).blob();
+    // 署名は Content-Type と ContentLength を固定するので、実体と食い違わせない。
+    const file = new File([blob], 'shot.jpg', { type: m[1] || blob.type });
+    return await uploadViaS3(file);
+  } catch {
+    return null;
+  }
 }
 
 /**

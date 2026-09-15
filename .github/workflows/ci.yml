@@ -72,6 +72,7 @@ jobs:
       - run: npm run verify:demo-gate
       - run: npm run verify:special-accounts
       - run: npm run verify:single-purchase
+      - run: npm run verify:scan-async
       - run: npm run verify:scan-upload-key
       - run: npm run verify:scan-persist
       - run: npm run verify:blood-csv

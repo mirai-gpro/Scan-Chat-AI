@@ -236,6 +236,68 @@ console.log('\n④-2 報告書が無いときのタイル\n');
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// ④-3 複数年アップロード (1 回分 = 1 年分・最大 5 年)
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n④-3 複数年アップロード\n');
+{
+  const scan = read('src/pages/scan.astro');
+  const vfy = read('src/scripts/scan-verification.ts');
+
+  /*
+   * **1 回の送信 = 1 回分 (1 年分)。** 1 回の検査は 4〜10 枚の紙になるので、
+   * 何枚まとめて送っても `test_artifacts` が 1 件になるのは**正しい**
+   * (2026-09-15 発注者確認)。足りないのは**回の区切り**だけ。
+   */
+  ok('複数年はスペシャルアカウントに限る',
+    /const multiYear = isSpecialAccount\(diagnosticUserId\);/.test(scan),
+    '通常の利用者は「今回の検査」1 回分。画面を変えない');
+
+  /*
+   * **済んだ回数はサーバの事実から数える。** 端末のカウンタだと、
+   * 途中で別の端末に変えたときに 1 からやり直しになる。
+   */
+  ok('済んだ回数は test_artifacts から数える',
+    /const roundsDone = uploads\.filter\(\(a\) => a\.test_type === 'health_checkup'\)\.length;/.test(scan),
+    'クライアントのカウンタだと端末を変えた時点で 1 に戻る');
+  ok('上限は 5 年分', /const MAX_ROUNDS = 5;/.test(scan));
+  ok('上限に達したら「続ける」を出さない',
+    /const canAddMore = multiYear && roundsDone < MAX_ROUNDS;/.test(scan)
+      && /\{canAddMore && \(/.test(scan));
+
+  // 送信前に「この 1 回分はこれで完了か」を尋ねる (仕様書 §4)
+  ok('送信前に 1 回分の完了を尋ねる',
+    /この 1 回分（1 年分）はこれで完了ですか？/.test(scan),
+    '「何枚送るか」ではなく「この回が揃っているか」が本題');
+
+  /*
+   * **通常の利用者の行き先は変えない。** `onSubmitted` を渡さなければ
+   * 従来どおり `/chat` へ遷移する。
+   */
+  ok('既定の行き先は /chat のまま',
+    /if \(this\.refs\.onSubmitted\) \{[\s\S]{0,120}?\}\s*window\.location\.href = '\/chat';/.test(vfy),
+    '通常の利用者の挙動を変えない');
+  ok('複数年のときだけ行き先を差し替える',
+    /onSubmitted: doneEl \? \(\) => \{ show\('done'\)/.test(scan));
+
+  /*
+   * **フラグを別に持たず、要素の有無を条件にする。** 値と DOM が食い違う余地を作らない
+   * (通常の利用者には `#panel-done` ごと存在しない)。
+   */
+  ok('done パネルは要素の有無で判定する',
+    /const doneEl = document\.getElementById\('panel-done'\);/.test(scan)
+      && /\{multiYear && \(\s*<section id="panel-done"/.test(scan));
+
+  // 次の回はページを開き直す (保存が失敗した回まで数えないため)
+  ok('次の回は開き直して数え直す',
+    /done-add-year'\)\?\.addEventListener\('click', \(\) => \{\s*window\.location\.href/.test(scan),
+    'クライアントでカウンタを進めると、保存が失敗した回まで数えてしまう');
+
+  // 残り回数を言い切らない (何年分あるかは本人しか知らない)
+  ok('残り年数を言い切らない',
+    !/あと\s*\$\{?[0-9A-Za-z]*\}?\s*年分/.test(stripComments(scan)));
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // ⑤ 実際に動かす (完了日時の扱い・見つからないときの倒し方)
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n⑤ interview-completion.ts を実際に動かす\n');

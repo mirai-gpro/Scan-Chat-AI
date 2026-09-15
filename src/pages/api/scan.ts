@@ -1,12 +1,5 @@
 import type { APIRoute } from 'astro';
-import { ANALYZE_SYSTEM } from '../../lib/scan-prompt';
-import {
-  callGemini,
-  MODELS,
-  extractText,
-  GeminiError,
-  type GeminiContent,
-} from '../../lib/gemini';
+import { readScanPage } from '../../lib/scan-read-page';
 import { fetchScanUpload } from '../../lib/scan-upload-ticket';
 
 export const prerender = false;
@@ -53,41 +46,14 @@ export const POST: APIRoute = async ({ request }) => {
     return json({ error: 'image or imageKey is required' }, 400);
   }
 
-  const userParts: GeminiContent['parts'] = [
-    { inline_data: { mime_type: mime, data } },
-    {
-      text: body.hint
-        ? `補足: ${body.hint}\nこの紙面を Markdown に書き起こしてください。`
-        : 'この紙面を Markdown に書き起こしてください。',
-    },
-  ];
-
-  try {
-    const res = await callGemini(
-      import.meta.env.GEMINI_API_KEY,
-      {
-        systemInstruction: { parts: [{ text: ANALYZE_SYSTEM }] },
-        contents: [{ role: 'user', parts: userParts }],
-        generationConfig: {
-          temperature: 0.0,
-          maxOutputTokens: 32768,
-          thinkingConfig: { thinkingBudget: 2048 },
-        },
-      },
-      MODELS.scan,
-    );
-    const markdown = extractText(res);
-    const finishReason = res.candidates?.[0]?.finishReason;
-    return json({ markdown, finishReason });
-  } catch (err) {
-    if (err instanceof GeminiError) {
-      return json(
-        { error: err.message, detail: err.body },
-        err.status >= 400 ? err.status : 500,
-      );
-    }
-    return json({ error: 'Unexpected error', detail: String(err) }, 500);
-  }
+  /*
+   * **読み取りの本体は `scan-read-page.ts` に一本化してある。**
+   * ワーカー (バックグラウンド) も同じ関数を通るので、
+   * ここに書き足すと同じ紙から違う結果が出るようになる。
+   */
+  const r = await readScanPage({ mime, data, hint: body.hint ?? null });
+  if (!r.ok) return json({ error: r.error, detail: r.detail }, r.status);
+  return json({ markdown: r.markdown, finishReason: r.finishReason });
 };
 
 function json(data: unknown, status = 200): Response {

@@ -25,6 +25,7 @@
     "verify:demo-gate": "node scripts/verify-demo-gate.mjs",
     "verify:special-accounts": "node scripts/verify-special-accounts.mjs",
     "verify:single-purchase": "node scripts/verify-single-purchase.mjs",
+    "verify:scan-async": "node scripts/verify-scan-async.mjs",
     "verify:staging-bridge": "node scripts/verify-staging-bridge.mjs",
     "verify:viewer-origin": "node scripts/verify-viewer-origin.mjs",
     "verify:intake-scope": "esbuild scripts/verify-intake-scope.ts --bundle --platform=node --format=esm --log-level=error | node --input-type=module",
