@@ -1,0 +1,47 @@
+# スキャンのバックグラウンド処理の**見張り**。
+#
+# 正本: docs/scan/スキャン非同期処理_仕様書.md §4.5。
+#
+# 【なぜ要るか】発注者判断 2026-09-10 で**失敗はユーザーに一切出さない**
+# (「問題があれば、それはこちら側のトラブル対応」)。誰も見ないと積もるだけなので、
+# **日次で叩いて 0 件でなければ赤くする**。赤くなると GitHub から購読者へメールが飛ぶので、
+# それが実質の通知になる。**通知基盤は作らない**
+# (CLAUDE.md「通知基盤を作らず GitHub Actions の日次ワークフローを見張りにする」)。
+name: scan jobs watch
+
+on:
+  schedule:
+    - cron: '0 0 * * *' # 毎日 09:00 JST
+  workflow_dispatch:
+
+jobs:
+  watch:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: 失敗・滞留が 0 件か
+        env:
+          BASE: ${{ secrets.SCAN_CHAT_AI_BASE_URL }}
+          KEY: ${{ secrets.ADMIN_API_KEY }}
+        run: |
+          # **secret が無い環境では赤くしない。** 「設定されていない」と
+          # 「異常が出ている」を同じ赤で表すと、赤の意味が薄れて誰も見なくなる。
+          if [ -z "$BASE" ] || [ -z "$KEY" ]; then
+            echo "SCAN_CHAT_AI_BASE_URL / ADMIN_API_KEY が未設定のため確認をスキップしました。"
+            exit 0
+          fi
+          body=$(curl -sS --max-time 30 -H "Authorization: Bearer $KEY" \
+            "$BASE/api/admin/scan-jobs?stale_minutes=60") || {
+              echo "監視 API に到達できませんでした"; exit 1; }
+          echo "$body"
+          # jq を使わずに数えるのは避ける (件数の取り違えが一番まずい)。
+          problems=$(echo "$body" | jq -r '.problems // "err"')
+          if [ "$problems" = "err" ]; then
+            echo "応答を解釈できませんでした"; exit 1
+          fi
+          if [ "$problems" != "0" ]; then
+            echo "::error::スキャンの失敗・滞留が $problems 件あります。admin で確認してください。"
+            exit 1
+          fi
+          echo "失敗・滞留はありません。"

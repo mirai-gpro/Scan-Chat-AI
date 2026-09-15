@@ -20,6 +20,7 @@
  */
 
 import type { AnalyzeResult, AnalyzeSource, RegionResult } from './camera-scan';
+import { joinPageMarkdown } from '../lib/scan-markdown';
 
 /**
  * この 1 枚がどの経路で入ったか。
@@ -90,8 +91,10 @@ export function mergeResults(results: AnalyzeResult[]): AnalyzeResult {
     }
   });
 
+  // **束ね方は `scan-markdown.ts` に一本化してある** — ワーカー (バックグラウンド) も
+  // 同じ規則で束ねるため。写して 2 か所に置くと、同じ紙から違う結果が出る。
   const join = (pick: (r: AnalyzeResult) => string | undefined) =>
-    usable.map((r, i) => `## ${i + 1}枚目\n\n${pick(r) ?? ''}`.trim()).join('\n\n');
+    joinPageMarkdown(usable.map((r) => pick(r) ?? ''));
 
   return {
     markdown: join((r) => r.markdown),

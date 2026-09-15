@@ -381,8 +381,14 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
         </button>
       </div>
 
+      {/*
+        **待ち時間の説明を置かない** (仕様書 §7「この文言は P4 で消える」)。
+        送信したら読み取りはサーバが後ろで行うので、利用者は待たない。
+        S3 が使えない回だけ前景処理へ落ちるが、そのときは進捗バーが出る
+        (文言で予告するより、実際に出るものを見せる方が食い違わない)。
+      */}
       <p class="text-sm text-slate-700">
-        この内容で読み取ります。読み取りは全ページまとめて行うため、少し時間がかかります。
+        この内容で送信します。読み取りはこのあとこちらで行うので、<b>送信後はこの画面を閉じてかまいません</b>。
       </p>
 
       {/*
@@ -536,6 +542,45 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
       </div>
     </div>
 
+    <!-- ============================================================== -->
+    <!-- パネル: sent — **送信したら終わり**                              -->
+    <!-- ============================================================== -->
+    {/*
+      発注者判断 2026-09-10「**ユーザーにとっては送信完了＝完了**」
+      (`docs/scan/スキャン非同期処理_仕様書.md` §4.1 ③ / §4.6)。
+      **進捗も完了通知も出さない。** 「読み取り中 (3/6)」も作らない。
+      読み取りで問題が起きたときの対応はこちら側 = admin の監視が担う (§4.5)。
+    */}
+    <section id="panel-sent" class="flex flex-1 flex-col items-center justify-center gap-6 text-center" hidden>
+      <div class="flex h-20 w-20 items-center justify-center rounded-3xl bg-brand-50 text-brand-700">
+        <AppIcon name="ok" size={40} />
+      </div>
+      <div class="flex flex-col gap-2">
+        <h2 class="text-lg font-bold text-navy-800">送信しました</h2>
+        {/*
+          **「あとで結果を見に来てください」と約束しない。** 通知も進捗も作らないので、
+          待たせる文言を置くと守れない約束になる。読み取りが終われば
+          検査結果にいつもどおり出る、という事実だけを書く。
+        */}
+        <p class="text-sm text-slate-700">
+          この画面は閉じてかまいません。<br />読み取りが終わると、マイページの検査結果に反映されます。
+        </p>
+      </div>
+      <div class="flex w-full max-w-sm flex-col gap-2">
+        {multiYear && (
+          <button id="sent-add-year" type="button" class="btn-primary !py-4 text-lg">
+            <AppIcon name="add" size={20} /> 別の年度を続けて登録する
+          </button>
+        )}
+        <a href="/chat" class="btn-secondary flex items-center justify-center gap-1.5">
+          <AppIcon name="interview" size={20} /> AI 問診へ進む
+        </a>
+        <a href={dashUrl} class="text-sm font-medium text-brand-700 hover:underline">
+          マイページに戻る
+        </a>
+      </div>
+    </section>
+
     {/*
       ==============================================================
       パネル: done — **複数年 (スペシャルアカウント) のときだけ**。
@@ -602,7 +647,7 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
   import { initCameraScan } from '../scripts/camera-scan';
   import type { AnalyzeResult, ScanState } from '../scripts/camera-scan';
   import { ScanVerificationController } from '../scripts/scan-verification';
-  import { prepareScanUpload, UploadTooLargeError } from '../scripts/scan-upload';
+  import { prepareScanUpload, uploadDataUrlToS3, UploadTooLargeError } from '../scripts/scan-upload';
   import { ScanPageList, mergeResults } from '../scripts/scan-pages';
   import { getOrCreateDiagnosticId } from '../lib/diagnostic-id';
 
@@ -615,7 +660,7 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
   // 直近の読込元ファイル名 (アップロード経由のみ。書き出しファイル名に組み込む)
   let lastSourceFileName: string | null = null;
 
-  type Panel = 'ready' | 'active' | 'confirm' | 'review' | 'result' | 'error' | 'done';
+  type Panel = 'ready' | 'active' | 'confirm' | 'review' | 'result' | 'error' | 'done' | 'sent';
   const panels: Partial<Record<Panel, HTMLElement>> = {
     ready: $('panel-ready'),
     active: $('panel-active'),
@@ -631,6 +676,7 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
    */
   const doneEl = document.getElementById('panel-done');
   if (doneEl) panels.done = doneEl;
+  panels.sent = $('panel-sent');
 
   function show(panel: Panel): void {
     (Object.keys(panels) as Panel[]).forEach((key) => {
@@ -743,9 +789,10 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
     src: Parameters<typeof pages.add>[0],
     name: string | null,
     origin: Parameters<typeof pages.add>[2],
-  ): void {
-    pages.add(src, name, origin);
+  ): ReturnType<typeof pages.add> {
+    const page = pages.add(src, name, origin);
     renderConfirm();
+    return page;
   }
 
   /**
@@ -829,6 +876,30 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
     sendBtn.disabled = true;
     addBtns.forEach((b) => { b.disabled = true; });
     $('review-progress').hidden = false;
+
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     * **全ページが S3 に載っていれば、ここで終わり。** (発注者指示 2026-09-15
+     * 「送信ボタン後は、ユーザーに一切待たせない」/ 仕様書 §4.1 ②③)
+     * ══════════════════════════════════════════════════════════════════
+     * ジョブを積んだら「送信しました」を出して終了する。読み取りは
+     * `/api/cron/scan-worker` が後ろで行う。**進捗も完了通知も出さない。**
+     *
+     * **1 枚でもキーが無ければ前景処理へ落ちる** — S3 未設定・CORS 未設定・
+     * 回線断のどれかで、こちらでは判別できない。待たせることにはなるが、
+     * **読み取り自体は必ず成立する**方に倒す (fail-safe)。
+     */
+    const keys = pages.all.map((p) => p.imageKey).filter((k): k is string => !!k);
+    if (keys.length === total) {
+      const queued = await enqueueScanJob(keys);
+      if (queued) {
+        pages.clear();
+        camera?.stop();
+        show('sent');
+        return;
+      }
+      // 積めなかった (未サインイン・DB 障害等)。**黙って落とさず**前景へ。
+    }
 
     const results = [];
     for (let i = 0; i < total; i += 1) {
@@ -985,6 +1056,31 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
     };
   }
 
+  /**
+   * ジョブを積む。成功で true。
+   *
+   * **失敗しても投げない** — 前景処理という確実な道が残っているので、
+   * ここで止めるより落ちた方がよい (利用者から見れば「少し待つ」だけ)。
+   */
+  async function enqueueScanJob(keys: string[]): Promise<boolean> {
+    try {
+      const hint = ($('scan-hint') as HTMLInputElement | null)?.value?.trim() || undefined;
+      const res = await fetch('/api/scan/jobs', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ keys, hint }),
+      });
+      const data = (await res.json().catch(() => ({}))) as { ok?: boolean };
+      return res.ok && data.ok === true;
+    } catch {
+      return false;
+    }
+  }
+
+  document.getElementById('sent-add-year')?.addEventListener('click', () => {
+    window.location.href = `${window.location.pathname}${window.location.search}`;
+  });
+
   /*
    * **次の回は「ページを開き直す」。** 回数 (`roundsDone`) はサーバが
    * `test_artifacts` を数えて出しているので、開き直せば
@@ -1017,7 +1113,18 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
        */
       onShot: (dataUrl) => {
         lastSourceFileName = null;
-        pushPageAndConfirm({ dataUrl, kind: 'image' }, null, 'camera');
+        const page = pushPageAndConfirm({ dataUrl, kind: 'image' }, null, 'camera');
+        /*
+         * **撮った 1 枚も S3 へ置く** (`スキャン非同期処理_仕様書.md` §3.1)。
+         * 送信後にサーバが読み直すので、**全ページにキーが要る**。
+         *
+         * **確認画面を待たせない。** 置き終わるのを待たずに先へ進み、
+         * 終わったらそのページに書き込む (`page.imageKey`)。失敗しても null のままで、
+         * その回は送信時に前景処理へ落ちるだけ = 読み取りは成立する。
+         */
+        void uploadDataUrlToS3(dataUrl).then((key) => {
+          if (key && page) page.imageKey = key;
+        });
       },
       onAnalyze: (result) => {
         void renderResult(result);
