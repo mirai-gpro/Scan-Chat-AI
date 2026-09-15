@@ -89,11 +89,36 @@ export const POST: APIRoute = async ({ request }) => {
     else extra.set(id, [o.key]);
   }
 
+  /*
+   * 残す側の内訳。**件数だけだと「想定と違う」に気づけない** (実測 2026-09-15: 30 のはずが 216)。
+   * 日付フォルダ別・拡張子別に数える。1 人 1 回なら date は 1 つ、json は 3 つになる。
+   */
+  const detail = new Map<string, Map<string, { json: number; other: number }>>();
+  for (const o of objs) {
+    const id = clientIdOf(o.key, deliveryPrefix);
+    if (!id || !keep.has(id.toLowerCase())) continue;
+    const seg = o.key.slice(deliveryPrefix.length).split('/');
+    const date = seg[2] ?? '(直下)'; // {id}/date/{YYYY_MM_DD}/...
+    const byDate = detail.get(id) ?? new Map();
+    detail.set(id, byDate);
+    const cell = byDate.get(date) ?? { json: 0, other: 0 };
+    if (o.key.toLowerCase().endsWith('.json')) cell.json++; else cell.other++;
+    byDate.set(date, cell);
+  }
+
   const summary = {
     ok: true,
     prefix: deliveryPrefix,
     total_objects: objs.length,
     kept: [...kept].map(([clientId, files]) => ({ clientId, files })),
+    kept_detail: [...detail].map(([clientId, byDate]) => ({
+      clientId,
+      dates: [...byDate].map(([date, c]) => ({ date, json: c.json, other: c.other })),
+    })),
+    kept_json: objs.filter((o) => {
+      const id = clientIdOf(o.key, deliveryPrefix);
+      return id && keep.has(id.toLowerCase()) && o.key.toLowerCase().endsWith('.json');
+    }).length,
     extra: [...extra].map(([clientId, keys]) => ({ clientId, files: keys.length, sample: keys[0] })),
     extra_objects: [...extra.values()].reduce((n, k) => n + k.length, 0),
     untouched_other_shape: unknown,
