@@ -21,6 +21,7 @@ import {
   ListObjectsV2Command,
   GetObjectCommand,
   DeleteObjectsCommand,
+  CopyObjectCommand,
 } from '@aws-sdk/client-s3';
 
 /** S3 へ PUT する 1 ファイル (scan-export / interview-export 共通) */
@@ -120,6 +121,29 @@ export async function listObjects(prefix: string): Promise<S3ObjectRef[]> {
     token = res.IsTruncated ? res.NextContinuationToken : undefined;
   } while (token);
   return out;
+}
+
+/**
+ * オブジェクトを同じバケット内で複製する (元は消さない)。
+ * 検証用プレフィックスへ書き出したものを、納品先へ持っていくために使う。
+ * 成功した複製先 key の数を返す。
+ */
+export async function copyObjects(pairs: { from: string; to: string }[]): Promise<number> {
+  const cfg = getS3Config();
+  if (!cfg) throw new Error('S3 is not configured (AWS_S3_BUCKET / AWS_REGION required)');
+  const client = makeClient(cfg);
+  let copied = 0;
+  for (const { from, to } of pairs) {
+    if (from === to) continue; // 同じ場所へは複製しない
+    await client.send(new CopyObjectCommand({
+      Bucket: cfg.bucket,
+      // CopySource は「バケット名/キー」を URL エンコードして渡す
+      CopySource: `${cfg.bucket}/${from}`.split('/').map(encodeURIComponent).join('/'),
+      Key: to,
+    }));
+    copied++;
+  }
+  return copied;
 }
 
 /** 1 オブジェクトを UTF-8 テキストとして取得する。 */
