@@ -23,6 +23,7 @@
     "verify:delivery-promote": "esbuild scripts/verify-delivery-promote.ts --bundle --platform=node --format=esm --log-level=error --packages=external \"--define:import.meta.env={}\" --outfile=node_modules/.cache/verify-delivery-promote.mjs && node node_modules/.cache/verify-delivery-promote.mjs",
     "verify:delivery-cleanup": "esbuild scripts/verify-delivery-cleanup.ts --bundle --platform=node --format=esm --log-level=error --packages=external \"--define:import.meta.env={}\" --outfile=node_modules/.cache/verify-delivery-cleanup.mjs && node node_modules/.cache/verify-delivery-cleanup.mjs",
     "verify:demo-gate": "node scripts/verify-demo-gate.mjs",
+    "verify:special-accounts": "node scripts/verify-special-accounts.mjs",
     "verify:staging-bridge": "node scripts/verify-staging-bridge.mjs",
     "verify:viewer-origin": "node scripts/verify-viewer-origin.mjs",
     "verify:intake-scope": "esbuild scripts/verify-intake-scope.ts --bundle --platform=node --format=esm --log-level=error | node --input-type=module",

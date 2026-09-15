@@ -24,6 +24,7 @@ import { publicOrigin } from '../../../lib/public-url';
 import { isHpEdgeConfigured, resolveCustomerWithAdmin } from '../../../lib/hp-edge';
 import { demoFallbackEnabled } from '../../../lib/demo-data';
 import { demoAccountStats } from '../../../lib/demo-accounts';
+import { isSpecialAccount, specialAccountStats } from '../../../lib/special-accounts';
 import { loadReportVM } from '../../../lib/elith-report-queries';
 import { refreshConfig } from '../../../lib/app-config';
 import { getServerSupabase, isBridgeConfigured, type BridgeOrigin } from '../../../lib/supabase';
@@ -250,8 +251,21 @@ async function inspectReport(viewerUid: string | null, origin: BridgeOrigin): Pr
    */
   const demo = demoFallbackEnabled(uid);
 
+  /*
+   * **スペシャルアカウント (EC 購入を伴わない招待・本人の実データ)。**
+   * `docs/operations/スペシャルアカウント_仕様書.md` §13 — デモと**並べて**出す。
+   *   is_special:true かつ demo_enabled(=using_demo_data):true → §7 の 1 行が効いていない。即座に調べる
+   *   is_special:false なのに入れない → 登録が反映されていない (TTL 45 秒 / uid 未採番)
+   */
+  const special = isSpecialAccount(uid);
+
   const out: Record<string, unknown> = {
     effective_uid: uid,
+    is_special: special,
+    special_accounts: specialAccountStats(),
+    special_reason: special
+      ? '実データの枠 — ダミーは出ない (demo_enabled は必ず false になる)'
+      : 'スペシャル枠ではない。登録は wellfort-site admin → 設定「スペシャルアカウント」',
     demo_enabled: demo,
     demo_accounts: demoAccountStats(),
     demo_reason: demo

@@ -61,6 +61,25 @@ export const CONFIG_SPECS: ConfigSpec[] = [
       + '管理者リストのメンバーを 1 度だけ自動登録し、その日時を記録する。'
       + ' **空にすると次回のアクセスで再び自動登録が走る** (外した人が戻ってしまうので注意)。' },
 
+  // ── スペシャルアカウント (EC 購入を伴わない招待。**本人の実データを扱う**) ──
+  // **デモ枠とは目的が逆。混ぜない** (`docs/operations/スペシャルアカウント_仕様書.md` §0)。
+  // デモ枠に入れると本人の画面に他人名義のダミーが出る。判定の実体は
+  // `special-accounts.ts` の `isSpecialAccount` (uid 1 本・同期・外部依存ゼロ)。
+  // **全停止スイッチは無い** — 止めるとその人がログインできなくなるため。緊急停止は除外リスト。
+  { key: 'special.account_emails', type: 'string', group: 'スペシャル', label: 'スペシャルアカウント (Google アカウントで登録)', default: '',
+    description: '**人が使う入口はこちら。** 相手の Google アカウントを登録すると、'
+      + 'その人は EC で購入していなくてもサインインできる (uid はサインイン時に自動で埋まる)。'
+      + ' **メールアドレスの現物は保存しない** — 1 行 = sha256 + 表示用マスク + uid + メモ。'
+      + ' 直接編集せず /admin/special-accounts から操作すること。' },
+  { key: 'special.account_uids', type: 'string', group: 'スペシャル', label: 'スペシャルアカウントの uid', default: '',
+    description: '判定に使う diagnostic_user_id をカンマ / 空白 / 改行 区切りで。'
+      + ' env SPECIAL_ALLOWED_UIDS に足される (和であって上書きではない)。'
+      + ' 通常は手で書かず、上のメール登録から自動で埋まる。' },
+  { key: 'special.account_denied_uids', type: 'string', group: 'スペシャル', label: 'スペシャルアカウントの除外リスト', default: '',
+    description: '**供給元に関わらず資格を止める uid。** これが緊急停止の手段'
+      + ' (供給元を書き換えず引き算するので「戻す」で元に戻る)。'
+      + ' 直接編集せず /admin/special-accounts から操作すること。' },
+
   // ── AI疾病予防報告書 (docs/旧版・ボツ/ai_prevention_report_generation_spec.md) ──
   // A「初期がんの早期発見」のフォールバック文言 (spec §4.0.1)。
   // **既定は空**。本命は Elith に書いてもらうこと (spec §10.1 E-1)。当社の定型文は

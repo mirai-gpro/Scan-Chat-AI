@@ -9,6 +9,7 @@ import {
 import { VIEWER_COOKIE, signViewer, viewerCookieOptions } from '../../../lib/viewer';
 import { isAdminEmailAsync } from '../../../lib/admin-auth';
 import { linkDemoEmail, resolveDemoUidByEmail } from '../../../lib/demo-accounts';
+import { linkSpecialEmail, resolveSpecialUidByEmail } from '../../../lib/special-accounts';
 
 export const prerender = false;
 
@@ -53,7 +54,7 @@ export const POST: APIRoute = async ({ request, cookies }) => {
    * テストの顧客が同じ `app_users` に並ぶ**。後から棚卸しできるように、
    * 「どこ由来か」を必ず残す。**PII は含まない**。
    */
-  let resolvedFrom: 'production' | 'staging' | 'local' | 'demo' | null = null;
+  let resolvedFrom: 'production' | 'staging' | 'local' | 'special' | 'demo' | null = null;
 
   /** ローカルの `customer_profiles` で解決する (HP Edge 未構成 / 呼び出し失敗時の受け皿)。 */
   const resolveLocally = async (): Promise<{ error: Response } | null> => {
@@ -176,6 +177,20 @@ export const POST: APIRoute = async ({ request, cookies }) => {
   }
 
   const uidIsAuthoritative = diagnosticUserId !== null; // 顧客DB由来か (= デモ発行でないか)
+  /*
+   * **スペシャルアカウント (EC 購入を伴わない招待) を通す。**
+   * 正本 `docs/operations/スペシャルアカウント_仕様書.md` §6。
+   *
+   * デモ枠と同じく `resolve-customer` では引けないが、**目的は逆で本人の実データを扱う**。
+   * **デモ枠より先に置く** — 誤って両方に登録されていたときに、
+   * 実データ側を優先してダミーを掴ませないため。
+   *
+   * `linkedUid` を渡すのが要点 (渡さないと毎回新しい uid を作って UNIQUE 違反になる)。
+   */
+  if (!diagnosticUserId) {
+    diagnosticUserId = await resolveSpecialUidByEmail(email, linkedUid);
+    if (diagnosticUserId) resolvedFrom = 'special';
+  }
   if (!diagnosticUserId) {
     diagnosticUserId = await resolveDemoUidByEmail(email, linkedUid);
     if (diagnosticUserId) resolvedFrom = 'demo';
@@ -263,6 +278,12 @@ export const POST: APIRoute = async ({ request, cookies }) => {
    * **失敗してもサインインは止めない** (`linkDemoEmail` は例外を投げない)。
    */
   await linkDemoEmail(email, diagnosticUserId);
+  /*
+   * **スペシャルアカウントも同じ場所で uid を写す** (仕様書 §6)。
+   * admin が登録するのは相手の Google アカウントで、uid ではない。
+   * `linkSpecialEmail` は登録の無い人には何も書かず、例外も投げない。
+   */
+  await linkSpecialEmail(email, diagnosticUserId);
 
   /*
    * **解決元の環境を Cookie に載せる。** キット進捗が読む `app_bridge` は

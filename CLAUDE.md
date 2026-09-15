@@ -54,8 +54,9 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
   GET でカタログ+現在値、POST で upsert。**UI は wellfort-site admin 側** (この作業ツリーには
   未取得のため実装状況は未確認)。
 
-**app_config の現行キー (28 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
+**app_config の現行キー (31 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
 `demo.account_emails` / `demo.account_uids` / `demo.account_denied_uids` / `demo.seeded_from_admins` /
+`special.account_emails` / `special.account_uids` / `special.account_denied_uids` /
 `ui.cancer_screening_not_included` / `ui.save_steps` / `report.sections.order` / `report.sections.hidden` /
 `report.sections.labels` / `report.sections.collapsed` /
 `scan.model` / `live.model` / `scan.output_format` / `scan.boundary_recheck` / `scan.obs_dedup` /
@@ -1059,7 +1060,7 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
         - **文言は app_config `ui.save_steps` で差し替え可** (OS 更新でメニュー名が変わるため)。
           書式 `端末キー=手順1｜手順2｜手順3` をカンマ区切り。**上書きは素の文**になる。
           解釈できないキー・空の手順は無視 = **手順が 1 行も無い状態を作らない**。
-          → **app_config 現行 28 件**。
+          → **app_config 現行 31 件**。
         - **検証**: `verify:screen` に ①端末 4 種が描かれ判定不能なら 4 つとも見える
           ②**印刷ビューに保存手順が出ていない** ③UA 別 (Windows/Mac/iPhone/**iPad**/Android) の
           分岐と `autoprint` の有無 を追加。**3 つとも壊して落ちることを確認済み**。
@@ -1693,6 +1694,35 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   - **切り分け** = `GET /api/debug/viewer?k=<PROBE_UPLOAD_TOKEN>`。**`?u=` が付いていないか必ず確認する**。
   - **経緯 (ボツ・根拠にしない)**: `docs/旧版・ボツ/2026-08-30_admin判定とデモゲートの試行錯誤.md`。
 
+- **【EC 購入を伴わない招待に実データで使わせる = スペシャルアカウント 2026-09-15 実装】
+  正本 `docs/operations/スペシャルアカウント_仕様書.md`。上位 = `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md`。**
+  **デモ枠とは目的が逆。混ぜない。** あちらは**ダミー**を見せる枠 (社外に渡す)、こちらは
+  **本人の実データ**を扱う枠。仕組みが似ているので、判定・供給元・app_config キー・admin 画面を
+  すべて分けてある。**共有するのは純粋関数の import だけ** (`hashEmail` / `maskEmail` /
+  `parseEntries` / `parseEmailEntries` / `serializeEmailEntries` / `isUuid`)。
+  **デモ枠を共通基盤へリファクタしない** (稼働中の機能に波及する)。
+  - **判定 = `special-accounts.ts` の `isSpecialAccount(uid)`。uid が一覧にあるか、それだけ。**
+    admin は見ない (デモ枠で踏んだ誤りをそのまま持ち込まない)。
+  - **登録は Google アカウント (メール) / 判定は uid**。保存するのは sha256 / マスク / uid / メモ の
+    4 つだけで、**メールの現物は保存しない**。uid はサインイン時に `linkSpecialEmail` が写す。
+  - **一覧 = 組み込み ∪ env `SPECIAL_ALLOWED_UIDS` ∪ app_config `special.account_uids`
+    − `special.account_denied_uids`** (除外は和のあと)。
+    **組み込み (`BUILTIN_SPECIAL_UIDS`) は空のままにする** — 実データが紐づくので焼き込まない。
+  - **全停止スイッチは持たない**。デモの `PUBLIC_DEMO_FALLBACK=false` は「ダミー表示を止める」ものだが、
+    本枠を止めると**その人がログインできなくなる** (EC 顧客ではないため)。緊急停止は除外リスト 1 件。
+  - **`demoFallbackEnabled()` に 1 行だけ入れてある** (`demo-data.ts`・live コードへの唯一の変更)。
+    両方に誤って登録されたとき、**実データの利用者に他人名義のダミー検査結果が出る**のを止める。
+  - **サインインの橋渡しは `api/auth/resolve.ts` の未連携 early return より前・デモ枠より先**。
+    後ろだと到達せず入口で弾かれる。先に置くのは実データ側を優先するため。
+  - **管理者リストからの初回登録は実装しない** (デモ枠だけの仕組み。実データが紐づく枠では危険)。
+  - 増減は wellfort-site `/admin/special-accounts` (サイドバー「設定」・**デモ用アカウントとは別メニュー**)。
+    UI=wellfort-site / 処理=Scan-Chat-AI `/api/admin/special-accounts` (Bearer `ADMIN_API_KEY`)。
+  - **検証 `npm run verify:special-accounts` 56 件** (CI の A 層)。`demoFallbackEnabled` の本体を
+    切り出して実際に動かし、`demo-accounts.ts` / `special-accounts.ts` は app_config だけスタブに
+    差し替えて実物を呼ぶ。**退行注入 10 種**で名指しに落ちることを確認済み。
+  - 切り分け = `GET /api/debug/viewer` の **`is_special`** と `using_demo_data`。
+    **両方 true なら 1 行の止めが効いていない** (即座に調べる)。
+
 ### PII / データ分離
 - `customer` スキーマ(PII) と `diagnosis` スキーマ(非PII) を **`diagnostic_user_id` のみで橋渡し**。
   氏名・住所・生年月日を診断系/外部/S3 に載せない (`docs/architecture/data_integration_requirements.md` §1.3,
@@ -1730,6 +1760,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/elith/elith_s3_data_handoff_spec.md` | **Elith S3 受け渡し仕様** (パス/命名/format_id/JSON) |
 | `docs/elith/elith_batch_centralization_design.md` | Elith バッチ**一元化設計**(キーは Vercel・役割分担・admin バッチ) |
 | `docs/elith/elith_assembly_wrapping_spec.md` | **納品セット アセンブリのラップ仕様(Elith向け説明)**。フォルダ/命名/ウェルネス年齢の時系列化(検査日毎・旧1件を撤回)・疑似データも同様に時系列生成・**LAiF AI疾病発症予測(Other/ai_prediction)のファイル仕様=Elith承諾により確定(§5・2026-08)。合成は data.items[] の発症率%/相対リスク比のみジッタ・昨年比は前年の相対リスク比を引継ぎ(実装済)**・manifest不一致の確認事項 |
+| **`docs/operations/スペシャルアカウント_仕様書.md`** | **スペシャルアカウントの正本 (アプリ全体)**。EC 購入を伴わない招待で**本人の実データ**を扱う枠。**デモ枠とは目的が逆で、混ぜると本人の画面に他人名義のダミーが出る**。判定 / 登録 (メール) と判定 (uid) の分離 / 供給元の和と除外 / サインインの橋渡しの位置 / **全停止スイッチを持たない理由** / 検証 / 切り分け |
 | **`docs/operations/デモ用アカウント_仕様書.md`** | **デモ用アカウントの正本 (アプリ全体)**。目的 / 誰が見るか / 判定の順序と理由 / 3 供給元の和 / 増やし方 / 実装上の約束 / 検証 / 切り分け。**権限 (admin) の仕組みに乗せない**のが設計の要 |
 | **`docs/elith/AI疾病予防報告書_引継ぎ書.md`** | **【この機能に着手する人が最初に読む】** 新規セッション用の入口。読む順番 / 越えてはならない線 / コードの地図 / 検証コマンド / いま動いているものと残っているもの / 詰まったときの切り分け。**仕様は書かない** (仕様の正は下の仕様書) |
 | **`docs/elith/AI疾病予防報告書_仕様書.md`** | **【この機能の唯一の入口。最初にこれを読む】** 紙面の正はモック 2 タイプで、仕様書は紙面を散文で書かない (2 回の作り直しの直接の対策)。目的 / 正の所在 / 素材 (sha256 つき) / デザイン見本 §4.3 / 変更手順 / 検証 / **決裁台帳 §6** |
