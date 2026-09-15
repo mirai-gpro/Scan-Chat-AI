@@ -12,10 +12,10 @@
 
 import type { APIRoute } from 'astro';
 import { scanGeneticPage, scanAiPredictionPage } from '../../../lib/elith-genetic';
-import { consolidateAiPredictionItems, type ConsolidateAudit } from '../../../lib/ai-prediction-consolidate';
-import { ELITH_HANDOFF_SCHEMA_VERSION, jstTodayIso } from '../../../lib/elith-export';
+
+import { jstTodayIso } from '../../../lib/elith-export';
+import { finalizeGeneticDelivery, resolveGeneticFormat } from '../../../lib/elith-genetic-finalize';
 import { refreshConfig, cfgBool } from '../../../lib/app-config';
-import { MODELS } from '../../../lib/gemini';
 import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 
@@ -33,26 +33,10 @@ function parseImage(input: string): { mime: string; data: string } {
   if (m) return { mime: m[1], data: m[2] };
   return { mime: '', data: input.trim() };
 }
-function randomUuid(): string {
-  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-}
-function utf8Bytes(s: string): number {
-  return typeof TextEncoder !== 'undefined' ? new TextEncoder().encode(s).length : Buffer.byteLength(s, 'utf-8');
-}
-function folderOf(prefix: string, clientId: string, testDate: string, formatId: string): { folder: string; stem: string } {
-  const dateFolder = testDate.replace(/-/g, '_');
-  const cleanPrefix = prefix ? prefix.replace(/^\/+/, '').replace(/\/*$/, '/') : '';
-  return {
-    folder: `${cleanPrefix}user/${clientId}/date/${dateFolder}/`,
-    stem: `${formatId}_date_${dateFolder}_user_${clientId}`,
-  };
-}
-/** このエンドポイントが扱う多ページ自由構造レポート。既定=遺伝子。Other=LAiF AI疾病発症予測。 */
-function resolveFormat(v: unknown): { formatId: 'GeneticTestResultData' | 'Other'; kind: string } {
-  return v === 'Other'
-    ? { formatId: 'Other', kind: 'ai_prediction' }
-    : { formatId: 'GeneticTestResultData', kind: 'genetic_scan_merged' };
-}
+/*
+ * **納品 JSON の組み立てと key の規則は `elith-genetic-finalize.ts` が正本。**
+ * ここに同じものを置くと、片方だけ直って静かにずれる (spec v3 §13.3)。
+ */
 
 interface Body {
   action?: unknown;
@@ -81,7 +65,7 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   const action = str(body.action) ?? 'part';
-  const { formatId, kind } = resolveFormat(str(body.formatId));
+  const { formatId, kind } = resolveGeneticFormat(str(body.formatId));
   const clientId = str(body.clientId);
   if (!clientId) return json({ ok: false, error: 'clientId is required' }, 400);
 
@@ -124,70 +108,36 @@ export const POST: APIRoute = async ({ request }) => {
     if (parts.length === 0) return json({ ok: false, error: 'parts is required for finalize' }, 400);
 
     const providedDate = str(body.testDate);
+    /*
+     * **today フォールバックは endpoint 境界に残す** (spec v3 §13.3)。
+     * 通常運用の既存挙動を変えないためで、**共通 core は today を埋めない** —
+     * トランスコスモス v3 は today 由来を捨てるので、あちらは必ず確定日を渡す。
+     */
     const testDate = providedDate && /^\d{4}-\d{2}-\d{2}$/.test(providedDate) ? providedDate : jstTodayIso();
 
-    const items: unknown[] = [];
-    const pages: { page: number; section: string | null; count: number }[] = [];
-    for (const p of parts) {
-      const pageItems = Array.isArray(p.items) ? (p.items as unknown[]) : [];
-      items.push(...pageItems);
-      pages.push({
-        page: typeof p.page === 'number' ? p.page : pages.length + 1,
-        section: typeof p.section === 'string' ? p.section : null,
-        count: pageItems.length,
-      });
-    }
-
-    // LAiF(Other) のみ: 同一疾患の重複(発症予測/アドバイス/用語解説/ネスト)を疾患単位に統合 (§5.3)。
-    //   app_config `scan.ai_prediction_dedup=on` のときだけ発火・既定 off=挙動不変(🎯後に on 化)。
-    //   疾患名は印字どおり維持(完全一致統合のみ)・捏造ゼロ・漏れゼロ。監査は応答で返し納品 data には含めない。
-    let deliverItems: unknown[] = items;
-    let consolidation: ConsolidateAudit | null = null;
-    if (formatId === 'Other' && cfgBool('scan.ai_prediction_dedup')) {
-      const c = consolidateAiPredictionItems(items);
-      deliverItems = c.items;
-      consolidation = c.audit;
-    }
-
-    const { folder, stem } = folderOf(prefix, clientId, testDate, formatId);
-    const json_key = `${folder}${stem}.json`;
-    const jsonObj = {
-      format_id: formatId,
-      schema_version: ELITH_HANDOFF_SCHEMA_VERSION,
-      kind,
-      client_id: clientId,
-      diagnostic_id: randomUuid(),
-      source_file: str(body.sourceFile),
-      source_pages: str(body.sourcePages),
-      page_count: parts.length,
-      test_date: testDate,
-      date_source: providedDate ? 'provided' : 'today',
-      exported_at: new Date().toISOString(),
-      subject: { sex: null, age: null },
-      source: {
-        origin: 'scan-chat-ai',
-        app: 'scan-chat-ai',
-        model: MODELS.scan,
-        note: formatId === 'Other'
-          ? 'admin バッチ (LAiF AI疾病発症予測・AIスキャン・構造化はLLM全面委任)。項目構造はLLM判定。'
-          : 'admin バッチ (遺伝子・AIスキャン・構造化はLLM全面委任)。項目構造はLLM判定。',
-        lab_name: formatId === 'Other' ? 'LAiF' : null,
-      },
-      data: { item_count: deliverItems.length, items: deliverItems, pages },
-    };
-    const jsonBody = JSON.stringify(jsonObj, null, 2);
+    // 組み立ては**共通 core 1 か所**。S3 書き込みだけがこの endpoint の仕事。
+    const fin = finalizeGeneticDelivery({
+      formatId, kind, clientId, testDate,
+      dateSource: providedDate ? 'provided' : 'today',
+      parts, prefix,
+      sourceFile: str(body.sourceFile),
+      sourcePages: str(body.sourcePages),
+      // app_config を読むのは呼び出し側 (core は env / DB を見ない)。
+      consolidateAiPrediction: cfgBool('scan.ai_prediction_dedup'),
+    });
+    const { json: jsonObj, jsonKey: json_key, jsonBody, consolidation } = fin;
 
     if (!isS3Configured() || !cfg) {
-      return json({ ok: false, configured: false, reason: 's3_not_configured', json_key, item_count: deliverItems.length, format_id: formatId, consolidation, preview: jsonObj });
+      return json({ ok: false, configured: false, reason: 's3_not_configured', json_key, item_count: fin.itemCount, format_id: formatId, consolidation, preview: jsonObj });
     }
     try {
       const uploaded = await putFiles([
-        { key: json_key, contentType: 'application/json; charset=utf-8', body: jsonBody, bytes: utf8Bytes(jsonBody) },
+        { key: json_key, contentType: 'application/json; charset=utf-8', body: jsonBody, bytes: fin.bytes },
       ]);
       return json({
         ok: true, action: 'finalize', configured: true, bucket: cfg.bucket,
         client_id: clientId, format_id: formatId, test_date: testDate,
-        page_count: parts.length, item_count: deliverItems.length, json_key,
+        page_count: fin.pageCount, item_count: fin.itemCount, json_key,
         uri: uploaded[0]?.uri ?? null,
         consolidation, // LAiF 統合監査 (件数/統合/競合)。null=未実施 (env off or 非Other)。納品 data には含めない。
         preview: jsonObj, // 🎯 照合用: 納品JSON(data.items)を返す(S3未設定分岐と同様)。

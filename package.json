@@ -55,6 +55,7 @@
     "verify:transcos-v3-preflight": "node scripts/verify-transcos-v3-preflight.mjs",
     "verify:transcos-v3-health": "node scripts/verify-transcos-v3-health.mjs",
     "verify:transcos-v3-delivery": "node scripts/verify-transcos-v3-delivery.mjs",
+    "verify:transcos-v3-genetic": "node scripts/verify-transcos-v3-genetic.mjs",
     "verify:transcos-v3-real-zip": "node scripts/verify-transcos-v3-real-zip.mjs",
     "verify:ad-hoc-e2e": "node scripts/verify-ad-hoc-e2e.mjs",
     "verify:executive-diagnosis": "node scripts/verify-executive-diagnosis.mjs"

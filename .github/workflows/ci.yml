@@ -130,6 +130,11 @@ jobs:
       # とくに **ETag を同一性の根拠にしない** — マルチパートや SSE-KMS だと
       # ETag は本文の SHA-256 と一致しないので、「ETag は合っているが中身が違う」で通る。
       - run: npm run verify:transcos-v3-delivery
+      # Genetic (§13)。**本命は production parity** — finalize の組み立てを共通 core へ
+      # 出したので、抽出の前後で納品 JSON が 1 バイトも変わっていないことを見る。
+      # ここがずれると**通常運用の遺伝子納品が静かに別物になり、S3 へ出るまで気づけない**。
+      # 併せて 26/26 未満を完了にしないこと (§13.4) と、audit が本文を書き換えないこと (§13.5)。
+      - run: npm run verify:transcos-v3-genetic
       # staging bridge (Edge Function 経路・2026-09-11 追加)。**鍵もサーバも要らない**
       # ので A 層。実物を transpile し、Edge Function は localhost のスタブ、
       # Supabase クライアントは記録用スタブに差し替えて動かす。
