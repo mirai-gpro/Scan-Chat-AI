@@ -54,9 +54,10 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
   GET でカタログ+現在値、POST で upsert。**UI は wellfort-site admin 側** (この作業ツリーには
   未取得のため実装状況は未確認)。
 
-**app_config の現行キー (31 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
+**app_config の現行キー (32 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
 `demo.account_emails` / `demo.account_uids` / `demo.account_denied_uids` / `demo.seeded_from_admins` /
 `special.account_emails` / `special.account_uids` / `special.account_denied_uids` /
+`ui.single_purchase_plan_name` /
 `ui.cancer_screening_not_included` / `ui.save_steps` / `report.sections.order` / `report.sections.hidden` /
 `report.sections.labels` / `report.sections.collapsed` /
 `scan.model` / `live.model` / `scan.output_format` / `scan.boundary_recheck` / `scan.obs_dedup` /
@@ -1722,6 +1723,38 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     差し替えて実物を呼ぶ。**退行注入 10 種**で名指しに落ちることを確認済み。
   - 切り分け = `GET /api/debug/viewer` の **`is_special`** と `using_demo_data`。
     **両方 true なら 1 行の止めが効いていない** (即座に調べる)。
+  - **【ダッシュボードは「単品購入」の形にする 2026-09-15・発注者指示】仕様書 §14。**
+    スペシャルアカウントは EC 購入が無い＝**サブスク契約も検査キットも構造的に存在しない**ので、
+    コースプラン用の枠をそのまま出すと**永久に埋まらない枠が 5 つ居座る**。
+    - 切替は **`isSpecialAccount(uid)` 1 本**。**件数で判定しない**
+      (「キットが 0 件なら」にすると実顧客でも連携前は 0 件で、コースプランの人の画面が黙って変わる)。
+    - **【進捗は 1 つに統合 2026-09-15・発注者指示】**「検査キットだけの進捗管理ではなく、
+      スキャンや AI 問診も含めた進捗管理に」。**コースプランでも最初にこの 2 つが要る**ので、
+      `ProgressSection.astro` (見出し「進捗」) に統合した。**入口で中身が変わる**:
+      course = ① AI問診 → ② スキャン → **③ 検査キット** → ④ 報告書 /
+      single = ① AI問診 → ② スキャン → ③ 報告書。**検査結果より上**に置く。
+      **キットの行は `KitProgressRows.astro` に一本化** (自己申告ボタンは `kit-self-report.ts` と
+      組なので写して増やさない。`KitProgressCard.astro` は見出し+rows の薄い器として残置)。
+    - **状態は「未実行」「完了済」の 2 語**で、未実行は**実行を促す**
+      (`status-action` + `action` アイコン / `status-ok` + `ok` アイコン。色だけで表さない)。
+    - **単品購入でもプラン名バッジを出す** — EC 購入が無く契約から引けないので
+      app_config `ui.single_purchase_plan_name` (既定「AI疾病予防報告書（単品）」)。**32 件目のキー**。
+      `/kit` への「進捗の詳細を見る」は単品では出さない (押した先に自分の物が 1 つも無い)。
+    - 検査結果は **人間ドック / 健康診断 の 1 種だけ** (他 4 種は構造的に来ない)。
+      主要導線 (AIスキャン / AI問診 の帯) は**出さない** (進捗の中のボタンと行き先が同じ)。
+      **コースプランの検査カードの並びは 1 px も変えない** (5 枚のときの grid 文字列を据え置き)。
+    - **報告書が無い回はタイルをグレーアウト**し `<a>` にしない (開いても `emptyVM` = 帯だけの紙面)。
+      **受領日の有無で決めない** — デモは行が無くてもサンプルを開けるので
+      `!!latestResult || demoShown` で判定する。`/report` の直接アクセスは塞がない。
+    - **AI問診の完了をサーバに残した (migration 1 本)**。実測: `/api/interview/export` は S3 へ
+      書くだけで Supabase 書き込み 0 件・完了は localStorage のみ = **スマホで問診 → PC で「未回答」**。
+      `diagnosis.interview_completions` (`20260915000010`) に **完了日時と設問数だけ**を書く
+      (`interview-completion.ts`)。**保存先は Cookie の uid** (body の申告は使わない)・
+      **回答の中身は保存しない** (`M-NAME` 等の医療情報。中身は S3 の納品 JSON 1 か所のまま)・
+      **S3 の成否と独立**・**例外を投げない**・未来/桁違いの申告は受信時刻へ倒す・
+      **`test_artifacts` の CHECK は触らない** (問診は検査ではない)。
+    - 検証 `npm run verify:single-purchase` 45 件 (CI の A 層)・**退行注入 18 種**。
+      **うち 1 つは最初の版で落ちなかったので差し替えた** (ヘッダー側の同じ条件を拾っていた)。
 
 ### PII / データ分離
 - `customer` スキーマ(PII) と `diagnosis` スキーマ(非PII) を **`diagnostic_user_id` のみで橋渡し**。

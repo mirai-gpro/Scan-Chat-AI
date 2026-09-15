@@ -75,6 +75,10 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     description: '判定に使う diagnostic_user_id をカンマ / 空白 / 改行 区切りで。'
       + ' env SPECIAL_ALLOWED_UIDS に足される (和であって上書きではない)。'
       + ' 通常は手で書かず、上のメール登録から自動で埋まる。' },
+  { key: 'ui.single_purchase_plan_name', type: 'string', group: 'スペシャル', label: '単品購入のプラン名表示', default: 'AI疾病予防報告書（単品）',
+    description: '進捗セクションの右肩に出すプラン名。コースプランは契約から引くが、'
+      + '**単品購入 (スペシャルアカウント) は EC 購入が無いので契約から引けない**ため、ここの文言を出す。'
+      + ' 空にするとバッジごと消える (発注者指示 2026-09-15 で出すと決めたので、通常は空にしない)。' },
   { key: 'special.account_denied_uids', type: 'string', group: 'スペシャル', label: 'スペシャルアカウントの除外リスト', default: '',
     description: '**供給元に関わらず資格を止める uid。** これが緊急停止の手段'
       + ' (供給元を書き換えず引き算するので「戻す」で元に戻る)。'

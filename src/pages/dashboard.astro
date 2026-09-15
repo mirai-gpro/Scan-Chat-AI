@@ -7,7 +7,7 @@ import UrgentAlertBanner from '../components/dashboard/UrgentAlertBanner.astro';
 import DailyQuests from '../components/dashboard/DailyQuests.astro';
 import OnlineConsultCard from '../components/dashboard/OnlineConsultCard.astro';
 import SituationalCards from '../components/dashboard/SituationalCards.astro';
-import KitProgressCard from '../components/dashboard/KitProgressCard.astro';
+import ProgressSection from '../components/dashboard/ProgressSection.astro';
 import TestResultsSection from '../components/dashboard/TestResultsSection.astro';
 import HealthInsightCard from '../components/dashboard/HealthInsightCard.astro';
 import HealthAgeCard from '../components/dashboard/HealthAgeCard.astro';
@@ -18,6 +18,8 @@ import { getLatestMeasurements } from '../lib/measurement-queries';
 import { countUnreadImportant } from '../lib/notice-queries';
 import { refreshConfig, cfg } from '../lib/app-config';
 import { demoFallbackEnabled } from '../lib/demo-data';
+import { isSpecialAccount } from '../lib/special-accounts';
+import { getLatestInterviewCompletion } from '../lib/interview-completion';
 import { isBridgeConfigured } from '../lib/supabase';
 import { resolveViewer } from '../lib/viewer';
 import {
@@ -114,9 +116,55 @@ const healthAge = data ? await getHealthAge(data.diagnosticUserId) : null;
 
 const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId) : 0;
 
+/*
+ * ══════════════════════════════════════════════════════════════════════
+ * **「AI疾病予防報告書 単品購入」の画面にするか** (発注者指示 2026-09-15)。
+ * ══════════════════════════════════════════════════════════════════════
+ * 正本 `docs/operations/スペシャルアカウント_仕様書.md` §14。
+ *
+ * スペシャルアカウントは **EC で購入していない**ので、サブスク契約も検査キットも
+ * 構造的に存在しない。材料は**自分でスキャンした検診・人間ドック ＋ AI問診**だけ＝
+ * CLAUDE.md の「報告書は 2 タイプある」の**タイプ2 (単品購入)** と同じ形。
+ *
+ * → コースプラン前提の枠 (キット進捗 / 検査 5 種) をそのまま出すと、
+ *   **永久に埋まらない枠が 5 つ居座る**ので、単品購入の進捗に差し替える。
+ *
+ * **判定は `isSpecialAccount(uid)` 1 本。** 「キットが 0 件なら」で判定しない —
+ * 実顧客でも連携前は 0 件になり、コースプランの人の画面が黙って変わってしまう。
+ */
+const singlePurchase = isSpecialAccount(data?.diagnosticUserId);
+
+/*
+ * ① AI問診の完了。**DB の事実だけ**を見る (`diagnosis.interview_completions`)。
+ * 端末の localStorage は見ない — スマホで問診して PC で開くと「未回答」になるため
+ * (この記録を足した理由そのもの)。単品購入の画面でしか使わないので、それ以外では引かない。
+ */
+const interviewDone = singlePurchase && data
+  ? await getLatestInterviewCompletion(data.diagnosticUserId)
+  : null;
+const checkups = (data?.artifacts ?? []).filter((a) => a.test_type === 'health_checkup');
+
+/*
+ * **報告書のタイルを押せるか** (発注者指示 2026-09-15「報告書が無い場合はグレーアウトに」)。
+ *
+ * 材料が 1 件も無い回に開くと `emptyVM` = 帯だけの紙面になる
+ * (`elith-report-queries.ts` の `emptyVM`)。それを「報告書」として開かせない。
+ *
+ * **受領日の有無だけで決めない** — デモ用アカウントは行が無くてもサンプルを開けるので、
+ * デモのときは押せるままにする (`loadReportVM` が sample() を返す経路)。
+ */
+const reportAvailable = !!data?.latestResult || demoShown;
+
 // 画面文言 (app_config)。未設定なら空文字が返り、UI 側で非表示になる。
 const healthAgeFollowup = cfg('ui.health_age_followup');
 const supportContact = cfg('ui.support_contact');
+/*
+ * **単品購入でもプラン名を出す** (発注者指示 2026-09-15)。
+ * コースプランは契約 (`subscription.plan_name`) から引くが、単品購入は EC 購入が無いので
+ * 引ける契約が存在しない。**当社が名乗る表示名**なので app_config に置いて差し替え可にする
+ * (画面文言は app_config = CLAUDE.md の流儀)。
+ */
+const singlePurchasePlanName = cfg('ui.single_purchase_plan_name');
 
 const greeting    = data ? formatGreeting(data) : '';
 const sections    = data?.elithSections ?? [];
@@ -225,11 +273,34 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
         {healthAge?.latest ? (
           <div class="grid grid-cols-1 items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_17rem]">
             <HealthAgeCard latest={healthAge.latest} followup={healthAgeFollowup} />
-            <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} />
+            <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} />
           </div>
         ) : (
-          <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} />
+          <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} />
         )}
+
+        {/*
+          ②-3 **進捗は検査結果より上に置く** (発注者指示 2026-09-15)。
+          利用者にとって「次にすること」が本題で、検査結果は**その結果として後から埋まる**もの。
+          順番を逆にすると、まだ何も無い検査カードを越えた先に本題が来る。
+
+          **中身は入口で変わる** (`ProgressSection`):
+            course … ① AI問診 → ② スキャン → ③ 検査キット → ④ 報告書
+            single … ① AI問診 → ② スキャン →           ③ 報告書
+        */}
+        <ProgressSection
+          mode={singlePurchase ? 'single' : 'course'}
+          planName={singlePurchase ? singlePurchasePlanName : data?.subscription?.plan_name}
+          interviewCompletedAt={interviewDone?.completedAt ?? null}
+          checkupCount={checkups.length}
+          latestCheckupDate={checkups[0]?.test_date ?? null}
+          reportReceivedAt={data?.latestResult?.received_at ?? null}
+          shipments={data?.shipments ?? []}
+          nextTestAt={data?.subscription?.next_test_at}
+          diagnosticUserId={data?.diagnosticUserId ?? ''}
+          detailHref={`/kit${q}`}
+          q={q}
+        />
 
         {/* ③ 次にすること — 非表示 (本日の健康クエスト): <DailyQuests quests={quests} /> */}
 
@@ -238,47 +309,46 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
           v1.0 で「直近の検査結果 (項目カード)」「検査値の推移」「検査履歴」をここに統合した。
           推移グラフは種別ごとに /trend へ切り出し、履歴は「データ」の遷移先 (結果ページ) に置く。
         */}
-        <TestResultsSection artifacts={data?.artifacts ?? []} q={q} />
+        <TestResultsSection artifacts={data?.artifacts ?? []} q={q} onlyTypes={singlePurchase ? ['health_checkup'] : undefined} />
 
-        {/* ⑤ キット進捗 (横長・検査結果の下) */}
-        <KitProgressCard
-          shipments={data?.shipments ?? []}
-          nextTestAt={data?.subscription?.next_test_at}
-          planName={data?.subscription?.plan_name}
-          diagnosticUserId={data?.diagnosticUserId ?? ''}
-          detailHref={`/kit${q}`}
-        />
 
         {/*
           ⑥ 主要導線。AI スキャンと AI 問診は**同格**なので同じ淡色にする
           (発注者指示 2026-08: AI 問診の白 →「データ」ボタンと同色)。
           brand 塗りは AI疾病予防報告書のタイルに寄せてあるので、ここでは使わない。
         */}
-        <section aria-label="主要な操作">
-          <h2 class="sr-only">主要な操作</h2>
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
-            <a
-              href={`/scan${q}`}
-              class="flex min-h-touch items-center gap-3 rounded-2xl border border-brand-600 bg-brand-50 px-4 py-4 transition hover:bg-brand-100"
-            >
-              <AppIcon name="scan" size={28} class="text-brand-700" />
-              <span class="flex flex-col">
-                <span class="text-base font-semibold text-brand-700">AI スキャン</span>
-                <span class="text-sm text-slate-600">検診・人間ドックの結果を読み取る</span>
-              </span>
-            </a>
-            <a
-              href={`/chat${q}`}
-              class="flex min-h-touch items-center gap-3 rounded-2xl border border-brand-600 bg-brand-50 px-4 py-4 transition hover:bg-brand-100"
-            >
-              <AppIcon name="interview" size={28} class="text-brand-700" />
-              <span class="flex flex-col">
-                <span class="text-base font-semibold text-brand-700">AI 問診</span>
-                <span class="text-sm text-slate-600">生活習慣を記録する</span>
-              </span>
-            </a>
-          </div>
-        </section>
+        {/*
+          **単品購入ではここを出さない。** 行き先が上の進捗カードのボタンと同じ (/scan・/chat) で、
+          同じ画面に同じ行き先のボタンが 2 つ並ぶ。進捗カード側は「済んだか」まで出せるので、
+          重複するならそちらを残す。コースプランの人には従来どおり出す。
+        */}
+        {!singlePurchase && (
+          <section aria-label="主要な操作">
+            <h2 class="sr-only">主要な操作</h2>
+            <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
+              <a
+                href={`/scan${q}`}
+                class="flex min-h-touch items-center gap-3 rounded-2xl border border-brand-600 bg-brand-50 px-4 py-4 transition hover:bg-brand-100"
+              >
+                <AppIcon name="scan" size={28} class="text-brand-700" />
+                <span class="flex flex-col">
+                  <span class="text-base font-semibold text-brand-700">AI スキャン</span>
+                  <span class="text-sm text-slate-600">検診・人間ドックの結果を読み取る</span>
+                </span>
+              </a>
+              <a
+                href={`/chat${q}`}
+                class="flex min-h-touch items-center gap-3 rounded-2xl border border-brand-600 bg-brand-50 px-4 py-4 transition hover:bg-brand-100"
+              >
+                <AppIcon name="interview" size={28} class="text-brand-700" />
+                <span class="flex flex-col">
+                  <span class="text-base font-semibold text-brand-700">AI 問診</span>
+                  <span class="text-sm text-slate-600">生活習慣を記録する</span>
+                </span>
+              </a>
+            </div>
+          </section>
+        )}
 
         {/* ⑦ 医師との面談 (オプション)。AI コーチとは相手が違うので枠を分ける。 */}
         <OnlineConsultCard />

@@ -22,8 +22,20 @@ interface Props {
   artifacts: TestArtifact[];
   /** ?u= を引き継ぐためのクエリ文字列 ('' か '?u=…')。 */
   q?: string;
+  /**
+   * **出す検査種別を絞る** (単品購入の画面用・2026-09-15)。
+   *
+   * 既定 (undefined) は従来どおり 5 種すべて。「この検査がある」を伝えるため、
+   * データが 0 件の枠も出すのが基本方針だからである。
+   *
+   * ただし**その入口に構造的に存在しない検査**は別で、
+   * 単品購入 (スペシャルアカウント) は自分でスキャンした検診・人間ドックだけなので、
+   * 血液 / がんリスク / AI疾病予測 / 遺伝子 の 4 枚は**永久に埋まらない行き止まり**になる。
+   * 絞るのは「この人には来ない」と分かっているときだけにする。
+   */
+  onlyTypes?: readonly string[];
 }
-const { artifacts, q = '' } = Astro.props as Props;
+const { artifacts, q = '', onlyTypes } = Astro.props as Props;
 
 /**
  * 画面に並べる検査 5 種と、その並び順。データが 1 件も無い種別も枠だけ出す
@@ -47,7 +59,26 @@ const TEST_TYPES: { type: string; label: string; trend: boolean }[] = [
  */
 const shortJpDate = (iso: string | null | undefined) => formatJpDate(iso).replace(/\s*\(.\)$/, '');
 
-const cards = TEST_TYPES.map((t) => {
+const visibleTypes = onlyTypes && onlyTypes.length > 0
+  ? TEST_TYPES.filter((t) => onlyTypes.includes(t.type))
+  : TEST_TYPES;
+
+/*
+ * **列数は枚数に合わせる。** 5 列固定のまま 1 枚だけ出すと、カードが画面の 1/5 幅になって
+ * ボタンが潰れる (絞り込みを足した 2026-09-15 に実測)。
+ * **クラスは完全な文字列で持つ** — Tailwind はソースを文字列として走査するので、
+ * `grid-cols-${n}` のように組み立てると生成されない。
+ * 5 枚のときの文字列は従来と 1 文字も変えていない (コースプランの画面は不変)。
+ */
+const GRID_BY_COUNT: Record<number, string> = {
+  1: 'grid-cols-1',
+  2: 'grid-cols-1 sm:grid-cols-2',
+  3: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3',
+  4: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-4',
+  5: 'grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5',
+};
+
+const cards = visibleTypes.map((t) => {
   // artifacts は test_date の降順で渡ってくる (dashboard-queries.ts の order 指定)。
   const mine = artifacts.filter((a) => a.test_type === t.type);
   const newest = mine[0] ?? null;
@@ -60,6 +91,7 @@ const cards = TEST_TYPES.map((t) => {
     canGraph: t.trend && mine.length >= 2,
   };
 });
+const gridCls = GRID_BY_COUNT[Math.min(cards.length, 5)] ?? GRID_BY_COUNT[5];
 ---
 
 <section aria-labelledby="tests-title">
@@ -71,7 +103,7 @@ const cards = TEST_TYPES.map((t) => {
     <span class="text-sm text-slate-600">データ＝直近の結果 ／ グラフ＝これまでの推移</span>
   </header>
 
-  <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+  <div class={`grid gap-3 ${gridCls}`}>
     {cards.map((c) => (
       <article class="card flex flex-col gap-3">
         <div class="flex items-center gap-3">
