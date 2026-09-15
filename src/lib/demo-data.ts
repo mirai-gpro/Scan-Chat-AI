@@ -21,6 +21,7 @@
  */
 
 import { demoDisabledGlobally, isDemoAccount } from './demo-accounts';
+import { isSpecialAccount } from './special-accounts';
 import type { ElithSection } from './elith-parser';
 import type { DashboardData, MetricTrendSeries } from './dashboard-queries';
 import type { NoticesData } from './notice-queries';
@@ -65,6 +66,14 @@ import type {
  */
 export function demoFallbackEnabled(uid?: string | null): boolean {
   if (demoDisabledGlobally()) return false;
+  /*
+   * **スペシャルアカウントにダミーは出さない** (`docs/operations/スペシャルアカウント_仕様書.md` §7)。
+   *
+   * あちらは**本人の実データ**を扱う枠で、目的がデモと逆。両方に登録される事故は起き得るので、
+   * そのとき**実データの利用者に他人名義のダミー検査結果が出る**のを 1 行で確実に止める。
+   * `verify:special-accounts` がこの 1 行を固定している。
+   */
+  if (isSpecialAccount(uid)) return false;
   return isDemoAccount(uid);
 }
 

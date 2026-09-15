@@ -70,6 +70,7 @@ jobs:
       - run: npm run verify:report-model
       - run: npm run verify:sheet-contract
       - run: npm run verify:demo-gate
+      - run: npm run verify:special-accounts
       - run: npm run verify:scan-upload-key
       - run: npm run verify:scan-persist
       - run: npm run verify:blood-csv
