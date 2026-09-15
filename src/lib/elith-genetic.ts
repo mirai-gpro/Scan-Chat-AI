@@ -154,67 +154,6 @@ async function scanReportPage(
   return { section, items, raw, finishReason, parsed };
 }
 
-// ---------------------------------------------------------------------------
-// Genoplan v1 の対象ページ (**この定数がページ範囲の唯一の正本**)
-// ---------------------------------------------------------------------------
-//
-// 正本: docs/lab/ad_hoc_diagnosis_batch_spec.md §8.2 / §8.5
-//
-// Genoplan (GenePlanet) のレポートは 208 または 210 ページあるが、**疾患リスク倍率を持つ
-// 項目が印字されているのは元 PDF の p10〜35 の 26 ページだけ**で、ゴールデン
-// (`docs/scan/golden/scan_golden_genetic_geneplanet_20240131.md`) もこの範囲から
-// 220 項目を建立している。**残りのページを LLM へ送ってはならない** (§8.4)。
-//
-// **「成功ページのキャッシュがあるから全ページ送ってよい」は理由にならない** (§8.4)。
-// キャッシュは費用を消すだけで、初回は 208 ページぶん実際に Gemini を呼ぶ。
-//
-// **ここを唯一の正本にする** (§8.5)。ad-hoc の ①受付拒否 ②complete 判定 ③retry 対象
-// ④status / processing-plan 応答 が全部この定数を見る。wellfort-site は API から
-// 受け取った集合だけを描き、`10` / `35` を独立した正本として持たない。
-// (`elith-batch.astro` の編集可能な from/to 既定値は運用 UI の初期値であって、
-//  ad-hoc の complete 条件の正本ではない。)
-
-/** Genoplan v1 の対象ページ範囲 (両端を含む)。 */
-export const GENOPLAN_V1_PAGE_RANGE = { from: 10, to: 35 } as const;
-
-/** Genoplan v1 で必ず読む必要のあるページ番号 (昇順・26 件)。 */
-export const GENOPLAN_V1_REQUIRED_PAGES: readonly number[] = Object.freeze(
-  Array.from(
-    { length: GENOPLAN_V1_PAGE_RANGE.to - GENOPLAN_V1_PAGE_RANGE.from + 1 },
-    (_, i) => GENOPLAN_V1_PAGE_RANGE.from + i,
-  ),
-);
-
-/**
- * そのページが Genoplan v1 の対象か。
- *
- * **整数でないもの・範囲外は false**。呼び出し側は false を silent skip にせず、
- * テストできる形 (4xx か明示的な invalid page 結果) で返すこと (§8.5)。
- */
-export function isGenoplanV1RequiredPage(page: unknown): boolean {
-  return (
-    typeof page === 'number' &&
-    Number.isInteger(page) &&
-    page >= GENOPLAN_V1_PAGE_RANGE.from &&
-    page <= GENOPLAN_V1_PAGE_RANGE.to
-  );
-}
-
-/**
- * 対象ページのうち、まだ `done` になっていないものを返す (昇順)。
- *
- * **「登録済みの行が全部 done」では完了にしない** (§8.6)。通信断でそのページの行自体が
- * 作られなかった場合、行を数える方式では**存在しないページを完了に数えてしまう**。
- * だから必要な集合の側から引く。
- *
- * `donePages` に p1〜9 / p36 以降が混ざっていても**母数には含めない** (§8.6)。
- */
-export function missingGenoplanV1Pages(donePages: Iterable<number>): number[] {
-  const done = new Set<number>();
-  for (const p of donePages) if (isGenoplanV1RequiredPage(p)) done.add(p);
-  return GENOPLAN_V1_REQUIRED_PAGES.filter((p) => !done.has(p));
-}
-
 /** 遺伝子検査 1 ページを構造化 (項目名/発症リスク倍率/発症率 を固定・案A-lite)。 */
 export function scanGeneticPage(input: { imageBase64: string; mimeType: string; hint?: string | null }): Promise<GeneticPageResult> {
   return scanReportPage(input, GENETIC_SYSTEM, GENETIC_USER);

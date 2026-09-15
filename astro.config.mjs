@@ -6,9 +6,9 @@ import vercel from '@astrojs/vercel';
 export default defineConfig({
   output: 'server',
   adapter: vercel({
-    // 大きい臨時診断 ZIP の分類は S3 Range GET + 展開 + PDF/XLSX 解析を行うため
-    // 300 秒を超える実データがある。Pro の上限内で 800 秒まで許可する。
-    maxDuration: 800,
+    // gemini-2.5-flash で密度の高い検査表 (~39 項目) を転記すると
+    // 30〜50 秒かかるため、デフォルト 10〜15 秒では足りない。
+    maxDuration: 60,
   }),
   integrations: [tailwind()],
   server: {
