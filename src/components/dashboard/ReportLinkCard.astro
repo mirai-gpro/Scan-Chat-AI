@@ -21,27 +21,60 @@ interface Props {
   href: string;
   /** Elith から受領した日 (diagnosis_results.received_at)。無ければ日付行を出さない。 */
   receivedAt?: string | null;
+  /**
+   * **開ける報告書があるか** (2026-09-15 発注者指示「報告書が無い場合はグレーアウトに」)。
+   *
+   * false のときは**押せない見た目**にして、リンクにしない。
+   * 理由: 押した先は `emptyVM` = 帯だけが立った紙面で、**中身が 1 つも無い**。
+   * それを「報告書」として開かせるのは変なので、入口で止める。
+   *
+   * **受領日の有無から推測しない** — デモ用アカウントはサンプルを開ける (受領日は無い)。
+   * 呼び出し側が「開けるか」を決めて渡す。
+   */
+  available?: boolean;
 }
-const { href, receivedAt = null } = Astro.props as Props;
+const { href, receivedAt = null, available = true } = Astro.props as Props;
 ---
 
-<section class="flex flex-col gap-3 rounded-2xl border border-brand-600 bg-brand-600 p-4 text-white sm:p-5">
+<section class:list={[
+  'flex flex-col gap-3 rounded-2xl border p-4 sm:p-5',
+  available ? 'border-brand-600 bg-brand-600 text-white' : 'border-slate-200 bg-slate-50 text-slate-700',
+]}>
   <div class="flex items-center gap-3">
-    <span class="grid h-10 w-10 shrink-0 place-items-center rounded-xl bg-white/20">
+    <span class:list={[
+      'grid h-10 w-10 shrink-0 place-items-center rounded-xl',
+      available ? 'bg-white/20' : 'bg-slate-200 text-slate-600',
+    ]}>
       <AppIcon name="report" size={20} />
     </span>
     <span class="flex min-w-0 flex-col">
       <span class="text-base font-bold">{AI_PREVENTION_REPORT_LABEL}</span>
-      {receivedAt && <span class="tnum whitespace-nowrap text-sm">{formatJpDate(receivedAt)}</span>}
+      {available
+        ? receivedAt && <span class="tnum whitespace-nowrap text-sm">{formatJpDate(receivedAt)}</span>
+        : <span class="text-sm">まだ届いていません</span>}
     </span>
   </div>
 
-  <a
-    href={href}
-    class="flex min-h-touch items-center justify-center gap-1.5 rounded-xl bg-white px-3 text-base font-semibold text-brand-700 transition hover:bg-brand-50"
-  >
-    報告書を読む<AppIcon name="next" size={18} />
-  </a>
+  {available ? (
+    <a
+      href={href}
+      class="flex min-h-touch items-center justify-center gap-1.5 rounded-xl bg-white px-3 text-base font-semibold text-brand-700 transition hover:bg-brand-50"
+    >
+      報告書を読む<AppIcon name="next" size={18} />
+    </a>
+  ) : (
+    /*
+      **押せないものをリンクにしない。** `<a>` のままだと見た目だけ灰色で押せてしまい、
+      中身の無い紙面が開く。`aria-disabled` を付けた `<span>` にして、
+      支援技術にも「いま押せない」と伝える (検査カードの `.btn-pair-off` と同じ流儀)。
+    */
+    <span
+      aria-disabled="true"
+      class="flex min-h-touch cursor-not-allowed items-center justify-center gap-1.5 rounded-xl border border-slate-200 bg-white px-3 text-base font-semibold text-slate-600"
+    >
+      報告書を読む<AppIcon name="next" size={18} />
+    </span>
+  )}
 
   {/*
     **旧「サマリー ／ 要注意の抜粋 ／ 全編PDF」の 1 行は撤去した (2026-08-30)。** 理由は 3 つ:

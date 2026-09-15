@@ -1,0 +1,145 @@
+---
+import AppIcon from '../AppIcon.astro';
+import { formatJpDate } from '../../lib/dashboard-queries';
+import { AI_PREVENTION_REPORT_LABEL } from '../../lib/display-names';
+
+/**
+ * **「AI疾病予防報告書 単品購入」の進捗。**
+ *
+ * 正本: `docs/operations/スペシャルアカウント_仕様書.md` §14。
+ *
+ * 【なぜキット進捗と別なのか】単品購入は**自分でスキャンした検診・人間ドック ＋ AI問診**だけで、
+ * 検査キットが 1 つも無い (CLAUDE.md「報告書は 2 タイプある」タイプ2)。
+ * コースプラン用の `KitProgressCard` をそのまま出すと、永久に
+ * 「進行中のキットはありません」しか言わない枠が居座る。**入口が違えば進捗も違う。**
+ *
+ * 【状態は DB から引いた事実だけ】
+ *   ① AI問診          … `diagnosis.interview_completions` の最新 (無ければ「未回答」)
+ *   ② 検診・人間ドック … `test_artifacts` の `health_checkup` の件数
+ *   ③ 報告書          … `diagnosis_results.received_at`
+ * **推測しない。** 「もうすぐできます」のような進行予測は書かない (材料が無い)。
+ *
+ * 【③ にボタンを置かない】報告書への導線は上の `ReportLinkCard` が持っている。
+ * 同じ画面に同じ行き先のボタンを 2 つ並べない。
+ */
+interface Props {
+  /** `diagnosis.interview_completions` の最新。null = 未回答。 */
+  interviewCompletedAt: string | null;
+  /** `test_artifacts` の `health_checkup` 件数 (＝アップロード済みの回数)。 */
+  checkupCount: number;
+  /** その最新の受診日。無ければ日付を出さない。 */
+  latestCheckupDate: string | null;
+  /** `diagnosis_results.received_at`。null = まだ届いていない。 */
+  reportReceivedAt: string | null;
+  /** `?u=` を引き継ぐためのクエリ (admin の代理表示用)。 */
+  q?: string;
+}
+const {
+  interviewCompletedAt,
+  checkupCount,
+  latestCheckupDate,
+  reportReceivedAt,
+  q = '',
+} = Astro.props as Props;
+
+const interviewDone = !!interviewCompletedAt;
+const checkupDone = checkupCount > 0;
+const reportDone = !!reportReceivedAt;
+
+/* 曜日は落として 1 行に収める (formatJpDate は「2026年9月15日 (月)」を返す)。 */
+const shortJpDate = (iso: string | null | undefined) => formatJpDate(iso).replace(/\s*\(.\)$/, '');
+
+const steps = [
+  {
+    n: 1,
+    icon: 'interview' as const,
+    title: 'AI 問診に答える',
+    done: interviewDone,
+    /** 済んだときは**事実だけ**。未了のときは何をすればよいかだけ。 */
+    state: interviewDone ? `回答済み ${shortJpDate(interviewCompletedAt)}` : 'まだ回答がありません',
+    note: interviewDone
+      ? '回答し直したいときは、もう一度はじめから答えられます。'
+      : '生活習慣をうかがいます。途中でやめても、続きから再開できます。',
+    href: `/chat${q}`,
+    action: interviewDone ? 'もう一度答える' : '問診をはじめる',
+  },
+  {
+    n: 2,
+    icon: 'scan' as const,
+    title: '検診・人間ドックの結果をアップロードする',
+    done: checkupDone,
+    state: checkupDone
+      ? `${checkupCount} 回分を登録済み${latestCheckupDate ? `（最新 ${shortJpDate(latestCheckupDate)}）` : ''}`
+      : 'まだ登録がありません',
+    note: checkupDone
+      ? '別の年度の結果も、同じ手順で追加できます。'
+      : '結果票を撮影するか、PDF・画像を選んでください。',
+    href: `/scan${q}`,
+    action: checkupDone ? '別の年度を追加する' : 'アップロードする',
+  },
+] as const;
+---
+
+<section class="card">
+  <header class="mb-3.5 flex flex-wrap items-center justify-between gap-2">
+    <h2 class="flex shrink-0 items-center gap-2 text-base font-bold text-navy-800">
+      <AppIcon name="report" size={20} class="text-brand-700" />
+      <span>{AI_PREVENTION_REPORT_LABEL}ができるまで</span>
+    </h2>
+    <span class="tnum rounded-full bg-slate-100 px-2.5 py-1 text-sm font-medium text-slate-700">
+      {[interviewDone, checkupDone].filter(Boolean).length} / 2 準備できています
+    </span>
+  </header>
+
+  <ol class="flex flex-col gap-3">
+    {steps.map((s) => (
+      <li class="flex flex-wrap items-center gap-x-3 gap-y-2.5 rounded-xl border border-slate-200 bg-white p-3 xl:flex-nowrap xl:gap-4">
+        {/*
+          状態は **アイコン + テキスト + 色の 3 点セット**で出す (UI 確定事項)。
+          色だけで「済んだ」を表さない。
+        */}
+        <span class={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${
+          s.done ? 'bg-brand-50 text-brand-700' : 'bg-mist text-navy-800'
+        }`}>
+          <AppIcon name={s.done ? 'check' : s.icon} size={20} />
+        </span>
+
+        <span class="flex min-w-0 flex-1 flex-col">
+          <span class="text-base font-bold text-navy-800">{s.n}. {s.title}</span>
+          <span class={`text-sm ${s.done ? 'font-medium text-brand-700' : 'text-slate-600'}`}>{s.state}</span>
+          <span class="text-sm text-slate-600">{s.note}</span>
+        </span>
+
+        <a
+          href={s.href}
+          class={`btn-pair ${s.done ? 'btn-graph' : 'btn-data'} w-full xl:w-auto`}
+        >
+          <AppIcon name={s.icon} size={18} />{s.action}
+        </a>
+      </li>
+    ))}
+
+    {/*
+      ③ は**状態だけ**。押す先は上の報告書タイルが持っているので、ボタンを 2 つ並べない。
+      まだ届いていない回に「もうすぐできます」とは書かない — 作成の時期を当社は知らない。
+    */}
+    <li class="flex flex-wrap items-center gap-x-3 gap-y-2.5 rounded-xl border border-dashed border-slate-300 p-3 xl:flex-nowrap xl:gap-4">
+      <span class={`grid h-10 w-10 shrink-0 place-items-center rounded-xl ${
+        reportDone ? 'bg-brand-50 text-brand-700' : 'bg-slate-100 text-slate-500'
+      }`}>
+        <AppIcon name={reportDone ? 'check' : 'report'} size={20} />
+      </span>
+      <span class="flex min-w-0 flex-1 flex-col">
+        <span class="text-base font-bold text-navy-800">3. {AI_PREVENTION_REPORT_LABEL}</span>
+        <span class={`text-sm ${reportDone ? 'font-medium text-brand-700' : 'text-slate-600'}`}>
+          {reportDone ? `お届け済み ${shortJpDate(reportReceivedAt)}` : 'まだ届いていません'}
+        </span>
+        <span class="text-sm text-slate-600">
+          {reportDone
+            ? '上の「報告書を読む」から開けます。'
+            : '1 と 2 がそろうと、AI 診断にかけて報告書をお届けします。'}
+        </span>
+      </span>
+    </li>
+  </ol>
+</section>
