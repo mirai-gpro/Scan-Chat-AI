@@ -1,0 +1,51 @@
+---
+import AppIcon from '../../components/AppIcon.astro';
+
+/**
+ * 商品一覧 (Wellfort のサイト) への導線。ダッシュボード最下部 (発注者指示 2026-09-16)。
+ *
+ * 【新しいタブで開く = 「ポップアップ」の実体】
+ *   `window.open()` で寸法つきのポップアップを作る手も考えたが採らない:
+ *     ①**ポップアップブロッカーに掛かり得る** (クリック起点なら通ることが多いが、
+ *       設定によっては黙って開かない = 押しても何も起きない画面になる)
+ *     ②**スマホでは寸法指定が効かず、結局 新しいタブ / オーバーレイになる**
+ *     ③JS が要る。`<a target="_blank">` なら JS 無しでも必ず開く。
+ *   ホーム画面から起動した状態 (standalone) では、iOS は アプリ内ブラウザ、
+ *   Android は Custom Tab のオーバーレイで開く = **閉じればアプリに戻る**ので、
+ *   「ポップアップで開く」の狙い (アプリから出て行かせない) を満たす。
+ *
+ * 【iframe のモーダルにしない】`www.wellfort.co.jp` は framing を禁じていないので
+ *   技術的には埋め込めるが、**この先は購入導線**で、Safari の 3rd-party cookie 制限下では
+ *   埋め込み内のログイン・決済が壊れ得る。売り物の導線でその賭けはしない。
+ *
+ * 【見た目】外部サイトへ送るカードは既に `OnlineConsultCard` の形があるので、それに揃える
+ *   (地=mist / 白ボタン + `external` アイコン / 行き先を明記した 1 行)。
+ *   **brand 塗りにしない** — 塗りは AI疾病予防報告書のタイル 1 枚だけ (確定事項)。
+ */
+const HREF = 'https://www.wellfort.co.jp/products';
+---
+
+<section class="rounded-2xl bg-mist p-4 sm:p-5" aria-labelledby="products-title">
+  {/* スマホ (390px) でボタンを横に置くと見出しが折れるので、次の行へ落とす
+      (`OnlineConsultCard` と同じ basis-full → sm 以上で auto)。 */}
+  <div class="flex flex-wrap items-center gap-3">
+    <span class="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-brand-600 text-white">
+      <AppIcon name="shop" size={22} />
+    </span>
+    <h3 id="products-title" class="min-w-0 flex-1 text-base font-bold text-navy-800">商品一覧</h3>
+    <a
+      href={HREF}
+      target="_blank"
+      rel="noopener noreferrer"
+      class="flex min-h-touch shrink-0 basis-full items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-4 text-base font-semibold text-slate-800 transition hover:bg-brand-50 sm:basis-auto"
+    >
+      <AppIcon name="shop" size={18} />商品一覧を見る<AppIcon name="external" size={16} class="text-slate-600" />
+    </a>
+  </div>
+  {/*
+    **何が起きるかを先に言う。** 押した先がアプリの外なので、黙って画面が変わると
+    「戻れなくなった」と受け取られる (主な利用者は 50〜65 代)。
+    **商品の説明はこちらで書かない** — 品目も価格も Wellfort のサイトが正 (ミッション④)。
+  */}
+  <p class="mt-2.5 text-sm text-slate-700">Wellfort のサイト（www.wellfort.co.jp）が新しいタブで開きます。</p>
+</section>
