@@ -12,6 +12,7 @@ import TestResultsSection from '../components/dashboard/TestResultsSection.astro
 import HealthInsightCard from '../components/dashboard/HealthInsightCard.astro';
 import HealthAgeCard from '../components/dashboard/HealthAgeCard.astro';
 import ReportLinkCard from '../components/dashboard/ReportLinkCard.astro';
+import ProductsLinkCard from '../components/dashboard/ProductsLinkCard.astro';
 import AddToHomeCard from '../components/AddToHomeCard.astro';
 import { loadDashboard, formatGreeting, getHealthAge, formatJpDate, testTypeLabel } from '../lib/dashboard-queries';
 import { getLatestMeasurements } from '../lib/measurement-queries';
@@ -359,6 +360,10 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
 
         {/* ⑩ ホーム画面への追加 (追加済み / 閉じたあとは出ない。判定はクライアント側) */}
         <AddToHomeCard />
+
+        {/* ⑪ 商品一覧 (発注者指示 2026-09-16)。**利用者に見える最後の枠**
+             — この下はテストフェーズの確認用フッタで、総合テストで遮蔽する。 */}
+        <ProductsLinkCard />
 
         {/* テストフェーズの確認用フッタ (総合テストで遮蔽する)。§02 参照。 */}
         <details class="rounded-2xl border border-dashed border-slate-300 p-4">

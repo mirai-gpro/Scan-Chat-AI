@@ -317,7 +317,7 @@ export class ScanVerificationController {
     this.bindModal();
     this.bindSubmit();
     this.updateDownstreamPreview();
-    this.updateSubmitGate();
+    this.updateSubmitState();
   }
 
   // ----------------------------------------------------------
@@ -776,7 +776,7 @@ export class ScanVerificationController {
     this.refreshOverlayColors();
     this.renderSummary();
     this.updateDownstreamPreview();
-    this.updateSubmitGate();
+    this.updateSubmitState();
   }
 
   // ----------------------------------------------------------
@@ -857,7 +857,19 @@ export class ScanVerificationController {
     this.refs.downstreamPreview.textContent = md || '(empty)';
   }
 
-  private updateSubmitGate(): void {
+  /**
+   * 送信ボタンの表示を更新する。**関門ではない。**
+   *
+   * 【2026-09-15・仕様書 §8 の確定 3 点目を実装】
+   * 以前はここが **疑念セルを全部解消するまで `disabled`** にする
+   * 「先へ進むための関門」だった。**読み取り精度は LLM 側で上げるものであって、
+   * 利用者に直させる作業ではない** (発注者指示) ため、関門をやめた。
+   *
+   * - **`disabled` にしない。** 未解消が残っていても送信できる。
+   * - 件数は**情報として**出す。「未解消です」と行き止まりにしない。
+   * - 画面自体は残す (案B)。直したい人は直せるが、**直さなくても先へ進める**。
+   */
+  private updateSubmitState(): void {
     let unresolved = 0;
     this.regions.forEach((view, regionIdx) => {
       if (!view.table) return;
@@ -865,19 +877,17 @@ export class ScanVerificationController {
         if (!this.isRowOk(regionIdx, rowIdx)) unresolved++;
       });
     });
+    // **どの場合もボタンは押せる。** 送信できない状態を作らない。
+    this.refs.submitBtn.disabled = false;
+    this.refs.submitBtn.textContent = '✓ 確認して送信';
     if (unresolved === 0) {
-      this.refs.submitBtn.disabled = false;
-      this.refs.submitBtn.textContent = '✓ 確認して送信';
-      this.refs.submitHint.textContent =
-        '✓ 全行を確認しました。問診へ進めます。';
-      this.refs.submitHint.className =
-        'text-center text-xs text-emerald-700';
+      this.refs.submitHint.textContent = '✓ 全行を確認しました。問診へ進めます。';
+      this.refs.submitHint.className = 'text-center text-xs text-emerald-700';
     } else {
-      this.refs.submitBtn.disabled = true;
-      this.refs.submitBtn.textContent = `✓ 確認して送信 (残り ${unresolved} 件)`;
-      this.refs.submitHint.textContent = `${unresolved} 件の疑念がまだ未解消です`;
-      this.refs.submitHint.className =
-        'text-center text-xs text-amber-700';
+      // **作業を指示しない。** 「直せる」ことだけを伝える。
+      this.refs.submitHint.textContent =
+        `読み取りの確度が低い箇所が ${unresolved} 件あります。直さずにこのまま送信できます。`;
+      this.refs.submitHint.className = 'text-center text-xs text-slate-600';
     }
   }
 

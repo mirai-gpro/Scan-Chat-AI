@@ -33,6 +33,7 @@ const jobs = read('src/lib/scan-jobs.ts');
 const worker = read('src/pages/api/cron/scan-worker.ts');
 const jobsApi = read('src/pages/api/scan/jobs.ts');
 const exportApi = read('src/pages/api/scan/export.ts');
+const verif = read('src/scripts/scan-verification.ts');
 
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n① 全ページが S3 に載る (P2)\n');
@@ -166,6 +167,35 @@ console.log('\n④-2 Elith 納品の書き出しが前景と同じ\n');
   ok('診断 ID は UUID の形だけ受ける',
     /UUID_RE\.test\(dRaw\) \? dRaw : null/.test(jobsApi),
     '任意の文字列を通すと納品先の隣のフォルダを指せる');
+}
+
+console.log('\n④-3 結果画面は関門でない (§8 案B の 3 点目)\n');
+{
+  /*
+   * 以前は疑念セルを全部解消するまで送信ボタンが `disabled` だった。
+   * **読み取り精度は LLM 側で上げるもので、利用者に直させる作業ではない**
+   * (発注者指示 2026-09-15) ので、関門をやめた。画面は残す (直せる場所)。
+   */
+  /*
+   * **関数の中だけを見る。** ファイル全体で `disabled = true` を禁じると、
+   * 送信中の二重押し防止 (`bindSubmit`) まで巻き込んで**正しい実装を落とす**。
+   */
+  const gateHead = verif.indexOf('private updateSubmitState(): void {');
+  const gateBody = gateHead >= 0 ? verif.slice(gateHead, verif.indexOf('\n  }', gateHead)) : '';
+  ok('送信ボタンを disabled にしない',
+    /this\.refs\.submitBtn\.disabled = false;/.test(gateBody)
+      && !/this\.refs\.submitBtn\.disabled = true;/.test(gateBody),
+    '未解消が残っていても送信できる');
+  ok('送信中の二重押し防止は残す',
+    /await this\.refs\.onBeforeSubmit\(\)/.test(verif)
+      && /this\.refs\.submitBtn\.disabled = true;[\s\S]{0,120}書き出し中/.test(verif),
+    '関門をやめても、書き出し中に 2 度押せてよい訳ではない');
+  ok('「未解消です」で行き止まりにしない',
+    !/疑念がまだ未解消/.test(verif),
+    '作業を指示する文言を残さない');
+  ok('件数は情報として出す',
+    /直さずにこのまま送信できます/.test(verif),
+    '黙って消すのでなく「直さなくてよい」と伝える');
 }
 
 console.log('\n⑤ cron と監視 (P4 / P5)\n');
