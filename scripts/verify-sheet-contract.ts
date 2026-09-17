@@ -81,6 +81,13 @@ const diffs = diffContract(mock, impl);
  * → 同じ素材を `hasCancerRisk: true` でも組み、**A 軸のカードが消えること**を
  *   「タイプ1 は未実装」という**既知の事実として固定**する。
  *   将来 A が出るようになったら、ここが落ちて「タイプ1 の契約を作れ」と教える。
+ *
+ * 【2026-09-17】①タイプ2 側は「A のカードが 1 枚以上」を決め打ちしていたが、
+ * パイロット暫定文 (当社が書いた 2 文) の削除で **材料が無い回は 0 枚**になった。
+ * 決め打ちを**モックの枚数との一致**に替える — こうすると「当社の文を紙面へ戻した」
+ * ときにも、「Elith の所見が黙って消えた」ときにも、どちらでも落ちる。
+ * ②**軸 A そのものを廃止した**ので `axis === 'a'` では引けない (引くと常に 0 = 検査が
+ * 空振りする)。**カードの key `cancer_finding`** で引く。見ている中身は同じ。
  */
 const vmAsCourse = buildReportVM({
   reportText: REPORT_TEXT,
@@ -93,19 +100,24 @@ const vmAsCourse = buildReportVM({
   chronologicalAge: 56,
   readConfig: () => '',
 });
-const aInType2 = vm.digest.filter((c) => c.axis === 'a').length;
-const aInType1 = vmAsCourse.digest.filter((c) => c.axis === 'a').length;
+const IS_FINDING = (c: { key: string }) => c.key === 'cancer_finding';
+const aInType2 = vm.digest.filter(IS_FINDING).length;
+const aInType1 = vmAsCourse.digest.filter(IS_FINDING).length;
+const aInMock = mock.cards.filter(IS_FINDING).length;
 const typeFlip: string[] = [];
-if (aInType2 === 0) {
-  typeFlip.push('タイプ2 で A 軸 (初期がんの早期発見) のカードが 0 枚。モックには在る。');
+if (aInType2 !== aInMock) {
+  typeFlip.push(
+    `タイプ2 の「今回の所見」が 実装 ${aInType2} 枚 / モック ${aInMock} 枚 で食い違う。`
+    + '紙面の正はモックなので、どちらが古いかを突き合わせて直すこと。',
+  );
 }
 if (aInType1 !== 0) {
   typeFlip.push(
-    `タイプ1 で A 軸のカードが ${aInType1} 枚出た。未実装のはずなので、`
+    `タイプ1 で「今回の所見」が ${aInType1} 枚出た。未実装のはずなので、`
     + 'タイプ1 の紙面契約 (sheet_contract_type1.json) を作って照合対象に加えること。',
   );
 }
-console.log(`タイプ判定: A 軸カード = タイプ2 ${aInType2} 枚 / タイプ1 ${aInType1} 枚 (タイプ1 は未実装のため 0 が正)`);
+console.log(`タイプ判定: 「今回の所見」= タイプ2 ${aInType2} 枚 (モック ${aInMock} 枚) / タイプ1 ${aInType1} 枚 (タイプ1 は未実装のため 0 が正)`);
 
 console.log(`タイプ2: モック ${mock.cards.length} カード / 実装 ${impl.cards.length} カード`);
 // タイプ 1 は実装が無い (JSON 未受領・v0.2)。契約だけを記録し、照合はしない。

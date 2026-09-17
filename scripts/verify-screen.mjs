@@ -111,20 +111,21 @@ const shellWidth = async (page, path) => {
    */
   await page.goto(`${BASE}/report?preview=1`, { waitUntil: 'domcontentloaded' });
   /*
-   * **A 軸の中だけを見る。** `document.body` 全体を見ると全編 (abstract/総評) にも
-   * 同じ文が在るので、**A 軸が空でも緑になる** — 実際に一度この誤りを書いた
-   * (壊して確かめたら通ってしまい発覚)。検証は必ず壊して落ちることを確認する。
+   * **「今回の所見」のカードの中だけを見る。** `document.body` 全体を見ると全編
+   * (abstract/総評) にも同じ文が在るので、**カードが空でも緑になる** — 実際に一度
+   * この誤りを書いた (壊して確かめたら通ってしまい発覚)。
+   *
+   * 【2026-09-17】軸 A「初期がんの早期発見」の廃止で**帯から辿れなくなった**ので、
+   * カードの見出しで引く。見ているもの (Elith の逐語が出ているか) は変えていない。
    */
   const t1A = await page.evaluate(() => {
-    const band = [...document.querySelectorAll('.rp-axis')]
-      .find((b) => (b.textContent ?? '').includes('初期がんの早期発見'));
-    const section = band?.parentElement;
-    const cards = section ? [...section.querySelectorAll('.rp-card')] : [];
+    const cards = [...document.querySelectorAll('.rp-card')]
+      .filter((c) => (c.querySelector('.rp-h3')?.textContent ?? '').includes('今回の所見'));
     return { cards: cards.length, text: cards.map((c) => c.textContent ?? '').join('') };
   });
   const t1Ok = t1A.cards > 0 && t1A.text.includes('尿中のポルフィリン量');
-  console.log(`${t1Ok ? '✓' : '✗'} ?preview=1 の主軸 A に受領本文の逐語が出ている (カード ${t1A.cards} 枚)`);
-  if (!t1Ok) fails.push('?preview=1 の主軸 A が空 (がんリスク検査の項目名で選べていない)');
+  console.log(`${t1Ok ? '✓' : '✗'} ?preview=1 の「今回の所見」に受領本文の逐語が出ている (カード ${t1A.cards} 枚)`);
+  if (!t1Ok) fails.push('?preview=1 の「今回の所見」が空 (がんリスク検査の項目名で選べていない)');
 
   /*
    * **ウェルネス年齢は画面にも出る** (裁定 D-C2′・発注者指示 2026-09-01)。
@@ -202,23 +203,40 @@ const shellWidth = async (page, path) => {
   if (!sipOk) fails.push(`印刷ビューに保存手順が出ている (節 ${saveInPrint.sec} / 手順 ${saveInPrint.steps} 行) = 保存した PDF に操作説明が載る`);
   await page.goto(`${BASE}/report?preview=2`, { waitUntil: 'domcontentloaded' });
 
-  // **A 軸のカードが在ること。** ここが実際に落ちていた箇所なので名指しで見る。
-  const axisA = await page.evaluate(() => {
-    const bands = [...document.querySelectorAll('.rp-axis')];
-    const a = bands.find((b) => (b.textContent ?? '').includes('初期がんの早期発見'));
-    if (!a) return { band: false, cards: 0 };
-    // 軸の <section> = 帯の親。その中の .rp-card がその軸のダイジェスト。
-    const section = a.parentElement;
-    return { band: true, cards: section ? section.querySelectorAll('.rp-card').length : 0 };
-  });
-  if (!axisA.band) {
-    console.log('✗ 主軸 A の帯が無い');
-    fails.push('主軸 A (初期がんの早期発見) の帯が画面に無い');
-  } else if (axisA.cards === 0) {
-    console.log('✗ 主軸 A の帯は在るがカードが 0 枚 — 発注者に「画面が空」と見える状態');
-    fails.push('主軸 A のカードが 0 枚 (タイプ反転か材料欠落)');
+  /*
+   * **「今回の所見」の枚数が紙面の正 (モックの契約) と一致すること。**
+   * ここは実際に落ちていた箇所なので名指しで見る。
+   *
+   * 【2026-09-17】①パイロット暫定文 (当社が書いた 2 文) の削除で**材料が無い回は
+   * 0 枚が正**になり ②軸 A の廃止で軸では引けなくなった。決め打ちをやめ、
+   * **契約のカード key** と突き合わせる — 当社の文が紙面へ戻ったときも、
+   * Elith の所見が黙って消えたときも、どちらでも落ちる。
+   */
+  const contract2 = JSON.parse(readFileSync('docs/elith/mock/sheet_contract_type2.json', 'utf-8'));
+  const axisAExpected = contract2.cards.filter((c) => c.key === 'cancer_finding').length;
+  const axisA = await page.evaluate(() => ({
+    // 廃止した軸 A の痕跡 (帯の見出し・丸バッジ) が紙面に残っていないこと。
+    oldBand: [...document.querySelectorAll('.rp-axis')]
+      .some((b) => (b.textContent ?? '').includes('初期がんの早期発見')),
+    badges: document.querySelectorAll('.rp-badge').length,
+    bands: document.querySelectorAll('.rp-axis').length,
+    cards: [...document.querySelectorAll('.rp-card')]
+      .filter((c) => (c.querySelector('.rp-h3')?.textContent ?? '').includes('今回の所見')).length,
+  }));
+  if (axisA.oldBand) {
+    console.log('✗ 廃止した軸 A の帯が画面に残っている');
+    fails.push('軸 A (初期がんの早期発見) は廃止したのに帯が出ている');
+  } else if (axisA.badges !== 0) {
+    console.log(`✗ 丸バッジ (A/B) が ${axisA.badges} 個出ている`);
+    fails.push(`丸バッジ (A/B) は廃止したのに ${axisA.badges} 個出ている`);
+  } else if (axisA.bands !== 1) {
+    console.log(`✗ 軸の帯が ${axisA.bands} 本 (1 本が正)`);
+    fails.push(`軸の帯が ${axisA.bands} 本 — 軸 A の廃止後は 1 本が正`);
+  } else if (axisA.cards !== axisAExpected) {
+    console.log(`✗ 「今回の所見」が ${axisA.cards} 枚 (契約は ${axisAExpected} 枚)`);
+    fails.push(`「今回の所見」が 画面 ${axisA.cards} 枚 / 契約 ${axisAExpected} 枚 で食い違う`);
   } else {
-    console.log(`✓ 主軸 A のカード ${axisA.cards} 枚`);
+    console.log(`✓ 軸の帯 1 本・バッジ 0 個・「今回の所見」${axisA.cards} 枚 (契約どおり)`);
   }
 
   for (const card of contractCards()) {

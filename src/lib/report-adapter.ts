@@ -35,24 +35,19 @@ export const SHEET_VERSION = 'v1.0';
 /** 検査サイクルの総数 (年 4 回・spec §1.0.1)。 */
 export const CYCLE_TOTAL = 4;
 
-/**
- * 【パイロット版 v0.1 の唯一の例外・発注者指示 2026-08-29】
+/*
+ * 【パイロット暫定文は削除した・発注者指示 2026-09-17】
  *
- * タイプ 2 の主軸 A「今回の所見」に出す 2 文。**これは Elith の原文ではない。**
- * spec §10.1 E-1 で Elith に出力を依頼している文型そのもので、受領データにはまだ無い。
+ * タイプ 2 の主軸 A「今回の所見」には、Elith へ依頼中の文型そのものを当社の文として
+ * 出していた (旧 `PILOT_CANCER_FINDING_TEXT`)。トランスコスモス社 10 名の実データで
+ * **Elith 本文が遺伝的がんリスクに言及している回に「気になる点は見当たりませんでした」と
+ * 併記され、紙面の中で矛盾した** (Wellfort 指摘 2026-09-16)。
  *
- * 発注者判断: **パイロット版ではこのまま出す。** 依頼の内容をそのまま Wellfort と Elith に
- * 見てもらい、回答を得てから修正する。確定したら
- *   ① Elith が `cancer_screening.text` を返すようになれば、そちらが優先される
- *   ② それでも来なければ `ui.cancer_screening_not_included` (admin から入力) へ降りる
- * のどちらかに置き換わり、この定数は消える。
- *
- * **これ以外に、当社が書いた文を紙面へ出してはならない** (spec §1.0.0)。
+ * → **当社が書いた文は紙面に一切出さない** (spec §1.0.0) へ戻す。A の材料は
+ *   ① Elith の `cancer_screening.text` ② `ui.cancer_screening_not_included`
+ *   (admin から入力・既定は空) の 2 つだけで、**どちらも無ければカードごと非表示**。
+ *   「記載が無いこと ≠ 所見が無いこと」なので、欠落は紙面でなく抽出監査に出す。
  */
-export const PILOT_CANCER_FINDING_TEXT = [
-  '今回お預かりした人間ドックの結果と問診の範囲では、がんに関して特に気になる点は見当たりませんでした。',
-  'なお、がんリスク検査は今回の検査には含まれていません。',
-];
 
 // ── 受領 JSON の取り込み (spec §5.1) ──────────────────────────
 
@@ -67,7 +62,24 @@ export interface ParsedReportText {
   wellnessAge: number | null;
   /** Elith が返した場合のがん所見 (spec §4.0.1 の依頼形)。未受領なら null。 */
   cancerText: string | null;
+  /** 本文の末尾に紛れていた生成メタ行 (章名 → その行)。**黙って消さず監査に出す。** */
+  metaLines: { section: string; line: string }[];
 }
+
+/**
+ * 【本文に紛れる生成メタ行を紙面に出さない・発注者判断 2026-09-17】
+ *
+ * 受領本文の**末尾**に `全体文字数：3012文字` という Elith 側の生成メタが付いて届くことがある
+ * (トランスコスモス社 10 名のうち 4 名の `lifestyle` 章・実測。しかも **4 名とも同じ 3012**
+ * なので、その人の本文の実際の字数ですらない)。**報告書の中身ではない**ので紙面に出さない。
+ *
+ * - **落とすのは「章の末尾にある、この 1 行だけ」**。行ごと落とすので、残りは受領本文の
+ *   部分文字列のまま = 逐語ルール (spec §4.1) を壊さない。**文の途中は 1 文字も触らない。**
+ * - **黙って消さない。** 落とした行は `metaLines` で監査に出す (先方の不具合が見えなくなる方が困る)。
+ * - **恒久策は Elith 側で出さないこと。** ここは受け側の保険で、表記が変われば効かない
+ *   (だから監査で「落とした / 落としていない」を見えるようにしておく)。
+ */
+const GENERATION_META_LINE = /\n\s*全体文字数[：:]\s*[0-9０-９]+\s*文字\s*$/;
 
 /**
  * `report_text.json` を取り込む。
@@ -81,8 +93,14 @@ export function parseReportText(raw: unknown): ParsedReportText {
   const byKey = new Map<string, ElithSection>();
   let wellnessAge: number | null = null;
   let cancerText: string | null = null;
+  const metaLines: { section: string; line: string }[] = [];
 
   const push = (key: string, s: ElithSection) => {
+    const m = GENERATION_META_LINE.exec(s.text);
+    if (m) {
+      metaLines.push({ section: s.section_name, line: m[0].trim() });
+      s.text = s.text.slice(0, m.index);
+    }
     sections.push(s);
     byKey.set(key, s);
   };
@@ -98,10 +116,10 @@ export function parseReportText(raw: unknown): ParsedReportText {
       };
       push(legacyKeyOf(v.section_name), s);
     }
-    return { sections, byKey, wellnessAge, cancerText };
+    return { sections, byKey, wellnessAge, cancerText, metaLines };
   }
 
-  if (!raw || typeof raw !== 'object') return { sections, byKey, wellnessAge, cancerText };
+  if (!raw || typeof raw !== 'object') return { sections, byKey, wellnessAge, cancerText, metaLines };
 
   for (const [key, v] of Object.entries(raw as Record<string, unknown>)) {
     if (key === 'health_age') {
@@ -131,7 +149,7 @@ export function parseReportText(raw: unknown): ParsedReportText {
       text: r.text,
     });
   }
-  return { sections, byKey, wellnessAge, cancerText };
+  return { sections, byKey, wellnessAge, cancerText, metaLines };
 }
 
 /** 旧形式 (配列) の `section_name` を新形式のキーへ寄せる。 */
@@ -520,8 +538,20 @@ export function buildMeasurements(
 
 // ── ダイジェストのカード ────────────────────────────────
 
-/** Elith が救急受診を促した文。**赤を使ってよいのはここだけ** (spec §4.2.1)。 */
-const EMERGENCY_RE = /(?:早急な医療確認|救急|ただちに医療機関|直ちに医療機関)/;
+/**
+ * 【救急カードは当面中止・発注者指示 2026-09-17】
+ *
+ * Elith が救急受診を促した文を 1 文だけ抜いて赤いカード (ラベル「すぐ受診」) にしていたが、
+ * **語だけで拾うので否定文も拾う**。実データ (堀石様・2026-09-16) では
+ * 「これは直ちに救急受診を指示するものではありません」に `直ちに医療機関`／`救急` が当たり、
+ * **ラベルと本文が正面から矛盾した**。逆に本当の救急文を拾い落とす側の誤りも同じ仕組みで起きる。
+ *
+ * → **抜き出しをやめる。** 当該の文は「医療受診の目安」の章に**原文のまま**残るので、
+ *   紙面から文が消えるわけではない (当社が強調の可否を判断しないだけ)。
+ *   再開するなら Elith 側に**救急かどうかの印**を出してもらうのが先で、
+ *   語の正規表現を足して直す問題ではない。
+ */
+const EMERGENCY_CARD_ENABLED: boolean = false;
 
 /** 章タイトル。レジストリ／`app_config` の上書きが空なら受領 JSON の `section_name`。 */
 function titleOf(key: string, label: string, section: ElithSection | null): string {
@@ -544,6 +574,69 @@ function card(
   return { key, title, axis, tone, blocks: filled, source, detailAnchor: null };
 }
 
+
+/**
+ * 【本文の身長・体重に出所を添える (spec §4.13・発注者判断 2026-09-17)】
+ *
+ * Elith の本文は**問診で本人が申告した値**を引くことがあり、検診・人間ドックの実測値と
+ * 食い違って見える (実測: 吉光様 本文 175cm/70kg ⇔ 検診 173.5cm/69.9kg。本文の数値は
+ * 共通問診表の申告値と**完全一致**)。**どちらも正しい値**なので上書きはしない。
+ * 食い違ったときだけ、その数値の直後に「（問診時）」と**出所だけ**を添える。
+ *
+ * **これは逐語ルールの唯一の例外**。足すのは `SELF_REPORT_MARK` の 5 文字だけで、
+ * 受領本文の文字は 1 文字も足さず・引かず・並べ替えない。回帰チェックはこの印を
+ * 取り除いてから部分文字列判定を行う (`verify:report-model`)。
+ *
+ * **付ける条件は 3 つとも満たすときだけ** (推測で出所を書かない):
+ *   ① その項目の検診値がある ② 本文の数値が検診値と違う ③ 本文の数値が問診の申告値と一致
+ * どれか欠ければ**紙面は触らず、監査にだけ出す**。
+ */
+const SELF_REPORT_MARK = '（問診時）';
+
+/** 「標準体重」を先に並べて**先に食わせる** (体重として拾わないため)。 */
+const BODY_METRIC_RE = /(標準体重|体重|身長)([^。0-9]{0,6})([0-9]+(?:\.[0-9]+)?)\s*(kg|cm|キロ|センチ)/g;
+
+function annotateSelfReported(
+  sections: ElithSection[],
+  checkup: Record<string, { date?: string; value?: unknown }[]> | null,
+  self: { height?: number | null; weight?: number | null } | null | undefined,
+  anomalies: string[],
+): void {
+  const measured = (name: '身長' | '体重'): number | null => {
+    for (const [key, arr] of Object.entries(checkup ?? {})) {
+      // `身長 [cm]` のように単位が付く。**「標準体重」と混ざらないよう完全一致で見る。**
+      if (key.replace(/\s*\[[^\]]*\]\s*$/, '').trim() !== name) continue;
+      const v = Number(arr?.[0]?.value);
+      if (Number.isFinite(v)) return v;
+    }
+    return null;
+  };
+  const ref = { 身長: measured('身長'), 体重: measured('体重') };
+  const said = { 身長: self?.height ?? null, 体重: self?.weight ?? null };
+  const unitOk = { 身長: ['cm', 'センチ'], 体重: ['kg', 'キロ'] };
+  let marked = 0;
+
+  for (const sec of sections) {
+    sec.text = sec.text.replace(BODY_METRIC_RE, (whole, label: string, gap: string, num: string, unit: string) => {
+      if (label === '標準体重') return whole;             // 別項目。触らない
+      const key = label as '身長' | '体重';
+      if (!unitOk[key].includes(unit)) return whole;      // 体重…cm 等は別項目の値
+      const n = Number(num);
+      const r = ref[key];
+      if (r == null || n === r) return whole;             // 検診値が無い / 一致 = 食い違いでない
+      if (said[key] == null || n !== said[key]) {
+        anomalies.push(`本文の${key} ${num}${unit} が検診の実測値 (${r}) と違いますが、`
+          + '問診の申告値と一致しないので出所を書きませんでした');
+        return whole;
+      }
+      marked += 1;
+      anomalies.push(`本文の${key} ${num}${unit} は問診時の申告値。検診の実測値は ${r} なので出所を添えました`);
+      return `${whole}${SELF_REPORT_MARK}`;
+    });
+  }
+  if (marked) anomalies.push(`出所「${SELF_REPORT_MARK}」を ${marked} 箇所に添えました (紙面で唯一の当社の挿入)`);
+}
+
 // ── 本体 ────────────────────────────────────────────────
 
 export interface BuildInput {
@@ -553,6 +646,15 @@ export interface BuildInput {
    * (`{ health_checkup, blood_test, cancer_risk }`)。`flattenLabFiles` が両方を受ける。
    */
   checkup: Record<string, { date?: string; value?: unknown }[]> | LabFiles | null;
+  /**
+   * **問診で本人が申告した身長・体重** (spec §4.13・発注者判断 2026-09-17)。
+   *
+   * 検診の実測値と食い違うのは異常ではない — **AI 診断を回す時点で問診は最新・検診は
+   * 半年前ということがあり、団体検診の計測そのものに疑問を持つ受診者も少なくない**。
+   * どちらも正しい値なので、**片方で上書きしない**。食い違うときだけ**出所を示す**。
+   * 値が無ければ何もしない (推測で「問診時」と書かない)。
+   */
+  selfReported?: { height?: number | null; weight?: number | null } | null;
   name: string;
   issuedOn: string;
   isSample: boolean;
@@ -577,7 +679,16 @@ export function buildReportVM(input: BuildInput): ReportVM {
   const digest: DigestCardVM[] = [];
   const emptyCards: string[] = [];
 
+  for (const m of parsed.metaLines) {
+    anomalies.push(`受領本文の末尾に生成メタ行があったので紙面から外しました: ${m.section} 「${m.line}」`);
+  }
+
   const lab = flattenLabFiles(input.checkup);
+  /*
+   * **ダイジェストと全編を組む前**に出所を添える。ここで 1 回やれば、要点にも全編にも
+   * 同じ形で出る (2 か所に同じ規則を書かない)。
+   */
+  annotateSelfReported(parsed.sections, lab.checkup, input.selfReported, anomalies);
   const measured = buildMeasurements(lab.checkup, sec('blood_analysis'));
   anomalies.push(...measured.anomalies);
   if (lab.dropped.length) {
@@ -635,13 +746,25 @@ export function buildReportVM(input: BuildInput): ReportVM {
     let built: DigestCardVM | null = null;
 
     switch (spec.key) {
-      // ── 主軸 A ──────────────────────────────────────
+      /*
+       * **軸は `spec.axis` を渡す。** ここに 'a' / 'b' をベタ書きしていたため、
+       * 軸 A を廃止して `cancer_finding` を b へ移したとき、**表示モデルは 'a' のまま**で
+       * 画面から静かに消えた (2026-09-17・`verify:screen` が検出)。
+       * レジストリが軸の正。
+       */
       case 'cancer_finding': {
         const texts = cancerFindingTexts(parsed.cancerText, input, lab.cancerItems,
           [sec('abstract'), sec('summary')]);
-        built = card(spec.key, title, 'a',
+        /*
+         * 出典は**受領 JSON のどこから採ったか**だけを書く (発注者指示 2026-09-17)。
+         * 旧「Elith へ依頼中 (spec §10.1 E-1)」は当社の社内表記で、しかも
+         * **パイロット暫定文を削除した今はその経路自体が無い**。
+         * 残る ② (`ui.cancer_screening_not_included`) は受領 JSON 由来でないので**空**にする
+         * — 出典の無い文に出典を書かない。空の出典行は紙面に描かない (`report.astro`)。
+         */
+        built = card(spec.key, title, spec.axis,
           parsed.cancerText ? '総評'
-            : input.hasCancerRisk ? 'アブストラクト・総評' : 'Elith へ依頼中 (spec §10.1 E-1)',
+            : input.hasCancerRisk ? 'アブストラクト・総評' : '',
           [{ kind: 'paragraphs', items: texts }]);
         break;
       }
@@ -651,18 +774,20 @@ export function buildReportVM(input: BuildInput): ReportVM {
         if (!section) break;
         // 見出しの無い世代でも空にしない (`topicsOrWhole` のコメントを参照)。
         const blocks = topicsOrWhole(section);
-        // 救急サインは別カードに切り出す。**赤はここだけ** (spec §4.2.1)。
-        const emergency = findEmergencySentence(section.text);
-        if (emergency) {
-          const e = card('emergency', '', 'b', `${section.section_name}`,
-            [{ kind: 'paragraphs', items: [emergency] }], 'emergency');
-          if (e) digest.push(e);
+        // 救急サインの抜き出しは中止中 (上の `EMERGENCY_CARD_ENABLED` のコメント)。
+        if (EMERGENCY_CARD_ENABLED) {
+          const emergency = findEmergencySentence(section.text);
+          if (emergency) {
+            const e = card('emergency', '', 'b', `${section.section_name}`,
+              [{ kind: 'paragraphs', items: [emergency] }], 'emergency');
+            if (e) digest.push(e);
+          }
         }
         const lead = blocks[0];
         const steps: DigestItem[] = blocks.slice(1).map((b) => ({
           heading: b.heading, text: leadSentences(b.body, 1),
         })).filter((s) => s.heading && s.text);
-        built = card(spec.key, title, 'b',
+        built = card(spec.key, title, spec.axis,
           steps.length ? `${section.section_name} §1〜§${blocks.length}`
                        : `${section.section_name} 冒頭 2 文`, [
             ...(lead ? [{ kind: 'paragraphs' as const, items: [leadSentences(lead.body, 2)] }] : []),
@@ -680,7 +805,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
         // 並びは **Elith が本文で言及した順** (`measured.digestRows`・spec §1.3.10)。
         // 受領ファイルのキー順ではない。当社が優先順位を決めているのでもない。
         const rows = measured.digestRows;
-        built = card(spec.key, title, 'b',
+        built = card(spec.key, title, spec.axis,
           `${section?.section_name ?? '検査値フィードバック'} (値・基準値・判定はすべて本文からの逐語)`,
           [{ kind: 'table', rows }]);
         break;
@@ -689,7 +814,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
       case 'lifestyle': {
         if (!section) break;
         const pairs = buildLifestylePairs(section.text);
-        built = card(spec.key, title, 'b',
+        built = card(spec.key, title, spec.axis,
           `${section.section_name} §1〜§${pairs.length}（各節の【現状評価】【行動提案】冒頭文）`,
           [{ kind: 'pairs', items: pairs }]);
         break;
@@ -718,7 +843,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
         const items = hasHeadings
           ? blocks.map((b) => leadSentences(b.body, 1)).filter(Boolean)
           : [leadSentences(blocks[0]?.body ?? '', 2)].filter(Boolean);
-        built = card(spec.key, title, 'b',
+        built = card(spec.key, title, spec.axis,
           hasHeadings ? `${section.section_name} §1〜§${blocks.length}`
                       : `${section.section_name} 冒頭 2 文`,
           [{ kind: 'paragraphs', items }]);
@@ -828,10 +953,8 @@ function isDigestChapter(key: string): boolean {
  * A の「今回の所見」に出す文を決める (spec §4.0.1)。
  *   ① Elith が書いていれば**その本文**
  *   ② `ui.cancer_screening_not_included` (admin から入力・既定は空)
- *   ③ パイロット版の暫定文 (`PILOT_CANCER_FINDING_TEXT`・発注者指示)
  *
- * タイプ 1 で Elith の記述が無いのはイレギュラーなので、**カードごと非表示**にする
- * (アプリが代わりを書かない)。
+ * **どちらも無ければ空を返し、カードごと非表示にする** (アプリが代わりを書かない)。
  */
 /**
  * 本文から「がんリスク検査に触れた文」を**逐語で選ぶ**。
@@ -875,9 +998,12 @@ function cancerFindingTexts(
   // ③ タイプ 2。admin で文言が確定していればそれを使う。
   const fallback = (input.cancerFallbackText ?? '').trim();
   if (fallback) return [fallback];
-  // ④ パイロット版のみの暫定文 (発注者指示・上の定数のコメントを参照)。
-  return [...PILOT_CANCER_FINDING_TEXT];
+  // ④ 何も無ければ**カードごと非表示**。当社の文で埋めない (上のコメント・spec §1.0.0)。
+  return [];
 }
+
+/** 救急受診を促した文の手がかり。**`EMERGENCY_CARD_ENABLED` が false のあいだは使われない。** */
+const EMERGENCY_RE = /(?:早急な医療確認|救急|ただちに医療機関|直ちに医療機関)/;
 
 /** Elith が救急受診を促した文を 1 文だけ逐語で取り出す。無ければ null。 */
 function findEmergencySentence(text: string): string | null {

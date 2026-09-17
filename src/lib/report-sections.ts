@@ -27,8 +27,18 @@ import type { AxisKey, AxisVM } from './report-model';
  * ポリシーの説明文を紙面に載せることではない (spec §4.-1)。
  * リードを足すとそれは当社が書いた散文になり §1.0.0 に反する。
  */
+/*
+ * 【主軸 A「初期がんの早期発見」は廃止・発注者指示 2026-09-17】
+ *
+ * **受領 JSON に対応するものが無い**枠だった (2 本柱は当社側の整理)。材料が無いので
+ * A の帯だけが常設で立ち、カードが 0 枚のまま残る状態になっていた。
+ * → **帯ごと廃止。残る 1 本の「B」バッジも外す** (1 本しかないものに記号を振らない)。
+ *
+ * これに伴い `cancer_finding` は残る軸へ移す。**Elith が
+ * `cancer_screening.text` を書いた回に、その所見を紙面から落とさないため**
+ * (A の廃止は枠の廃止であって、受領内容を捨てる決定ではない)。
+ */
 export const REPORT_AXES: readonly AxisVM[] = [
-  { key: 'a', title: '初期がんの早期発見' },
   { key: 'b', title: 'AI 診断による疾病予防アドバイス' },
 ] as const;
 
@@ -71,11 +81,10 @@ export interface ChapterSpec {
  * 受領 PDF ではこれが 6 章目に埋もれ、「最優先の所見」が最後まで読まないと出てこない。
  */
 export const CHAPTER_REGISTRY: readonly ChapterSpec[] = [
-  // ── 主軸 A ──
   // 中身は abstract と summary から選んでいる。着地は先に出るほう (アブストラクト)。
-  { key: 'cancer_finding', label: '今回の所見',   sourceKey: null,             axis: 'a', collapsed: true,
+  // **軸 A の廃止で `axis: 'b'` へ移した** (上の `REPORT_AXES` のコメント)。
+  { key: 'cancer_finding', label: '今回の所見',   sourceKey: null,             axis: 'b', collapsed: true,
     detailKeys: ['abstract', 'summary'] },
-  // ── 主軸 B ──
   { key: 'medical_visit',  label: '',             sourceKey: 'medical_visit',  axis: 'b', collapsed: true },
   { key: 'measurements',   label: '',             sourceKey: 'blood_analysis', axis: 'b', collapsed: true },
   { key: 'summary',        label: '',             sourceKey: 'summary',        axis: 'b', collapsed: true },
