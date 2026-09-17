@@ -98,6 +98,15 @@ ok('観測ログを初期化している', /initLiveTrace\(\)/.test(ctrl));
    * `if (!enabled) return;` を足す退行で、代入行はそのまま残るため (実測で通ってしまった)。
    * **代入より前に早期 return が無いこと**を見る。
    */
+  /*
+   * **URL を編集せずに有効化できること。** ホーム画面起動では URL 欄が無く、
+   * 「?trace=1 を付けて開き直す」だけの案内では詰まる (実際に 2 往復詰まった)。
+   */
+  ok('再読み込み不要で有効化できる入口がある',
+    /__liveTraceOn\s*=\s*\(\)\s*=>/.test(t) && /enabled = true/.test(t));
+  ok('無効時の案内が __liveTraceOn を指している', /howTo:[\s\S]{0,80}__liveTraceOn\(\)/.test(t));
+  ok('URL で指定したら端末に残す (遷移でクエリが落ちても続く)',
+    /if \(q === '1' \|\| h === '1'\)[\s\S]{0,80}persist\(true\)/.test(t));
   ok('無効時も window.__liveTrace を生やす (原因が分かるように)',
     assign >= 0 && /howTo:/.test(t) && (early === -1 || early > assign),
     early >= 0 && early < assign ? '代入より前に早期 return がある' : '');
