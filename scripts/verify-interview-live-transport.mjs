@@ -84,6 +84,15 @@ ok('3.8 でエラーになる proactiveAudio: false を入れていない',
 
 // ⑨ 観測ログ (P0-0)
 ok('観測ログを初期化している', /initLiveTrace\(\)/.test(ctrl));
+{
+  /*
+   * **無効時も `window.__liveTrace` を生やすこと。** 生やさないと、採取する人が
+   * `?trace=1` を付け忘れただけで「not a function」しか出ず、デプロイ漏れと区別が付かない。
+   */
+  const t = code('src/scripts/chat/live-trace.ts');
+  ok('無効時も window.__liveTrace を生やす (原因が分かるように)',
+    /w\.__liveTrace = \(\) => \(enabled/.test(t) && /howTo:/.test(t));
+}
 for (const ev of ['ANSWER_COMMIT', 'UI_APPLY', 'MODEL_TURN_SEND', 'SERVER_INTERRUPTED',
   'AUDIO_FLUSH', 'AUDIO_FIRST_CHUNK', 'TURN_COMPLETE']) {
   ok(`ログ ${ev} を出している`, new RegExp(`trace\\('${ev}'`).test(ctrl));

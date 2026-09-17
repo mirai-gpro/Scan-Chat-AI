@@ -30,15 +30,31 @@ function readFlag(): boolean {
   } catch { return false; }  // private mode 等で throw しても落とさない
 }
 
-/** 画面の初期化時に 1 回だけ呼ぶ。**失敗しても本体を止めない。** */
+/**
+ * 画面の初期化時に 1 回だけ呼ぶ。**失敗しても本体を止めない。**
+ *
+ * **`window.__liveTrace` は無効時も必ず生やす。** 生やさないと、採取する人が
+ * `?trace=1` を付け忘れただけでも `__liveTrace is not a function` としか出ず、
+ * 「入れ忘れ」なのか「デプロイされていない」のか「ページが違う」のかが**判別できない**
+ * (実際にそうなった・2026-09-17)。無効なら**理由と有効化の手順を返す**。
+ */
 export function initLiveTrace(): void {
   try {
     enabled = readFlag();
     t0 = performance.now();
-    if (!enabled) return;
-    (window as unknown as { __liveTrace?: () => TraceRow[] }).__liveTrace = () => rows.slice();
+    const w = window as unknown as { __liveTrace?: () => unknown };
+    w.__liveTrace = () => (enabled
+      ? rows.slice()
+      : {
+        enabled: false,
+        reason: 'このページは観測ログ無効で開かれています',
+        howTo: 'URL に ?trace=1 を付けて開き直す (例 /chat?trace=1)。'
+             + " または localStorage.setItem('welltect.live.trace','1') を実行して再読み込み。",
+      });
     // eslint-disable-next-line no-console
-    console.info('[live-trace] 有効。window.__liveTrace() で取り出せます。');
+    console.info(enabled
+      ? '[live-trace] 有効。window.__liveTrace() で取り出せます。'
+      : '[live-trace] 無効。?trace=1 を付けて開き直してください。');
   } catch { /* 何もしない */ }
 }
 
