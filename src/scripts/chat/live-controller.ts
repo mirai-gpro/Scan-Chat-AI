@@ -24,6 +24,7 @@ import {
 } from '@google/genai';
 import { marked } from 'marked';
 import { LiveAudioManager } from './live-audio-manager';
+import { initLiveTrace, trace } from './live-trace';
 import {
   clearChatSession,
   clearInterviewProgress,
@@ -157,6 +158,9 @@ type ChoiceOption = { label: string; icon?: string };
 export async function initLiveController(refs: LiveRefs): Promise<void> {
   let session: ChatSession = loadChatSession(SESSION_ID) ?? createEmptySession(SESSION_ID);
   const audio = new LiveAudioManager();
+  /** そのターンで最初の音声 chunk が来たかどうか (観測ログ用。UI 遷移には使わない)。 */
+  let sawAudioThisTurn = false;
+  initLiveTrace();
   let liveSession: Session | null = null;
   let connecting = false;
 
@@ -564,9 +568,10 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     closeAllPickers();
     persistProgress();
     applyQuestionToUI(q);
-    sendToModel(
+    sendModelTurn(
       `ユーザーが直前の回答を訂正します。次の質問をもう一度自然に読み上げてください: 「${speechOf(q)}」
 ユーザーの回答を復唱しないでください。選択肢も読み上げないでください (画面に表示されています)。`,
+      q.id,
     );
   }
 
@@ -581,7 +586,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     if (!cq) {
       // 未開始時は単純に AI へ渡す (例: 「リセット後の自由発話」)
       if (!opts.silent) appendMessage({ role: 'user', text: rawAnswer, ts: Date.now() });
-      sendToModel(rawAnswer);
+      sendUserText(rawAnswer);   // 利用者の発話。発話命令に混ぜない (§6.1.3)
       return;
     }
 
@@ -593,6 +598,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     // 開いているモーダル (選択画面/マトリクス) を閉じる
     closeAllPickers();
 
+    trace('ANSWER_COMMIT', cq.id, { voice: !!opts.silent });
     const answerValue = toAnswerValue(cq, rawAnswer);
     const { next, isComplete } = engine.recordAndAdvance(answerValue);
     // 確認バーは**次に答えるまで消さない** (選択画面が覆っても回答が視界に残る)。
@@ -609,7 +615,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
       // 音声回答 (silent) では発話を注入しない。Live API の自発応答が唯一の話者。
       // (発話注入すると二重話者=二重復唱になる。§AI問診_仕様と設計原則 案1)
       if (!opts.silent) {
-        sendToModel(`ユーザーが最後の質問「${cq.question}」に「${rawAnswer}」と回答し、これで全問終了です。「お疲れさまでした、ご協力ありがとうございました」と温かく一言だけお願いします。質問は絶対に発話しないでください。`);
+        sendModelTurn(`ユーザーが最後の質問「${cq.question}」に「${rawAnswer}」と回答し、これで全問終了です。「お疲れさまでした、ご協力ありがとうございました」と温かく一言だけお願いします。質問は絶対に発話しないでください。`, cq.id);
       }
       return;
     }
@@ -647,7 +653,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
 ユーザーの回答を復唱しないでください。選択肢も読み上げないでください (画面に表示されています)。`
       : `次の質問を自然に読み上げてください: 「${speechOf(next)}」
 ユーザーの回答を復唱しないでください。選択肢も読み上げないでください (画面に表示されています)。`;
-    sendToModel(msg);
+    sendModelTurn(msg, next.id);
   }
 
   /*
@@ -732,7 +738,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     if (!t) return;
     refs.fallbackInput.value = '';
     appendMessage({ role: 'user', text: t, ts: Date.now() });
-    sendToModel(t);
+    sendUserText(t);   // フォールバック入力は利用者の発話 (§6.1.3)
     presentQuestionCalledThisTurn = false;
   }
 
@@ -756,7 +762,43 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     return q.speech ?? q.question;
   }
 
-  function sendToModel(text: string): void {
+  /**
+   * **プログラム → モデルへの発話命令** (正本 §6.1.1・2026-09-17 確定)。
+   *
+   * `sendClientContent` は**順序が保証され**、`turnComplete: true` は
+   * **前の生成を無条件に中断する** (3.1 のモデルページに明記)。
+   * これで「画面は次の質問なのに音声は前の質問」が構造的に消える。
+   *
+   * 以前は `sendRealtimeInput({ text })` で送っていた。あれは**非対応ではない**が
+   * 「応答性を優先し確定的な順序を犠牲にする」経路なので、**確定した発話命令には不適切**だった。
+   * しかも 1 問目だけ `sendClientContent` という食い違いがあった。
+   *
+   * **これはプログラムによるターン制御ではない** — 禁じているのは独自の状態機械・
+   * マイクゲート・silent 分岐であって、Live API 公式のターン境界を使うことは許容 (§6.1.2)。
+   */
+  function sendModelTurn(text: string, qid?: string | null): void {
+    if (!liveSession) {
+      appendMessage({
+        role: 'system',
+        text: 'まず🎙ボタンで問診セッションを開始してください。',
+        ts: Date.now(),
+      });
+      return;
+    }
+    trace('MODEL_TURN_SEND', qid ?? null);
+    liveSession.sendClientContent({
+      turns: [{ role: 'user', parts: [{ text }] }],
+      turnComplete: true,
+    });
+  }
+
+  /**
+   * **利用者が入力したテキスト**。発話命令と同じ経路に載せない (§6.1.3)。
+   *
+   * `sendClientContent(turnComplete: true)` に載せると**入力しただけで読み上げが切れる**
+   * (無条件に中断するため)。こちらは従来どおり realtime 入力のまま。
+   */
+  function sendUserText(text: string): void {
     if (!liveSession) {
       appendMessage({
         role: 'system',
@@ -843,17 +885,16 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
           // AI には「挨拶 + 次の質問の読み上げ」だけを依頼
           setTimeout(() => {
             try {
-              liveSession?.sendClientContent({
-                turns: [{ role: 'user', parts: [{ text:
+              // **1 問目も 2 問目以降と同じ経路** (以前はここだけ別だった・§6.1.1)。
+              sendModelTurn(
                   `問診を始めます。次の 2 文を発話してください:
   ① ${isResume
                     ? '「おかえりなさい。前回の続きから問診を再開します。」'
                     : '「こんにちは、ウェルフォートの AI 問診です。画面の質問に、タップでも音声でもお答えいただけます。」'}
   ② 続けて画面に表示されている質問を読み上げ: 「${speechOf(firstQ)}」
-選択肢や入力例は読み上げないでください (画面に表示されています)。挨拶と質問を 1 回だけ、絶対に繰り返さないでください。`
-                } ] }],
-                turnComplete: true,
-              });
+選択肢や入力例は読み上げないでください (画面に表示されています)。挨拶と質問を 1 回だけ、絶対に繰り返さないでください。`,
+                firstQ.id,
+              );
             } catch {}
           }, 250);
         },
@@ -899,6 +940,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
       const mime = p.inlineData?.mimeType ?? '';
       const data = p.inlineData?.data;
       if (data && mime.startsWith('audio/pcm') && !muted) {
+        if (!sawAudioThisTurn) { sawAudioThisTurn = true; trace('AUDIO_FIRST_CHUNK', currentQ?.id ?? null); }
         // 音声は再生するだけ。**UI 遷移のトリガにしない** (2026-09-04)。
         // 以前はここで「次の質問」を描画しており、復唱の開始で画面が先へ進んでいた。
         audio.playPcm(data);
@@ -922,6 +964,8 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
 
     // 3) turn 完了で確定
     if (msg.serverContent?.turnComplete) {
+      trace('TURN_COMPLETE', currentQ?.id ?? null);
+      sawAudioThisTurn = false;
       const cleanedAssistant = cleanTranscript(assistantBuf);
       const finishedUser = userBuf.trim();
       finalizeStream('user', userBuf);
@@ -976,7 +1020,13 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     }
 
     // 5) 割り込み
-    if (msg.serverContent?.interrupted) audio.flushPlayback();
+    if (msg.serverContent?.interrupted) {
+      // サーバが「割り込んだ」と言ったときだけ捨てる (UI 起点の強制停止ではない)。
+      trace('SERVER_INTERRUPTED', currentQ?.id ?? null);
+      audio.flushPlayback();
+      trace('AUDIO_FLUSH', currentQ?.id ?? null);
+      sawAudioThisTurn = false;
+    }
 
     if (msg.goAway) setStatus('まもなく切断（再接続してください）');
   }
@@ -987,6 +1037,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
 
   /** engine から受け取った Q を画面に反映する (engine 駆動の核) */
   function applyQuestionToUI(q: QuestionDef): void {
+    trace('UI_APPLY', q.id);
     currentQ = q;
     advancing = false; // 次設問が出たので音声回答の受付を再開
 

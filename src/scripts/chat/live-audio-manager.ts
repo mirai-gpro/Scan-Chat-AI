@@ -11,6 +11,8 @@
  *       (realtimeInputConfig.automaticActivityDetection はデフォルト ON)
  */
 
+import { trace } from './live-trace';
+
 const INPUT_SAMPLE_RATE = 16000;
 const OUTPUT_SAMPLE_RATE = 24000;
 const PROCESS_BUFFER_SIZE = 4096;
@@ -56,6 +58,8 @@ export class LiveAudioManager {
     await this.inputCtx.resume();
     await this.outputCtx.resume();
     this.nextPlaybackTime = this.outputCtx.currentTime;
+    // 端末が 24kHz を尊重したか (iOS は resample する可能性がある・正本 §6.2)。
+    trace('AUDIO_CONTEXT', null, { sampleRate: this.outputCtx.sampleRate });
 
     this.source = this.inputCtx.createMediaStreamSource(this.stream);
     this.processor = this.inputCtx.createScriptProcessor(PROCESS_BUFFER_SIZE, 1, 1);
@@ -103,9 +107,21 @@ export class LiveAudioManager {
     const src = this.outputCtx.createBufferSource();
     src.buffer = buf;
     src.connect(this.outputCtx.destination);
-    const start = Math.max(this.nextPlaybackTime, this.outputCtx.currentTime);
+    /*
+     * **いまは到着ごとに未来時刻へ並べるだけ** (ジッタバッファ無し)。
+     * bounded buffer 化は P0-2 (正本 §6.2)。ここでは**測るだけ**にして、
+     * 「実際にアンダーランしているか」を実機で確かめられるようにする。
+     */
+    const now = this.outputCtx.currentTime;
+    const underflow = this.nextPlaybackTime < now;   // 次の chunk が間に合わなかった
+    const start = Math.max(this.nextPlaybackTime, now);
     src.start(start);
     this.nextPlaybackTime = start + buf.duration;
+    trace('PCM_ARRIVE', null, {
+      bytes: bytes.byteLength,
+      aheadMs: Math.round((this.nextPlaybackTime - now) * 1000),
+    });
+    if (underflow) trace('AUDIO_UNDERFLOW', null, { gapMs: Math.round((now - (start - buf.duration)) * 1000) });
     this.playingSources.add(src);
     src.onended = () => {
       this.playingSources.delete(src);

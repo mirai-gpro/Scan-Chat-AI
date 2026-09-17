@@ -12,7 +12,7 @@
 # 【job を分けてある理由】required にできる安定した層を、まだ CI 実績の無い層で
 # 巻き添えにしないため。static-required だけが最初の品質ゲート。
 #
-#   static-required   … astro check / build / A 層 14 本   → 最初から required
+#   static-required   … astro check / build / A 層 15 本   → 最初から required
 #   pwsh-verify       … B 層 6 本 (PowerShell 必須)         → 初回 non-required
 #   browser-screen    … verify:screen だけ                  → 安定後に優先して required
 #   browser-extended  … 残りのブラウザ検査 3 本             → 当面 non-required
@@ -73,6 +73,7 @@ jobs:
       - run: npm run verify:special-accounts
       - run: npm run verify:single-purchase
       - run: npm run verify:interview-speech
+      - run: npm run verify:interview-live-transport
       - run: npm run verify:scan-async
       - run: npm run verify:elith-intake
       - run: npm run verify:report-render
