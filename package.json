@@ -47,6 +47,7 @@
     "verify:ps1-order": "esbuild scripts/verify-ps1-order.ts --bundle --platform=node --format=esm --log-level=error | node --input-type=module",
     "verify:report": "npm run verify:report-model && npm run verify:sheet-contract && npm run verify:demo-gate",
     "verify:report-model": "esbuild scripts/verify-report-model.ts --bundle --platform=node --format=esm --log-level=error \"--define:import.meta.env={}\" | node --input-type=module",
+    "verify:report-render": "node scripts/verify-report-render.mjs",
     "verify:scan-async": "node scripts/verify-scan-async.mjs",
     "verify:scan-pages": "node scripts/verify-scan-pages.mjs",
     "verify:scan-persist": "esbuild scripts/verify-scan-persist.ts --bundle --platform=node --format=esm --log-level=error \"--define:import.meta.env={}\" --outfile=node_modules/.cache/verify-scan-persist.mjs && node node_modules/.cache/verify-scan-persist.mjs",

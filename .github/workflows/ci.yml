@@ -74,6 +74,7 @@ jobs:
       - run: npm run verify:single-purchase
       - run: npm run verify:scan-async
       - run: npm run verify:elith-intake
+      - run: npm run verify:report-render
       - run: npm run verify:scan-upload-key
       - run: npm run verify:scan-persist
       - run: npm run verify:blood-csv
