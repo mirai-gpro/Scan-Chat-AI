@@ -31,6 +31,7 @@ import type { APIRoute } from 'astro';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { putOriginal } from '../../../../lib/originals-storage';
 import { isAdminAuthorized } from '../../../../lib/api-auth';
+import { ingestElithReport } from '../../../../lib/elith-report-ingest';
 import { buildReportVM, type LabFiles } from '../../../../lib/report-adapter';
 
 export const prerender = false;
@@ -157,58 +158,41 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   const receivedAt = now.toISOString();
-  const db = sb.schema('diagnosis') as unknown as { from: (t: string) => any };
 
-  // 世代管理 (暫定): 既存の同ユーザー行を superseded に落としてから新しい行を足す。
-  const { error: supErr } = await db
-    .from('diagnosis_results')
-    .update({ status: 'superseded' })
-    .eq('diagnostic_user_id', diagnosticUserId)
-    .neq('status', 'superseded');
-  if (supErr) return json({ ok: false, error: 'db_failed', detail: supErr.message }, 500);
-
-  const { data, error } = await db
-    .from('diagnosis_results')
-    .insert({
-      diagnostic_user_id:     diagnosticUserId,
-      diagnostic_id:          crypto.randomUUID(),
-      report:                 report,
-      checkup_values:         checkup,
-      schema_version:         schemaVersion,
-      status:                 'received',
-      received_at:            receivedAt,
-      report_pdf_url:         stored?.storageUrl ?? null,
-      report_pdf_sha256:      stored?.sha256 ?? null,
-      report_pdf_pages:       pages,
-      report_pdf_received_at: stored ? receivedAt : null,
-    })
-    .select('id')
-    .single();
-  if (error) return json({ ok: false, error: 'db_failed', detail: error.message }, 500);
-
-  // 取り込めた中身を**表示と同じアダプタで数えて**返す。
-  // 別の数え方をすると「取り込めたつもりで画面が空」を検知できない (spec §1.3.6)。
-  const vm = buildReportVM({
-    reportText: report, checkup, name: '', issuedOn: receivedAt.slice(0, 10),
-    isSample: false, hasCancerRisk: false, cycleSeq: null, chronologicalAge: null,
+  /*
+   * **書き込みは `elith-report-ingest.ts` に集約**。随時バッチ
+   * (`/api/admin/elith-intake`) と 毎日の自動取り込み (`/api/cron/elith-intake`) も
+   * 同じ関数を通る。世代管理と「取り込めた中身の数え方」を 3 か所に書くと、
+   * 直したとき片方が腐る (健診 finalize と同じ規律)。
+   * **手動アップロードは `sourceKey` を持たない** — 二重取り込みの歯止めは
+   * S3 から自動で取り込む経路のためのもので、手で入れ直す操作は止めない。
+   */
+  const r = await ingestElithReport(sb as never, {
+    diagnosticUserId,
+    report,
+    checkup,
+    schemaVersion,
+    pdf: stored ? { storageUrl: stored.storageUrl, sha256: stored.sha256, pages } : null,
+    receivedAt,
   });
+  if (!r.ok) return json({ ok: false, error: r.error, detail: r.detail }, 500);
 
   return json({
     ok: true,
-    id: data?.id ?? null,
+    id: r.id,
     schema_version: schemaVersion,
     pdf: stored ? { backend: stored.backend, storage_url: stored.storageUrl, sha256: stored.sha256, pages } : null,
     ingested: {
-      sections: vm.audit.sections.length,
-      section_names: vm.audit.sections,
-      wellness_age: vm.cover.wellnessAge,
-      measurements: vm.audit.measurementCount,
-      references: vm.audit.referenceCount,
-      topics: vm.audit.topicCount,
-      digest_cards: vm.audit.digestCards,
-      empty_cards: vm.audit.emptyCards,
+      sections: r.ingested?.sections ?? 0,
+      section_names: r.ingested?.section_names ?? [],
+      wellness_age: r.ingested?.wellness_age ?? null,
+      measurements: r.ingested?.measurements ?? 0,
+      references: r.ingested?.references ?? 0,
+      topics: r.ingested?.topics ?? 0,
+      digest_cards: r.ingested?.digest_cards ?? [],
+      empty_cards: r.ingested?.empty_cards ?? [],
     },
-    warnings: vm.audit.anomalies,
+    warnings: r.warnings ?? [],
   });
 };
 

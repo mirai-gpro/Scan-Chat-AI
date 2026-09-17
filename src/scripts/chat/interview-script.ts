@@ -69,6 +69,18 @@ export interface QuestionDef {
   section_id: SectionId;
   section_title: string;
   question: string;
+  /**
+   * **読み上げ用の言い換え** (省略時は `question` をそのまま読む)。
+   *
+   * 画面と納品 JSON は `question` が正で、ここは**音声だけ**に効く。
+   * 例: 表示「身長を教えてください。（cm）」→ 読み上げ「…（センチ）」。
+   * `cm` のままだと LLM が **「シーエム」**と読む (実機で報告あり 2026-09-17)。
+   *
+   * **表示側を書き換えない理由**: `question` は Elith 納品 JSON にも入る
+   * (`interview-export.ts` の `question: q?.question`)。表示のために納品物の
+   * 文字列を動かさない。
+   */
+  speech?: string;
   answer_kind: AnswerKind;
 
   /** chip 用 */
@@ -260,12 +272,14 @@ const RAW: Omit<QuestionDef, 'section_title'>[] = [
   {
     id: 'B-HEIGHT', section_id: 'basic', answer_kind: 'text', numeric: true,
     question: '身長を教えてください。（cm）',
+    speech: '身長を教えてください。（センチ）',
     example: '172cm → 172',
     placeholder: '例：172',
   },
   {
     id: 'B-WEIGHT', section_id: 'basic', answer_kind: 'text', numeric: true,
     question: '体重を教えてください。（kg・数字のみ）',
+    speech: '体重を教えてください。（キログラム・数字のみ）',
     example: '65kg → 65',
     placeholder: '例：65',
   },

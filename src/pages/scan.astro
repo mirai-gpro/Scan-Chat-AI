@@ -92,7 +92,7 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
         >
           <AppIcon name="attachment" size={32} />
           <span class="text-base">ファイルをアップロード</span>
-          <span class="text-xs font-normal text-white/85">PDF / JPEG / PNG / WebP / HEIC<span class="text-white/65"> (最大 10 MB・複数選択可)</span></span>
+          <span class="text-xs font-normal text-white/85">PDF / JPEG / PNG / WebP / HEIC<span class="text-white/65"> (最大 40 MB・複数選択可)</span></span>
         </label>
         {/*
           **`multiple` が要る** (2026-09-10 発注者報告)。
@@ -1195,7 +1195,7 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
       replaceAllOnNextPick = false;
       if (files.length === 0) return;
 
-      // 上限 (10 MB) の判定と、Vercel のボディ上限に収めるための縮小は
+      // 上限 (40 MB) の判定と、Vercel のボディ上限に収めるための縮小は
       // scan-upload.ts に集約してある (受け付ける上限と送れる上限は別物)。
       type Prepared = Awaited<ReturnType<typeof prepareScanUpload>>;
       const added: { src: Prepared; name: string }[] = [];

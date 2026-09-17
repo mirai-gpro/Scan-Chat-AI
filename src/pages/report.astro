@@ -4,6 +4,8 @@ import BackToDashboard from '../components/BackToDashboard.astro';
 import AppNav from '../components/AppNav.astro';
 import BaseLayout from '../layouts/BaseLayout.astro';
 import { loadReportVM, previewVM } from '../lib/elith-report-queries';
+import { loadLocalRenderInput } from '../lib/report-local-render';
+import { buildReportVM } from '../lib/report-adapter';
 import { renderReportMarkdown } from '../lib/report-view';
 import { chapterAnchor } from '../lib/report-sections';
 import { applySaveStepOverrides } from '../lib/save-steps';
@@ -108,7 +110,25 @@ const healthAge = data ? await getHealthAge(data.diagnosticUserId) : null;
  * `elith-report-queries.ts` の `sample()` に置いてある — 紙面の材料を選ぶ場所と
  * タイプを決める場所は同じでなければ食い違う (詳細はそのコメント)。
  */
-const cancerArtifact = (data?.artifacts ?? []).find((a) => a.test_type === 'cancer_urine') ?? null;
+/*
+ * **受領 JSON をそのまま紙面にする口 (開発時のみ)。**
+ * Elith から受け取った JSON を一括で PDF にするための入口
+ * (`scripts/render-report-pdf.mjs`)。`import.meta.env.DEV` で囲ってあるので
+ * **本番のビルドには出ない**。Vercel に PDF 生成を足すのとは別物。
+ */
+const localInput = import.meta.env.DEV
+  ? loadLocalRenderInput(url.searchParams.get('render'))
+  : null;
+
+/*
+ * **受領 JSON を描くときは、閲覧者側の検査を持ち込まない。**
+ * `cancerArtifact` は「いま見ている人の `test_artifacts`」から作るので、
+ * そのまま使うと**別人のがんリスク検査への導線**が紙面に出る
+ * (ローカルで描いたとき実際に出た)。渡された JSON が全てなので null にする。
+ */
+const cancerArtifact = localInput != null
+  ? null
+  : (data?.artifacts ?? []).find((a) => a.test_type === 'cancer_urine') ?? null;
 
 /** 表示モデルの入力。**プレビューと本番で同じものを渡す** (二重に書かない)。 */
 const reportCtx = {
@@ -121,9 +141,11 @@ const reportCtx = {
   cycleSeq: data?.subscription?.current_cycle_seq ?? null,
 };
 
-const vm = previewType != null
-  ? previewVM(reportCtx, previewType)
-  : await loadReportVM(reportCtx);
+const vm = localInput != null
+  ? buildReportVM(localInput)
+  : previewType != null
+    ? previewVM(reportCtx, previewType)
+    : await loadReportVM(reportCtx);
 
 /**
  * **走りフッター (見本 全ページ下の帯) とページ番号。**
