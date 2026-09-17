@@ -574,6 +574,69 @@ function card(
   return { key, title, axis, tone, blocks: filled, source, detailAnchor: null };
 }
 
+
+/**
+ * 【本文の身長・体重に出所を添える (spec §4.13・発注者判断 2026-09-17)】
+ *
+ * Elith の本文は**問診で本人が申告した値**を引くことがあり、検診・人間ドックの実測値と
+ * 食い違って見える (実測: 吉光様 本文 175cm/70kg ⇔ 検診 173.5cm/69.9kg。本文の数値は
+ * 共通問診表の申告値と**完全一致**)。**どちらも正しい値**なので上書きはしない。
+ * 食い違ったときだけ、その数値の直後に「（問診時）」と**出所だけ**を添える。
+ *
+ * **これは逐語ルールの唯一の例外**。足すのは `SELF_REPORT_MARK` の 5 文字だけで、
+ * 受領本文の文字は 1 文字も足さず・引かず・並べ替えない。回帰チェックはこの印を
+ * 取り除いてから部分文字列判定を行う (`verify:report-model`)。
+ *
+ * **付ける条件は 3 つとも満たすときだけ** (推測で出所を書かない):
+ *   ① その項目の検診値がある ② 本文の数値が検診値と違う ③ 本文の数値が問診の申告値と一致
+ * どれか欠ければ**紙面は触らず、監査にだけ出す**。
+ */
+const SELF_REPORT_MARK = '（問診時）';
+
+/** 「標準体重」を先に並べて**先に食わせる** (体重として拾わないため)。 */
+const BODY_METRIC_RE = /(標準体重|体重|身長)([^。0-9]{0,6})([0-9]+(?:\.[0-9]+)?)\s*(kg|cm|キロ|センチ)/g;
+
+function annotateSelfReported(
+  sections: ElithSection[],
+  checkup: Record<string, { date?: string; value?: unknown }[]> | null,
+  self: { height?: number | null; weight?: number | null } | null | undefined,
+  anomalies: string[],
+): void {
+  const measured = (name: '身長' | '体重'): number | null => {
+    for (const [key, arr] of Object.entries(checkup ?? {})) {
+      // `身長 [cm]` のように単位が付く。**「標準体重」と混ざらないよう完全一致で見る。**
+      if (key.replace(/\s*\[[^\]]*\]\s*$/, '').trim() !== name) continue;
+      const v = Number(arr?.[0]?.value);
+      if (Number.isFinite(v)) return v;
+    }
+    return null;
+  };
+  const ref = { 身長: measured('身長'), 体重: measured('体重') };
+  const said = { 身長: self?.height ?? null, 体重: self?.weight ?? null };
+  const unitOk = { 身長: ['cm', 'センチ'], 体重: ['kg', 'キロ'] };
+  let marked = 0;
+
+  for (const sec of sections) {
+    sec.text = sec.text.replace(BODY_METRIC_RE, (whole, label: string, gap: string, num: string, unit: string) => {
+      if (label === '標準体重') return whole;             // 別項目。触らない
+      const key = label as '身長' | '体重';
+      if (!unitOk[key].includes(unit)) return whole;      // 体重…cm 等は別項目の値
+      const n = Number(num);
+      const r = ref[key];
+      if (r == null || n === r) return whole;             // 検診値が無い / 一致 = 食い違いでない
+      if (said[key] == null || n !== said[key]) {
+        anomalies.push(`本文の${key} ${num}${unit} が検診の実測値 (${r}) と違いますが、`
+          + '問診の申告値と一致しないので出所を書きませんでした');
+        return whole;
+      }
+      marked += 1;
+      anomalies.push(`本文の${key} ${num}${unit} は問診時の申告値。検診の実測値は ${r} なので出所を添えました`);
+      return `${whole}${SELF_REPORT_MARK}`;
+    });
+  }
+  if (marked) anomalies.push(`出所「${SELF_REPORT_MARK}」を ${marked} 箇所に添えました (紙面で唯一の当社の挿入)`);
+}
+
 // ── 本体 ────────────────────────────────────────────────
 
 export interface BuildInput {
@@ -583,6 +646,15 @@ export interface BuildInput {
    * (`{ health_checkup, blood_test, cancer_risk }`)。`flattenLabFiles` が両方を受ける。
    */
   checkup: Record<string, { date?: string; value?: unknown }[]> | LabFiles | null;
+  /**
+   * **問診で本人が申告した身長・体重** (spec §4.13・発注者判断 2026-09-17)。
+   *
+   * 検診の実測値と食い違うのは異常ではない — **AI 診断を回す時点で問診は最新・検診は
+   * 半年前ということがあり、団体検診の計測そのものに疑問を持つ受診者も少なくない**。
+   * どちらも正しい値なので、**片方で上書きしない**。食い違うときだけ**出所を示す**。
+   * 値が無ければ何もしない (推測で「問診時」と書かない)。
+   */
+  selfReported?: { height?: number | null; weight?: number | null } | null;
   name: string;
   issuedOn: string;
   isSample: boolean;
@@ -612,6 +684,11 @@ export function buildReportVM(input: BuildInput): ReportVM {
   }
 
   const lab = flattenLabFiles(input.checkup);
+  /*
+   * **ダイジェストと全編を組む前**に出所を添える。ここで 1 回やれば、要点にも全編にも
+   * 同じ形で出る (2 か所に同じ規則を書かない)。
+   */
+  annotateSelfReported(parsed.sections, lab.checkup, input.selfReported, anomalies);
   const measured = buildMeasurements(lab.checkup, sec('blood_analysis'));
   anomalies.push(...measured.anomalies);
   if (lab.dropped.length) {

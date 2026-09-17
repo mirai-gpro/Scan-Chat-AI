@@ -59,10 +59,18 @@ walk(REPORT_TEXT);
 const norm = (s: string) => s.replace(/\s+/g, '');
 const CORPUS = norm(corpus);
 
-/** 紙面に出る文が受領本文の逐語かを見る。 */
+/**
+ * 紙面に出る文が受領本文の逐語かを見る。
+ *
+ * **唯一の例外 = 出所の印「（問診時）」** (spec §4.13・発注者判断 2026-09-17)。
+ * 当社が足してよいのはこの 5 文字だけなので、**取り除いてから**部分文字列で照合する。
+ * 逆に言えば、これ以外の文字を 1 文字でも足せばここで落ちる。
+ */
+const SELF_MARK = '（問診時）';
 function verbatim(label: string, text: string): void {
   if (!text) return;
-  check(`逐語: ${label}`, CORPUS.includes(norm(text)), `"${text.slice(0, 40)}…"`);
+  check(`逐語: ${label}`, CORPUS.includes(norm(text.split(SELF_MARK).join(''))),
+    `"${text.slice(0, 40)}…"`);
 }
 
 // ── 1) ダイジェストの全文が逐語であること ────────────────────────────
@@ -582,6 +590,63 @@ check('タイプ1 でもダイジェストの段落は受領本文の逐語',
   const orphan = both.filter((c) => !axisKeys.has(c.axis));
   check('どのカードも実在する軸に属する (画面から消えない)', orphan.length === 0,
     orphan.map((c) => c.key + ':' + c.axis).join(','));
+}
+
+// ── 18) 身長・体重の出所 (spec §4.13・発注者判断 2026-09-17) ────────
+//
+// 検診の実測値と問診の申告値は**どちらも正しく、食い違って当然** (AI 診断を回す時点で
+// 問診は最新・検診は半年前ということがある)。**上書きせず、出所だけを添える。**
+// 実測: 吉光様の本文 175cm/70kg は共通問診表の申告値と完全一致・検診は 173.5/69.9。
+{
+  const SEC = (t: string) => ({ lifestyle: { section_name: 'ライフスタイル総合', text: t } });
+  const HC = { '身長 [cm]': [{ value: 173.5 }], '体重 [kg]': [{ value: 69.9 }], '標準体重 [kg]': [{ value: 66.2 }] };
+  const body = (v: ReportVM) => v.chapters.flatMap((c) => c.topics.map((t) => t.body)).join('\n');
+  const run = (text: string, self: { height?: number | null; weight?: number | null } | null) =>
+    buildReportVM({
+      reportText: SEC(text), checkup: { health_checkup: HC } as never, name: '', issuedOn: '2026-09-17',
+      isSample: true, hasCancerRisk: false, cycleSeq: null, chronologicalAge: null,
+      readConfig: () => '', selfReported: self,
+    });
+
+  const TXT = '現在の体重は70kg、身長は175cmと報告されています。標準体重は66.2kgとされています。';
+  const ok = run(TXT, { height: 175, weight: 70 });
+  check('問診の申告値と一致する数値に出所を添える',
+    body(ok).includes('70kg（問診時）') && body(ok).includes('175cm（問診時）'), body(ok).slice(0, 80));
+  check('標準体重には添えない (別項目)', body(ok).includes('66.2kgとされています'));
+  /*
+   * **「標準体重」を体重として拾っていないこと。** 紙面だけ見ると印が付かないので
+   * 素通りする (実測: 退行を入れても緑のままだった)。**監査に 66.2 が現れないこと**で
+   * 「そもそも体重として比べていない」を固定する。
+   */
+  check('標準体重を体重として比べていない',
+    !ok.audit.anomalies.some((a) => a.includes('66.2')),
+    ok.audit.anomalies.filter((a) => a.includes('66.2')).join(' / '));
+  check('数値そのものは書き換えない', body(ok).includes('70kg') && !body(ok).includes('69.9kg'));
+  check('添えたことは監査に出る', ok.audit.anomalies.some((a) => a.includes('問診時の申告値')));
+
+  // **推測で出所を書かない。** 問診値が無い / 一致しないときは紙面を触らず監査だけ。
+  const noSelf = run(TXT, null);
+  check('問診値が無ければ紙面を触らない', !body(noSelf).includes('（問診時）'));
+  check('それでも食い違いは監査に出る',
+    noSelf.audit.anomalies.some((a) => a.includes('出所を書きませんでした')));
+  const other = run(TXT, { height: 180, weight: 80 });
+  check('問診値と一致しなければ添えない', !body(other).includes('（問診時）'));
+
+  // 検診値と一致している数値は「食い違い」ではない。
+  const same = run('現在の体重は69.9kg、身長は173.5cmです。', { height: 175, weight: 70 });
+  check('検診値と一致する数値には添えない', !body(same).includes('（問診時）'));
+
+  // 検診に身長・体重が無い回 (実測: 坂田様) は比べる相手がいないので触らない。
+  const noRef = buildReportVM({
+    reportText: SEC(TXT), checkup: null, name: '', issuedOn: '2026-09-17', isSample: true,
+    hasCancerRisk: false, cycleSeq: null, chronologicalAge: null, readConfig: () => '',
+    selfReported: { height: 175, weight: 70 },
+  });
+  check('検診値が無い回は触らない', !body(noRef).includes('（問診時）'));
+
+  // 実検体 (2026-08-26) は問診値を渡していないので 1 か所も付かない。
+  check('問診値を渡していない実検体では付かない',
+    !vm.chapters.flatMap((c) => c.topics.map((t) => t.body)).join('').includes('（問診時）'));
 }
 
 // ── 結果 ──────────────────────────────────────────────────────────

@@ -31,6 +31,12 @@ export interface RenderMeta {
   cycleSeq?: number | null;
   /** その回にがんリスク検査があったか。**既定は false = タイプ2**。 */
   hasCancerRisk?: boolean;
+  /**
+   * **問診で本人が申告した身長・体重** (spec §4.13)。本文の数値が検診の実測値と
+   * 食い違うとき、**この値と一致した数値にだけ**「（問診時）」と出所を添える。
+   * 無ければ何もしない (推測で出所を書かない)。
+   */
+  selfReported?: { height?: number | null; weight?: number | null } | null;
 }
 
 function readJson(path: string): unknown | null {
@@ -67,5 +73,6 @@ export function loadLocalRenderInput(id: string | null): BuildInput | null {
     hasCancerRisk: meta.hasCancerRisk === true,
     cycleSeq: meta.cycleSeq ?? null,
     chronologicalAge: meta.chronologicalAge ?? null,
+    selfReported: meta.selfReported ?? null,
   };
 }
