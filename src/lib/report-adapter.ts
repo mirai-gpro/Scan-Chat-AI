@@ -669,7 +669,12 @@ export function buildReportVM(input: BuildInput): ReportVM {
     let built: DigestCardVM | null = null;
 
     switch (spec.key) {
-      // ── 主軸 A ──────────────────────────────────────
+      /*
+       * **軸は `spec.axis` を渡す。** ここに 'a' / 'b' をベタ書きしていたため、
+       * 軸 A を廃止して `cancer_finding` を b へ移したとき、**表示モデルは 'a' のまま**で
+       * 画面から静かに消えた (2026-09-17・`verify:screen` が検出)。
+       * レジストリが軸の正。
+       */
       case 'cancer_finding': {
         const texts = cancerFindingTexts(parsed.cancerText, input, lab.cancerItems,
           [sec('abstract'), sec('summary')]);
@@ -680,7 +685,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
          * 残る ② (`ui.cancer_screening_not_included`) は受領 JSON 由来でないので**空**にする
          * — 出典の無い文に出典を書かない。空の出典行は紙面に描かない (`report.astro`)。
          */
-        built = card(spec.key, title, 'a',
+        built = card(spec.key, title, spec.axis,
           parsed.cancerText ? '総評'
             : input.hasCancerRisk ? 'アブストラクト・総評' : '',
           [{ kind: 'paragraphs', items: texts }]);
@@ -705,7 +710,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
         const steps: DigestItem[] = blocks.slice(1).map((b) => ({
           heading: b.heading, text: leadSentences(b.body, 1),
         })).filter((s) => s.heading && s.text);
-        built = card(spec.key, title, 'b',
+        built = card(spec.key, title, spec.axis,
           steps.length ? `${section.section_name} §1〜§${blocks.length}`
                        : `${section.section_name} 冒頭 2 文`, [
             ...(lead ? [{ kind: 'paragraphs' as const, items: [leadSentences(lead.body, 2)] }] : []),
@@ -723,7 +728,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
         // 並びは **Elith が本文で言及した順** (`measured.digestRows`・spec §1.3.10)。
         // 受領ファイルのキー順ではない。当社が優先順位を決めているのでもない。
         const rows = measured.digestRows;
-        built = card(spec.key, title, 'b',
+        built = card(spec.key, title, spec.axis,
           `${section?.section_name ?? '検査値フィードバック'} (値・基準値・判定はすべて本文からの逐語)`,
           [{ kind: 'table', rows }]);
         break;
@@ -732,7 +737,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
       case 'lifestyle': {
         if (!section) break;
         const pairs = buildLifestylePairs(section.text);
-        built = card(spec.key, title, 'b',
+        built = card(spec.key, title, spec.axis,
           `${section.section_name} §1〜§${pairs.length}（各節の【現状評価】【行動提案】冒頭文）`,
           [{ kind: 'pairs', items: pairs }]);
         break;
@@ -761,7 +766,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
         const items = hasHeadings
           ? blocks.map((b) => leadSentences(b.body, 1)).filter(Boolean)
           : [leadSentences(blocks[0]?.body ?? '', 2)].filter(Boolean);
-        built = card(spec.key, title, 'b',
+        built = card(spec.key, title, spec.axis,
           hasHeadings ? `${section.section_name} §1〜§${blocks.length}`
                       : `${section.section_name} 冒頭 2 文`,
           [{ kind: 'paragraphs', items }]);

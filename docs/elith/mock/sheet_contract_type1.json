@@ -21,7 +21,7 @@
     },
     {
       "key": "cancer_finding",
-      "axis": "a",
+      "axis": "b",
       "title": "今回の所見",
       "blocks": [
         {

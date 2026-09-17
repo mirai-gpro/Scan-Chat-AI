@@ -398,8 +398,11 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
         ⑤ 章扉 = 淡 teal 地 + 丸バッジ + 見出し (見本 p2/p9)。 */}
     {vm.axes.map((axis) => (
       <section class="flex flex-col gap-4">
+        {/*
+          **丸バッジ (A / B) は出さない** (発注者指示 2026-09-17)。
+          軸 A「初期がんの早期発見」を廃止して 1 本になったので、記号で区別する相手がいない。
+        */}
         <div class="rp-axis mt-2 flex items-center gap-3 px-4 py-3">
-          <span class="rp-badge">{axis.key === 'a' ? 'A' : 'B'}</span>
           <h2 class="text-lg font-bold leading-snug text-navy-800">{axis.title}</h2>
         </div>
 
@@ -541,12 +544,15 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
         ))}
 
         {/*
-          主軸 A の導線 (spec §4.0.1「詳細はリンクで別画面へ送る」)。
+          がんリスク検査への導線 (spec §4.0.1「詳細はリンクで別画面へ送る」)。
           **その回にがんリスク検査があったときだけ出す。** 無い回 (タイプ 2) は送る先が
           存在しないので出さない — 押せば 404 になるリンクを置かない。
-          A に材料が無い回でも帯は立つ。**アプリが代わりの所見を書かない** (spec §4.0.1)。
+
+          **軸 A の廃止 (2026-09-17) で置き場所が無くなったが、リンク自体は消していない** —
+          これは Elith の文ではなく**当社アプリの自分の画面への導線**で、消すと
+          タイプ 1 の利用者が結果へ行けなくなるため。要否は発注者の判断。
         */}
-        {axis.key === 'a' && !vm.isSample && cancerArtifact && (
+        {!vm.isSample && cancerArtifact && (
           <p class="px-1 text-sm text-slate-600">
             <a class="font-semibold text-brand-700 underline" href={`/result/${cancerArtifact.id}${u ? `?u=${u}` : ''}`}>
               がんリスク検査の結果を見る →

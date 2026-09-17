@@ -119,9 +119,14 @@ check('基準値は 8 件のみ (spec §6 ④)', vm.audit.referenceCount === 8, 
 check('ウェルネス年齢 46.6', vm.cover.wellnessAge === 46.6, String(vm.cover.wellnessAge));
 check('タイプ 2 と判定', vm.reportType === 2, String(vm.reportType));
 
-// ── 4) 2 本柱は常設 ────────────────────────────────────────────────
-check('主軸は常に 2 本', vm.axes.length === 2);
-check('主軸 A が先頭', vm.axes[0]?.key === 'a');
+// ── 4) 軸は 1 本 (A は廃止・2026-09-17) ───────────────────────────
+//
+// 「初期がんの早期発見」は受領 JSON に対応するものが無い枠だったので廃止した。
+// **残るのは 1 本だけ**で、丸バッジ (A/B) も紙面に出さない (バッジは `verify:screen` が見る)。
+check('軸は 1 本だけ', vm.axes.length === 1, vm.axes.map((a) => a.key).join(','));
+check('残った軸は疾病予防アドバイス', vm.axes[0]?.key === 'b'
+  && vm.axes[0]?.title === 'AI 診断による疾病予防アドバイス', vm.axes[0]?.title ?? '');
+check('廃止した軸 A のカードが残っていない', !vm.digest.some((c) => c.axis === 'a'));
 // 帯にリードを持たせない (ポリシーの説明文を紙面に載せない・spec §4.-1)。
 check('軸は見出しだけを持つ',
   vm.axes.every((a) => Object.keys(a).length === 2 && !!a.title));
@@ -199,7 +204,7 @@ const type1 = buildReportVM({
 check('タイプ 1 と判定', type1.reportType === 1);
 check('タイプ 1 で記述が無ければ A のカードを出さない',
   !type1.digest.some((c) => c.key === 'cancer_finding'));
-check('タイプ 1 でも主軸の帯は立つ', type1.axes.length === 2);
+check('タイプ 1 でも軸の帯は立つ', type1.axes.length === 1);
 check('カードを出さなかったことは監査に出る',
   type1.audit.emptyCards.includes('cancer_finding'));
 
@@ -320,17 +325,29 @@ for (const c of oldB) {
    */
   check('サンプルの既定はタイプ1', asDemoWithCancer.reportType === 1,
     `reportType=${asDemoWithCancer.reportType}`);
-  const aCards = asDemoWithCancer.digest.filter((c) => c.axis === 'a').length;
-  check('サンプルで主軸 A のカードが出る', aCards >= 1, `A 軸のカード ${aCards} 枚`);
+  // 軸 A の廃止後は**カードの key で引く** (軸では引けない)。意図は同じ。
+  const aCards = asDemoWithCancer.digest.filter((c) => c.key === 'cancer_finding').length;
+  check('サンプルで「今回の所見」のカードが出る', aCards >= 1, `${aCards} 枚`);
   /*
-   * **A 軸の中身が受領本文の逐語であること。** タイプ1 は本文に「がん」が 0 回で、
+   * **「今回の所見」の中身が受領本文の逐語であること。** タイプ1 は本文に「がん」が 0 回で、
    * 代わりに `cancer_risk.json` の項目名 (尿中のポルフィリン量) が出てくる。
    * 語ではなく**受領ファイルの項目名**で選んでいることを、ここで固定する。
    */
-  const aCard = asDemoWithCancer.digest.find((c) => c.axis === 'a');
+  const aCard = asDemoWithCancer.digest.find((c) => c.key === 'cancer_finding');
+  /*
+   * **このカードの軸がレジストリと一致すること。** アダプタに軸をベタ書きしていたため、
+   * レジストリで b へ移しても 'a' のままになり**画面から静かに消えた** (2026-09-17)。
+   * 下の §17 は `vm`/`t1` を見るが、**どちらにもこのカードは出ない**ので
+   * ここで見ないと検査が空振りする (退行注入で実証済み)。
+   */
+  const regAxis = resolveChapters(() => '').chapters.find((c) => c.key === 'cancer_finding')?.axis;
+  check('「今回の所見」の軸がレジストリと一致する', !!aCard && aCard.axis === regAxis,
+    `カード=${aCard?.axis ?? 'なし'} / レジストリ=${regAxis}`);
+  check('「今回の所見」が実在する軸に属する (画面から消えない)',
+    !!aCard && asDemoWithCancer.axes.some((x) => x.key === aCard.axis));
   const aItems = (aCard?.blocks[0] as { items?: string[] } | undefined)?.items ?? [];
   const t1Body = JSON.stringify(T1_TEXT);
-  check('主軸 A の文は受領本文の逐語', aItems.length > 0
+  check('「今回の所見」の文は受領本文の逐語', aItems.length > 0
     && aItems.every((x) => t1Body.includes(x)), `${aItems.length} 文`);
 
   /*
@@ -481,7 +498,7 @@ check('タイプ1 でもダイジェストの段落は受領本文の逐語',
     !vm.digest.some((c) => c.key === 'cancer_finding'));
   check('出さなかったことは監査に出る (黙って消さない)',
     vm.audit.emptyCards.includes('cancer_finding'));
-  check('材料が無くても主軸の帯は立つ', vm.axes.length === 2);
+  check('材料が無くても軸の帯は立つ', vm.axes.length === 1);
 
   // ① 出典行 = 受領 JSON のどこから採ったかだけ。社内表記を紙面に出さない。
   // `ui.cancer_screening_not_included` は `elith-report-queries.ts` が
@@ -548,6 +565,23 @@ check('タイプ1 でもダイジェストの段落は受領本文の逐語',
     vm.audit.anomalies.some((a) => a.includes('全体文字数')));
   const sheet = vm.chapters.flatMap((c) => c.topics.map((t) => t.body)).join('\n');
   check('実検体の紙面にメタ行が出ない', !sheet.includes('全体文字数'));
+}
+
+// ── 17) カードの軸はレジストリが正 (2026-09-17 に実際に踏んだ) ──────
+//
+// アダプタ側に軸を 'a' / 'b' とベタ書きしていたため、レジストリで `cancer_finding` を
+// b へ移しても表示モデルは 'a' のままになり、**画面から静かに消えた**
+// (`verify:screen` が先に検出)。表示モデル側でも固定しておく。
+{
+  const reg = new Map(resolveChapters(() => '').chapters.map((c) => [c.key, c.axis]));
+  const both = [...vm.digest, ...t1.digest];
+  const stray = both.filter((c) => reg.has(c.key) && reg.get(c.key) !== c.axis);
+  check('カードの軸がレジストリと一致する', stray.length === 0,
+    stray.map((c) => c.key + ':' + c.axis).join(','));
+  const axisKeys = new Set(vm.axes.map((a) => a.key));
+  const orphan = both.filter((c) => !axisKeys.has(c.axis));
+  check('どのカードも実在する軸に属する (画面から消えない)', orphan.length === 0,
+    orphan.map((c) => c.key + ':' + c.axis).join(','));
 }
 
 // ── 結果 ──────────────────────────────────────────────────────────
