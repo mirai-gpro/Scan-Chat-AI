@@ -169,10 +169,123 @@ Gemini Live API は VAD・割り込み・ターン取りをモデル(サーバ)�
 
 ## 6. Live API 設定・実装上の注意
 
-- モデル: `MODELS.liveChat = gemini-3.1-flash-live-preview`（`src/lib/gemini.ts`）。**preview モデルはサーバ挙動が予告なく変わり得る**（自発応答の強さ等）→ 二重化の“見え方”が時間で変動する要因。挙動が急変したら**モデル版の固定/変更**を第一に検討（これはターン制御ではなく“モデル選択”＝許容）。
+- モデル: `MODELS.liveChat = gemini-3.1-flash-live-preview`（`src/lib/gemini.ts`・実値は app_config `live.model` が優先）。**preview モデルはサーバ挙動が予告なく変わり得る**（自発応答の強さ等）→ 二重化の“見え方”が時間で変動する要因。挙動が急変したら**モデル版の固定/変更**を第一に検討（これはターン制御ではなく“モデル選択”＝許容）。
 - 接続設定（`live-controller.ts` の `ai.live.connect`）: `responseModalities:[AUDIO]` / `speechConfig ja-JP` / `inputAudioTranscription` / `outputAudioTranscription`。
 - `realtimeInputConfig.activityHandling`: 現状 `NO_INTERRUPTION`。**turn/VAD 系の設定を安易にいじらない**（挙動が絡む）。変更するなら公式ドキュメント根拠＋実機確認をセットで。
 - 重複発話ループ検出（`duplicateAssistantCount`）等の“保険”はあるが、これは最終防波堤であって設計の代替ではない。
+
+---
+
+## 6.1 発話命令の送信経路（2026-09-17 確定・一次資料で確認済み）
+
+### 6.1.0 なぜ書き換えたか
+
+実機から **④ 画面と音声のズレ**（画面は次の質問なのに音声は前の質問を読み続ける）と
+**⑤ 音声の途切れ**が報告された。原因は**プログラムの作りの問題**で、モデルの問題ではない。
+
+1. **同じ「質問を読ませる」操作なのに送信経路が 2 種類ある**
+   （1 問目 = `sendClientContent` / 2 問目以降 = `sendRealtimeInput({ text })`）。
+2. **受信 PCM にジッタバッファが無い**（到着ごとに `AudioContext` の未来時刻へ予約するだけ）。
+
+### 6.1.1 経路の使い分け（確定）
+
+| 送るもの | API | 理由 |
+|---|---|---|
+| **プログラム → モデルへの発話命令**（開始挨拶＋最初の質問 / 次の質問 / 訂正時の読み直し / 完了の一言） | **`sendClientContent({ turns:[{role:'user',parts:[{text}]}], turnComplete: true })`** | 順序が保証され、`turnComplete:true` が**前の生成を無条件に中断**する＝画面と音声が揃う |
+| **マイク音声** | `sendRealtimeInput({ audio })` | 従来どおり |
+| **利用者が入力したテキスト** | **発話命令と同じ経路に載せない**（下記 6.1.3） | `turnComplete:true` に載せると**入力しただけで読み上げが切れる** |
+
+**一次資料（2026-09-17 に実確認）**
+- `gemini-3.1-flash-live-preview` のモデルページ:
+  「`send_client_content` is supported throughout the entire session lifecycle with explicit roles (`user` or `model`)」
+  「Setting `turn_complete=true` unconditionally interrupts active model generation」
+  → **3.1 のままで全質問を `sendClientContent` にしてよい**（3.8 へ上げる必要は無い）。
+- capabilities:
+  「`send_realtime_input` is optimized for responsiveness at the expense of deterministic ordering」
+  → `sendRealtimeInput({ text })` は**非対応ではない**（`BidiGenerateContentRealtimeInput.text` は正式に存在）。
+  **問題は「順序が保証されない経路を、確定した発話命令に使っていた」こと。**
+
+### 6.1.2 これは「プログラムによるターン制御」ではない
+
+§3 が禁じているのは**独自の会話状態機械・半二重制御**（マイクゲート / `SPEAKING` 状態 /
+音声の開始・終了で UI を進める / silent 分岐）である。
+**Live API が公式に提供するターン境界（`turnComplete`）を使うことは禁止事項に当たらない。**
+UI は従来どおり**音声を待たない**（回答確定と同時に次の質問を描画する）。
+
+### 6.1.3 利用者のテキストは発話命令に混ぜない
+
+`sendToModel()` に 5 用途が相乗りしていた。**発話命令の 3 件だけ**を新しい
+`sendModelTurn()`（= ClientContent）へ移す。
+
+| 箇所 | 用途 | 経路 |
+|---|---|---|
+| `live-controller.ts` 訂正時 | 同じ質問を読み直させる | **`sendModelTurn`** |
+| 同 完了時 | 「お疲れさまでした」 | **`sendModelTurn`** |
+| 同 次の質問 | 次の質問を読ませる | **`sendModelTurn`** |
+| 同 未開始時の自由発話 | 利用者の発話 | `sendRealtimeInput({ text })` のまま |
+| 同 フォールバック入力欄 | **テキストでの回答** | `sendRealtimeInput({ text })` のまま |
+
+> フォールバック入力は本来「補助的なテキスト回答」であり、回答は `InterviewEngine` が受け取る。
+> **モデルへ送る必然性は薄い**ので、将来 `submitAnswer()` へ直結させる案がある（今回は変えない）。
+
+### 6.1.4 未確認のまま残すこと
+
+- **`NO_INTERRUPTION` と `turnComplete:true` の優先順位**を 1 か所で明記した一次資料は見つからない。
+  `NO_INTERRUPTION` は `RealtimeInputConfig.activityHandling`（＝**ユーザーの activity** の扱い）に属し、
+  ClientContent は別メッセージ型で「無条件に中断」と書かれているので、
+  **「barge-in は抑止するが ClientContent の明示中断は抑止しない」**と読むのが妥当だが、**実機確認が要る**。
+
+---
+
+## 6.2 音声再生（PCM）— bounded buffer（2026-09-17 決定・未実装）
+
+現行 `LiveAudioManager.playPcm()` は到着ごとに未来時刻へ予約するだけで、
+**ジッタバッファも最大先行量も持たない**。これが ⑤ の独立した原因になり得る。
+
+- 受信 PCM を JS 側の小さなキューに入れ、**短い look-ahead だけ** `AudioContext` へ schedule する。
+- 実装開始値（**公式の推奨値ではない。実機で調整する**）: 初期 140ms / look-ahead 150ms / 最大先行 300ms。
+- `nextPlaybackTime < currentTime` は **underflow として記録**する。
+- `serverContent.interrupted` で**再生中 source・未再生キュー・予約済み source を全部破棄**する。
+- 出力は **24kHz PCM**（Live API 公式）。ただし **iOS Safari で `new AudioContext({ sampleRate: 24000 })` を
+  前提に固定しない** — Web Audio 仕様上、デバイスのレートと異なると**ブラウザが resample し遅延が増え得る**。
+  `new AudioContext()`（native rate）との A/B を後段で行う。
+
+---
+
+## 6.3 Gemini 3.8 Live への移行（決定・ただし最後に回す）
+
+**④⑤ の修正に 3.8 は不要**（6.1.1 のとおり 3.1 で成立する）。移行は**別 PR**で、**最後**に行う。
+
+**確定した段階（発注者・ChatGPT・当方の三者合意 2026-09-17）**
+
+```
+P0-0  観測ログだけ追加          → 実機でベースラインを取る
+P0-1  3.1 のまま発話命令を ClientContent へ統一 → 実機で ④ を確認
+P0-2  3.1 のまま bounded buffer            → 実機で ⑤ を確認
+P1    @google/genai を現行安定版へ (モデルは 3.1)  → 実機確認
+P2    v1alpha → v1beta            (モデルは 3.1)  → 実機確認
+P3    gemini-3.1-flash-live-preview → gemini-3.8-live → proactive audio を重点検証
+```
+
+**3.8 固有の注意（一次資料で確認済み・2026-09-17）**
+
+- **proactive audio は恒久的に ON**。3.8 モデルページ:
+  「Proactive audio is now permanently enabled. Setting `proactive_audio: false` returns an error.」
+  → **`false` を指定してはいけない**（エラーになる）。JS SDK の構造は
+  `config.proactivity?: ProactivityConfig` の中に `proactiveAudio?: boolean`（`genai.d.ts` 実測）。
+  **3.8 では `proactivity` 自体を指定しない。**
+- proactive audio は「内容が関連しないと判断したら**応答しない**」機能
+  （capabilities: "Gemini can proactively decide not to respond if the content is not relevant"）。
+  本アプリは**渡した質問を必ず読む**ことが前提なので、**3.8 移行の最大の Go/No-Go 項目**。
+  → **合格条件に「プログラムが指定した質問を 100% 読み上げる」を追加する。**
+  `sendClientContent(turnComplete:true)` を送ったのに **audio part も outputTranscription も
+  一度も来ない回**を明示的な FAIL とする。**「ClientContent なら無視されない」保証は一次資料に無い。**
+- `thinking_level` / `thinking_config` は 3.8 で**渡してはいけない**（当方は元々渡していない）。
+- 非同期 function calling が既定（当方は `tools` 自体を渡していないので影響なし）。
+- **3.1 は legacy preview だが shutdown date は未発表**（deprecations ページ: "No shutdown date announced"、
+  replacement = `gemini-3.8-live`）。**急ぐ理由は無い。**
+- ephemeral token は公式が **v1beta** と明記（現行コードは `v1alpha` で**実際に動いている**）。
+  `v1alpha` の廃止日・3.8 が v1alpha で提供されるかは**未確認**。P2 で切り替える。
 
 ---
 
@@ -208,5 +321,6 @@ Gemini Live API は VAD・割り込み・ターン取りをモデル(サーバ)�
 | `f3d59e8`/`f864966` | 7/5 | silent 分岐 / マイクゲート | **禁じ手**→ `da74e70` で全 revert |
 | （UI 刷新） | 2026-09-04 | **復唱を全廃**（AI は質問だけ読む）／音声・テキスト切替を撤去／質問直下に常設ガイダンス／`schedulePendingQuestion` 廃止 | 発注者指示。**silent 分岐と先行表示が同時に消える** |
 | PR #44 | — | silent 分岐の再犯（Claude） | **closed（撤回）** |
+| （本書 §6.1〜§6.3） | 2026-09-17 | **発話命令を `sendClientContent(turnComplete:true)` に統一**／bounded buffer／3.8 移行は最後に分離 | 確定（一次資料で裏取り済み） |
 
 > 教訓: **症状をコードで握りに行くと必ず深みに嵌る。** Live API の土俵（LLM がターンを仕切る）に合わせるのが唯一の解。

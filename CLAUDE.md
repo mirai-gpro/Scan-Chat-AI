@@ -191,6 +191,34 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
 - AI問診＝**5セクション（嗜好品・運動・食生活・睡眠・心身）**が仕様
   (`docs/interview/20260331_AI参考問診票.png` / `docs/funding_application/要件定義書.md` F-3)。
   **同意設問・実施検査確認などは問診に含めない**（同意は登録/オンボーディングで取得）。
+- **【2026-09-17 確定・発話命令の送信経路】プログラムがモデルに喋らせる命令は
+  `sendClientContent({ turns:[{role:'user',parts:[{text}]}], turnComplete: true })` に統一する。**
+  正本 `docs/interview/AI問診_仕様と設計原則.md` §6.1〜§6.3。
+  - 発端 = 実機報告 **④ 画面と音声のズレ / ⑤ 音声の途切れ**。真因は**送信経路が 2 種類**あったこと
+    (1 問目 = `sendClientContent` / 2 問目以降 = `sendRealtimeInput({ text })`) と、
+    **受信 PCM にジッタバッファが無い**こと。**モデルの問題ではない。**
+  - **`sendRealtimeInput({ text })` は非対応ではない** (`BidiGenerateContentRealtimeInput.text` は正式に存在)。
+    問題は **「順序が保証されない経路」を確定した発話命令に使っていた**こと
+    (capabilities: "optimized for responsiveness at the expense of deterministic ordering")。
+  - **これは「プログラムによるターン制御」に当たらない** — 禁じているのは独自の状態機械・マイクゲート・
+    silent 分岐であって、**Live API 公式のターン境界 (`turnComplete`) を使うことは許容**。
+    UI は従来どおり**音声を待たない**。
+  - **3.1 のままでよい** (一次資料で確認・2026-09-17): `gemini-3.1-flash-live-preview` のモデルページに
+    「`send_client_content` is supported throughout the entire session lifecycle」
+    「Setting `turn_complete=true` unconditionally interrupts active model generation」。
+  - **利用者が入力したテキストは発話命令に混ぜない** (`turnComplete:true` に載せると
+    **入力しただけで読み上げが切れる**)。`sendToModel` の 5 用途のうち**発話命令の 3 件だけ**を移す。
+  - **未確認**: `NO_INTERRUPTION` と `turnComplete:true` の優先順位を 1 か所で明記した資料は無い
+    (別々の記述から「barge-in は抑止するが ClientContent の明示中断は抑止しない」と読める)。**実機確認が要る。**
+- **【2026-09-17 確定・段階】④⑤ の修正に Gemini 3.8 は不要。移行は最後に独立した PR で行う。**
+  `P0-0 観測ログ → P0-1 ClientContent 統一 (3.1) → 実機④ → P0-2 bounded buffer (3.1) → 実機⑤
+   → P1 SDK 更新 → P2 v1beta → P3 3.8`。各段のあいだに**実機確認を挟む**(何が効いたかを一意に判定するため)。
+  - **3.8 は proactive audio が恒久 ON** (「Proactive audio is now permanently enabled.
+    Setting `proactive_audio: false` returns an error.」)。**`false` を指定するとエラー**なので
+    `proactivity` 自体を渡さない。proactive audio は**「関連しないと判断したら応答しない」**機能なので、
+    **3.8 の合格条件に「指定した質問を 100% 読み上げる」を追加する** (最大の Go/No-Go)。
+  - 3.1 は legacy preview だが **shutdown date は未発表** = 急ぐ理由は無い。
+  - ephemeral token は公式が **v1beta**。現行の `v1alpha` は**実際に動いている**ので、P2 で切り替える。
 - **詳細仕様・設計原則・アンチパターン・二重話者問題の因果は `docs/interview/AI問診_仕様と設計原則.md` が正本。
   AI問診コードに触れる前に必読。** 責務分界（フロー/選択肢/データ=プログラム, 音声のターン/発話=LLM任せ）、
   silent 分岐・マイクゲート禁止、`f99f47e` が二重話者の起点である因果、案1(音声=LLM単独話者)への修正方針を記載。
