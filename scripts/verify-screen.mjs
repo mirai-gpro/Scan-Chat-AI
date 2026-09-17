@@ -202,7 +202,17 @@ const shellWidth = async (page, path) => {
   if (!sipOk) fails.push(`印刷ビューに保存手順が出ている (節 ${saveInPrint.sec} / 手順 ${saveInPrint.steps} 行) = 保存した PDF に操作説明が載る`);
   await page.goto(`${BASE}/report?preview=2`, { waitUntil: 'domcontentloaded' });
 
-  // **A 軸のカードが在ること。** ここが実際に落ちていた箇所なので名指しで見る。
+  /*
+   * **A 軸の帯と、カードの枚数が紙面の正 (モックの契約) と一致すること。**
+   * ここは実際に落ちていた箇所なので名指しで見る。
+   *
+   * 【2026-09-17】以前は「1 枚以上」を決め打ちしていたが、パイロット暫定文
+   * (当社が書いた 2 文) の削除で**材料が無い回は 0 枚が正**になった。
+   * 決め打ちをやめて契約の枚数と突き合わせる — 当社の文が紙面へ戻ったときも、
+   * Elith の所見が黙って消えたときも、どちらでも落ちる。
+   */
+  const axisAExpected = JSON.parse(readFileSync('docs/elith/mock/sheet_contract_type2.json', 'utf-8'))
+    .cards.filter((c) => c.axis === 'a').length;
   const axisA = await page.evaluate(() => {
     const bands = [...document.querySelectorAll('.rp-axis')];
     const a = bands.find((b) => (b.textContent ?? '').includes('初期がんの早期発見'));
@@ -214,11 +224,11 @@ const shellWidth = async (page, path) => {
   if (!axisA.band) {
     console.log('✗ 主軸 A の帯が無い');
     fails.push('主軸 A (初期がんの早期発見) の帯が画面に無い');
-  } else if (axisA.cards === 0) {
-    console.log('✗ 主軸 A の帯は在るがカードが 0 枚 — 発注者に「画面が空」と見える状態');
-    fails.push('主軸 A のカードが 0 枚 (タイプ反転か材料欠落)');
+  } else if (axisA.cards !== axisAExpected) {
+    console.log(`✗ 主軸 A のカードが ${axisA.cards} 枚 (契約は ${axisAExpected} 枚)`);
+    fails.push(`主軸 A のカードが 画面 ${axisA.cards} 枚 / 契約 ${axisAExpected} 枚 で食い違う`);
   } else {
-    console.log(`✓ 主軸 A のカード ${axisA.cards} 枚`);
+    console.log(`✓ 主軸 A のカード ${axisA.cards} 枚 (契約どおり)`);
   }
 
   for (const card of contractCards()) {

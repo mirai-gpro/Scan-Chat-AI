@@ -18,7 +18,7 @@ import T1_TEXT from '../src/data/elith/type1_20260824/report_text.json';
 import T1_CHECKUP from '../src/data/elith/type1_20260824/health_checkup.json';
 import T1_BLOOD from '../src/data/elith/type1_20260824/blood_test.json';
 import T1_CANCER from '../src/data/elith/type1_20260824/cancer_risk.json';
-import { buildReportVM, PILOT_CANCER_FINDING_TEXT, leadSentences } from '../src/lib/report-adapter';
+import { buildReportVM, leadSentences } from '../src/lib/report-adapter';
 import { anchorFor, resolveChapters } from '../src/lib/report-sections';
 import type { ReportVM } from '../src/lib/report-model';
 import { loadReportVM } from '../src/lib/elith-report-queries';
@@ -69,11 +69,8 @@ function verbatim(label: string, text: string): void {
 for (const card of vm.digest) {
   for (const b of card.blocks) {
     if (b.kind === 'paragraphs') {
-      for (const t of b.items) {
-        // 主軸 A のパイロット暫定文だけは受領データに無い (発注者指示の唯一の例外)。
-        if (PILOT_CANCER_FINDING_TEXT.includes(t)) continue;
-        verbatim(`${card.key}/paragraph`, t);
-      }
+      // **例外は無い。** パイロット暫定文 (当社の 2 文) は 2026-09-17 に削除した。
+      for (const t of b.items) verbatim(`${card.key}/paragraph`, t);
     }
     if (b.kind === 'steps' || b.kind === 'weeks') {
       for (const i of b.items) verbatim(`${card.key}/${i.heading}`, i.text);
@@ -416,13 +413,9 @@ for (const c of t1.digest) {
     if (any.kind === 'paragraphs') t1Sentences.push(...(any.items as string[]));
   }
 }
-// **例外はパイロット暫定文だけ** (spec §4.1 の逐語ルールの唯一の例外)。
-const t1Pilot = new Set(PILOT_CANCER_FINDING_TEXT.map((x) => x.replace(/\s+/g, '')));
-const t1Bad = t1Sentences.filter((x) => {
-  const n = x.replace(/\s+/g, '');
-  return !t1Norm.includes(n) && !t1Pilot.has(n);
-});
-check('タイプ1 でもダイジェストの段落は受領本文の逐語 (暫定文を除く)',
+// **例外は無い** (spec §4.1 の逐語ルール。暫定文は 2026-09-17 に削除)。
+const t1Bad = t1Sentences.filter((x) => !t1Norm.includes(x.replace(/\s+/g, '')));
+check('タイプ1 でもダイジェストの段落は受領本文の逐語',
   t1Bad.length === 0, `${t1Bad.length} 文が一致しない: ${t1Bad[0]?.slice(0, 40) ?? ''}`);
 
 // ── 14) 詳細への導線 (発注者裁定 2026-09-01・案 03) ───────────────────
@@ -456,6 +449,105 @@ check('タイプ1 でもダイジェストの段落は受領本文の逐語 (暫
     && !hidden.chapters.some((ch) => `ch-${ch.key}` === c.detailAnchor));
   check('隠した章への導線は残さない', dead.length === 0,
     dead.map((c) => `${c.key}→${c.detailAnchor}`).join(' / '));
+}
+
+// ── 15) 当社が書いた文を紙面に出さない / 救急ラベルは出さない ─────────
+//
+// 【なぜ機械で見張るか】どちらも**紙面は正常に見えたまま**間違う種類の誤りで、
+// 実データで Wellfort に指摘されるまで気づけなかった (2026-09-16)。
+// ③ 当社の 2 文が Elith 本文と併記されて矛盾 / ④ 否定文に「すぐ受診」が付いた。
+{
+  /** 紙面 (ダイジェスト + 全編) に出る文字を 1 本に連ねる。 */
+  const sheetText = (v: ReportVM): string => {
+    const out: string[] = [];
+    for (const c of v.digest) {
+      out.push(c.title, c.source);
+      for (const b of c.blocks) {
+        if (b.kind === 'paragraphs') out.push(...b.items);
+        if (b.kind === 'steps' || b.kind === 'weeks') out.push(...b.items.map((i) => `${i.heading}${i.text}`));
+        if (b.kind === 'pairs') out.push(...b.items.map((i) => `${i.heading}${i.current}${i.action}`));
+        if (b.kind === 'table') out.push(...b.rows.map((r) => `${r.name}${r.judgement}`));
+      }
+    }
+    for (const ch of v.chapters) for (const t of ch.topics) out.push(t.heading, t.body);
+    return out.join('\n');
+  };
+
+  // ③ パイロット暫定文 = 当社が書いた唯一の文。**もう出ない。**
+  const pilot = 'がんに関して特に気になる点は見当たりませんでした';
+  check('当社の暫定文が紙面に出ない (タイプ2)', !sheetText(vm).includes(pilot));
+  check('当社の暫定文が紙面に出ない (タイプ1)', !sheetText(t1).includes(pilot));
+  check('タイプ2 で材料が無ければ A のカードを出さない',
+    !vm.digest.some((c) => c.key === 'cancer_finding'));
+  check('出さなかったことは監査に出る (黙って消さない)',
+    vm.audit.emptyCards.includes('cancer_finding'));
+  check('材料が無くても主軸の帯は立つ', vm.axes.length === 2);
+
+  // ① 出典行 = 受領 JSON のどこから採ったかだけ。社内表記を紙面に出さない。
+  // `ui.cancer_screening_not_included` は `elith-report-queries.ts` が
+  // `cancerFallbackText` として渡す (readConfig 経由ではない)。
+  const withFallback = buildReportVM({
+    reportText: REPORT_TEXT, checkup, name: '', issuedOn: '2026-08-26', isSample: true,
+    hasCancerRisk: false, cycleSeq: null, chronologicalAge: 56, readConfig: () => '',
+    cancerFallbackText: 'この報告書は、がんリスク検査を含まない検査データをもとに作成しています。',
+  });
+  const fb = withFallback.digest.find((c) => c.key === 'cancer_finding');
+  check('admin の文言を入れればカードが出る', !!fb);
+  check('受領 JSON 由来でない文には出典を書かない', fb?.source === '',
+    `source="${fb?.source ?? '(カード無し)'}"`);
+  /*
+   * **`withFallback` も必ず見る。** 材料の無い `vm` では A のカードごと出ないので、
+   * `vm` と `t1` だけだと出典を見ていないのと同じになる (この検査が空振りする)。
+   */
+  for (const [label, v] of [['タイプ2', vm], ['タイプ1', t1], ['admin 文言あり', withFallback]] as const) {
+    check(`社内表記 (spec §) が紙面に出ない — ${label}`, !sheetText(v).includes('spec §'));
+  }
+
+  // ④ 救急カード。**材料は在るのに出さない**ことを、材料の実在ごと固定する。
+  const ER = '早急な医療確認';
+  check('検体に救急文が実在する (この検査が空振りしていない)', CORPUS.includes(ER));
+  check('救急カードを出さない', !vm.digest.some((c) => c.key === 'emergency'));
+  check('赤 (tone=emergency) のカードが 1 枚も無い',
+    !vm.digest.some((c) => c.tone === 'emergency'));
+  check('救急の文は全編に原文のまま残る (黙って消していない)',
+    vm.chapters.some((ch) => ch.topics.some((t) => t.body.includes(ER))));
+}
+
+// ── 16) 本文に紛れた生成メタ行 (発注者判断 2026-09-17) ───────────────
+//
+// 受領本文の末尾に `全体文字数：3012文字` が付いて届く回がある (実測 4 名・値も共通)。
+// **報告書の中身ではないので紙面に出さず、落とした事実は監査に出す。**
+{
+  const body = 'これは本文です。記録を続けましょう。';
+  const withMeta = buildReportVM({
+    reportText: { lifestyle: { section_name: 'ライフスタイル総合', text: `${body}\n\n全体文字数：3012文字` } },
+    checkup: null, name: '', issuedOn: '2026-09-17', isSample: true,
+    hasCancerRisk: false, cycleSeq: null, chronologicalAge: null, readConfig: () => '',
+  });
+  const text = withMeta.chapters.flatMap((c) => c.topics.map((t) => t.body)).join('\n');
+  check('生成メタ行は紙面に出ない', !text.includes('全体文字数'), text.slice(-40));
+  check('本文そのものは 1 文字も落とさない', text.includes(body));
+  check('落としたことは監査に出る (黙って消さない)',
+    withMeta.audit.anomalies.some((a) => a.includes('全体文字数')));
+
+  // **落とすのは章の末尾の 1 行だけ。** 文中に同じ字面があっても触らない (narrow)。
+  const inMiddle = buildReportVM({
+    reportText: { lifestyle: { section_name: 'ライフスタイル総合', text: '全体文字数：3012文字 と書かれた資料。続きの本文です。' } },
+    checkup: null, name: '', issuedOn: '2026-09-17', isSample: true,
+    hasCancerRisk: false, cycleSeq: null, chronologicalAge: null, readConfig: () => '',
+  });
+  check('文中の同じ字面は触らない',
+    inMiddle.chapters.flatMap((c) => c.topics.map((t) => t.body)).join('').includes('全体文字数：3012文字'));
+
+  /*
+   * **実検体 (2026-08-26) にも入っていた** — `lifestyle` 末尾の「全体文字数：2997文字」。
+   * つまり 4 名だけの事故ではなく、この形式で恒常的に混ざっている。
+   * 実データ側でも落ちていること・監査に出ていることを固定する。
+   */
+  check('実検体でもメタ行を落としている',
+    vm.audit.anomalies.some((a) => a.includes('全体文字数')));
+  const sheet = vm.chapters.flatMap((c) => c.topics.map((t) => t.body)).join('\n');
+  check('実検体の紙面にメタ行が出ない', !sheet.includes('全体文字数'));
 }
 
 // ── 結果 ──────────────────────────────────────────────────────────

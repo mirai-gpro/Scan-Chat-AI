@@ -519,19 +519,24 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
                 **`?print=1` では出さない。** 紙に押せないボタンが印字されるため
                 (保存手順を印刷ビューに置かないのと同じ理屈・spec §4.4)。
                 **章が無い回は出さない** (`detailAnchor` が null)。押しても何も起きない
-                リンクを置かない。そのときは従来どおり出典だけを出す。 */}
+                リンクを置かない。そのときは従来どおり出典だけを出す。
+
+                **出典が空のカードは出典行そのものを出さない** (発注者指示 2026-09-17)。
+                受領 JSON 由来でない文 (`ui.cancer_screening_not_included`) に
+                出どころを書けないため。空の `<p>` / `<small>` を残すと、紙面に
+                意味の無い余白と読み上げ対象が生まれる。 */}
             {!isPrint && card.detailAnchor ? (
               <a class="rp-jump" href={`#${card.detailAnchor}`} data-jump>
                 <span class="rp-jump-lbl">
                   <span>詳しい説明を読む</span>
-                  <small class="font-mono">{card.source}</small>
+                  {card.source && <small class="font-mono">{card.source}</small>}
                 </span>
                 <AppIcon name="next" size={18} class="shrink-0 text-brand-600" />
               </a>
-            ) : (
+            ) : card.source ? (
               /* 13px 以上にする。11px は禁止事項「12px 以下を作らない」に触れていた。 */
               <p class="mt-0.5 font-mono text-[13px] text-slate-600">{card.source}</p>
-            )}
+            ) : null}
           </article>
         ))}
 
