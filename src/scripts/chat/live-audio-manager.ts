@@ -6,9 +6,13 @@
  * iPhone Safari 互換のため ScriptProcessorNode を使用（AudioWorklet は別ファイル必要で煩雑）。
  *
  * VAD / echo / barge-in は Gemini Live API のサーバー側で処理される（公式既定）。
- * クライアントで mic を gating すると barge-in が壊れるので、ここでは常時送信する。
+ * **プログラムが mic を gating すると barge-in が壊れる**ので、こちらからは止めない。
  * 参考: https://ai.google.dev/gemini-api/docs/live-guide
  *       (realtimeInputConfig.automaticActivityDetection はデフォルト ON)
+ *
+ * 唯一の例外が `setUserMicMuted` = **利用者が自分でマイクを切ったとき**
+ * (発注者指示 2026-09-17)。禁じられているのはプログラム側の自動ゲートであって、
+ * 利用者の操作ではない。詳しくは同メソッドのコメントを見ること。
  */
 
 import { trace } from './live-trace';
@@ -32,11 +36,18 @@ export class LiveAudioManager {
   private playingSources = new Set<AudioBufferSourceNode>();
   private onChunk: AudioChunkHandler = () => {};
   private onPlaybackEnd: PlaybackEndHandler = () => {};
-  private inputMuted = false;
+  private userMicMuted = false;
 
-  /** マイク入力を一時停止/再開。AI 発話中に VAD 誤検出 (周辺ノイズで interrupted) を防ぐ用途。 */
-  setInputMuted(muted: boolean): void {
-    this.inputMuted = muted;
+  /**
+   * マイクを送るのをやめる / 再開する。**利用者がボタンを押したときだけ**呼ぶこと
+   * (2026-09-17)。AI 発話中の自動ゲート・VAD 誤検出よけ等の**プログラム側の制御は禁止**
+   * (正本 `docs/interview/AI問診_仕様と設計原則.md`)。名前で用途を固定してある。
+   *
+   * **止めるのは送信だけ**で、`this.stream` のトラックは掴んだままにする
+   * (戻すときに許諾ダイアログを出さないため)。端末の録音インジケータは点いたまま。
+   */
+  setUserMicMuted(muted: boolean): void {
+    this.userMicMuted = muted;
   }
 
   /** AI の音声再生が完全に終わった時のコールバックを登録 */
@@ -155,7 +166,7 @@ export class LiveAudioManager {
 
   private handleAudioProcess(ev: AudioProcessingEvent): void {
     if (!this.inputCtx) return;
-    if (this.inputMuted) return; // AI 発話中など。サーバへ送らない
+    if (this.userMicMuted) return; // 利用者がマイクを切っている。サーバへ送らない
     const input = ev.inputBuffer.getChannelData(0);
     const ratio = this.inputCtx.sampleRate / INPUT_SAMPLE_RATE;
     const outLen = Math.floor(input.length / ratio);

@@ -199,6 +199,28 @@ const diagnosticUserId = viewer.uid;
           </button>
         </div>
 
+        {/*
+          マイクのオン / オフ (発注者指示 2026-09-17・裁定 A 案)。
+          **文言の帯の右端にボタン**を置く = 押す場所とメッセージが 1 か所にまとまる。
+          ボタンは 44×44px (中止 60×60 より小さい)・アイコンだけ (意味は帯の文言と
+          aria-label が持つ)・**3 秒周期でゆっくり点滅**して「いま録っている」を示す。
+          中止・スピーカーは現状のまま触っていない。
+        */}
+        <div id="mic-gate" class="mic-gate">
+          <span id="mic-gate-note" class="mic-gate-note" aria-live="polite"
+            >周囲の音を拾う場合、マイクをオフに</span
+          >
+          <button
+            id="mic-gate-btn"
+            type="button"
+            class="mic-gate-btn"
+            aria-label="マイクをオフにする"
+          >
+            <span class="mic-gate-ico mic-gate-ico-on"><AppIcon name="mic" size={22} /></span>
+            <span class="mic-gate-ico mic-gate-ico-off"><AppIcon name="mic-off" size={22} /></span>
+          </button>
+        </div>
+
         <!-- 二刀流ヒント（widget 表示時のみ） -->
         {/*
           音声で答えられることを示す常設ガイダンス。**質問文の直下・選択肢の直前**に置く。
@@ -357,6 +379,9 @@ const diagnosticUserId = viewer.uid;
       startHero: $('start-hero'),
       qaArea: $('qa-area'),
       voiceGuide: $('voice-guide'),
+      micGate: $('mic-gate'),
+      micGateNote: $('mic-gate-note'),
+      micGateBtn: $<HTMLButtonElement>('mic-gate-btn'),
       answerPanel: $('answer-panel'),
       questionText: $('question-text'),
       lastAnswer: $('last-answer'),

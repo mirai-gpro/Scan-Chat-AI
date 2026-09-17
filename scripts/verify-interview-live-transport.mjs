@@ -20,6 +20,26 @@ const code = (p) => read(p)
   .replace(/\/\*[\s\S]*?\*\//g, '')
   .split('\n').filter((l) => !l.trim().startsWith('//')).join('\n');
 
+/**
+ * 目印から始まる 1 つの塊 (`{...}` か `(...)`) を切り出す。
+ * **窓幅 (`[\s\S]{0,600}`) で見ると、関数が伸びた日に黙って検査が効かなくなる。**
+ */
+function spanOf(src, marker, open = '{', close = '}') {
+  const at = src.indexOf(marker);
+  if (at < 0) return '';
+  const start = src.indexOf(open, at);
+  if (start < 0) return '';
+  let depth = 0;
+  for (let i = start; i < src.length; i++) {
+    if (src[i] === open) depth += 1;
+    else if (src[i] === close) {
+      depth -= 1;
+      if (depth === 0) return src.slice(start, i + 1);
+    }
+  }
+  return '';
+}
+
 const ctrl = code('src/scripts/chat/live-controller.ts');
 const audio = code('src/scripts/chat/live-audio-manager.ts');
 const token = code('src/pages/api/live-token.ts');
@@ -67,7 +87,59 @@ ok('マイク音声は sendRealtimeInput(audio)', /sendRealtimeInput\(\{?\s*\n?\
 ok('NO_INTERRUPTION を維持', /activityHandling:\s*ActivityHandling\.NO_INTERRUPTION/.test(ctrl));
 ok('interrupted → flushPlayback を維持', /serverContent\?\.interrupted[\s\S]{0,200}flushPlayback\(\)/.test(ctrl));
 ok('modelTurn.parts を全走査', /for\s*\(const p of parts\)/.test(ctrl));
-ok('マイクゲートを入れていない', !/setInputMuted\s*\(/.test(ctrl));
+/*
+ * ⑦-b **マイクのオン / オフ (2026-09-17)。**
+ * 禁じられているのは**プログラムが勝手にゲートすること**であって、利用者の操作ではない。
+ * 「呼び出しが 0 件」では見張れなくなったので、**呼び出し元を固定する**検査に差し替えた。
+ */
+ok('旧 setInputMuted (自動ゲート用の名前) が残っていない',
+  !/setInputMuted/.test(ctrl) && !/setInputMuted/.test(audio));
+{
+  const calls = (ctrl.match(/setUserMicMuted\(/g) ?? []).length;
+  const inGate = spanOf(ctrl, 'createMicGate(', '(', ')');
+  ok('マイクの送信停止は 1 か所からしか呼ばない', calls === 1, `${calls} 箇所`);
+  ok('その 1 か所は micGate の onChange の中', /setUserMicMuted\(/.test(inGate));
+
+  const toggles = (ctrl.match(/micGate\.toggle\(/g) ?? []).length;
+  ok('micGate.toggle() の呼び出しは 1 か所', toggles === 1, `${toggles} 箇所`);
+  ok('その呼び出し元はマイクボタンの click',
+    /micGateBtn\.addEventListener\('click',[^;]*micGate\.toggle\(\)/.test(ctrl));
+
+  /*
+   * **ここが本丸**: ターン・AI の発話・サーバのイベントからマイクを動かさないこと。
+   * サーバメッセージの処理と、マイク音声を送るコールバックの**中身を実際に切り出して**見る。
+   */
+  const server = spanOf(ctrl, 'function handleServerMessage');
+  const chunk = spanOf(ctrl, 'await audio.start(', '(', ')');
+  const ended = spanOf(ctrl, 'audio.setOnPlaybackEnd(', '(', ')');
+  ok('サーバメッセージの処理でマイクを切り替えない',
+    server.length > 0 && !/micGate|setUserMicMuted/.test(server), server ? '' : '本体を切り出せなかった');
+  ok('マイク送信のコールバックで切り替えない', !/micGate|setUserMicMuted/.test(chunk));
+  ok('AI の再生終了で切り替えない', !/micGate|setUserMicMuted/.test(ended));
+
+  /*
+   * **「送るのをやめるだけ」** (発注者裁定 2026-09-17)。端末のマイクは掴んだままにする
+   * = 戻すときに許諾ダイアログを出さない。トラックを止める実装へ滑らせない。
+   */
+  const setter = spanOf(audio, 'setUserMicMuted(muted: boolean)');
+  ok('マイクを切っても端末のトラックは止めない',
+    setter.length > 0 && !/getTracks|\.stop\(|enabled\s*=/.test(setter), setter.slice(0, 60));
+  ok('マイクを切っても AI の再生は止めない', !/flushPlayback/.test(inGate));
+}
+{
+  /*
+   * mic-gate 自身が勝手に動かないこと。**タイマーも自前のイベント購読も持たせない**
+   * (持たせた瞬間に「プログラム側の制御」になる)。
+   */
+  const gate = code('src/scripts/chat/mic-gate.ts');
+  ok('mic-gate はタイマーを持たない', !/setTimeout|setInterval|requestAnimationFrame/.test(gate));
+  ok('mic-gate は自分でイベントを購読しない', !/addEventListener/.test(gate));
+  // 宣言を除いた呼び出しが 2 つ = toggle と resetToOn。ほかから状態を動かさない。
+  const setCalls = (gate.replace(/function set\(/g, 'function _decl(').match(/\bset\(/g) ?? []).length;
+  ok('状態を変える入口は toggle と resetToOn だけ',
+    setCalls === 2 && /toggle:\s*\(\)\s*=>\s*set\(/.test(gate) && /resetToOn:\s*\(\)\s*=>\s*set\(/.test(gate),
+    `set() の呼び出し ${setCalls} 件`);
+}
 ok('silent 分岐 (発話依頼の出し分け) を入れていない',
   !/opts\.silent\s*\?[\s\S]{0,120}(sendModelTurn|sendUserText)/.test(ctrl));
 ok('SPEAKING 等の独自状態機械を入れていない', !/\bSPEAKING\b|\bWAITING_AUDIO\b/.test(ctrl));
@@ -112,7 +184,7 @@ ok('観測ログを初期化している', /initLiveTrace\(\)/.test(ctrl));
     early >= 0 && early < assign ? '代入より前に早期 return がある' : '');
 }
 for (const ev of ['ANSWER_COMMIT', 'UI_APPLY', 'MODEL_TURN_SEND', 'SERVER_INTERRUPTED',
-  'AUDIO_FLUSH', 'AUDIO_FIRST_CHUNK', 'TURN_COMPLETE', 'INPUT_ACTIVITY']) {
+  'AUDIO_FLUSH', 'AUDIO_FIRST_CHUNK', 'TURN_COMPLETE', 'INPUT_ACTIVITY', 'MIC_MUTE']) {
   ok(`ログ ${ev} を出している`, new RegExp(`trace\\('${ev}'`).test(ctrl));
 }
 for (const ev of ['PCM_ARRIVE', 'AUDIO_UNDERFLOW', 'AUDIO_CONTEXT']) {
