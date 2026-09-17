@@ -228,12 +228,19 @@ UI は従来どおり**音声を待たない**（回答確定と同時に次の�
 > フォールバック入力は本来「補助的なテキスト回答」であり、回答は `InterviewEngine` が受け取る。
 > **モデルへ送る必然性は薄い**ので、将来 `submitAnswer()` へ直結させる案がある（今回は変えない）。
 
-### 6.1.4 未確認のまま残すこと
+### 6.1.4 実機で確認できたこと（2026-09-17・観測ログの実測）
 
-- **`NO_INTERRUPTION` と `turnComplete:true` の優先順位**を 1 か所で明記した一次資料は見つからない。
-  `NO_INTERRUPTION` は `RealtimeInputConfig.activityHandling`（＝**ユーザーの activity** の扱い）に属し、
-  ClientContent は別メッセージ型で「無条件に中断」と書かれているので、
-  **「barge-in は抑止するが ClientContent の明示中断は抑止しない」**と読むのが妥当だが、**実機確認が要る**。
+**`NO_INTERRUPTION` は `turnComplete:true` の中断を妨げない。** 実測値:
+
+| 見たもの | 実測 |
+|---|---|
+| `MODEL_TURN_SEND` → `SERVER_INTERRUPTED` | **46 ms**（前の読み上げが残っていた回） |
+| 直後の `AUDIO_FLUSH` | 46 ms の 1 ms 後（溜まっていた**約 3.4 秒ぶん**の旧音声を破棄） |
+| `UI_APPLY` → `AUDIO_FIRST_CHUNK`（画面と音声のズレ） | **776 ms / 797 ms**（§11.1 の許容「数百 ms」の範囲） |
+| 前の生成が既に終わっていた回 | `SERVER_INTERRUPTED` は**来ない**（切る対象が無い＝正しい挙動） |
+
+→ 一次資料に 1 か所で書かれていなかった点は、**実測で解決**した（`NO_INTERRUPTION` は
+ユーザー activity による barge-in のみを抑止し、ClientContent の明示中断は通る）。
 
 ---
 

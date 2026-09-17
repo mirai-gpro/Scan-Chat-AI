@@ -16,6 +16,8 @@ import { trace } from './live-trace';
 const INPUT_SAMPLE_RATE = 16000;
 const OUTPUT_SAMPLE_RATE = 24000;
 const PROCESS_BUFFER_SIZE = 4096;
+/** この時間より長く空いていたら「ターンの頭」= アンダーランではない (上の説明を参照)。 */
+const MID_STREAM_GAP_MS = 300;
 
 export type AudioChunkHandler = (base64Pcm16: string) => void;
 export type PlaybackEndHandler = () => void;
@@ -113,7 +115,14 @@ export class LiveAudioManager {
      * 「実際にアンダーランしているか」を実機で確かめられるようにする。
      */
     const now = this.outputCtx.currentTime;
-    const underflow = this.nextPlaybackTime < now;   // 次の chunk が間に合わなかった
+    /*
+     * **アンダーランは「喋っている途中で音が尽きた」ときだけ。**
+     * ターンの頭は必ず `nextPlaybackTime < now` になる (前のターンから時間が空くため)。
+     * そこまで数えると**毎ターン必ず 1 件出て、本物の途切れと区別が付かない**
+     * (実測 2026-09-17: 4 件とも 0.7〜7.4 秒空いたターン頭 = 偽陽性だった)。
+     */
+    const idleMs = (now - this.nextPlaybackTime) * 1000;
+    const underflow = idleMs > 0 && idleMs < MID_STREAM_GAP_MS;
     const start = Math.max(this.nextPlaybackTime, now);
     src.start(start);
     this.nextPlaybackTime = start + buf.duration;
@@ -121,7 +130,7 @@ export class LiveAudioManager {
       bytes: bytes.byteLength,
       aheadMs: Math.round((this.nextPlaybackTime - now) * 1000),
     });
-    if (underflow) trace('AUDIO_UNDERFLOW', null, { gapMs: Math.round((now - (start - buf.duration)) * 1000) });
+    if (underflow) trace('AUDIO_UNDERFLOW', null, { gapMs: Math.round(idleMs) });
     this.playingSources.add(src);
     src.onended = () => {
       this.playingSources.delete(src);

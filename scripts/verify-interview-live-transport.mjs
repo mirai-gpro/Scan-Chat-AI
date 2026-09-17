@@ -112,7 +112,7 @@ ok('観測ログを初期化している', /initLiveTrace\(\)/.test(ctrl));
     early >= 0 && early < assign ? '代入より前に早期 return がある' : '');
 }
 for (const ev of ['ANSWER_COMMIT', 'UI_APPLY', 'MODEL_TURN_SEND', 'SERVER_INTERRUPTED',
-  'AUDIO_FLUSH', 'AUDIO_FIRST_CHUNK', 'TURN_COMPLETE']) {
+  'AUDIO_FLUSH', 'AUDIO_FIRST_CHUNK', 'TURN_COMPLETE', 'INPUT_ACTIVITY']) {
   ok(`ログ ${ev} を出している`, new RegExp(`trace\\('${ev}'`).test(ctrl));
 }
 for (const ev of ['PCM_ARRIVE', 'AUDIO_UNDERFLOW', 'AUDIO_CONTEXT']) {
@@ -125,6 +125,8 @@ for (const ev of ['PCM_ARRIVE', 'AUDIO_UNDERFLOW', 'AUDIO_CONTEXT']) {
     /TraceDetail\s*=\s*Record<string,\s*number \| boolean \| 'tap' \| 'voice' \| null>/.test(t));
   const bad = [...ctrl.matchAll(/trace\([^)]*\)/g)].filter((m) => /rawAnswer|question|text:|transcript|Buf/.test(m[0]));
   ok('trace に回答本文・transcript を渡していない', bad.length === 0, bad.map((b) => b[0]).join(' / '));
+  ok('マイクが拾った中身は記録しない (発火したことだけ)',
+    /trace\('INPUT_ACTIVITY', currentQ\?\.\id \?\? null\)/.test(ctrl));
 }
 // AI 音声を UI 遷移のトリガにしていない (禁止事項)
 ok('AUDIO_FIRST_CHUNK で UI を進めていない',

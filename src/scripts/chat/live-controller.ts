@@ -160,6 +160,8 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
   const audio = new LiveAudioManager();
   /** そのターンで最初の音声 chunk が来たかどうか (観測ログ用。UI 遷移には使わない)。 */
   let sawAudioThisTurn = false;
+  /** そのターンでマイクが何か拾ったか (観測ログ用。**中身は記録しない**)。 */
+  let sawInputThisTurn = false;
   initLiveTrace();
   let liveSession: Session | null = null;
   let connecting = false;
@@ -950,6 +952,12 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     // 2) ストリーミング transcript (入力 = ユーザー)
     const inText = msg.serverContent?.inputTranscription?.text;
     if (inText) {
+      /*
+       * **マイクが何か拾ったこと自体**を記録する (中身は記録しない = 医療情報)。
+       * 依頼していない発話 (実測 2026-09-17: 依頼の無い AUDIO_FIRST_CHUNK) が、
+       * **マイクが拾った音に対する応答なのか、モデルが勝手に喋ったのか**を切り分けるため。
+       */
+      if (!sawInputThisTurn) { sawInputThisTurn = true; trace('INPUT_ACTIVITY', currentQ?.id ?? null); }
       userBuf += inText;
       ensureStreamBubble('user').textContent = userBuf;
       refs.log.scrollTop = refs.log.scrollHeight;
@@ -966,6 +974,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     if (msg.serverContent?.turnComplete) {
       trace('TURN_COMPLETE', currentQ?.id ?? null);
       sawAudioThisTurn = false;
+      sawInputThisTurn = false;
       const cleanedAssistant = cleanTranscript(assistantBuf);
       const finishedUser = userBuf.trim();
       finalizeStream('user', userBuf);
