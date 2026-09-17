@@ -26,6 +26,7 @@
     "verify:demo-gate": "node scripts/verify-demo-gate.mjs",
     "verify:special-accounts": "node scripts/verify-special-accounts.mjs",
     "verify:single-purchase": "node scripts/verify-single-purchase.mjs",
+    "verify:interview-speech": "node scripts/verify-interview-speech.mjs",
     "verify:scan-async": "node scripts/verify-scan-async.mjs",
     "verify:elith-intake": "node scripts/verify-elith-intake.mjs",
     "verify:staging-bridge": "node scripts/verify-staging-bridge.mjs",

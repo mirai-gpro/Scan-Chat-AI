@@ -6,7 +6,7 @@
  * (4.5 MB・vercel.com/docs/functions/limitations「Request body size」) を超えると、
  * 関数に届く前にプラットフォームが 413 `FUNCTION_PAYLOAD_TOO_LARGE` を返すので、
  * `/api/scan` は呼ばれず、こちらのコードには何の痕跡も残らない。
- * 画面に出る上限 (10 MB) と、実際に送れる大きさは別物なので、
+ * 画面に出る上限 (40 MB) と、実際に送れる大きさは別物なので、
  * 「上限の数字を上げただけ」で壊れていないことをここで固定する。
  *
  * 前提: `npm run dev` が起動していること。URL は `VERIFY_URL` で差し替えられる。
@@ -119,7 +119,7 @@ async function upload({ name, type, w, h, bytes, quality = 1.0 }) {
 // ── ① 画面の表示と実装が食い違っていないか ──
 {
   const label = await page.textContent('label[for="scan-file"]');
-  ok('ラベルが 10 MB を名乗っている', /最大\s*10\s*MB/.test(label ?? ''), (label ?? '').trim());
+  ok('ラベルが 40 MB を名乗っている', /最大\s*40\s*MB/.test(label ?? ''), (label ?? '').trim());
 }
 
 // ── ② 大きな写真: 受け付けたうえで、上限内に収めて送る ──
@@ -157,9 +157,11 @@ async function upload({ name, type, w, h, bytes, quality = 1.0 }) {
 
 // ── ⑤ 受付上限そのもの ──
 {
-  const r = await upload({ name: 'huge.pdf', type: 'application/pdf', bytes: 11 * 1024 * 1024 });
-  ok('10 MB 超は POST しない', !r.body, '');
-  ok('10 MB 超は上限を伝える', /10\.0 MB 以下にしてください/.test(r.err), r.err);
+  // **上限を上げたら、ここも上げる。** 11 MB のままだと上限を下回り「通ってしまう」
+  // ので検査が意味を失う (上げ忘れると静かに素通りする)。
+  const r = await upload({ name: 'huge.pdf', type: 'application/pdf', bytes: 41 * 1024 * 1024 });
+  ok('40 MB 超は POST しない', !r.body, '');
+  ok('40 MB 超は上限を伝える', /40\.0 MB 以下にしてください/.test(r.err), r.err);
 }
 
 // ─────────────────────────────────────────────────────────────
