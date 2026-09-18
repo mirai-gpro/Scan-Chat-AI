@@ -79,7 +79,15 @@ console.log('\n③ 旧プロンプトの残骸を残さない\n');
  */
 console.log('\n④ 進行の判断を LLM に渡していない\n');
 {
-  const prompt = read('src/scripts/chat/live-controller.ts');
+  /*
+   * **プロンプト本文だけを見る。** ファイル全体を見ると、コードのコメント
+   * (「黙って無視しない」等) に反応して落ちる = 誤検知 (実測 2026-09-18)。
+   * 見張りたいのは**モデルに渡る文字列**だけ。
+   */
+  const whole = read('src/scripts/chat/live-controller.ts');
+  const at = whole.indexOf('const SYSTEM_INSTRUCTION = `');
+  const prompt = at < 0 ? '' : whole.slice(at, whole.indexOf('`;', at));
+  ok('SYSTEM_INSTRUCTION を切り出せた', prompt.length > 200, `${prompt.length} 字`);
   ok('発話するのは依頼文の内容だけ、と書いてある',
     /発話するのは、こちらから届いた依頼文が指示する内容だけ/.test(prompt));
   /*

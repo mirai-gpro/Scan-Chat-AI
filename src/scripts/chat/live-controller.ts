@@ -26,7 +26,6 @@ import { marked } from 'marked';
 import { LiveAudioManager } from './live-audio-manager';
 import { initLiveTrace, trace } from './live-trace';
 import { createMicGate, type MicGate } from './mic-gate';
-import { pickVoiceOption, normalizeVoice } from './voice-answer';
 import {
   clearChatSession,
   clearInterviewProgress,
@@ -743,7 +742,18 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     const q = currentQ;
     if (!q) return;
     const ans = interpretVoiceAnswer(q, transcript);
-    if (ans == null) return;
+    if (ans != null) { commitVoiceAnswer(ans); return; }
+    /*
+     * 決定論で当たらなかった (発注者指示 2026-09-18)。
+     * **言い方が違うだけ**のことが多いので、選択肢の中から**推論させる**。
+     * 例: 「多分ない」「ないと思う」「ない、けど」→ 否定の選択肢。
+     * 確度が低ければ採らず、**聞き直す**。黙って無視しない。
+     */
+    if (!isChoiceQ(q)) return;
+    void resolveVoiceByLlm(q, transcript);
+  }
+
+  function commitVoiceAnswer(ans: string | string[]): void {
     if (Array.isArray(ans)) {
       submitAnswer(ans.length ? ans.join('、') : 'なし', { silent: true });
     } else {
@@ -751,10 +761,67 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     }
   }
 
+  /** 選択式か (推論に回してよい設問か)。自由記述・スライダー・マトリクスは対象外。 */
+  function isChoiceQ(q: QuestionDef): boolean {
+    return optionsOf(q).length > 0 && mapKind(q.answer_kind) === 'list';
+  }
+
+  /**
+   * 選択肢の中から推論させる。**Live セッションには一切触らない** —
+   * サーバ側の 1 回きりの呼び出しで番号だけを受け取り、発話はいつもどおり依頼文で頼む。
+   *
+   * **決められなければ回答にしない。** 聞き直しの一言を頼んで、画面のタップを待つ。
+   */
+  async function resolveVoiceByLlm(q: QuestionDef, transcript: string): Promise<void> {
+    const labels = optionsOf(q).map((o) => o.label);
+    let index: number | null = null;
+    try {
+      const res = await fetch('/api/interview/classify-voice', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ question: q.question, options: labels, transcript }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { index?: number | null };
+        if (typeof data.index === 'number' && data.index >= 0 && data.index < labels.length) {
+          index = data.index;
+        }
+      }
+    } catch { /* 通信断。下の聞き直しへ倒す */ }
+
+    // 待っている間に設問が変わっていたら捨てる (古い回答を今の設問に入れない)
+    if (currentQ?.id !== q.id || advancing) return;
+
+    if (index != null) {
+      trace('VOICE_LLM_PICK', q.id, { index });
+      commitVoiceAnswer(isMultiQ(q) ? [labels[index]] : labels[index]);
+      return;
+    }
+    trace('VOICE_LLM_UNCLEAR', q.id);
+    askToRepeat(q);
+  }
+
+  /**
+   * 聞き直しは **1 問につき 1 回まで**。テレビの音などを拾い続けると、
+   * 「聞き取れませんでした」を延々と喋る AI になるため (マイク OFF との併用が前提)。
+   */
+  const askedRepeat = new Set<string>();
+
+  /** 聞き取れなかったことを伝えて、もう一度か、タップをお願いする (発注者指示の文言)。 */
+  function askToRepeat(q: QuestionDef): void {
+    if (askedRepeat.has(q.id)) return;
+    askedRepeat.add(q.id);
+    sendModelTurn(
+      `利用者の回答が聞き取れませんでした。次の 1 文だけを発話してください: `
+      + `「申し訳ありません、聞き取れませんでした。画面の選択肢をご確認のうえ、もう一度お答えいただくか、選択肢をタップしてください」`
+      + `。質問文は読み上げないでください。`,
+      q.id,
+    );
+  }
+
   /** transcript を設問種別ごとに解釈。マッチしなければ null (タップ待ち) */
   function interpretVoiceAnswer(q: QuestionDef, transcript: string): string | string[] | null {
-    const t = normalizeVoice(transcript);
-    if (!t) return null;
+    if (!transcript.trim()) return null;
 
     if (q.answer_kind === 'text') {
       // 自由記述は発話をそのまま回答に採用 (元の transcript を保持)
@@ -775,10 +842,15 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     }
 
     /*
-     * 選択肢への当て方は `voice-answer.ts` に切り出した (2026-09-18)。
-     * **誤って採る方が、採らないより悪い**場所なので、単体で検査できるようにしてある。
+     * **選択肢への当てはめは、ここでは一切しない** (発注者指示 2026-09-18:
+     * 「極力 LLM に判断させて。パターンマッチング的なことは絶対にやらないで」)。
+     *
+     * 文字の一致・部分一致・同義語表は**持たない**。言い方の揺れ
+     * (「ない」「なし」「特にない」「多分ない」「ないと思う」「ない、けど」…) を
+     * 表で数え上げるのは、書いた分しか当たらず、書き漏らすと黙って落ちる。
+     * → `resolveVoiceByLlm` が選択肢の中から推論する。
      */
-    return pickVoiceOption(optionsOf(q), transcript, isMultiQ(q));
+    return null;
   }
 
   function sendFallback(): void {
