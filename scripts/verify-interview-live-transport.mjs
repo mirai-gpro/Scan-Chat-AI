@@ -145,14 +145,24 @@ ok('silent 分岐 (発話依頼の出し分け) を入れていない',
 ok('SPEAKING 等の独自状態機械を入れていない', !/\bSPEAKING\b|\bWAITING_AUDIO\b/.test(ctrl));
 
 // ⑧ 段階の約束 (P0 ではモデルと API version を動かさない・正本 §6.3)
-ok('Live モデルの既定は 3.1 のまま (3.8 は P3)',
-  /gemini-3\.1-flash-live-preview/.test(cfg) || /gemini-3\.1-flash-live-preview/.test(gemini));
-ok('3.8 をまだ既定にしていない',
-  !/gemini-3\.8-live/.test(cfg) && !/gemini-3\.8-live/.test(gemini));
-ok('v1alpha はまだ動かさない (v1beta 切替は P2)',
+/*
+ * ⑧ **3.8 へ上げるのは決定事項** (発注者 2026-09-18)。
+ * 旧 §6.3 の段取りは「3.8 は最後 (P3)」だったが、**3.1 でしか確認できない項目が 1 つも無い**
+ * (発話の挙動は 3.8 で全部変わる / 選択肢の推論は別モデル=scan 側) ため、先に上げる。
+ * 検査も「3.1 に留める」から**「3.8 になっていること」**へ反転させる。
+ */
+ok('Live モデルの既定が 3.8 になっている',
+  /gemini-3\.8-live/.test(cfg), 'コード既定 (DB に行があればそちらが勝つ)');
+ok('3.1 へ戻していない (戻すなら意図的に)',
+  !/default: 'gemini-3\.1-flash-live-preview'/.test(cfg));
+ok('v1alpha のまま (v1beta へ動かすのは 3.8 が通らなかったときだけ)',
   /v1alpha/.test(token) && /v1alpha/.test(ctrl));
-ok('3.8 でエラーになる proactiveAudio: false を入れていない',
-  !/proactiveAudio:\s*false/.test(ctrl));
+/*
+ * 3.8 は **proactive audio が恒久 ON** で、`proactive_audio: false` を指定すると**エラー**。
+ * 現行は `proactivity` 自体を渡していない (これが正しい)。渡し始めたら落とす。
+ */
+ok('proactiveAudio: false を入れていない', !/proactiveAudio:\s*false/.test(ctrl));
+ok('proactivity 自体を渡していない', !/proactivity\s*:/.test(ctrl));
 
 // ⑨ 観測ログ (P0-0)
 ok('観測ログを初期化している', /initLiveTrace\(\)/.test(ctrl));
