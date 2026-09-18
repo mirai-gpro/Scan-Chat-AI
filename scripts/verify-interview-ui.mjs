@@ -143,7 +143,40 @@ try {
   browser = await chromium.launch();
 }
 const page = await browser.newPage();
+/*
+ * ⓪ **初期化が生きているか。** これが今回いちばん大事な検査 (2026-09-18・実障害)。
+ *
+ * `initLiveController` の途中で例外が出ると、**その後ろにある
+ * `startBtn.addEventListener` に到達しない** → 画面は正常に見えるのに
+ * **「開始を押しても何も起きない」**になる。実際に `let widgetKey` を使う場所の近くで
+ * 宣言して TDZ を踏み、本番をこの状態にした。
+ * **astro check も他の検査も全部通ったまま**壊れたので、ここで実際にページを
+ * 読み込んで例外を数え、ボタンを押して反応を見る。
+ */
+const pageErrors = [];
+page.on('pageerror', (e) => pageErrors.push(String(e).slice(0, 200)));
 await page.goto(`${BASE}/chat`, { waitUntil: 'networkidle' });
+await page.waitForTimeout(800);
+ok('⓪ 読み込みで例外が出ていない', pageErrors.length === 0, pageErrors[0] ?? '');
+{
+  /*
+   * **押して反応するか**を見る。Live API は手元で叩けない (キーは本番のサーバ側だけ) ので
+   * 接続は失敗してよい。見るのは**ハンドラが動いたか**＝ status が空でなくなること。
+   * 「例外ゼロ」だけでは、登録忘れ・セレクタ違いを拾えない。
+   */
+  await page.evaluate(() => document.querySelector('astro-dev-toolbar')?.remove());
+  // 状態表示は #chat-status (初期値「未接続」)。**id を間違えると常に空で比較され、
+  // 壊れていても通ってしまう**ので、押す前が既定値であることも一緒に見る。
+  const read = () => page.evaluate(() => document.getElementById('chat-status')?.textContent?.trim() ?? '(要素なし)');
+  const before = await read();
+  await page.click('#start-btn');
+  await page.waitForTimeout(2500);
+  const after = await read();
+  ok('⓪ 「問診を開始」を押すと反応する (ハンドラが登録されている)',
+    before === '未接続' && after !== before && after !== '(要素なし)',
+    `押す前="${before}" / 押した後="${after}"`);
+  await page.reload({ waitUntil: 'networkidle' });
+}
 
 const count = (sel) => page.locator(sel).count();
 const html = await page.content();
