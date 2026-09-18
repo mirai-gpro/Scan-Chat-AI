@@ -54,11 +54,11 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
   GET でカタログ+現在値、POST で upsert。**UI は wellfort-site admin 側** (この作業ツリーには
   未取得のため実装状況は未確認)。
 
-**app_config の現行キー (32 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
+**app_config の現行キー (31 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
 `demo.account_emails` / `demo.account_uids` / `demo.account_denied_uids` / `demo.seeded_from_admins` /
 `special.account_emails` / `special.account_uids` / `special.account_denied_uids` /
 `ui.single_purchase_plan_name` /
-`ui.cancer_screening_not_included` / `ui.save_steps` / `report.sections.order` / `report.sections.hidden` /
+`ui.save_steps` / `report.sections.order` / `report.sections.hidden` /
 `report.sections.labels` / `report.sections.collapsed` /
 `scan.model` / `live.model` / `scan.output_format` / `scan.boundary_recheck` / `scan.obs_dedup` /
 `scan.scramble_fix` / `scan.eye_resolve` / `scan.lipid_fix` / `scan.canonicalize` /
@@ -1681,6 +1681,38 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   - 判定レベルを値と基準値から算出しない。助言文・受診勧告文を生成しない。
   - 表示してよいのは 検査票の値・単位・基準値 と、**検査機関が付けた** `flag` / `assessment`。
     `flag` が null は「印が無い」であって「基準値内」ではない → **判定を表示しない**。
+
+- **【AI疾病予防報告書に受領 JSON に無い文言を出していた 2026-09-18・発注者指摘・修正済み】
+  正本 `docs/elith/AI疾病予防報告書_仕様書.md` §4.1 / §4.14。**
+  発注者:「**そもそも、Elith からの受領 JSON に無い文言で報告書をつくるのは、絶対に NG でしょ？**」
+  - **出ていたもの (実測)**: 表の列見出し **「基準値」「判定」** / 空欄の **「—」** /
+    カード見出し **「今回の所見」**(受領 JSON に 0 件) / **「N 通り」「本文」** バッジ /
+    **「すぐ受診」**(死蔵コード) / `ui.cancer_screening_not_included`(admin が入力した当社の文)。
+  - **受領ファイルの各エントリは `date` と `value` だけ**で、**基準値・判定のフィールドは無い**。
+    しかも Elith 自身が本文で「**結果票の判定をご確認ください**」と書いている
+    (タイプ2 `blood_analysis` の「判定」4 件は**全部が原票への誘導**・タイプ1 は **0 件**)
+    = **Elith は検査値の判定を出さない**。それを当社が欄にして「—」を置いていた。
+  - **直した形**: 表は **項目名と値の 2 列だけ**(受領ファイルの写しに徹する) /
+    **ダイジェストの表は廃止**(57 行から 7 行を当社が選んで見せていた) /
+    「今回の所見」は **Elith が `cancer_screening` を書いた回だけ・Elith の `section_name` を見出しに** /
+    バッジとプレースホルダは**撤去し監査へ** / 救急カードは**コードごと削除** /
+    **表紙の実年齢も値が無い回は枠ごと出さない**(`—` を置かない)。
+  - **なぜ緑のまま通っていたか**: CLAUDE.md は「紙面に出る全文が受領 JSON の部分文字列である
+    ことを機械で確認する」と書いていたが、**`verify:sheet-contract` は本文の文しか見ておらず、
+    列見出し・ラベル・プレースホルダを 1 つも見ていなかった**。しかも spec §4.1 自身が
+    「構造ラベルは例外」と**抜け穴を用意していた**。→ 例外を全面改訂して閉じた。
+  - **再発防止 = `npm run verify:report-verbatim` (新設・CI の A 層)**。紙面を作るファイルから
+    日本語リテラルとプレースホルダを全部抜き、①受領 JSON の逐語(**12 字以上**) ②Elith の見出し
+    マーカー(`【…】`/`### …`) ③`ALLOW` に**理由つき**で登録、のどれでもなければ落とす。
+    **禁止語 (判定/所見/基準値/要注意/すぐ受診/通り) とプレースホルダ (`—` 等) は `ALLOW` でも許可できない。**
+    - **短い語に部分文字列一致を使わないのが要点**。最初「受領 JSON の部分文字列なら OK」で書いたら
+      **退行注入 (判定/基準値の列を戻す) が通った** — どちらも Elith の散文に語として在るため。
+      **語が本文に在ることと、その語を当社が見出しに使ってよいことは別。**
+    - **退行注入 6 種**で名指しに落ちることを確認済み。`verify:screen` にも**実際の画面**で
+      「表の列 = 項目名 / 値」「空欄の `—` が 0 件」を追加した。
+  - **未処理 = トランスコスモス 10 名の PDF の差し替え** (発注者判断済み)。本番へ入れてから
+    同じ受領 JSON で作り直す。**基準値を表で見せたいなら Elith に `reference`/`judgement` を
+    フィールドで返してもらうのが唯一の筋** (値から当社が判定を計算するのは捏造)。
 - **【誰にダミーを出すか 2026-08-30 確定・発注者指示】正本 `docs/operations/デモ用アカウント_仕様書.md`。**
   **アプリ全体にかかる仕組み**なので特定機能の仕様書には書かない (報告書 spec §4.6 はここを指すだけ)。
   - **デモ用アカウントと管理者アカウントは別物。混ぜない。**
@@ -1824,7 +1856,7 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     - **状態は「未実行」「完了済」の 2 語**で、未実行は**実行を促す**
       (`status-action` + `action` アイコン / `status-ok` + `ok` アイコン。色だけで表さない)。
     - **単品購入でもプラン名バッジを出す** — EC 購入が無く契約から引けないので
-      app_config `ui.single_purchase_plan_name` (既定「AI疾病予防報告書（単品）」)。**32 件目のキー**。
+      app_config `ui.single_purchase_plan_name` (既定「AI疾病予防報告書（単品）」)。
       `/kit` への「進捗の詳細を見る」は単品では出さない (押した先に自分の物が 1 つも無い)。
     - 検査結果は **人間ドック / 健康診断 の 1 種だけ** (他 4 種は構造的に来ない)。
       主要導線 (AIスキャン / AI問診 の帯) は**出さない** (進捗の中のボタンと行き先が同じ)。

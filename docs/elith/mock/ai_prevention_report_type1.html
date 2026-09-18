@@ -315,26 +315,15 @@
       上記は「医療受診の目安」を採った案です。→ 依頼事項に追加します。
     </div>
 
+    <!--
+      【2026-09-18・発注者指示】ここに在った表を廃止した (タイプ2 と同じ理由)。
+      さらにこの表は「注意・経過観察」「緊急 ※」という**受領 JSON に無い判定語**まで
+      並べており、それを打ち消すための当社の注記まで足していた。**欄ごと作らない。**
+    -->
     <div data-card="measurements" data-axis="b" class="card">
       <h3>検査値フィードバック</h3>
-      <div class="scroll">
-      <table>
-        <thead><tr><th>項目</th><th>今回</th><th>判定</th><th>基準値</th></tr></thead>
-        <tbody>
-          <tr><td>体重</td><td class="num-cell">95.8 kg</td><td class="jdg j-w">注意・経過観察</td><td class="ref">—</td></tr>
-          <tr><td>腹囲</td><td class="num-cell">99.0 cm</td><td class="jdg j-w">注意・経過観察</td><td class="ref">—</td></tr>
-          <tr><td>血圧</td><td class="num-cell">136 / 84</td><td class="jdg j-w">注意・経過観察</td><td class="ref">—</td></tr>
-          <tr><td>総ビリルビン</td><td class="num-cell">0.7</td><td class="jdg j-o">基準範囲内</td><td class="ref">0.3〜1.2 mg/dL</td></tr>
-          <tr><td>網赤血球数</td><td class="num-cell">18 ‰</td><td class="jdg j-o">基準範囲内</td><td class="ref">2〜27 ‰</td></tr>
-          <tr><td>尿蛋白</td><td class="num-cell">(-)</td><td class="jdg j-o">陰性</td><td class="ref">—</td></tr>
-          <tr><td>右視力</td><td class="num-cell">1.50</td><td class="jdg j-x">—</td><td class="ref">—</td></tr>
-          <tr><td>眼底検査</td><td class="num-cell">結果詳細なし</td><td class="jdg j-x">緊急 ※</td><td class="ref">—</td></tr>
-        </tbody>
-      </table>
-      </div>
-      <p class="muted">※ この「緊急」は健診上の分類ラベルであり、直ちに救急受診が必要な状態を指すものではありません。
-        眼底検査の詳細な結果について、原票にて改めて確認してください。</p>
-      <div class="src">検査値フィードバック（値・判定・基準値はすべて本文からの逐語）</div>
+      <p>今回の血液検査の結果、肝機能に関連する項目において、いくつかの確認事項があります。ASTは30 U/Lであり、基準範囲内での結果となっています。</p>
+      <div class="src">検査値フィードバック 冒頭 2 文</div>
     </div>
 
     <div data-note class="anno">

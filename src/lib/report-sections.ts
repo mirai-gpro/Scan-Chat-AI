@@ -83,14 +83,17 @@ export interface ChapterSpec {
 export const CHAPTER_REGISTRY: readonly ChapterSpec[] = [
   // 中身は abstract と summary から選んでいる。着地は先に出るほう (アブストラクト)。
   // **軸 A の廃止で `axis: 'b'` へ移した** (上の `REPORT_AXES` のコメント)。
-  { key: 'cancer_finding', label: '今回の所見',   sourceKey: null,             axis: 'b', collapsed: true,
+  // **ラベルを空にした (2026-09-18)。** 「今回の所見」は受領 JSON に 0 件の当社の文言。
+  // 見出しは Elith が `cancer_screening.section_name` に書いたものだけを使う。
+  { key: 'cancer_finding', label: '',             sourceKey: null,             axis: 'b', collapsed: true,
     detailKeys: ['abstract', 'summary'] },
   { key: 'medical_visit',  label: '',             sourceKey: 'medical_visit',  axis: 'b', collapsed: true },
   { key: 'measurements',   label: '',             sourceKey: 'blood_analysis', axis: 'b', collapsed: true },
   { key: 'summary',        label: '',             sourceKey: 'summary',        axis: 'b', collapsed: true },
   { key: 'abstract',       label: '',             sourceKey: 'abstract',       axis: 'b', collapsed: true },
   { key: 'lifestyle',      label: '',             sourceKey: 'lifestyle',      axis: 'b', collapsed: true },
-  { key: 'diet_plan',      label: '1か月の食事改善プラン', sourceKey: null,     axis: 'b', collapsed: true,
+  // 見出しは Elith 本文の `### 4. 1か月の食事改善プラン` をそのまま使う (当社のラベルを持たない)。
+  { key: 'diet_plan',      label: '',             sourceKey: null,             axis: 'b', collapsed: true,
     detailKeys: ['diet'] },
   { key: 'diet',           label: '',             sourceKey: 'diet',           axis: 'b', collapsed: true },
   { key: 'exercise',       label: '',             sourceKey: 'exercise',       axis: 'b', collapsed: true },

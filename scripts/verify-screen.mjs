@@ -111,21 +111,43 @@ const shellWidth = async (page, path) => {
    */
   await page.goto(`${BASE}/report?preview=1`, { waitUntil: 'domcontentloaded' });
   /*
-   * **「今回の所見」のカードの中だけを見る。** `document.body` 全体を見ると全編
-   * (abstract/総評) にも同じ文が在るので、**カードが空でも緑になる** — 実際に一度
-   * この誤りを書いた (壊して確かめたら通ってしまい発覚)。
+   * 【2026-09-18・発注者指示】**「今回の所見」を廃止した。**
    *
-   * 【2026-09-17】軸 A「初期がんの早期発見」の廃止で**帯から辿れなくなった**ので、
-   * カードの見出しで引く。見ているもの (Elith の逐語が出ているか) は変えていない。
+   * ここは「がんリスク検査の項目名を含む文を当社が選び、『今回の所見』という
+   * 当社の見出しの下に置く」ことを**緑で固定していた**。文は逐語でも、
+   * **選んで名前を付ければ解釈**なので、カードごと撤去した
+   * (「今回の所見」は受領 JSON に 0 件)。
+   *
+   * → 検査も**逆向き**に変える: このカードが**出ていないこと**と、
+   *   拾っていた文が**全編にそのまま残っていること** (黙って消していない) を見る。
    */
-  const t1A = await page.evaluate(() => {
-    const cards = [...document.querySelectorAll('.rp-card')]
-      .filter((c) => (c.querySelector('.rp-h3')?.textContent ?? '').includes('今回の所見'));
-    return { cards: cards.length, text: cards.map((c) => c.textContent ?? '').join('') };
+  const t1A = await page.evaluate(() => ({
+    cards: [...document.querySelectorAll('.rp-card')]
+      .filter((c) => (c.querySelector('.rp-h3')?.textContent ?? '').includes('今回の所見')).length,
+    body: document.body.textContent ?? '',
+  }));
+  const t1Ok = t1A.cards === 0 && t1A.body.includes('尿中のポルフィリン量');
+  console.log(`${t1Ok ? '✓' : '✗'} ?preview=1「今回の所見」を出さず、文は紙面に残る (カード ${t1A.cards} 枚)`);
+  if (!t1Ok) {
+    fails.push(t1A.cards > 0
+      ? '?preview=1 に「今回の所見」のカードが出ている (受領 JSON に無い当社の見出し)'
+      : '?preview=1 から「尿中のポルフィリン量」の文が消えた (黙って落としている)');
+  }
+
+  /*
+   * **紙面に「判定」「基準値」の列と空欄の「—」を作らない** (2026-09-18)。
+   * 受領ファイルに無い欄を当社が作り、空欄に「—」を置いて
+   * "欄はあるが該当なし" に見せていたのが捏造だった。**実際の画面**で見る
+   * (表示モデルが正しくてもレンダラが列を描けば紙面には出るため)。
+   */
+  const cols = await page.evaluate(() => {
+    const th = [...document.querySelectorAll('.rp-sheet table th')].map((e) => e.textContent?.trim() ?? '');
+    const cells = [...document.querySelectorAll('.rp-sheet table td')].map((e) => e.textContent?.trim() ?? '');
+    return { th: [...new Set(th)], dash: cells.filter((t) => t === '—' || t === '-').length };
   });
-  const t1Ok = t1A.cards > 0 && t1A.text.includes('尿中のポルフィリン量');
-  console.log(`${t1Ok ? '✓' : '✗'} ?preview=1 の「今回の所見」に受領本文の逐語が出ている (カード ${t1A.cards} 枚)`);
-  if (!t1Ok) fails.push('?preview=1 の「今回の所見」が空 (がんリスク検査の項目名で選べていない)');
+  const colsOk = !cols.th.some((t) => /判定|基準/.test(t)) && cols.dash === 0;
+  console.log(`${colsOk ? '✓' : '✗'} 表の列 = ${cols.th.join(' / ')} / 空欄の「—」 ${cols.dash} 件`);
+  if (!colsOk) fails.push(`表に受領 JSON に無い欄がある (列: ${cols.th.join(',')} / 「—」${cols.dash} 件)`);
 
   /*
    * **ウェルネス年齢は画面にも出る** (裁定 D-C2′・発注者指示 2026-09-01)。

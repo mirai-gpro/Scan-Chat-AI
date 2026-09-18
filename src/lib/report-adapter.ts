@@ -62,6 +62,8 @@ export interface ParsedReportText {
   wellnessAge: number | null;
   /** Elith が返した場合のがん所見 (spec §4.0.1 の依頼形)。未受領なら null。 */
   cancerText: string | null;
+  /** Elith が `cancer_screening` に付けた見出し。無ければ null (当社が付けない)。 */
+  cancerName: string | null;
   /** 本文の末尾に紛れていた生成メタ行 (章名 → その行)。**黙って消さず監査に出す。** */
   metaLines: { section: string; line: string }[];
 }
@@ -93,6 +95,7 @@ export function parseReportText(raw: unknown): ParsedReportText {
   const byKey = new Map<string, ElithSection>();
   let wellnessAge: number | null = null;
   let cancerText: string | null = null;
+  let cancerName: string | null = null;
   const metaLines: { section: string; line: string }[] = [];
 
   const push = (key: string, s: ElithSection) => {
@@ -116,10 +119,10 @@ export function parseReportText(raw: unknown): ParsedReportText {
       };
       push(legacyKeyOf(v.section_name), s);
     }
-    return { sections, byKey, wellnessAge, cancerText, metaLines };
+    return { sections, byKey, wellnessAge, cancerText, cancerName, metaLines };
   }
 
-  if (!raw || typeof raw !== 'object') return { sections, byKey, wellnessAge, cancerText, metaLines };
+  if (!raw || typeof raw !== 'object') return { sections, byKey, wellnessAge, cancerText, cancerName, metaLines };
 
   for (const [key, v] of Object.entries(raw as Record<string, unknown>)) {
     if (key === 'health_age') {
@@ -138,6 +141,9 @@ export function parseReportText(raw: unknown): ParsedReportText {
     if (key === 'cancer_screening' && v && typeof v === 'object') {
       const t = (v as { text?: unknown }).text;
       if (typeof t === 'string' && t.trim()) cancerText = t.trim();
+      // **見出しも Elith が付けたものだけを使う** (当社が「今回の所見」と名付けない)。
+      const nm = (v as { section_name?: unknown }).section_name;
+      if (typeof nm === 'string' && nm.trim()) cancerName = nm.trim();
       continue;
     }
     if (!v || typeof v !== 'object') continue;
@@ -149,7 +155,7 @@ export function parseReportText(raw: unknown): ParsedReportText {
       text: r.text,
     });
   }
-  return { sections, byKey, wellnessAge, cancerText, metaLines };
+  return { sections, byKey, wellnessAge, cancerText, cancerName, metaLines };
 }
 
 /** 旧形式 (配列) の `section_name` を新形式のキーへ寄せる。 */
@@ -241,20 +247,26 @@ function topicsOrWhole(section: ElithSection): Block[] {
 
 // ── 検査値 (spec §5.3 / §7.1 / §7.2) ─────────────────────────
 
-/**
- * Elith 自身が書いた判定句。**アプリが値と基準値を比べて作った文ではない。**
+/*
+ * 【「判定」「基準値」を表の欄として作らない・発注者指示 2026-09-18】
  *
- * `上+` は実データの誤字「基準範囲を**上上**回っており」を拾うため (spec §7.3)。
- * **原文は直さないが、検出はする。**
+ * ここには `JUDGEMENT_RE` / `toneOf` があり、Elith の散文から判定句を拾って
+ * **表の「判定」欄**に入れていた。**これは捏造だった。**
+ *
+ * 実測 (2026-09-18):
+ *   - タイプ1 (2026-08-24 受領) の `blood_analysis` に「判定」は **0 件**。
+ *     他章の 3 件は**すべて遺伝子検査の判定**の話で、検査値の判定ではない。
+ *   - タイプ2 (2026-08-26 受領) の `blood_analysis` の「判定」4 件は
+ *     **4 件とも「結果票の判定をご確認ください」**という原票への誘導。
+ *     → **Elith 自身が「検査値の判定は出さない」と本文で明言している。**
+ *
+ * それを当社が「判定」という欄にし、書いていない行に「—」を置いて
+ * **"判定欄はあるが該当なし" のように見せていた**。欄ごと廃止する。
+ * 「基準値」も同じ — 受領ファイルに基準値のフィールドは無く、散文にあるだけなので、
+ * **散文のまま本文に出す**(全編の章)。表には持ち込まない。
+ *
+ * **表は受領した検査値ファイルの写しに徹する** = 項目名と値だけ。
  */
-const JUDGEMENT_RE =
-  /(基準範囲を上+回って(?:います|おり)|基準範囲内|基準範囲に収まって(?:います|おり)|基準値を下回って(?:います|おり))/;
-
-function toneOf(judgement: string): MeasurementRow['tone'] {
-  if (!judgement) return 'unknown';
-  if (/基準範囲内|収まって/.test(judgement)) return 'within';
-  return 'flagged';
-}
 
 /**
  * `名前は 値（基準値：〜）` を拾う。
@@ -270,6 +282,7 @@ function toneOf(judgement: string): MeasurementRow['tone'] {
  * タイプ1 は 0 → **7 件**。
  */
 const VALUE_RE = /([^\s、。（(]+?)(?:は|が)((?:[0-9][^（(、。]*?))[（(]基準値[：:]?\s*([^）)]*)[）)]/g;
+/* ↑ **表には使わない** (上のコメント)。本文に基準値が書かれているかを**監査に出すため**だけに残す。 */
 
 /** `health_checkup.json` のキー `項目名 [単位]` を分解する。 */
 function splitCheckupKey(key: string): { name: string; unit: string } {
@@ -301,22 +314,16 @@ function textKey(name: string, unit: string): string {
 }
 
 export interface MeasurementResult {
-  /** 受領した全行。**受領ファイルのキー順のまま**にする (原票と並びが揃う)。全編の表に出す。 */
-  rows: MeasurementRow[];
   /**
-   * ダイジェストの表に出す行 = **Elith が本文で取り上げた項目**を、
-   * **Elith が本文で言及した順**に並べたもの (spec §1.3.10 / モック契約)。
+   * 受領した全行。**受領ファイルのキー順のまま** (原票と並びが揃う)。全編の章の表に出す。
    *
-   * 【なぜ受領順ではないか】`health_checkup.json` のキー順は検査票の様式順で、
-   * Elith の話の流れとは無関係。そのまま出すと、Elith が最初に取り上げた
-   * 赤血球・ヘモグロビン・ヘマトクリットの 3 点セットが表の中ほどにばらけ、
-   * 直前の「医療受診の目安」の話と繋がらない (モックとの差分で発覚)。
-   *
-   * 【なぜ当社の解釈ではないか】並べ替えの根拠は **Elith が本文に書いた順序そのもの**。
-   * 値と基準値を当社が比べて優先順位を付けているのではないので、
-   * 整理であって解釈ではない (ミッション④)。
+   * 【`digestRows` を廃止した・発注者指示 2026-09-18】
+   * 以前は「Elith が本文で取り上げた項目」を選び、本文での言及順に並べ替えて
+   * **ダイジェストにも表を出していた**。選び方の根拠 (基準値が本文にあるか) が
+   * 紙面のどこにも書けないので、読む人には「なぜこの 7 項目なのか」が分からない。
+   * **当社が選んで見せている**ことになるため、ダイジェストの表ごと廃止した。
    */
-  digestRows: MeasurementRow[];
+  rows: MeasurementRow[];
   anomalies: string[];
 }
 
@@ -382,14 +389,15 @@ export function flattenLabFiles(
 }
 
 /**
- * 検査値の表を組む。
+ * 検査値の表を組む。**受領した検査値ファイルの写しに徹する** (発注者指示 2026-09-18)。
  *
- * - 値 = `health_checkup.json` (受領そのまま)。
- * - **本文にしかない値も載せる** (spec §7.2)。2 ファイルは包含関係でないため、
- *   検査値ファイルだけで組むと本文が最優先扱いする項目 (実測: ヘマトクリット) が落ちる。
- * - 基準値・判定 = `blood_analysis` の本文から取れた分だけ。**無い項目は空**
- *   (外部マスタで補完しない = 捏造ゼロ)。
- * - **同名別値は自動採用しない** (spec §7.1)。両方を行として残し `variants` で通数を持つ。
+ * - 出すのは **項目名と値だけ**。受領ファイルが持つのはこの 2 つ (と日付) だけで、
+ *   **基準値・判定のフィールドは存在しない**。無い欄を当社が作らない。
+ * - 並びは**受領ファイルのキー順のまま**。並べ替えない。
+ * - **同名別値は自動採用しない** (spec §7.1)。両方を行として残し、**監査で報せる**
+ *   (紙面に当社の注記「N 通り」を出すのはやめた)。
+ * - 本文にしかない値は**本文のまま**章に出る。表へ移さない
+ *   (移すと「検査値ファイルに入っていた」ことになるため)。
  */
 export function buildMeasurements(
   checkup: Record<string, { date?: string; value?: unknown }[]> | null,
@@ -397,69 +405,16 @@ export function buildMeasurements(
 ): MeasurementResult {
   const anomalies: string[] = [];
 
-  // ① 本文から 値・基準値・判定 を拾う (`項目名|単位` → 情報)
-  //    **キーに単位を含める。** 同じ項目名で単位違いの値が届くことがあり
-  //    (実測: 赤血球数 [10^4/ul]=585 と [万/μL]=504)、名前だけで突き合わせると
-  //    Elith が判定していない行に判定が付く = 書いていない判定を作ることになる (spec §7.1)。
-  interface FromText { name: string; unit: string; value: string; reference: string; judgement: string }
-  const fromText = new Map<string, FromText>();
-
-  if (bloodAnalysis) {
-    // **`【】` 決め打ちにしない。** 受領世代によって節の書き方が `###` に変わる
-    // (実測 2026-08-29: 本番 DB の検体は `### 血圧` 形式で `【` が 0 件)。
-    // `splitByBracket` しか見ていなかったため 1 ブロックも取れず表が空になった。
-    // 見出しがまったく無い章は章まるごと 1 ブロックとして扱う。
-    for (const block of topicsOrWhole(bloodAnalysis)) {
-      const found: FromText[] = [];
-      VALUE_RE.lastIndex = 0;
-      let m: RegExpExecArray | null;
-      while ((m = VALUE_RE.exec(block.body))) {
-        // 「今回の測定値は27.9 mg/dL（基準値：…）」のように項目名が入らない書き方がある。
-        // その場合はブロック見出しが項目名 (単一項目ブロック)。
-        const raw = m[1].trim();
-        const name = /測定値|結果$/.test(raw)
-          ? (block.heading.trim() || bloodAnalysis.section_name.trim())
-          : raw;
-        if (!name) continue;
-        const value = m[2].trim();
-        const entry: FromText = { name, unit: unitOfValue(value), value, reference: m[3].trim(), judgement: '' };
-        found.push(entry);
-        fromText.set(textKey(entry.name, entry.unit), entry);
-      }
-      if (!found.length) continue;
-
-      /*
-   * **黙って空にしない** (spec §5.3)。本文の節はあるのに 1 件も拾えないときは、
-   * 受領形式が変わった合図。実測でこれを 2 回踏んでいる —
-   * 2026-08-29 は `【` 決め打ちで節が取れず、2026-09-01 は `（基準値 …）` の
-   * 区切り文字が変わって 0 件になり、どちらも**表が空のまま何も知らせなかった**。
+  /*
+   * 【表は受領した検査値ファイルの写しに徹する・発注者指示 2026-09-18】
+   *
+   * 以前はここで Elith の散文から「基準値」「判定」を拾い、表の欄に入れていた。
+   * **受領ファイルに基準値・判定のフィールドは無く、当社が欄を作っていた** = 捏造。
+   * 撤去した (上の JUDGEMENT_RE のコメントに実測の根拠)。
+   *
+   * いま作るのは **項目名と値だけ**。順序も受領ファイルのキー順のまま
+   * (「Elith が本文で言及した順」に並べ替えるのも当社の解釈なので行わない)。
    */
-  if (bloodAnalysis && fromText.size === 0) {
-    anomalies.push('本文 (検査値フィードバック) から値・基準値を 1 件も抽出できませんでした'
-      + ' — 受領形式が変わった可能性があります');
-  }
-
-  // ② 判定句を項目へ割り当てる。
-      //    まず「<項目>は…<判定句>」の形で項目名に隣接するものだけを引く。
-      //    「クレアチニンについても基準値との関係において…」のように判定句を伴わない
-      //    言及に判定を付けないため (Elith が書いていない判定を作らない)。
-      for (const e of found) {
-        const esc = e.name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const hit = new RegExp(`${esc}(?:は|も|が)[^。]{0,12}?${JUDGEMENT_RE.source}`).exec(block.body);
-        if (hit) e.judgement = hit[1];
-      }
-      // 一括表明を当てる。次の 2 つだけを対象にする:
-      //   - 「これら3つの項目すべてが基準範囲を上回っています」= 明示的に全項目
-      //   - 単一項目ブロック = 「今回の結果は基準範囲を上回っており」の主語がその項目しかない
-      // どちらでもないブロックには当てない (どの項目の判定か決められないため)。
-      const blanket = new RegExp(`(?:すべてが|今回の結果は)[^。]{0,10}?${JUDGEMENT_RE.source}`).exec(block.body);
-      if (blanket && (found.length === 1 || /すべてが/.test(blanket[0]))) {
-        for (const e of found) if (!e.judgement) e.judgement = blanket[1];
-      }
-    }
-  }
-
-  // ③ health_checkup.json を行にする。同名別値は競合として両方残す。
   const rows: MeasurementRow[] = [];
   const seenNames = new Map<string, number>();
   const entries = Object.entries(checkup ?? {});
@@ -469,89 +424,51 @@ export function buildMeasurements(
     seenNames.set(name, (seenNames.get(name) ?? 0) + 1);
   }
 
-  // 行 → 本文での言及順。`fromText` は Map なので**挿入順 = 本文に現れた順**。
-  // **行を作るその場で記録する。** 後から名前で引き当てると、同名別値 (総コレステロール
-  // 210 mg/dL と 251 mg/dl) で**単位違いの別の行に順序が付く** (実測で末尾へ飛んだ)。
-  const mentionAt = new Map<string, number>();
-  [...fromText.keys()].forEach((k, i) => mentionAt.set(k, i));
-  const rowMention = new Map<MeasurementRow, number>();
-
-  const usedFromText = new Set<string>();
   for (const [key, arr] of entries) {
     const { name, unit } = splitCheckupKey(key);
     const first = Array.isArray(arr) ? arr[0] : undefined;
     if (!first || first.value === undefined || first.value === null) continue;
-    // 単位まで一致したときだけ本文の基準値・判定を結ぶ。一致しなければ空のまま。
-    const k = textKey(name, unit);
-    const t = fromText.get(k);
-    if (t) usedFromText.add(k);
-    const row: MeasurementRow = {
-      name,
-      value: unit ? `${first.value} ${unit}` : String(first.value),
-      reference: t?.reference ?? '',
-      judgement: t?.judgement ?? '',
-      tone: toneOf(t?.judgement ?? ''),
-      source: 'checkup',
-      variants: seenNames.get(name) ?? 1,
-    };
-    rows.push(row);
-    const at = mentionAt.get(k);
-    if (at !== undefined) rowMention.set(row, at);
+    rows.push({ name, value: unit ? `${first.value} ${unit}` : String(first.value) });
   }
 
+  /*
+   * **同名別値は自動採用しない** (spec §7.1)。ただし紙面にバッジ (「N 通り」) を
+   * 出すのはやめた — **当社の注記だから**。両方の行をそのまま載せ、監査で報せる。
+   */
   for (const [name, count] of seenNames) {
     if (count > 1) anomalies.push(`同名別値: ${name} が ${count} 通り届いています (自動採用しません)`);
   }
 
-
-
-  // ④ 本文にしかない項目を足す (spec §7.2)。
-  //    2 ファイルは包含関係でないので、検査値ファイルだけで組むと本文が最優先扱いする
-  //    項目 (実測: ヘマトクリット) が落ちる。
-  for (const [k, t] of fromText) {
-    if (usedFromText.has(k)) continue;
-    rows.push({
-      name: t.name,
-      value: t.value,
-      reference: t.reference,
-      judgement: t.judgement,
-      tone: toneOf(t.judgement),
-      source: 'report_text',
-      variants: 1,
-    });
-    if (!seenNames.has(t.name)) {
-      anomalies.push(`本文が扱う ${t.name} が health_checkup.json に無いため、本文から拾いました`);
+  /*
+   * **本文に基準値が書かれているかは監査にだけ出す。**
+   * 紙面では Elith の散文がそのまま章に出るので、読む人はそこで基準値を読める。
+   * 表へ移すと「基準値という欄が届いている」ことになるので持ち込まない。
+   */
+  if (bloodAnalysis) {
+    let inProse = 0;
+    for (const block of topicsOrWhole(bloodAnalysis)) {
+      VALUE_RE.lastIndex = 0;
+      while (VALUE_RE.exec(block.body)) inProse += 1;
     }
-    rowMention.set(rows[rows.length - 1], mentionAt.get(k) ?? Number.MAX_SAFE_INTEGER);
+    anomalies.push(inProse
+      ? `本文 (検査値フィードバック) に基準値の記載が ${inProse} 件あります (紙面では本文のまま出します)`
+      : '本文 (検査値フィードバック) に基準値の記載がありません');
   }
 
-  // ダイジェスト = 本文が取り上げた行 (基準値が付いた行) を、**本文での言及順**に。
-  // 言及順が取れなかった行は末尾へ回し、その中では受領順を保つ (安定ソート)。
-  const digestRows = rows
-    .filter((r) => r.reference)
-    .map((r, i) => ({ r, i, m: rowMention.get(r) ?? Number.MAX_SAFE_INTEGER }))
-    .sort((a, b) => a.m - b.m || a.i - b.i)
-    .map((x) => x.r);
-
-  return { rows, digestRows, anomalies };
+  return { rows, anomalies };
 }
 
 // ── ダイジェストのカード ────────────────────────────────
 
-/**
- * 【救急カードは当面中止・発注者指示 2026-09-17】
+/*
+ * 【救急カードは削除した・発注者指示 2026-09-18】
  *
- * Elith が救急受診を促した文を 1 文だけ抜いて赤いカード (ラベル「すぐ受診」) にしていたが、
- * **語だけで拾うので否定文も拾う**。実データ (堀石様・2026-09-16) では
- * 「これは直ちに救急受診を指示するものではありません」に `直ちに医療機関`／`救急` が当たり、
- * **ラベルと本文が正面から矛盾した**。逆に本当の救急文を拾い落とす側の誤りも同じ仕組みで起きる。
- *
- * → **抜き出しをやめる。** 当該の文は「医療受診の目安」の章に**原文のまま**残るので、
- *   紙面から文が消えるわけではない (当社が強調の可否を判断しないだけ)。
- *   再開するなら Elith 側に**救急かどうかの印**を出してもらうのが先で、
- *   語の正規表現を足して直す問題ではない。
+ * 2026-09-17 に「当面中止」として `EMERGENCY_CARD_ENABLED = false` で死蔵していたが、
+ * ラベル「すぐ受診」は**受領 JSON に無い当社の文言**なので、コードごと消す
+ * (残しておくとフラグ 1 つで捏造が復活する)。当該の文は「医療受診の目安」の章に
+ * **原文のまま**残るので紙面から文が消えるわけではない。
+ * 再開するなら Elith 側に**救急かどうかの印**を出してもらうのが先。
  */
-const EMERGENCY_CARD_ENABLED: boolean = false;
 
 /** 章タイトル。レジストリ／`app_config` の上書きが空なら受領 JSON の `section_name`。 */
 function titleOf(key: string, label: string, section: ElithSection | null): string {
@@ -561,7 +478,7 @@ function titleOf(key: string, label: string, section: ElithSection | null): stri
 
 function card(
   key: string, title: string, axis: 'a' | 'b', source: string,
-  blocks: DigestBlock[], tone: DigestCardVM['tone'] = 'normal',
+  blocks: DigestBlock[],
 ): DigestCardVM | null {
   const filled = blocks.filter((b) =>
     (b.kind === 'paragraphs' && b.items.length) ||
@@ -571,7 +488,7 @@ function card(
     (b.kind === 'weeks' && b.items.length));
   if (!filled.length) return null;
   // `detailAnchor` は章が出揃ってから入れる (下記)。ここでは決められない。
-  return { key, title, axis, tone, blocks: filled, source, detailAnchor: null };
+  return { key, title, axis, blocks: filled, source, detailAnchor: null };
 }
 
 
@@ -664,8 +581,6 @@ export interface BuildInput {
   chronologicalAge: number | null;
   /** 当社 CABA の算出値。Elith 出力との突合に使う (紙面には出さない・spec §1.3.8)。 */
   ourWellnessAge?: number | null;
-  /** `ui.cancer_screening_not_included`。空なら使わない (spec §0.3)。 */
-  cancerFallbackText?: string;
   /** 章立ての設定リーダ。回帰テストで差し替える。 */
   readConfig?: (key: string) => string;
 }
@@ -730,7 +645,6 @@ export function buildReportVM(input: BuildInput): ReportVM {
         key: leadSpec.key,
         title: '',                 // 見本 p1 に見出しは無い
         axis: leadSpec.axis,
-        tone: 'normal',
         blocks: [{ kind: 'paragraphs', items: paragraphs }],
         source: leadSection.section_name,
         detailAnchor: null,        // 全編から外したので飛び先が無い
@@ -752,20 +666,28 @@ export function buildReportVM(input: BuildInput): ReportVM {
        * 画面から静かに消えた (2026-09-17・`verify:screen` が検出)。
        * レジストリが軸の正。
        */
+      /*
+       * 【「今回の所見」を廃止した・発注者指示 2026-09-18】
+       *
+       * ここは 3 つの経路を持っていた:
+       *   ① Elith の `cancer_screening.text` をそのまま
+       *   ② タイプ1: **がんリスク検査の項目名に触れた文を当社が選ぶ**
+       *   ③ `ui.cancer_screening_not_included` (admin が入力した当社の文)
+       *
+       * **②③ は捏造だった。** ②は文こそ逐語だが、その文を選んで
+       * **「今回の所見」という当社の見出しの下に置く**行為が解釈そのもの
+       * (実測: 「今回の所見」は受領 JSON に **0 件**)。③に至っては当社が書いた文。
+       *
+       * → **① だけ残す。** 見出しも Elith が付けた `section_name` を使い、
+       *   無ければ見出しを出さない。Elith が書かなかった回は**カードごと出ない**。
+       *   ②で拾っていた文は、もともと abstract / summary の文なので
+       *   **冒頭の総括と全編の章にそのまま出る** (紙面から消えるわけではない)。
+       */
       case 'cancer_finding': {
-        const texts = cancerFindingTexts(parsed.cancerText, input, lab.cancerItems,
-          [sec('abstract'), sec('summary')]);
-        /*
-         * 出典は**受領 JSON のどこから採ったか**だけを書く (発注者指示 2026-09-17)。
-         * 旧「Elith へ依頼中 (spec §10.1 E-1)」は当社の社内表記で、しかも
-         * **パイロット暫定文を削除した今はその経路自体が無い**。
-         * 残る ② (`ui.cancer_screening_not_included`) は受領 JSON 由来でないので**空**にする
-         * — 出典の無い文に出典を書かない。空の出典行は紙面に描かない (`report.astro`)。
-         */
-        built = card(spec.key, title, spec.axis,
-          parsed.cancerText ? '総評'
-            : input.hasCancerRisk ? 'アブストラクト・総評' : '',
-          [{ kind: 'paragraphs', items: texts }]);
+        if (!parsed.cancerText) break;
+        built = card(spec.key, parsed.cancerName ?? '', spec.axis,
+          parsed.cancerName ?? '',
+          [{ kind: 'paragraphs', items: [parsed.cancerText] }]);
         break;
       }
 
@@ -774,15 +696,6 @@ export function buildReportVM(input: BuildInput): ReportVM {
         if (!section) break;
         // 見出しの無い世代でも空にしない (`topicsOrWhole` のコメントを参照)。
         const blocks = topicsOrWhole(section);
-        // 救急サインの抜き出しは中止中 (上の `EMERGENCY_CARD_ENABLED` のコメント)。
-        if (EMERGENCY_CARD_ENABLED) {
-          const emergency = findEmergencySentence(section.text);
-          if (emergency) {
-            const e = card('emergency', '', 'b', `${section.section_name}`,
-              [{ kind: 'paragraphs', items: [emergency] }], 'emergency');
-            if (e) digest.push(e);
-          }
-        }
         const lead = blocks[0];
         const steps: DigestItem[] = blocks.slice(1).map((b) => ({
           heading: b.heading, text: leadSentences(b.body, 1),
@@ -796,18 +709,25 @@ export function buildReportVM(input: BuildInput): ReportVM {
         break;
       }
 
+      /*
+       * 【ダイジェストの表を廃止した・発注者指示 2026-09-18】
+       *
+       * 受領 57 行のうち 7 行だけを「Elith が本文で取り上げた項目」として抜き、
+       * **基準値・判定の欄をつけて**出していた。欄そのものが受領 JSON に無いうえ、
+       * **なぜその 7 行なのかは紙面のどこにも書けない**ので、読む人には
+       * 「当社が選んだ重要項目」に見える。表ごとやめる。
+       *
+       * 代わりに**他の章と同じ扱い** = 本文の冒頭 2 文を逐語で出し、
+       * 全編への導線を付ける。**受領した全行の表は全編の章に残る**ので、
+       * 値が紙面から消えることはない。
+       */
       case 'measurements': {
-        // ダイジェストには **Elith が本文で取り上げた項目だけ**を出す (基準値が付いた行)。
-        // 受領した全 40 項目は全編の章に出る (可読化 = 出す文を選ぶこと・spec §1.1)。
-        // 判定が無い行 (実測: クレアチニン) も、Elith が触れている以上は落とさず
-        // 判定欄を空で出す。「印が無い」を「基準値内」と読み替えない (ミッション④)。
-        //
-        // 並びは **Elith が本文で言及した順** (`measured.digestRows`・spec §1.3.10)。
-        // 受領ファイルのキー順ではない。当社が優先順位を決めているのでもない。
-        const rows = measured.digestRows;
-        built = card(spec.key, title, spec.axis,
-          `${section?.section_name ?? '検査値フィードバック'} (値・基準値・判定はすべて本文からの逐語)`,
-          [{ kind: 'table', rows }]);
+        if (!section) break;
+        const blocks = topicsOrWhole(section);
+        const lead = blocks[0];
+        if (!lead) break;
+        built = card(spec.key, title, spec.axis, `${section.section_name} 冒頭 2 文`,
+          [{ kind: 'paragraphs', items: [leadSentences(lead.body, 2)] }]);
         break;
       }
 
@@ -826,7 +746,8 @@ export function buildReportVM(input: BuildInput): ReportVM {
         const plan = splitTopics(diet.text).find((b) => /食事改善プラン/.test(b.heading));
         if (!plan) break;
         const weeks = splitWeeks(plan.body);
-        built = card(spec.key, spec.label || plan.heading, 'b',
+        // **見出しは Elith が本文に書いたものを使う** (当社のラベルを先に当てない)。
+        built = card(spec.key, plan.heading || spec.label, 'b',
           `${diet.section_name} §4`, [
             { kind: 'paragraphs', items: [leadSentences(plan.body.split('【第')[0], 2)] },
             { kind: 'weeks', items: weeks },
@@ -926,7 +847,8 @@ export function buildReportVM(input: BuildInput): ReportVM {
     unknownChapterKeys: unknown,
     topicCount: chapters.reduce((n, c) => n + c.topics.length, 0),
     measurementCount: measured.rows.length,
-    referenceCount: measured.rows.filter((r) => r.reference).length,
+    // 【2026-09-18】表から基準値の欄を廃止したので、行ごとの基準値は数えられない。
+    // 本文に基準値の記載が何件あったかは `anomalies` に出る。
     anomalies,
   };
 
@@ -949,70 +871,17 @@ function isDigestChapter(key: string): boolean {
     .includes(key);
 }
 
-/**
- * A の「今回の所見」に出す文を決める (spec §4.0.1)。
- *   ① Elith が書いていれば**その本文**
- *   ② `ui.cancer_screening_not_included` (admin から入力・既定は空)
+/*
+ * 【削除: がんリスク検査に触れた文の抜き出しと、救急文の抜き出し・2026-09-18】
  *
- * **どちらも無ければ空を返し、カードごと非表示にする** (アプリが代わりを書かない)。
+ * `cancerFindingTexts` / `findingsMentioning` / `EMERGENCY_RE` /
+ * `findEmergencySentence` をここから消した。どれも **Elith の本文から当社が文を選び、
+ * 当社が付けた見出し (「今回の所見」「すぐ受診」) の下に置く**ものだった。
+ * 文自体は逐語でも、**選んで名前を付ければ解釈**になる (ミッション④)。
+ *
+ * 抜き出していた文は、もともと abstract / summary / medical_visit の文なので、
+ * **冒頭の総括と全編の章にそのまま出る**。紙面から文が消えるわけではない。
  */
-/**
- * 本文から「がんリスク検査に触れた文」を**逐語で選ぶ**。
- *
- * 【なぜ語で探さないか】2026-08-24 受領のタイプ1 は、`cancer_risk.json` を渡している
- * にもかかわらず本文に **「がん」「腫瘍」「マーカー」が 0 回**（実測）。語で探すと 0 件になる。
- * 一方で **`cancer_risk.json` のキー名「尿中のポルフィリン量」は本文に 2 回**出てくる。
- *
- * → **受領ファイルの項目名で探す。** 名前は Elith が受け取った項目そのもので、
- *   当社が「これはがんの話だ」と決めた語ではない。**文は選ぶだけで、足さない・繋げない。**
- */
-function findingsMentioning(items: string[], sections: (ElithSection | null)[]): string[] {
-  if (!items.length) return [];
-  const out: string[] = [];
-  for (const sec of sections) {
-    if (!sec) continue;
-    for (const raw of sec.text.match(/[^。]+。|[^。]+$/g) ?? []) {
-      const s = raw.trim();
-      if (s && items.some((it) => s.includes(it)) && !out.includes(s)) out.push(s);
-    }
-  }
-  return out;
-}
-
-function cancerFindingTexts(
-  cancerText: string | null,
-  input: BuildInput,
-  cancerItems: string[],
-  sections: (ElithSection | null)[],
-): string[] {
-  // ① Elith が書いていれば、その本文をそのまま。当社は但し書きを足さない
-  //    (Stage2 では Elith 自身が「がんがないことを断定するものではない」と書いている)。
-  if (cancerText) return [cancerText];
-  if (input.hasCancerRisk) {
-    // ② タイプ 1。**がんリスク検査の項目名に触れた文を逐語で選ぶ** (発注者指示 2026-09-01)。
-    const found = findingsMentioning(cancerItems, sections);
-    // ③ 1 文も無ければ**カードごと非表示**。アプリが代わりを書かない
-    //    (spec §4.0.1「記載が無いこと ≠ 所見が無いこと」)。欠落は監査に出る。
-    return found;
-  }
-  // ③ タイプ 2。admin で文言が確定していればそれを使う。
-  const fallback = (input.cancerFallbackText ?? '').trim();
-  if (fallback) return [fallback];
-  // ④ 何も無ければ**カードごと非表示**。当社の文で埋めない (上のコメント・spec §1.0.0)。
-  return [];
-}
-
-/** 救急受診を促した文の手がかり。**`EMERGENCY_CARD_ENABLED` が false のあいだは使われない。** */
-const EMERGENCY_RE = /(?:早急な医療確認|救急|ただちに医療機関|直ちに医療機関)/;
-
-/** Elith が救急受診を促した文を 1 文だけ逐語で取り出す。無ければ null。 */
-function findEmergencySentence(text: string): string | null {
-  for (const raw of text.split('。')) {
-    const s = raw.trim();
-    if (s && EMERGENCY_RE.test(s)) return `${s}。`;
-  }
-  return null;
-}
 
 /** `lifestyle` を【現状評価】/【行動提案】のペアにする (spec §4.2.2)。 */
 export function buildLifestylePairs(text: string): LifestylePair[] {

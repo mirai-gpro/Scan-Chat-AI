@@ -38,24 +38,24 @@ export interface DigestItem {
 }
 
 /** 検査値テーブルの 1 行。 */
+/**
+ * 検査値の 1 行。**受領した検査値ファイルが持っているものだけ** (発注者指示 2026-09-18)。
+ *
+ * 【`reference` / `judgement` / `tone` / `source` / `variants` を削除した】
+ * 受領ファイル (`health_checkup.json` ほか) の各エントリが持つフィールドは
+ * **`date` と `value` の 2 つだけ**で、基準値も判定も存在しない (実測)。
+ * それらを当社が欄として作り、空欄に「—」を置いて
+ * **"欄はあるが該当なし" のように見せていた**。欄ごと廃止する。
+ *   - 基準値は Elith が**散文**に書いているので、**本文のまま**章に出る。
+ *   - 判定は Elith 自身が「結果票の判定をご確認ください」と本文で言っている
+ *     = **Elith は判定を出さない**。当社が欄を作らない。
+ *   - 同名別値・本文にしかない値は**監査**に出す (紙面に当社の注記を置かない)。
+ */
 export interface MeasurementRow {
+  /** 受領ファイルのキーから取った項目名。 */
   name: string;
   /** 値＋単位。受領データの表記のまま。 */
   value: string;
-  /** 基準値。本文から取れた分だけ。無ければ空 (外部マスタで補完しない = 捏造ゼロ)。 */
-  reference: string;
-  /** Elith が書いた判定句の逐語。書いていなければ空。 */
-  judgement: string;
-  /**
-   * 判定の向き。**アプリが値と基準値を比べて決めない** — Elith の判定句の文言から引く。
-   * `flagged` = 基準範囲を外れたと Elith が書いた / `within` = 基準範囲内と書いた /
-   * `unknown` = Elith が判定を書いていない (「印が無い」であって「基準値内」ではない)。
-   */
-  tone: 'flagged' | 'within' | 'unknown';
-  /** 値の出どころ。2 ファイルは包含関係でないため両方から集める (spec §7.2)。 */
-  source: 'checkup' | 'report_text';
-  /** 同名別値が届いたときの通数。1 なら競合なし (spec §7.1)。 */
-  variants: number;
 }
 
 /** 生活習慣の 1 項目 = 【現状評価】と【行動提案】のペア (spec §4.2.2)。 */
@@ -82,11 +82,10 @@ export interface DigestCardVM {
   title: string;
   /** どちらの主軸に属すか。 */
   axis: AxisKey;
-  /**
-   * `emergency` は**救急サインのみ**。所見に赤を使わない (spec §4.2.1)。
-   * Elith が救急受診を促す文を書いた回だけ立つ。
+  /*
+   * 【`tone` を削除した・2026-09-18】救急カード (ラベル「すぐ受診」) 専用の値だったが、
+   * そのラベルは受領 JSON に無い当社の文言なのでカードごと廃止した。
    */
-  tone: 'normal' | 'emergency';
   blocks: DigestBlock[];
   /** 出典表示 (例: 医療受診の目安 §1〜§4)。どこから引いたかを紙面で辿れるようにする。 */
   source: string;
@@ -171,9 +170,9 @@ export interface ReportAudit {
   unknownChapterKeys: string[];
   /** 全編のトピック数。 */
   topicCount: number;
-  /** 検査値の行数と、基準値が付いた数。 */
+  /** 検査値の行数。 */
   measurementCount: number;
-  referenceCount: number;
+  /* 【2026-09-18】表から基準値の欄を廃止したので `referenceCount` は削除した。 */
   /** 受領データの異常。 */
   anomalies: string[];
 }

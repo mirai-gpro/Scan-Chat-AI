@@ -187,7 +187,6 @@ export const POST: APIRoute = async ({ request }) => {
       section_names: r.ingested?.section_names ?? [],
       wellness_age: r.ingested?.wellness_age ?? null,
       measurements: r.ingested?.measurements ?? 0,
-      references: r.ingested?.references ?? 0,
       topics: r.ingested?.topics ?? 0,
       digest_cards: r.ingested?.digest_cards ?? [],
       empty_cards: r.ingested?.empty_cards ?? [],
