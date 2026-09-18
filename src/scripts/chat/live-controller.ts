@@ -165,6 +165,25 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
   let session: ChatSession = loadChatSession(SESSION_ID) ?? createEmptySession(SESSION_ID);
   const audio = new LiveAudioManager();
   /**
+   * 直前に出したウィジェット。ガイダンスの出し分けに使う (`updateVoiceGuide`)。
+   *
+   * **ここで宣言する理由 (2026-09-18・実障害)**: 初期化は `applyModeUI()` →
+   * `showWidget()` を**この関数の途中で直に呼ぶ**。`let` を使う場所の近く
+   * (showWidget の直前) に置くと **TDZ で `Cannot access 'widgetKey' before
+   * initialization` を投げ、`initLiveController` ごと落ちる**。すると
+   * **開始ボタンの addEventListener に到達せず「押しても何も起きない」**になる。
+   * 型検査は通る (型は正しい) ので、**宣言の位置を下げないこと**。
+   */
+  let widgetKey: WidgetKey = 'voice';
+  /**
+   * 「そのまま話して回答できます」の出し分け。
+   * ①質問がまだ無い待機中 ②**マイクを切っているとき** は出さない
+   * (切っているのに「話して回答できます」と出ていたら嘘になる)。
+   */
+  function updateVoiceGuide(): void {
+    refs.voiceGuide.hidden = widgetKey === 'voice' || micGate.isMuted();
+  }
+  /**
    * マイクのオン / オフ (発注者指示 2026-09-17)。**利用者のタップでしか変わらない。**
    * ここから `toggle()` / `resetToOn()` を呼んでよいのは
    * ①マイクボタンの click ②問診を開始するとき の 2 か所だけで、
@@ -483,18 +502,6 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
   }
 
   type WidgetKey = 'voice' | 'list' | 'matrix' | 'slider' | 'stepper' | 'text';
-
-  /** 直前に出したウィジェット。ガイダンスの出し分けに使う (`updateVoiceGuide`)。 */
-  let widgetKey: WidgetKey = 'voice';
-
-  /**
-   * 「そのまま話して回答できます」の出し分け。
-   * ①質問がまだ無い待機中 ②**マイクを切っているとき** は出さない
-   * (切っているのに「話して回答できます」と出ていたら嘘になる)。
-   */
-  function updateVoiceGuide(): void {
-    refs.voiceGuide.hidden = widgetKey === 'voice' || micGate.isMuted();
-  }
 
   function showWidget(key: WidgetKey): void {
     const map: Record<WidgetKey, HTMLElement> = {
