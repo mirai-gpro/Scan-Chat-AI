@@ -126,8 +126,8 @@ export const CONFIG_SPECS: ConfigSpec[] = [
   { key: 'scan.model', type: 'enum', group: 'モデル', label: 'スキャン用モデル', default: 'gemini-3.1-flash-lite',
     options: ['gemini-3.1-flash-lite', 'gemini-3.5-flash-lite', 'gemini-3.5-flash', 'gemini-2.5-flash'],
     description: '画像解析/REST 呼び出しに使うモデル。既定=3.1-flash-lite (軽量安定)。3.5-flash-lite=GA(2026-07)。' },
-  { key: 'live.model', type: 'string', group: 'モデル', label: 'AI問診(Live)用モデル', default: 'gemini-3.1-flash-live-preview',
-    description: 'Live API 専用 (REST 非対応)。' },
+  { key: 'live.model', type: 'string', group: 'モデル', label: 'AI問診(Live)用モデル', default: 'gemini-3.8-live',
+    description: 'Live API 専用 (REST 非対応)。3.8 は proactive audio が恒久 ON。戻すなら gemini-3.1-flash-live-preview。' },
   // ── スキャン読取 (確定運用スタック) ──
   { key: 'scan.output_format', type: 'enum', group: 'スキャン読取', label: '出力形式', default: 'markdown', options: ['markdown', 'json'],
     description: 'markdown=GFM表経路(既定)。json=responseSchema構造化(補助欄暴走のため未採用)。' },

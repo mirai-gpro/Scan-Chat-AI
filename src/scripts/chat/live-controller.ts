@@ -131,16 +131,16 @@ const SYSTEM_INSTRUCTION = `あなたはウェルフォートの健康問診を�
 
 【絶対ルール】
 A. 自分で勝手に質問を考えない。ユーザー回答後にこちらから「次の質問: 『xxx』」と指定された文だけを読み上げる。指定がないターンでは質問を発話しない。
-A-2. **依頼文が届いていないターンでは、何も発話しない。** 相づち・お礼・確認・状況説明も含めて一切話さない。ユーザーが声で答えただけのターンは、こちらから依頼が届くまで**黙って待つ**。
-A-3. **問診の進み具合を自分で判断しない。** 「これで完了です」「最後の質問です」「あと少しです」等、**進行状況・残り問数に触れる発話を絶対にしない**。どこまで進んだか、いつ終わるかを知っているのは画面のシステムだけで、あなたには分からない。
+A-2. **問診の進み具合を自分で判断しない。** 「これで完了です」「最後の質問です」「あと少しです」等、**進行状況・残り問数に触れる発話を絶対にしない**。どこまで進んだか、いつ終わるかを知っているのは画面のシステムだけで、あなたには分からない。
 B. 選択肢や入力例を長々と読み上げない (画面に表示されています)。回答方法が必要なときだけ「画面で回して選ぶか、声でお答えください」と一言添える程度にする。
 C. ツール呼び出しは一切不要 (廃止済)。
 D. 診断・処方は禁止。
 
 【ターン構成】
-E. **ユーザーの回答を復唱しない。** 「『◯◯』ですね」等の言い直し・確認の聞き返しは一切しない。
-   「回答ありがとうございます」等のお礼・相づちも言わない。
+E. **ユーザーの回答を復唱しない。** 確認の聞き返し・お礼・相づち・状況説明もしない。
    回答内容は画面に表示されるので、音声で繰り返すと二重になる。
+   **発話するのは、こちらから届いた依頼文が指示する内容だけ。**
+   ユーザーが声で答えたときも、こちらから次の質問の依頼が届く。それを読み上げればよい。
 ユーザー回答が届いたら、以下の順で 1〜2 文を発話:
   ① セクションが変わるときだけ「次は◯◯についてお伺いしますね」と一言
   ② 依頼された質問本文をそのまま自然に読み上げる: 「『xxx』」
@@ -150,7 +150,7 @@ E. **ユーザーの回答を復唱しない。** 「『◯◯』ですね」等
 
 【問診完了時】
 **「これで全問終了です」という依頼がこちらから届いたときだけ**、「お疲れさまでした、ご協力ありがとうございました」と一言お礼。
-**依頼が無いのに自分の判断で完了を告げてはいけない** (A-3)。届かないまま問診が終わることもあるが、それでよい。
+**依頼が無いのに自分の判断で完了を告げてはいけない** (A-2)。
 
 【緊急対応】
 胸痛 / 呼吸困難 / 意識消失 / 激しい頭痛 / 大量出血等を訴えたら、即座に「すぐに 119 番にお電話ください」と案内する。`;
@@ -742,7 +742,18 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     const q = currentQ;
     if (!q) return;
     const ans = interpretVoiceAnswer(q, transcript);
-    if (ans == null) return;
+    if (ans != null) { commitVoiceAnswer(ans); return; }
+    /*
+     * 決定論で当たらなかった (発注者指示 2026-09-18)。
+     * **言い方が違うだけ**のことが多いので、選択肢の中から**推論させる**。
+     * 例: 「多分ない」「ないと思う」「ない、けど」→ 否定の選択肢。
+     * 確度が低ければ採らず、**聞き直す**。黙って無視しない。
+     */
+    if (!isChoiceQ(q)) return;
+    void resolveVoiceByLlm(q, transcript);
+  }
+
+  function commitVoiceAnswer(ans: string | string[]): void {
     if (Array.isArray(ans)) {
       submitAnswer(ans.length ? ans.join('、') : 'なし', { silent: true });
     } else {
@@ -750,10 +761,67 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     }
   }
 
+  /** 選択式か (推論に回してよい設問か)。自由記述・スライダー・マトリクスは対象外。 */
+  function isChoiceQ(q: QuestionDef): boolean {
+    return optionsOf(q).length > 0 && mapKind(q.answer_kind) === 'list';
+  }
+
+  /**
+   * 選択肢の中から推論させる。**Live セッションには一切触らない** —
+   * サーバ側の 1 回きりの呼び出しで番号だけを受け取り、発話はいつもどおり依頼文で頼む。
+   *
+   * **決められなければ回答にしない。** 聞き直しの一言を頼んで、画面のタップを待つ。
+   */
+  async function resolveVoiceByLlm(q: QuestionDef, transcript: string): Promise<void> {
+    const labels = optionsOf(q).map((o) => o.label);
+    let index: number | null = null;
+    try {
+      const res = await fetch('/api/interview/classify-voice', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ question: q.question, options: labels, transcript }),
+      });
+      if (res.ok) {
+        const data = (await res.json()) as { index?: number | null };
+        if (typeof data.index === 'number' && data.index >= 0 && data.index < labels.length) {
+          index = data.index;
+        }
+      }
+    } catch { /* 通信断。下の聞き直しへ倒す */ }
+
+    // 待っている間に設問が変わっていたら捨てる (古い回答を今の設問に入れない)
+    if (currentQ?.id !== q.id || advancing) return;
+
+    if (index != null) {
+      trace('VOICE_LLM_PICK', q.id, { index });
+      commitVoiceAnswer(isMultiQ(q) ? [labels[index]] : labels[index]);
+      return;
+    }
+    trace('VOICE_LLM_UNCLEAR', q.id);
+    askToRepeat(q);
+  }
+
+  /**
+   * 聞き直しは **1 問につき 1 回まで**。テレビの音などを拾い続けると、
+   * 「聞き取れませんでした」を延々と喋る AI になるため (マイク OFF との併用が前提)。
+   */
+  const askedRepeat = new Set<string>();
+
+  /** 聞き取れなかったことを伝えて、もう一度か、タップをお願いする (発注者指示の文言)。 */
+  function askToRepeat(q: QuestionDef): void {
+    if (askedRepeat.has(q.id)) return;
+    askedRepeat.add(q.id);
+    sendModelTurn(
+      `利用者の回答が聞き取れませんでした。次の 1 文だけを発話してください: `
+      + `「申し訳ありません、聞き取れませんでした。画面の選択肢をご確認のうえ、もう一度お答えいただくか、選択肢をタップしてください」`
+      + `。質問文は読み上げないでください。`,
+      q.id,
+    );
+  }
+
   /** transcript を設問種別ごとに解釈。マッチしなければ null (タップ待ち) */
   function interpretVoiceAnswer(q: QuestionDef, transcript: string): string | string[] | null {
-    const t = normalizeVoice(transcript);
-    if (!t) return null;
+    if (!transcript.trim()) return null;
 
     if (q.answer_kind === 'text') {
       // 自由記述は発話をそのまま回答に採用 (元の transcript を保持)
@@ -773,23 +841,16 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
       return null; // マトリクスはタップ操作のみ
     }
 
-    const options = optionsOf(q);
-    if (options.length === 0) return null;
-
-    const isMulti = isMultiQ(q);
-
-    const matched = options
-      .map((o) => ({ label: o.label, core: normalizeVoice(o.label) }))
-      .filter(({ core }) => core && (t.includes(core) || core.includes(t)));
-
-    if (matched.length === 0) return null;
-
-    if (isMulti) {
-      return matched.map((m) => m.label);
-    }
-    // 単一: 最も具体的 (核が長い) 候補を採用
-    matched.sort((a, b) => b.core.length - a.core.length);
-    return matched[0].label;
+    /*
+     * **選択肢への当てはめは、ここでは一切しない** (発注者指示 2026-09-18:
+     * 「極力 LLM に判断させて。パターンマッチング的なことは絶対にやらないで」)。
+     *
+     * 文字の一致・部分一致・同義語表は**持たない**。言い方の揺れ
+     * (「ない」「なし」「特にない」「多分ない」「ないと思う」「ない、けど」…) を
+     * 表で数え上げるのは、書いた分しか当たらず、書き漏らすと黙って落ちる。
+     * → `resolveVoiceByLlm` が選択肢の中から推論する。
+     */
+    return null;
   }
 
   function sendFallback(): void {
@@ -1428,14 +1489,6 @@ function clamp(v: number, lo: number, hi: number): number {
  * NFKC 正規化 → 括弧書き / 記号 / 空白を除去 → 小文字化。
  * 例: 「ほぼ毎日（週5日以上）」→「ほぼ毎日」
  */
-function normalizeVoice(s: string): string {
-  return s
-    .normalize('NFKC')
-    .replace(/[（(][^）)]*[）)]/g, '')
-    .replace(/[\s　・、。，．,.!！?？「」『』〜~ー\-/]/g, '')
-    .toLowerCase();
-}
-
 function describeErr(err: unknown): string {
   if (err instanceof Error) {
     const msg = err.message;

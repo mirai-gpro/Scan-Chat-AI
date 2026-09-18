@@ -73,6 +73,7 @@ jobs:
       - run: npm run verify:special-accounts
       - run: npm run verify:single-purchase
       - run: npm run verify:interview-speech
+      - run: npm run verify:voice-choice
       - run: npm run verify:interview-live-transport
       - run: npm run verify:scan-async
       - run: npm run verify:elith-intake
