@@ -322,24 +322,18 @@
       値と基準値を比べて当社が良し悪しを決めているのではなく、**Elith が書いた判定文の
       有無で並べているだけ**なのでミッション④ の範囲内 (整理はする / 解釈はしない)。
     -->
+    <!--
+      【2026-09-18・発注者指示】ここに在った表を廃止した。
+      表は「項目 / 今回 / 基準値 / 判定」の 4 列で、**基準値と判定は受領 JSON に無い欄**だった
+      (受領ファイルの各エントリは `date` と `value` だけ)。しかも Elith 自身が本文で
+      「結果票の判定をご確認ください」と書いており、**Elith は検査値の判定を出さない**。
+      当社が欄を作り、空欄に「—」を置いて "欄はあるが該当なし" に見せていた = 捏造。
+      → 他の章と同じく**本文の冒頭 2 文を逐語で出す**。受領した全行の表は「全編」に残る。
+    -->
     <div class="card" data-card="measurements" data-axis="b">
       <h3>検査値フィードバック</h3>
-      <div class="scroll">
-      <table>
-        <thead><tr><th>項目</th><th>今回</th><th>基準値</th><th>判定</th></tr></thead>
-        <tbody>
-          <tr><td>赤血球数</td><td class="num-cell">585 10^4/ul</td><td class="ref">400〜539 10^4/ul</td><td class="jdg j-w">基準範囲を上回っています</td></tr>
-          <tr><td>ヘモグロビン</td><td class="num-cell">18.1 g/dL</td><td class="ref">13.1〜16.3 g/dL</td><td class="jdg j-w">基準範囲を上回っています</td></tr>
-          <tr><td>ヘマトクリット</td><td class="num-cell">55.6 %</td><td class="ref">38.5〜48.9 %</td><td class="jdg j-w">基準範囲を上回っています</td></tr>
-          <tr><td>尿素窒素</td><td class="num-cell">27.9 mg/dL</td><td class="ref">8〜20 mg/dL</td><td class="jdg j-w">基準範囲を上回っており</td></tr>
-          <tr><td>ALT(GPT)</td><td class="num-cell">49 U/L</td><td class="ref">10〜42 U/L</td><td class="jdg j-w">基準範囲を上上回っており</td></tr>
-          <tr><td>総コレステロール</td><td class="num-cell">251 mg/dl</td><td class="ref">140〜199 mg/dl</td><td class="jdg j-w">基準範囲を上回っており</td></tr>
-          <tr><td>eGFR</td><td class="num-cell">64.6 mL/min</td><td class="ref">60.0以上 mL/min</td><td class="jdg j-o">基準範囲内</td></tr>
-          <tr><td>クレアチニン</td><td class="num-cell">0.96 mg/dl</td><td class="ref">1.00以上 mg/dl</td><td class="jdg j-x"></td></tr>
-        </tbody>
-      </table>
-      </div>
-      <div class="src">検査値フィードバック (値・基準値・判定はすべて本文からの逐語)</div>
+      <p>血液中の赤血球に関する項目についてご説明します。赤血球数は585 10^4/ul（基準値：400〜539 10^4/ul）、ヘモグロビンは18.1 g/dL（基準値：13.1〜16.3 g/dL）、ヘマトクリットは55.6 %（基準値：38.5〜48.9 %）という結果でした。</p>
+      <div class="src">検査値フィードバック 冒頭 2 文</div>
     </div>
 
     <div class="card" data-card="lifestyle" data-axis="b">

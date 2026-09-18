@@ -68,6 +68,8 @@ jobs:
       # A 層 = 純 Node。ブラウザも dev サーバも外部バイナリも要らない。
       # 1 本ずつ step にしてあるのは、落ちたときにどれが落ちたか一目で分かるため。
       - run: npm run verify:report-model
+      # 紙面に当社の文言を足していないか (2026-09-18 の捏造の再発防止)
+      - run: npm run verify:report-verbatim
       - run: npm run verify:sheet-contract
       - run: npm run verify:demo-gate
       - run: npm run verify:special-accounts

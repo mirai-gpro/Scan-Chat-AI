@@ -54,7 +54,6 @@ export const GET: APIRoute = async ({ request }) => {
       sections: vm.audit.sections,
       topics: vm.audit.topicCount,
       measurements: vm.audit.measurementCount,
-      references: vm.audit.referenceCount,
     },
     digest: {
       cards: vm.audit.digestCards,

@@ -43,7 +43,6 @@ export interface ElithIngestResult {
     section_names: string[];
     wellness_age: unknown;
     measurements: number;
-    references: number;
     topics: number;
     digest_cards: string[];
     empty_cards: string[];
@@ -130,7 +129,6 @@ export async function ingestElithReport(
       section_names: vm.audit.sections,
       wellness_age: vm.cover.wellnessAge,
       measurements: vm.audit.measurementCount,
-      references: vm.audit.referenceCount,
       topics: vm.audit.topicCount,
       digest_cards: vm.audit.digestCards,
       empty_cards: vm.audit.emptyCards,

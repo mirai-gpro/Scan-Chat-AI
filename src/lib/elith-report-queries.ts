@@ -22,7 +22,7 @@ import {
 } from './elith-report-sample';
 import { buildReportVM, type BuildInput } from './report-adapter';
 import type { ReportVM } from './report-model';
-import { cfg } from './app-config';
+// `cfg` は `ui.cancer_screening_not_included` のためだけに使っていた (2026-09-18 に削除)。
 
 /** 表示に必要な、報告書以外の材料 (氏名・実年齢・検査サイクル・タイプ判定)。 */
 export interface ReportContext {
@@ -50,7 +50,11 @@ function common(ctx: ReportContext): Omit<BuildInput, 'reportText' | 'checkup' |
     cycleSeq: ctx.cycleSeq,
     chronologicalAge: ctx.chronologicalAge,
     ourWellnessAge: ctx.ourWellnessAge,
-    cancerFallbackText: cfg('ui.cancer_screening_not_included'),
+    /*
+     * 【`cancerFallbackText` を削除した・発注者指示 2026-09-18】
+     * `ui.cancer_screening_not_included` は **admin が入力した当社の文**を
+     * 報告書の紙面に出すためのものだった。受領 JSON に無い文言は紙面に出さない。
+     */
   };
 }
 

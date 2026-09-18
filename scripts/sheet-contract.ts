@@ -201,7 +201,7 @@ export function contractFromVM(vm: ReportVM): SheetContract {
           case 'table':
             return {
               kind: 'table',
-              rows: b.rows.map((r) => [r.name, r.value, r.reference, r.judgement].join('\t')),
+              rows: b.rows.map((r) => [r.name, r.value].join('\t')),  // 基準値・判定の欄は 2026-09-18 に廃止
             };
         }
       }),

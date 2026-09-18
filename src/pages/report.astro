@@ -320,12 +320,19 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
           </b>
           <span class="mt-2 block text-sm text-slate-800">{WELLNESS_AGE_LABEL}</span>
         </div>
-        <div class="rp-num">
-          <b class="block font-mono text-[2.4rem] font-medium leading-none text-slate-700">
-            {vm.cover.chronologicalAge ?? '—'}
-          </b>
-          <span class="mt-2 block text-sm text-slate-800">実年齢</span>
-        </div>
+        {/*
+          **実年齢が無い回はこの枠ごと出さない** (2026-09-18)。
+          以前は空欄に `—` を置いていたが、紙面に「値がある欄」を作って中身だけ空にすると
+          "欄はあるが該当なし" に読める。**無い値の欄は作らない。**
+        */}
+        {vm.cover.chronologicalAge != null && (
+          <div class="rp-num">
+            <b class="block font-mono text-[2.4rem] font-medium leading-none text-slate-700">
+              {vm.cover.chronologicalAge}
+            </b>
+            <span class="mt-2 block text-sm text-slate-800">実年齢</span>
+          </div>
+        )}
       </div>
     )}
 
@@ -406,15 +413,9 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
           <h2 class="text-lg font-bold leading-snug text-navy-800">{axis.title}</h2>
         </div>
 
+        {/* 救急カード (ラベル「すぐ受診」) は 2026-09-18 に廃止。受領 JSON に無い当社の文言のため。 */}
         {digestByAxis(axis.key).map((card) => (
-          <article class={`rp-card flex flex-col gap-2.5 ${
-            card.tone === 'emergency' ? 'rp-er px-4 py-3.5' : ''
-          }`}>
-            {card.tone === 'emergency' && (
-              <p class="inline-flex w-fit items-center gap-1.5 text-xs font-semibold text-status-action">
-                <AppIcon name="error" size={14} />すぐ受診
-              </p>
-            )}
+          <article class="rp-card flex flex-col gap-2.5">
             {card.title && (
               <h3 class="rp-h3 text-base font-bold leading-snug text-navy-800">{card.title}</h3>
             )}
@@ -437,42 +438,22 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
                   </ol>
                 )}
 
-                {/* ⑩ 横テーブル — teal ヘッダ・白抜き・ゼブラなし (見本 p9/p12/p17) */}
+                {/*
+                  ⑩ 横テーブル — teal ヘッダ・白抜き・ゼブラなし (見本 p9/p12/p17)。
+                  **ダイジェストには出さない** (2026-09-18)。受領 57 行のうち 7 行だけを
+                  当社が選んで見せていたため。受領した全行の表は全編の章に出る。
+                */}
                 {block.kind === 'table' && (
                   <div class="-mx-1 overflow-x-auto">
                     <table class="rp-table text-sm">
                       <thead>
-                        <tr>
-                          <th>項目</th>
-                          <th>今回</th>
-                          <th>基準値</th>
-                          <th>判定</th>
-                        </tr>
+                        <tr><th>項目名</th><th>値</th></tr>
                       </thead>
                       <tbody>
                         {block.rows.map((r) => (
                           <tr>
-                            <td>
-                              {r.name}
-                              {/* 2 ファイルは包含関係でないので、本文にしかない値も載せる (spec §7.2)。 */}
-                              {r.source === 'report_text' && (
-                                <span class="ml-1 rounded bg-slate-100 px-1 text-[11px] text-slate-600">本文</span>
-                              )}
-                              {r.variants > 1 && (
-                                <span class="ml-1 rounded bg-amber-50 px-1 text-[11px] text-amber-800">
-                                  {r.variants} 通り
-                                </span>
-                              )}
-                            </td>
+                            <td>{r.name}</td>
                             <td class="whitespace-nowrap font-mono tabular-nums">{r.value}</td>
-                            <td class="whitespace-nowrap text-xs text-slate-600">{r.reference || '—'}</td>
-                            {/* 判定は Elith の原文をそのまま。色だけで意味を伝えない (アイコン+テキスト+色)。 */}
-                            <td class={`min-w-[11rem] text-xs leading-snug ${
-                              r.tone === 'flagged' ? 'font-semibold text-status-watch'
-                              : r.tone === 'within' ? 'text-status-ok' : 'text-slate-500'
-                            }`}>
-                              {r.judgement || '—'}
-                            </td>
                           </tr>
                         ))}
                       </tbody>
@@ -590,35 +571,25 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
                 </div>
               ))}
 
-              {/* 受領した検査値の全行。ダイジェストは Elith が取り上げた 8 項目だけを出している。 */}
+              {/*
+                受領した検査値ファイルの**全行をそのまま**写した表 (2026-09-18)。
+
+                **列は「項目名」と「値」だけ。** 受領ファイルの各エントリは `date` と
+                `value` しか持たず、**基準値・判定のフィールドは存在しない**。
+                以前はそれを欄にして空欄へ「—」を置き、"欄はあるが該当なし" に見せていた。
+                基準値は Elith が散文に書いているので、**上の本文にそのまま出る**。
+              */}
               {ch.table && !!ch.table.length && (
                 <div class="overflow-x-auto">
                   <table class="rp-table text-sm">
                     <thead>
-                      <tr>
-                        <th>項目</th>
-                        <th>今回</th>
-                        <th>基準値</th>
-                        <th>判定</th>
-                      </tr>
+                      <tr><th>項目名</th><th>値</th></tr>
                     </thead>
                     <tbody>
                       {ch.table.map((r) => (
                         <tr>
-                          <td>
-                            {r.name}
-                            {r.source === 'report_text' && (
-                              <span class="ml-1 rounded bg-slate-100 px-1 text-[11px] text-slate-600">本文</span>
-                            )}
-                            {r.variants > 1 && (
-                              <span class="ml-1 rounded bg-amber-50 px-1 text-[11px] text-amber-800">
-                                {r.variants} 通り
-                              </span>
-                            )}
-                          </td>
+                          <td>{r.name}</td>
                           <td class="whitespace-nowrap font-mono tabular-nums">{r.value}</td>
-                          <td class="whitespace-nowrap text-xs text-slate-600">{r.reference || '—'}</td>
-                          <td class="text-xs leading-snug text-slate-600">{r.judgement || '—'}</td>
                         </tr>
                       ))}
                     </tbody>

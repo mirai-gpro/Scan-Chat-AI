@@ -11,6 +11,7 @@
  * 実行: npm run verify:report-model
  */
 
+import { readFileSync } from 'node:fs';
 import REPORT_TEXT from '../src/data/elith/report_text_20260826.json';
 import HEALTH_CHECKUP from '../src/data/elith/health_checkup_20260826.json';
 // タイプ1 (2026-08-24 検査 / 2026-09-01 受領)。**検体 1 つでの検証は事故を通した** (spec §5.2)。
@@ -57,6 +58,17 @@ const walk = (v: unknown): void => {
 };
 walk(REPORT_TEXT);
 const norm = (s: string) => s.replace(/\s+/g, '');
+/**
+ * アダプタの**コードだけ** (コメントを落としたもの)。
+ * 「経路ごと無くした」ことを機械で見るのに使う (2026-09-18)。
+ *
+ * **コメントを落とすのが要点** — 何を消したかは削除跡のコメントに書いてあるので、
+ * 原文のまま検査すると**そのコメントに当たって永久に落ちる**。
+ */
+const ADAPTER_SRC = readFileSync('src/lib/report-adapter.ts', 'utf8')
+  .replace(/\/\*[\s\S]*?\*\//g, '')
+  .replace(/\/\/[^\n]*/g, '');
+
 const CORPUS = norm(corpus);
 
 /**
@@ -90,8 +102,11 @@ for (const card of vm.digest) {
       }
     }
     if (b.kind === 'table') {
-      // 判定は Elith の原文の部分文字列でなければならない (当社が判定を作らない)。
-      for (const r of b.rows) verbatim(`${card.key}/${r.name}/判定`, r.judgement);
+      // 【2026-09-18】表は項目名と値だけ。判定・基準値の欄は廃止した (受領 JSON に無い欄だった)。
+      for (const r of b.rows) {
+        check(`${card.key}/${r.name}: 表の列は項目名と値の 2 つだけ`,
+          Object.keys(r).length === 2 && 'name' in r && 'value' in r, Object.keys(r).join(','));
+      }
     }
   }
 }
@@ -102,7 +117,7 @@ for (const c of vm.digest) for (const b of c.blocks) {
   if (b.kind === 'paragraphs') b.items.forEach((t) => { digestChars += norm(t).length; });
   if (b.kind === 'steps' || b.kind === 'weeks') b.items.forEach((i) => { digestChars += norm(i.text).length; });
   if (b.kind === 'pairs') b.items.forEach((p) => { digestChars += norm(p.current).length + norm(p.action).length; });
-  if (b.kind === 'table') b.rows.forEach((r) => { digestChars += norm(r.name + r.value + r.reference + r.judgement).length; });
+  if (b.kind === 'table') b.rows.forEach((r) => { digestChars += norm(r.name + r.value).length; });
 }
 const reduction = 100 - (digestChars / CORPUS.length) * 100;
 // 前回の実装は削減率 1% でリバートされた (spec §9.2)。**80% を下回ったら可読化していない。**
@@ -123,7 +138,6 @@ check('トピック 38 件 (spec §5.4)', vm.audit.topicCount === 38, String(vm.
 check('アブストラクトは全編に置かない (冒頭へ移した)',
   !vm.chapters.some((c) => c.key === 'abstract'),
   vm.chapters.map((c) => c.key).join(','));
-check('基準値は 8 件のみ (spec §6 ④)', vm.audit.referenceCount === 8, String(vm.audit.referenceCount));
 check('ウェルネス年齢 46.6', vm.cover.wellnessAge === 46.6, String(vm.cover.wellnessAge));
 check('タイプ 2 と判定', vm.reportType === 2, String(vm.reportType));
 
@@ -141,18 +155,23 @@ check('軸は見出しだけを持つ',
 
 // ── 5) 捏造ゼロの境界 ──────────────────────────────────────────────
 const allRows = vm.chapters.find((c) => c.key === 'measurements')?.table ?? [];
-check('基準値が無い項目は空のまま (外部マスタで補完しない)',
-  allRows.filter((r) => !r.reference).length > 0);
-check('Elith が判定を書いていない行は判定が空',
-  allRows.every((r) => r.judgement === '' || CORPUS.includes(norm(r.judgement))));
-// 同名別値は自動採用しない (spec §7.1)。
-check('同名別値を競合として残す', allRows.some((r) => r.variants > 1));
-// 誤字は直さない (spec §7.3)。
-check('誤字「上上回っており」を直さず出す',
-  allRows.some((r) => r.judgement.includes('上上回っており')));
-// 2 ファイルは包含関係でない (spec §7.2)。
-check('本文にしかない値も表に載る',
-  allRows.some((r) => r.source === 'report_text'));
+
+/*
+ * 【2026-09-18・発注者指示】**受領 JSON に無い欄を表に作らない。**
+ *
+ * 以前ここは「基準値が無い行は空のまま」「判定が空」を見ていたが、
+ * **欄そのものが受領ファイルに無かった** (各エントリは `date` と `value` だけ)。
+ * 空欄に「—」を置いて "欄はあるが該当なし" に見せていたのが捏造だったので、
+ * 検査も「欄が無いこと」を見る側へ変える。
+ */
+check('表の列は項目名と値の 2 つだけ (基準値・判定の欄を作らない)',
+  allRows.length > 0 && allRows.every((r) => Object.keys(r).length === 2 && 'name' in r && 'value' in r),
+  allRows.length ? Object.keys(allRows[0]).join(',') : '0 行');
+// 同名別値は自動採用しない (spec §7.1)。**紙面のバッジではなく監査で報せる。**
+check('同名別値を監査に出す', vm.audit.anomalies.some((a) => a.startsWith('同名別値:')));
+// 値は受領のまま。**行を落とさない** (サイレント脱落ゼロ)。
+check('受領した行を全部載せる', allRows.length === vm.audit.measurementCount,
+  `${allRows.length} / ${vm.audit.measurementCount}`);
 
 // ── 6) 章立ての設定 ────────────────────────────────────────────────
 const cfgOf = (m: Record<string, string>) => (k: string) => m[k] ?? '';
@@ -276,11 +295,22 @@ check('旧世代: 見出しの無い章もダイジェストに出る',
   oldB.some((c) => c.key === 'medical_visit') && oldB.some((c) => c.key === 'nutrients'),
   oldB.map((c) => c.key).join(','));
 const oldRows = oldGen.chapters.find((c) => c.key === 'measurements')?.table ?? [];
-check('旧世代: `###` 節 + 半角コロンでも検査値を拾う', oldRows.length >= 4,
-  `${oldRows.length} 行`);
-check('旧世代: 基準値が半角コロンでも結べる',
-  oldRows.some((r) => r.name === '最高血圧' && r.reference === '〜129 mmHg'),
-  oldRows.map((r) => `${r.name}=${r.reference}`).join(' / '));
+/*
+ * **旧世代の fixture は検査値ファイルを持たない**ので表は 0 行が正しい (2026-09-18)。
+ * 以前は本文から値を拾って表に足していたが、**表は受領した検査値ファイルの写しに徹する**
+ * ことにしたため、本文にしかない値は本文のまま章に出る。
+ */
+check('旧世代: 検査値ファイルが無ければ表を作らない', oldRows.length === 0, `${oldRows.length} 行`);
+check('旧世代: 本文は章にそのまま出る',
+  oldGen.chapters.some((c) => c.key === 'measurements' && c.topics.length > 0));
+/*
+ * **基準値は表に持ち込まない** (2026-09-18)。ただし「本文に基準値の記載があるか」は
+ * 監査で数え続ける — **世代差で黙って 0 件になったことに気づけなくなる**のを防ぐため。
+ * 半角コロン `（基準値: 〜129 mmHg）` の世代でこれが 0 になった実績がある (2026-08-29)。
+ */
+check('旧世代: 半角コロンの基準値を監査で数えられる',
+  oldGen.audit.anomalies.some((a) => /本文 \(検査値フィードバック\) に基準値の記載が [1-9]/.test(a)),
+  oldGen.audit.anomalies.filter((a) => a.includes('基準値')).join(' / '));
 // 旧世代でも紙面の文はすべて逐語。
 const OLD_CORPUS = norm(OLD_GEN.map((s) => s.text).join(''));
 for (const c of oldB) {
@@ -333,30 +363,20 @@ for (const c of oldB) {
    */
   check('サンプルの既定はタイプ1', asDemoWithCancer.reportType === 1,
     `reportType=${asDemoWithCancer.reportType}`);
-  // 軸 A の廃止後は**カードの key で引く** (軸では引けない)。意図は同じ。
-  const aCards = asDemoWithCancer.digest.filter((c) => c.key === 'cancer_finding').length;
-  check('サンプルで「今回の所見」のカードが出る', aCards >= 1, `${aCards} 枚`);
   /*
-   * **「今回の所見」の中身が受領本文の逐語であること。** タイプ1 は本文に「がん」が 0 回で、
-   * 代わりに `cancer_risk.json` の項目名 (尿中のポルフィリン量) が出てくる。
-   * 語ではなく**受領ファイルの項目名**で選んでいることを、ここで固定する。
+   * 【2026-09-18・発注者指示】**「今回の所見」を廃止した。**
+   *
+   * 中身の文は逐語だったが、**当社が本文から文を選び、受領 JSON に 0 件の
+   * 「今回の所見」という見出しの下に置いていた**。選んで名前を付ければ解釈になる。
+   * → Elith が `cancer_screening` を書いた回だけ、**Elith の見出しで**出す。
+   *   タイプ1 の受領 JSON にそのフィールドは無いので、カードは出ない。
    */
-  const aCard = asDemoWithCancer.digest.find((c) => c.key === 'cancer_finding');
-  /*
-   * **このカードの軸がレジストリと一致すること。** アダプタに軸をベタ書きしていたため、
-   * レジストリで b へ移しても 'a' のままになり**画面から静かに消えた** (2026-09-17)。
-   * 下の §17 は `vm`/`t1` を見るが、**どちらにもこのカードは出ない**ので
-   * ここで見ないと検査が空振りする (退行注入で実証済み)。
-   */
-  const regAxis = resolveChapters(() => '').chapters.find((c) => c.key === 'cancer_finding')?.axis;
-  check('「今回の所見」の軸がレジストリと一致する', !!aCard && aCard.axis === regAxis,
-    `カード=${aCard?.axis ?? 'なし'} / レジストリ=${regAxis}`);
-  check('「今回の所見」が実在する軸に属する (画面から消えない)',
-    !!aCard && asDemoWithCancer.axes.some((x) => x.key === aCard.axis));
-  const aItems = (aCard?.blocks[0] as { items?: string[] } | undefined)?.items ?? [];
-  const t1Body = JSON.stringify(T1_TEXT);
-  check('「今回の所見」の文は受領本文の逐語', aItems.length > 0
-    && aItems.every((x) => t1Body.includes(x)), `${aItems.length} 文`);
+  check('「今回の所見」のカードを作らない (当社の見出しを紙面に出さない)',
+    !asDemoWithCancer.digest.some((c) => c.key === 'cancer_finding'),
+    asDemoWithCancer.digest.map((c) => c.key).join(','));
+  check('レジストリにも当社のラベルを残さない',
+    (resolveChapters(() => '').chapters.find((c) => c.key === 'cancer_finding') as { label?: string } | undefined)
+      ?.label !== '今回の所見');
 
   /*
    * **閲覧者の artifacts でタイプが反転しないこと** (2026-08-30 の実障害の逆向き)。
@@ -404,9 +424,11 @@ const t1NoOurs = buildReportVM({
 });
 check('当社の値も無ければ null (0 にしない)', t1NoOurs.cover.wellnessAge === null);
 
-// ② 基準値は「基準値：」でも「基準値 」でも拾う。**世代差で黙って空にしない**
-check('基準値をコロン無しの世代でも拾う', t1.audit.referenceCount === 7,
-  `referenceCount=${t1.audit.referenceCount}`);
+// ② 基準値は「基準値：」でも「基準値 」でも**監査で**拾う。**世代差で黙って空にしない**
+//    (紙面の表には持ち込まない = 受領ファイルに基準値の欄が無いため・2026-09-18)
+check('基準値をコロン無しの世代でも監査で拾う',
+  t1.audit.anomalies.some((a) => a.includes('本文 (検査値フィードバック) に基準値の記載が 7 件')),
+  t1.audit.anomalies.filter((a) => a.includes('基準値')).join(' / '));
 
 // ③ 検査値ファイル 3 つを 1 つの表に。問診は外す (発注者指示 2026-09-01)
 check('3 ファイルぶんの検査値が入る (37+18+2)', t1.audit.measurementCount === 57,
@@ -508,32 +530,27 @@ check('タイプ1 でもダイジェストの段落は受領本文の逐語',
     vm.audit.emptyCards.includes('cancer_finding'));
   check('材料が無くても軸の帯は立つ', vm.axes.length === 1);
 
-  // ① 出典行 = 受領 JSON のどこから採ったかだけ。社内表記を紙面に出さない。
-  // `ui.cancer_screening_not_included` は `elith-report-queries.ts` が
-  // `cancerFallbackText` として渡す (readConfig 経由ではない)。
-  const withFallback = buildReportVM({
-    reportText: REPORT_TEXT, checkup, name: '', issuedOn: '2026-08-26', isSample: true,
-    hasCancerRisk: false, cycleSeq: null, chronologicalAge: 56, readConfig: () => '',
-    cancerFallbackText: 'この報告書は、がんリスク検査を含まない検査データをもとに作成しています。',
-  });
-  const fb = withFallback.digest.find((c) => c.key === 'cancer_finding');
-  check('admin の文言を入れればカードが出る', !!fb);
-  check('受領 JSON 由来でない文には出典を書かない', fb?.source === '',
-    `source="${fb?.source ?? '(カード無し)'}"`);
   /*
-   * **`withFallback` も必ず見る。** 材料の無い `vm` では A のカードごと出ないので、
-   * `vm` と `t1` だけだと出典を見ていないのと同じになる (この検査が空振りする)。
+   * 【2026-09-18】`ui.cancer_screening_not_included` (admin が入力した当社の文) を廃止した。
+   * **受領 JSON に無い文言は紙面に出さない**ので、入力する口ごと無くした。
    */
-  for (const [label, v] of [['タイプ2', vm], ['タイプ1', t1], ['admin 文言あり', withFallback]] as const) {
+  check('admin が入力した文を紙面に出す経路が無い',
+    !/cancerFallbackText|cancer_screening_not_included/.test(ADAPTER_SRC),
+    'report-adapter.ts に残っている');
+
+  for (const [label, v] of [['タイプ2', vm], ['タイプ1', t1]] as const) {
     check(`社内表記 (spec §) が紙面に出ない — ${label}`, !sheetText(v).includes('spec §'));
   }
 
-  // ④ 救急カード。**材料は在るのに出さない**ことを、材料の実在ごと固定する。
+  /*
+   * ④ 救急カード。**材料は在るのに出さない**ことを、材料の実在ごと固定する。
+   * 2026-09-18 に**コードごと削除**した (ラベル「すぐ受診」は受領 JSON に無い当社の文言)。
+   */
   const ER = '早急な医療確認';
   check('検体に救急文が実在する (この検査が空振りしていない)', CORPUS.includes(ER));
   check('救急カードを出さない', !vm.digest.some((c) => c.key === 'emergency'));
-  check('赤 (tone=emergency) のカードが 1 枚も無い',
-    !vm.digest.some((c) => c.tone === 'emergency'));
+  check('救急カードのコードが残っていない (フラグ 1 つで復活しない)',
+    !/EMERGENCY_CARD_ENABLED|findEmergencySentence|すぐ受診/.test(ADAPTER_SRC));
   check('救急の文は全編に原文のまま残る (黙って消していない)',
     vm.chapters.some((ch) => ch.topics.some((t) => t.body.includes(ER))));
 }
@@ -651,7 +668,8 @@ check('タイプ1 でもダイジェストの段落は受領本文の逐語',
 
 // ── 結果 ──────────────────────────────────────────────────────────
 console.log(`\n受領本文 ${CORPUS.length} 字 / ダイジェスト ${digestChars} 字 (削減率 ${reduction.toFixed(1)}%)`);
-console.log(`検査値 ${vm.audit.measurementCount} 行・基準値 ${vm.audit.referenceCount} 件・トピック ${vm.audit.topicCount} 件`);
+console.log(`検査値 ${vm.audit.measurementCount} 行・トピック ${vm.audit.topicCount} 件` +
+  ` (基準値・判定の欄は 2026-09-18 に廃止 = 受領 JSON に無い欄だったため)`);
 if (vm.audit.anomalies.length) {
   console.log(`\n受領データの異常 ${vm.audit.anomalies.length} 件 (紙面には出さない):`);
   for (const a of vm.audit.anomalies) console.log(`  - ${a}`);
