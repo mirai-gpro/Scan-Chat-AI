@@ -26,6 +26,7 @@ import { marked } from 'marked';
 import { LiveAudioManager } from './live-audio-manager';
 import { initLiveTrace, trace } from './live-trace';
 import { createMicGate, type MicGate } from './mic-gate';
+import { pickVoiceOption, normalizeVoice } from './voice-answer';
 import {
   clearChatSession,
   clearInterviewProgress,
@@ -773,23 +774,11 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
       return null; // マトリクスはタップ操作のみ
     }
 
-    const options = optionsOf(q);
-    if (options.length === 0) return null;
-
-    const isMulti = isMultiQ(q);
-
-    const matched = options
-      .map((o) => ({ label: o.label, core: normalizeVoice(o.label) }))
-      .filter(({ core }) => core && (t.includes(core) || core.includes(t)));
-
-    if (matched.length === 0) return null;
-
-    if (isMulti) {
-      return matched.map((m) => m.label);
-    }
-    // 単一: 最も具体的 (核が長い) 候補を採用
-    matched.sort((a, b) => b.core.length - a.core.length);
-    return matched[0].label;
+    /*
+     * 選択肢への当て方は `voice-answer.ts` に切り出した (2026-09-18)。
+     * **誤って採る方が、採らないより悪い**場所なので、単体で検査できるようにしてある。
+     */
+    return pickVoiceOption(optionsOf(q), transcript, isMultiQ(q));
   }
 
   function sendFallback(): void {
@@ -1428,14 +1417,6 @@ function clamp(v: number, lo: number, hi: number): number {
  * NFKC 正規化 → 括弧書き / 記号 / 空白を除去 → 小文字化。
  * 例: 「ほぼ毎日（週5日以上）」→「ほぼ毎日」
  */
-function normalizeVoice(s: string): string {
-  return s
-    .normalize('NFKC')
-    .replace(/[（(][^）)]*[）)]/g, '')
-    .replace(/[\s　・、。，．,.!！?？「」『』〜~ー\-/]/g, '')
-    .toLowerCase();
-}
-
 function describeErr(err: unknown): string {
   if (err instanceof Error) {
     const msg = err.message;
