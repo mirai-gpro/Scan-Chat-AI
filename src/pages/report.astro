@@ -289,7 +289,14 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
       </p>
       <p class="mt-5 text-lg font-bold text-navy-800">{vm.cover.name}</p>
       <p class="mt-1.5 flex flex-wrap gap-x-4 gap-y-1 text-sm text-slate-600">
-        <span>作成日 {formatJpDate(vm.cover.issuedOn) || vm.cover.issuedOn}</span>
+        {/*
+          **作成日が無い回はラベルごと出さない** (2026-09-18)。
+          値が空でも「作成日」とだけ印字され、**中身の無い欄**が紙面に残っていた
+          (表の「基準値」「判定」と同じ形の誤り)。無い値の欄は作らない。
+        */}
+        {vm.cover.issuedOn && (
+          <span>作成日 {formatJpDate(vm.cover.issuedOn) || vm.cover.issuedOn}</span>
+        )}
         <span>紙面 {vm.cover.sheetVersion}</span>
         {vm.cover.testedOn && <span>検査 {formatJpDate(vm.cover.testedOn)}</span>}
         {vm.cover.cycleSeq && <span>第 {vm.cover.cycleSeq} 回 / 全 {vm.cover.cycleTotal} 回</span>}
