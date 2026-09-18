@@ -914,6 +914,75 @@
   }
 
   /* ──────────────────────────────────────────────────────────────
+   * AI問診: マイクのオン / オフ (#mic-gate・発注者指示 2026-09-17)
+   *
+   * **青はこのブロックだけで持つ。** アプリの操作色は Precision Teal で、
+   * そこへ「マイクを切る」を混ぜると押せるものの色が 2 つになる。発注者指定は
+   * 「薄い青」なので、`.report-sheet` が報告書だけのトークンを持つのと同じ流儀で
+   * **ここに閉じる** (`tailwind.config.mjs` の brand は触らない)。
+   *
+   * 色の実測 (帯の地 = Medical Mist に青 10%):
+   *   文字・アイコン #1E40AF … 帯 6.3:1 / ボタン面 5.1:1 (WCAG AA 4.5:1)
+   *   ボタンの枠 #1D4ED8 … 帯に対し 4.9:1 (非文字 1.4.11 の 3:1)
+   * **枠を透過にしない**のは、帯そのものが青いので青 55% の枠だと 2.0:1 しか出ず
+   * 3:1 に届かないため (計算で確認)。
+   * ──────────────────────────────────────────────────────────── */
+  .mic-gate {
+    @apply mt-2.5 flex items-center gap-2.5 rounded-xl py-2 pl-3 pr-2;
+    background: rgb(37 99 235 / 0.10);
+    border: 1px solid rgb(37 99 235 / 0.35);
+  }
+  .mic-gate-note {
+    @apply flex-1 text-xs font-bold leading-normal;
+    color: #1E40AF;
+    /*
+     * 和文はどこでも折れるので、390px では「…マイクをオフ / に」と 1 文字だけ
+     * 落ちる (実測)。**文言は発注者指定なので縮めず**、折り返す位置だけ整える。
+     * `text-wrap: balance` は**もっと悪くなった** (「周囲の音を拾う場 / 合、」で
+     * 語の途中を割る・実測) ので採らない。`keep-all` なら読点で折れる。
+     * 収まらない端末のために `anywhere` を添える (はみ出させない)。
+     */
+    word-break: keep-all;
+    overflow-wrap: anywhere;
+  }
+  /* タップ領域は 44px を割らない (走行中の電車で押す場面を想定する)。 */
+  .mic-gate-btn {
+    @apply grid shrink-0 place-items-center rounded-xl transition;
+    width: 2.75rem;
+    height: 2.75rem;
+    background: rgb(37 99 235 / 0.18);
+    border: 1px solid #1D4ED8;
+    color: #1E40AF;
+    animation: mic-blink 3s ease-in-out infinite;
+  }
+  .mic-gate-btn:active { transform: scale(0.97); }
+  /* 3 秒周期 = 0.33Hz。WCAG 2.3.1 の閾値 3Hz を大きく下回る。発光は使わない。 */
+  @keyframes mic-blink {
+    0%, 100% { opacity: 1; }
+    50%      { opacity: 0.38; }
+  }
+  .mic-gate .mic-gate-ico-off { display: none; }
+
+  /* オフ = 青も点滅も消える。帯ごと色が落ちるので遠目でも状態が分かる。 */
+  .mic-gate.off {
+    @apply bg-slate-100;
+    border-color: theme('colors.slate.300');
+  }
+  .mic-gate.off .mic-gate-note { @apply text-slate-700; }
+  .mic-gate.off .mic-gate-btn {
+    @apply bg-white text-slate-600;
+    border-color: theme('colors.navy.400');
+    animation: none;
+  }
+  .mic-gate.off .mic-gate-ico-on { display: none; }
+  .mic-gate.off .mic-gate-ico-off { display: grid; }
+
+  /* 動きを減らす設定の端末では点滅させない (状態は色と文言が持つ)。 */
+  @media (prefers-reduced-motion: reduce) {
+    .mic-gate-btn { animation: none; }
+  }
+
+  /* ──────────────────────────────────────────────────────────────
    * AI問診: 直前の回答の確認 + 訂正 (#last-answer)
    *
    * 復唱を廃止したので、回答を確かめる手段は**画面表示だけ**になった。

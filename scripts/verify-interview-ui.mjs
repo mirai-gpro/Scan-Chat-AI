@@ -240,6 +240,69 @@ ok('⑪ ガイダンスのスタイルが当たっている', !!applied?.guideSt
 ok('⑪ 質問が mist の面に乗っている', !!applied?.qbPainted, '');
 
 /*
+ * ⑫ **マイクのオン / オフ** (発注者指示 2026-09-17・裁定 A 案)。
+ * 実機でテレビの音をかなり拾うので、利用者が自分でマイクを切れるようにした。
+ * **モジュールを実際に動かして**帯と文言とアイコンが切り替わることを見る
+ * (ソース検査だけだと「書いてあるが当たっていない」を見逃す)。
+ */
+const gate = await page.evaluate(async () => {
+  const m = await import('/src/scripts/chat/mic-gate.ts');
+  const qa = document.getElementById('qa-area');
+  const wasHidden = qa.hidden;
+  qa.hidden = false; // [hidden] は display:none なので測れない
+  const gateEl = document.getElementById('mic-gate');
+  const noteEl = document.getElementById('mic-gate-note');
+  const btn = document.getElementById('mic-gate-btn');
+  const guide = document.getElementById('voice-guide');
+  const seen = [];
+  const g = m.createMicGate({ gate: gateEl, note: noteEl, button: btn }, (muted) => seen.push(muted));
+  const snap = () => {
+    const cs = getComputedStyle(btn);
+    const r = btn.getBoundingClientRect();
+    return {
+      note: noteEl.textContent.trim(),
+      label: btn.getAttribute('aria-label'),
+      band: getComputedStyle(gateEl).backgroundColor,
+      anim: cs.animationDuration,
+      w: Math.round(r.width), h: Math.round(r.height),
+      icoOn: getComputedStyle(document.querySelector('.mic-gate-ico-on')).display,
+      icoOff: getComputedStyle(document.querySelector('.mic-gate-ico-off')).display,
+    };
+  };
+  const on = snap();
+  g.toggle();
+  const off = snap();
+  g.toggle();
+  const back = snap();
+  // 並び: 質問 → マイクの帯 → 音声ガイダンス
+  const after = (a, z) => !!(a.compareDocumentPosition(z) & Node.DOCUMENT_POSITION_FOLLOWING);
+  const order = after(document.getElementById('question-text'), gateEl) && after(gateEl, guide);
+  // 中止・スピーカーは現状のまま (帯へ移していない・数も変えていない)
+  const untouched = document.querySelectorAll('#mic-btn').length === 1
+    && document.querySelectorAll('#speaker-btn').length === 1
+    && !document.querySelector('.qb > .flex').contains(btn);
+  qa.hidden = wasHidden;
+  return { on, off, back, seen, order, untouched, note: m.MIC_GATE_NOTE_ON, noteOff: m.MIC_GATE_NOTE_OFF };
+});
+ok('⑫ 帯の文言が「周囲の音を拾う場合、マイクをオフに」', gate.on.note === gate.note, gate.on.note);
+ok('⑫ ボタンは帯の右端・44px 以上', gate.on.w >= 44 && gate.on.h >= 44, `${gate.on.w}x${gate.on.h}`);
+ok('⑫ 点滅は 3 秒周期', gate.on.anim === '3s', gate.on.anim);
+ok('⑫ 中止・スピーカーは現状のまま (質問行に足していない)', gate.untouched, '');
+ok('⑫ 質問 → マイクの帯 → 音声ガイダンス の順', gate.order, '');
+// オフ: 文言・ラベル・アイコン・地の色・点滅がすべて変わる
+ok('⑫ オフで文言が変わる', gate.off.note === gate.noteOff, gate.off.note);
+ok('⑫ オフで aria-label が「マイクをオンにする」', gate.off.label === 'マイクをオンにする', gate.off.label);
+ok('⑫ オフで点滅が止まる', gate.off.anim === '0s', gate.off.anim);
+ok('⑫ オフで帯の色が変わる (色だけに頼らないが色も変える)',
+  gate.off.band !== gate.on.band, `${gate.on.band} → ${gate.off.band}`);
+ok('⑫ アイコンが切り替わる (斜線入りになる)',
+  gate.on.icoOn !== 'none' && gate.on.icoOff === 'none'
+  && gate.off.icoOn === 'none' && gate.off.icoOff !== 'none',
+  JSON.stringify([gate.on.icoOn, gate.on.icoOff, gate.off.icoOn, gate.off.icoOff]));
+ok('⑫ もう一度押すと元に戻る', gate.back.note === gate.on.note && gate.back.anim === gate.on.anim, '');
+ok('⑫ 変化のたびに 1 回だけ通知する', JSON.stringify(gate.seen) === '[true,false]', JSON.stringify(gate.seen));
+
+/*
  * ⑨ 選択画面の中に確認バーが出て、そこから訂正できること (実際に開いて押す)。
  * 問診本体は Live API が要るので動かせない。ここは picker 単体を直接開いて見る。
  */

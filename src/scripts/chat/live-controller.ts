@@ -25,6 +25,7 @@ import {
 import { marked } from 'marked';
 import { LiveAudioManager } from './live-audio-manager';
 import { initLiveTrace, trace } from './live-trace';
+import { createMicGate, type MicGate } from './mic-gate';
 import {
   clearChatSession,
   clearInterviewProgress,
@@ -61,6 +62,11 @@ export interface LiveRefs {
   micBtn: HTMLButtonElement;
   startBtn: HTMLButtonElement;
   speakerBtn: HTMLButtonElement;
+
+  /** マイクのオン / オフ。**帯とボタンで 1 組** (発注者裁定 2026-09-17・A 案)。 */
+  micGate: HTMLElement;
+  micGateNote: HTMLElement;
+  micGateBtn: HTMLButtonElement;
 
   startHero: HTMLElement;
   qaArea: HTMLElement;
@@ -158,8 +164,26 @@ type ChoiceOption = { label: string; icon?: string };
 export async function initLiveController(refs: LiveRefs): Promise<void> {
   let session: ChatSession = loadChatSession(SESSION_ID) ?? createEmptySession(SESSION_ID);
   const audio = new LiveAudioManager();
+  /**
+   * マイクのオン / オフ (発注者指示 2026-09-17)。**利用者のタップでしか変わらない。**
+   * ここから `toggle()` / `resetToOn()` を呼んでよいのは
+   * ①マイクボタンの click ②問診を開始するとき の 2 か所だけで、
+   * ターン・AI の発話・サーバのイベントからは**絶対に呼ばない** (プログラム側の
+   * マイクゲートは禁止・正本 `docs/interview/AI問診_仕様と設計原則.md`)。
+   */
+  const micGate: MicGate = createMicGate(
+    { gate: refs.micGate, note: refs.micGateNote, button: refs.micGateBtn },
+    (muted) => {
+      audio.setUserMicMuted(muted);
+      // 切ってある間は「そのまま話して回答できます」を出さない (できないので)。
+      updateVoiceGuide();
+      trace('MIC_MUTE', currentQ?.id ?? null, { muted });
+    },
+  );
   /** そのターンで最初の音声 chunk が来たかどうか (観測ログ用。UI 遷移には使わない)。 */
   let sawAudioThisTurn = false;
+  /** そのターンでマイクが何か拾ったか (観測ログ用。**中身は記録しない**)。 */
+  let sawInputThisTurn = false;
   initLiveTrace();
   let liveSession: Session | null = null;
   let connecting = false;
@@ -315,6 +339,12 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     }
   }
 
+  /*
+   * マイク ON/OFF。**ここが micGate.toggle() の唯一の呼び出し元**
+   * (利用者の操作以外でマイクの状態を変えない)。
+   */
+  refs.micGateBtn.addEventListener('click', () => micGate.toggle());
+
   // スピーカー ON/OFF（AI の音声出力のみ。テキスト/UI は影響なし）
   refs.speakerBtn.addEventListener('click', () => {
     muted = !muted;
@@ -332,6 +362,11 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
       return;
     }
     if (connecting) return;
+    /*
+     * **前回の選択を持ち越さない** (静かな部屋と電車では答えが違う)。
+     * 開始のタップに紐づく操作なので、ここも利用者の操作の内。
+     */
+    micGate.resetToOn();
     connecting = true;
     setStatus('接続中…');
     refs.startBtn.disabled = true;
@@ -449,6 +484,18 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
 
   type WidgetKey = 'voice' | 'list' | 'matrix' | 'slider' | 'stepper' | 'text';
 
+  /** 直前に出したウィジェット。ガイダンスの出し分けに使う (`updateVoiceGuide`)。 */
+  let widgetKey: WidgetKey = 'voice';
+
+  /**
+   * 「そのまま話して回答できます」の出し分け。
+   * ①質問がまだ無い待機中 ②**マイクを切っているとき** は出さない
+   * (切っているのに「話して回答できます」と出ていたら嘘になる)。
+   */
+  function updateVoiceGuide(): void {
+    refs.voiceGuide.hidden = widgetKey === 'voice' || micGate.isMuted();
+  }
+
   function showWidget(key: WidgetKey): void {
     const map: Record<WidgetKey, HTMLElement> = {
       voice: refs.uiVoice,
@@ -468,7 +515,8 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
      * 声で答えられるので、ウィジェットの種類で出し分けない。
      * 隠すのは「質問がまだ無い待機中 (key==='voice')」のときだけ。
      */
-    refs.voiceGuide.hidden = key === 'voice';
+    widgetKey = key;
+    updateVoiceGuide();
   }
 
   function stepStep(delta: number): void {
@@ -950,6 +998,12 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     // 2) ストリーミング transcript (入力 = ユーザー)
     const inText = msg.serverContent?.inputTranscription?.text;
     if (inText) {
+      /*
+       * **マイクが何か拾ったこと自体**を記録する (中身は記録しない = 医療情報)。
+       * 依頼していない発話 (実測 2026-09-17: 依頼の無い AUDIO_FIRST_CHUNK) が、
+       * **マイクが拾った音に対する応答なのか、モデルが勝手に喋ったのか**を切り分けるため。
+       */
+      if (!sawInputThisTurn) { sawInputThisTurn = true; trace('INPUT_ACTIVITY', currentQ?.id ?? null); }
       userBuf += inText;
       ensureStreamBubble('user').textContent = userBuf;
       refs.log.scrollTop = refs.log.scrollHeight;
@@ -966,6 +1020,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     if (msg.serverContent?.turnComplete) {
       trace('TURN_COMPLETE', currentQ?.id ?? null);
       sawAudioThisTurn = false;
+      sawInputThisTurn = false;
       const cleanedAssistant = cleanTranscript(assistantBuf);
       const finishedUser = userBuf.trim();
       finalizeStream('user', userBuf);
