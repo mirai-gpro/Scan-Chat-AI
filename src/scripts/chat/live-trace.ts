@@ -108,3 +108,62 @@ export function trace(ev: string, qid?: string | null, d?: TraceDetail): void {
 }
 
 export function isTraceEnabled(): boolean { return enabled; }
+
+/**
+ * **スマホから観測ログを取り出す口** (2026-09-23)。
+ *
+ * 【なぜ要るか】`window.__liveTrace()` は JS コンソールが要る。**実機は iPhone で、
+ * コンソールを開くには Mac と Safari の開発メニューが要る**ので、事実上取り出せない。
+ * その結果「読み上げされない」の原因を**推測で 2 回続けて外した** (2026-09-23)。
+ * 測れないものを直そうとしない。
+ *
+ * 【出す条件】観測ログが有効なときだけ。通常の問診画面には**出ない**。
+ * 【PII】積んでいるのは設問 ID・イベント名・時刻・数値だけ (`TraceDetail` が
+ * 自由入力の文字列を受け取れない型)。発話も回答も入っていない。
+ */
+export function mountTraceButton(): void {
+  try {
+    if (!enabled || typeof document === 'undefined') return;
+    if (document.getElementById('live-trace-copy')) return;
+
+    const btn = document.createElement('button');
+    btn.id = 'live-trace-copy';
+    btn.type = 'button';
+    btn.textContent = '観測ログをコピー';
+    btn.setAttribute('aria-label', '観測ログをクリップボードへコピー');
+    btn.style.cssText = [
+      'position:fixed', 'right:8px', 'bottom:8px', 'z-index:2147483647',
+      'min-height:44px', 'padding:10px 14px', 'border-radius:9999px',
+      'border:1px solid #287F86', 'background:#FFFFFF', 'color:#287F86',
+      'font-size:13px', 'font-weight:600', 'box-shadow:0 1px 4px rgba(0,0,0,.2)',
+    ].join(';');
+
+    btn.addEventListener('click', () => {
+      const text = JSON.stringify(rows.slice(), null, 1);
+      const done = (msg: string) => {
+        btn.textContent = msg;
+        setTimeout(() => { btn.textContent = `観測ログをコピー (${rows.length})`; }, 2000);
+      };
+      /*
+       * `navigator.clipboard` は**安全なコンテキストと権限**が要る。
+       * 落ちたときに何も起きないと「コピーできたのか」が分からないので、
+       * **選択済みのテキスト欄に出して手でコピーできる**ところまで倒す。
+       */
+      const fallback = () => {
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.readOnly = true;
+        ta.style.cssText = 'position:fixed;left:4px;right:4px;bottom:60px;height:40vh;z-index:2147483647;font-size:12px';
+        document.body.appendChild(ta);
+        ta.select();
+        done('下の欄から手でコピーしてください');
+      };
+      try {
+        void navigator.clipboard.writeText(text).then(() => done('コピーしました'), fallback);
+      } catch { fallback(); }
+    });
+
+    document.body.appendChild(btn);
+    btn.textContent = `観測ログをコピー (${rows.length})`;
+  } catch { /* 何もしない */ }
+}
