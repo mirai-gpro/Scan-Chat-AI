@@ -351,7 +351,7 @@ const RAW: Omit<QuestionDef, 'section_title'>[] = [
   },
   {
     id: 'S-YEARS', section_id: 'smoking', answer_kind: 'chip',
-    question: '喫煙している／していた年数を教えてください。',
+    question: '喫煙している、又は、していた年数を教えてください。',
     chips: opt(['5年未満', '5〜10年', '10〜20年', '20〜30年', '30年以上']),
     when: (a) => a['S-STATUS'] !== '吸ったことはない',
   },
@@ -376,13 +376,13 @@ const RAW: Omit<QuestionDef, 'section_title'>[] = [
   },
   {
     id: 'D-YEARS', section_id: 'drinking', answer_kind: 'chip',
-    question: '飲酒している／していた年数を教えてください。',
+    question: '飲酒している、又は、していた年数を教えてください。',
     chips: opt(['5年未満', '5〜10年', '10〜20年', '20〜30年', '30年以上']),
     when: (a) => a['D-FREQ'] !== '元々まったく飲まない',
   },
   {
     id: 'D-AMOUNT', section_id: 'drinking', answer_kind: 'chip',
-    question: '飲酒する／していた際の、1回あたりの飲酒量を教えてください。',
+    question: '飲酒する、又は、していた際の、1回あたりの飲酒量を教えてください。',
     chips: opt(['1合未満（ビール中瓶1本未満）', '1〜2合', '2〜3合', '3合以上']),
     when: (a) => a['D-FREQ'] !== '元々まったく飲まない',
   },
@@ -525,7 +525,7 @@ const RAW: Omit<QuestionDef, 'section_title'>[] = [
   // 申込情報が取れない場合のみフォールバックで提示する (複数検査可＝multi)。
   {
     id: 'EXAM-TYPE', section_id: 'exam', answer_kind: 'list', multi: true,
-    question: '今回実施いただく／いただいた検査について、当てはまるものを教えてください。',
+    question: '今回実施いただく、又は、いただいた検査について、当てはまるものを教えてください。',
     list_title: '実施する検査を選んでください（複数選択可）',
     list_options: opt([T_WELLTECT, T_GENE, T_CANCER, T_BLOOD, T_AIPRED, T_AIPREV]),
   },
