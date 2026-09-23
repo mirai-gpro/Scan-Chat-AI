@@ -41,13 +41,13 @@ export const POST: APIRoute = async ({ request }) => {
   if (!transcript.trim() || options.length === 0) return json({ index: null, confidence: 0 });
 
   const apiKey = import.meta.env.GEMINI_API_KEY ?? process.env.GEMINI_API_KEY ?? '';
-  if (!apiKey) return json({ index: null, confidence: 0 });
+  if (!apiKey) return json({ index: null, confidence: 0, reason: 'empty' });
 
   try {
     const r = await classifyVoiceChoice(apiKey, options, transcript, question);
     return json(r);
   } catch {
     // **落ちても回答を作らない。** 呼び出し側が「もう一度お答えください」に倒す。
-    return json({ index: null, confidence: 0 });
+    return json({ index: null, confidence: 0, reason: 'empty' });
   }
 };

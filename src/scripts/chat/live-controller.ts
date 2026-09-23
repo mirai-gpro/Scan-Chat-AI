@@ -866,9 +866,16 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
         body: JSON.stringify({ question: q.question, options: labels, transcript }),
       });
       if (res.ok) {
-        const data = (await res.json()) as { index?: number | null };
+        const data = (await res.json()) as { index?: number | null; reason?: string };
         if (typeof data.index === 'number' && data.index >= 0 && data.index < labels.length) {
           index = data.index;
+        } else if (data.reason === 'empty') {
+          /*
+           * **本文が空で返った** = モデルが決められなかったのとは別物
+           * (思考で出力予算を使い切った / 応答が壊れた)。画面にはどちらも
+           * 「聞き取れませんでした」としか出ないので、ここで分けて残す。
+           */
+          trace('VOICE_LLM_EMPTY', q.id);
         }
       }
     } catch { /* 通信断。下の聞き直しへ倒す */ }

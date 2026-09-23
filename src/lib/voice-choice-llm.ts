@@ -26,6 +26,14 @@ export interface VoiceChoiceResult {
   index: number | null;
   /** 0〜1。低いほど自信が無い。閾値未満は呼び出し側で null 扱い。 */
   confidence: number;
+  /**
+   * **なぜその結果になったか** (切り分け用・2026-09-23)。
+   * `index: null` だけだと「モデルが決められなかった」と
+   * 「本文が空で返った (予算切れ・通信失敗)」が**区別できず**、
+   * 画面にはどちらも「聞き取れませんでした」としか出ない。
+   * 選択肢の文言も発話も入れない (PII を増やさない)。
+   */
+  reason?: 'ok' | 'empty' | 'unparsable' | 'out_of_range' | 'low_confidence';
 }
 
 /** これ未満は採らない。**医療問診なので高めに置く** (誤採用より聞き直し)。 */
@@ -91,7 +99,26 @@ ${list}
       temperature: 0,
       responseMimeType: 'application/json',
       responseSchema: SCHEMA,
-      maxOutputTokens: 64,
+      /*
+       * **思考トークンも maxOutputTokens に含まれる** (実障害 2026-09-23)。
+       *
+       * 公式 (ai.google.dev/gemini-api/docs/thinking):
+       *   "max_output_tokens ... sets the maximum number of tokens a response can
+       *    generate, **including thought tokens**"
+       *   "If the model hits this limit while reasoning, it stops generating ...
+       *    and returns truncated or **empty output**"
+       *
+       * ここは `thinkingBudget: 0` (2.x で思考オフ) を渡しているが、3.x では
+       * `gemini.ts` の `thinkingBudgetToLevel` が **0 を `thinkingLevel: 'low'` に
+       * 変換する = 思考はオンのまま**。そこへ 64 しか与えていなかったので、
+       * 思考で予算を使い切り**本文が空で返り**、JSON.parse に失敗 →
+       * `index: null` → 「聞き取れませんでした」。
+       * **選択肢の音声回答が通らない**症状の正体がこれ。
+       *
+       * 返す JSON は 30 トークン程度なので、思考ぶんの余裕を持たせる。
+       * (`thinkingBudgetToLevel` 自体はスキャン経路と共用なので**ここでは触らない**)
+       */
+      maxOutputTokens: 2048,
       thinkingConfig: { thinkingBudget: 0 },
     },
   }, MODELS.scan);
@@ -104,15 +131,17 @@ ${list}
  * (モデルが何を返しても、選択肢の外は採用できない形にしておく)
  */
 export function parseChoice(text: string, optionCount: number): VoiceChoiceResult {
+  // **空は「決められなかった」ではない。** 予算切れ・通信失敗の疑いとして分けて返す。
+  if (!text.trim()) return { index: null, confidence: 0, reason: 'empty' };
   let raw: unknown;
-  try { raw = JSON.parse(text); } catch { return { index: null, confidence: 0 }; }
-  if (!raw || typeof raw !== 'object') return { index: null, confidence: 0 };
+  try { raw = JSON.parse(text); } catch { return { index: null, confidence: 0, reason: 'unparsable' }; }
+  if (!raw || typeof raw !== 'object') return { index: null, confidence: 0, reason: 'unparsable' };
   const o = raw as { index?: unknown; confidence?: unknown };
   const conf = typeof o.confidence === 'number' && Number.isFinite(o.confidence)
     ? Math.max(0, Math.min(1, o.confidence))
     : 0;
-  if (typeof o.index !== 'number' || !Number.isInteger(o.index)) return { index: null, confidence: conf };
-  if (o.index < 0 || o.index >= optionCount) return { index: null, confidence: conf };
-  if (conf < CONFIDENCE_FLOOR) return { index: null, confidence: conf };
-  return { index: o.index, confidence: conf };
+  if (typeof o.index !== 'number' || !Number.isInteger(o.index)) return { index: null, confidence: conf, reason: 'ok' };
+  if (o.index < 0 || o.index >= optionCount) return { index: null, confidence: conf, reason: 'out_of_range' };
+  if (conf < CONFIDENCE_FLOOR) return { index: null, confidence: conf, reason: 'low_confidence' };
+  return { index: o.index, confidence: conf, reason: 'ok' };
 }
