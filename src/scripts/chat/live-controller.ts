@@ -785,6 +785,30 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
    * 先に来たほうが `userBuf` を空にするので、後から来たほうは空振りする (二重記録しない)。
    */
   function finalizeUserUtterance(via: 'settle' | 'turn_complete'): void {
+    /*
+     * ━━ **モデルが喋っている最中は確定しない** (回帰修正 2026-09-23) ━━
+     *
+     * 【出した回帰】挨拶のあと **1 問目が読み上げられなくなった**。
+     * 挨拶と 1 問目は 1 回の `sendModelTurn` で依頼している (onopen) ので、
+     * 途中で別のターンが飛ぶと**質問だけが消える**。
+     * `sendModelTurn` の `turnComplete: true` は
+     * **"unconditionally interrupts active model generation"** (3.1 モデルページ)。
+     *
+     * 【機序】**アプリ側にエコー除去は無い** (handleServerMessage 冒頭のコメント:
+     * 「VAD / echo / barge-in は Live API サーバ側が処理する」)。
+     * 挨拶の音声をマイクが拾う → 文字起こしが届く → 切れ目のタイマーが
+     * **モデルの発話中に**発火 → 1 問目は自由記述なので `interpretVoiceAnswer` が
+     * **発話をそのまま回答に採用** → 次の設問へ進み `sendModelTurn` → 挨拶を中断。
+     *
+     * 【直し方】**モデルのターンが進行中 (`sawAudioThisTurn`) なら確定しない**。
+     * その回は `turnComplete` 側が確定するので取りこぼさない。
+     * 詰まっていたのは**モデルが黙っている**ケースで、そこは音声が来ないので
+     * `sawAudioThisTurn` が false = これまでどおり切れ目で確定する。
+     *
+     * これで「モデルを絶対に中断しない」(修正前から在った性質) と
+     * 「モデルを待たずに確定する」(今回の修正) が両立する。
+     */
+    if (via === 'settle' && sawAudioThisTurn) { scheduleUtteranceSettle(); return; }
     cancelUtteranceSettle();
     const finished = userBuf.trim();
     if (!finished) return;

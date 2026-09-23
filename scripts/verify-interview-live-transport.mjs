@@ -112,6 +112,20 @@ ok('マイク音声は sendRealtimeInput(audio)', /sendRealtimeInput\(\{?\s*\n?\
   ok('確定と同時に userBuf を空にする', /userBuf = ''/.test(fin),
     '空にしないと次の発話が連結される (「70kg 70kg」)');
 
+  /*
+   * **モデルの発話を絶対に中断しない** (回帰 2026-09-23)。
+   * 挨拶と 1 問目は 1 回の sendModelTurn で依頼しているので、発話中に確定 →
+   * 次の設問へ進む → sendModelTurn (turnComplete:true は生成を無条件に中断) と
+   * 連鎖すると **1 問目が読み上げられない**。アプリ側にエコー除去は無いので、
+   * 挨拶を拾った文字起こしだけでこれが起きる。
+   */
+  ok('モデルの発話中は切れ目で確定しない',
+    /via === 'settle' && sawAudioThisTurn/.test(fin),
+    'モデルの発話を中断して 1 問目が読み上げられなくなる');
+  ok('その回は捨てずに仕掛け直す',
+    /sawAudioThisTurn\)\s*\{\s*scheduleUtteranceSettle\(\)/.test(fin),
+    '捨てると発話中に届いた回答が失われる');
+
   const turn = spanOf(ctrl, 'if (msg.serverContent?.turnComplete)', '{', '}');
   ok('turnComplete 側も同じ口を通す', /finalizeUserUtterance\('turn_complete'\)/.test(turn),
     '確定の口が 2 つあると二重記録する');
