@@ -1237,18 +1237,32 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     completedAt: number;
   }): Promise<void> {
     try {
+      const payload = JSON.stringify({
+        diagnosticId: getOrCreateDiagnosticId(),
+        diagnosticUserId: opts.uid,
+        userName: userProfile?.name ?? null,
+        dateOfBirth: userProfile?.dateOfBirth ?? null,
+        sex: userProfile?.sex ?? null,
+        answers: opts.answers,
+        completedAt: opts.completedAt,
+      });
+      /*
+       * **`keepalive` でページ遷移を跨いで送り切る** (2026-09-23)。
+       *
+       * この呼び出しは fire-and-forget で、**同じ `showCompletion()` が直後に
+       * 「ダッシュボードで結果を見る」を描く**。押すのが速いと遷移でこの POST が
+       * 中断され、**`diagnosis.interview_completions` に 1 行も残らない**
+       * = ダッシュボードで「AI 問診 未実行」。実際に踏んだ (2026-09-23)。
+       *
+       * `keepalive` の本文上限は 64KB (fetch 仕様) なので、超える回だけ従来どおり送る。
+       * 回答は設問 35 件で数 KB なので実際にはまず超えない。
+       */
+      const bytes = new TextEncoder().encode(payload).length;
       await fetch('/api/interview/export', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          diagnosticId: getOrCreateDiagnosticId(),
-          diagnosticUserId: opts.uid,
-          userName: userProfile?.name ?? null,
-          dateOfBirth: userProfile?.dateOfBirth ?? null,
-          sex: userProfile?.sex ?? null,
-          answers: opts.answers,
-          completedAt: opts.completedAt,
-        }),
+        keepalive: bytes <= 60_000,
+        body: payload,
       });
     } catch {
       /* テスト用途のため失敗は握りつぶす (UI を止めない) */

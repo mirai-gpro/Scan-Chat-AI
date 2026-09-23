@@ -138,11 +138,17 @@ const singlePurchase = isSpecialAccount(data?.diagnosticUserId);
 /*
  * ① AI問診の完了。**DB の事実だけ**を見る (`diagnosis.interview_completions`)。
  * 端末の localStorage は見ない — スマホで問診して PC で開くと「未回答」になるため
- * (この記録を足した理由そのもの)。単品購入の画面でしか使わないので、それ以外では引かない。
+ * (この記録を足した理由そのもの)。
+ *
+ * **入口 (course / single) で引くかどうかを変えない** (2026-09-23 修正)。
+ * 2026-09-15 に進捗を `ProgressSection` 1 本へ統合したとき、**AI問診の行は course でも
+ * 出る**ようになった (`ProgressSection.astro` の `steps` は mode で分岐しない) のに、
+ * この取得だけが「単品購入でしか使わない」という統合前の前提のまま残っていた。
+ * → **コースプランの利用者は問診を完了しても永久に「未実行」**になっていた (実測 2026-09-23)。
+ *
+ * 行を出すなら、その行の根拠も必ず引く。**片方だけを mode で絞らない。**
  */
-const interviewDone = singlePurchase && data
-  ? await getLatestInterviewCompletion(data.diagnosticUserId)
-  : null;
+const interviewDone = data ? await getLatestInterviewCompletion(data.diagnosticUserId) : null;
 const checkups = (data?.artifacts ?? []).filter((a) => a.test_type === 'health_checkup');
 
 /*
