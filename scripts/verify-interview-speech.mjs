@@ -119,6 +119,19 @@ console.log('\n④ 進行の判断を LLM に渡していない\n');
     '実機で「回答ありがとうございます」が出た (2026-09-18)');
 }
 
+/*
+ * **読み上げに「／」を使わない** (実機報告 2026-09-23)。
+ * 「飲酒する／していた際の」の "／" は読み上げで**何と言っているか聞き取れない**。
+ * 画面と納品 JSON も同じ文言なので、`question` ごと「、又は、」にそろえた。
+ * (`speech` で音声だけ変える手もあるが、画面でも "／" は読みにくいので両方)
+ */
+{
+  const script = read('src/scripts/chat/interview-script.ts');
+  const hits = (script.match(/／/g) ?? []).length;
+  ok('設問に「／」を使っていない', hits === 0,
+    `${hits} 箇所 — 読み上げで何と言っているか聞き取れない`);
+}
+
 console.log(fails.length
   ? `\n✗ ${fails.length} 件\n - ` + fails.join('\n - ')
   : '\n✓ 音声だけが変わる。表示と納品 JSON は動いていない。');

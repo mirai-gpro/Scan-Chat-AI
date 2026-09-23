@@ -859,6 +859,13 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
   async function resolveVoiceByLlm(q: QuestionDef, transcript: string): Promise<void> {
     const labels = optionsOf(q).map((o) => o.label);
     let index: number | null = null;
+    /*
+     * **この往復が次の質問の読み上げの前に入る** (実機報告 2026-09-23:
+     * 「音声で答えると次の質問の読み上げが 2 秒以上遅れる / タップなら 1 秒以内」)。
+     * タップは `submitAnswer` から直行するのでこの区間が無い。
+     * 体感でなく**数字で**詰められるように、往復の実測値を残す。
+     */
+    const t0 = Date.now();
     try {
       const res = await fetch('/api/interview/classify-voice', {
         method: 'POST',
@@ -884,11 +891,11 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     if (currentQ?.id !== q.id || advancing) return;
 
     if (index != null) {
-      trace('VOICE_LLM_PICK', q.id, { index });
+      trace('VOICE_LLM_PICK', q.id, { index, ms: Date.now() - t0 });
       commitVoiceAnswer(isMultiQ(q) ? [labels[index]] : labels[index]);
       return;
     }
-    trace('VOICE_LLM_UNCLEAR', q.id);
+    trace('VOICE_LLM_UNCLEAR', q.id, { ms: Date.now() - t0 });
     askToRepeat(q);
   }
 
