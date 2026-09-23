@@ -133,6 +133,25 @@ console.log('\n② 埋まらない枠を並べない\n');
   ok('単品購入では主要導線 (⑥) を出さない',
     /\{!singlePurchase && \(\s*<section aria-label="主要な操作">/.test(dash),
     '進捗カードのボタンと行き先 (/scan・/chat) が同じ。同じ画面に同じ行き先を 2 つ並べない');
+
+  /*
+   * **AI問診の完了を mode で絞らない** (実障害 2026-09-23)。
+   *
+   * `ProgressSection.astro` の `steps` は **mode で分岐しない**ので、AI問診の行は
+   * course でも出る。なのに取得側が `singlePurchase &&` で絞られていたため、
+   * **コースプランの利用者は問診を完了しても永久に「未実行」**だった。
+   * 画面は正常に見えるので目視では捕まらない。
+   *
+   * ここで見るのは「行を出すなら根拠も引く」という対応関係そのもの。
+   */
+  const iv = (dash.match(/const interviewDone = .*/) ?? [''])[0];
+  ok('AI問診の完了を course でも引く',
+    /getLatestInterviewCompletion/.test(iv) && !/singlePurchase/.test(iv),
+    `mode で絞ると course の利用者が永久に「未実行」になる → ${iv.trim()}`);
+  ok('AI問診の行は mode で出し分けていない',
+    !/course\s*[?&]/.test(read('src/components/dashboard/ProgressSection.astro')
+      .split('const steps = [')[1]?.split('\n];')[0] ?? 'course ?'),
+    'steps が mode で分岐するなら、取得側の絞り込みも同時に見直す必要がある');
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -178,6 +197,16 @@ console.log('\n④ 問診の完了記録\n');
    * **S3 の成否と独立。** 本人が問診を終えた事実は、書き出しが失敗しても変わらない。
    * 逆に S3 成功の中だけに置くと、S3 未設定の環境で永久に「未回答」になる。
    */
+  /*
+   * **完了の送信がページ遷移で切れないこと** (実障害 2026-09-23)。
+   * `showCompletion()` は送信と同時に「ダッシュボードで結果を見る」を描くので、
+   * keepalive が無いと**押すのが速い人だけ記録が残らない**。再現性が低く目視では捕まらない。
+   */
+  const lc = read('src/scripts/chat/live-controller.ts');
+  ok('問診の書き出しが keepalive で送られる',
+    /keepalive:/.test(lc.split("fetch('/api/interview/export'")[1]?.slice(0, 400) ?? ''),
+    '完了直後にダッシュボードへ遷移すると POST が中断され、完了が DB に残らない');
+
   const iRec = ex.indexOf('recordInterviewCompletion(');
   const iS3 = ex.indexOf('isS3Configured()');
   ok('S3 の成否より前に記録している', iRec >= 0 && iS3 >= 0 && iRec < iS3,
