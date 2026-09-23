@@ -113,6 +113,36 @@ console.log('\n⑥ PII を増やしていない\n');
   ok('失敗しても回答を作らない', /catch[\s\S]{0,120}index: null/.test(api));
 }
 
+console.log('\n⑥ 思考トークンで出力予算を使い切らない (実障害 2026-09-23)\n');
+{
+  /*
+   * **選択肢の音声回答が通らない**症状の正体。
+   * 公式 (ai.google.dev/gemini-api/docs/thinking):
+   *   "max_output_tokens ... **including thought tokens**"
+   *   "If the model hits this limit while reasoning ... returns truncated or **empty output**"
+   * `thinkingBudget: 0` (2.x で思考オフ) は 3.x では `thinkingLevel: 'low'` に変換され
+   * **思考はオンのまま**。そこへ 64 しか与えていなかったので本文が空で返っていた。
+   */
+  const gem = code('src/lib/gemini.ts');
+  ok('3.x では thinkingBudget:0 が思考オフにならない (既知の変換)',
+    /budget != null && budget > 8192 \? 'high' : 'low'/.test(gem),
+    'この変換が変わったら下の予算の前提も見直す');
+
+  const llm = code('src/lib/voice-choice-llm.ts');
+  const m = /maxOutputTokens:\s*(\d+)/.exec(llm);
+  const budget = m ? Number(m[1]) : 0;
+  ok('出力予算が思考ぶんを含めて足りる', budget >= 512,
+    `maxOutputTokens=${budget} — 思考で使い切ると本文が空で返り、選択肢の音声回答が全部聞き直しになる`);
+
+  ok('空返しを「決められなかった」と区別する',
+    parseChoice('', 3).reason === 'empty',
+    'index:null だけだと予算切れとモデルの判断保留を切り分けられない');
+  ok('壊れた JSON も区別する', parseChoice('{oops', 3).reason === 'unparsable');
+  ok('範囲外は out_of_range', parseChoice('{"index":9,"confidence":1}', 3).reason === 'out_of_range');
+  ok('確度不足は low_confidence',
+    parseChoice('{"index":0,"confidence":0.1}', 3).reason === 'low_confidence');
+}
+
 const failed = results.filter((r) => !r.pass).length;
 console.log(`\n${results.length - failed}/${results.length} passed`);
 process.exit(failed ? 1 : 0);
