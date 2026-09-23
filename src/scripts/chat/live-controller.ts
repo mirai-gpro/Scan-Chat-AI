@@ -382,6 +382,58 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     }
   });
 
+  /*
+   * ━━ **Live の接続が切れたことを、黙って見逃さない** (実障害 2026-09-23) ━━
+   *
+   * 【症状】問診の途中から質問が読み上げられなくなる。止まる問番号は回ごとに変わる
+   * (2 問目・3 問目…)。**モデルの挙動ではなかった。**
+   *
+   * 【真因】実機のコンソールに出ていた:
+   *   `WebSocket is already in CLOSING or CLOSED state.  send @ …`
+   * Live の WebSocket が途中で閉じ、`sendClientContent` が**握りつぶされていた**。
+   *
+   * `onclose` は `liveSession = null` にするが、**CLOSING の間はまだ非 null** なので
+   * `sendModelTurn` の `if (!liveSession)` を素通りする。SDK は警告を出すだけで
+   * 例外も投げないため、**画面には何も出ないまま質問だけが読まれない**。
+   * 進行はプログラムが持っているので、問診は何事もなかったように次へ進む。
+   *
+   * 【直し方】切断を**見えるようにし、1 回だけ自動で復帰する**。
+   * 再接続すると `onopen` が `loadInterviewProgress` から**続きを復元して
+   * 今の質問を読み直す**ので、復帰の実体は「つなぎ直すだけ」で足りる。
+   * **ターン制御ではない** — 落ちた transport を張り直しているだけ。
+   */
+  let intentionalStop = false;   // 利用者/コードが意図して止めたか
+  let reconnectTried = false;    // 想定外の切断からの復帰は 1 回だけ (ループを作らない)
+
+  function announceDrop(retrying: boolean): void {
+    appendMessage({
+      role: 'system',
+      text: retrying
+        ? '接続が切れたため、つなぎ直しています。続きから再開します。'
+        : '接続が切れました。🎙ボタンで再開してください（回答済みの内容は残っています）。',
+      ts: Date.now(),
+    });
+  }
+
+  /** 想定外の切断から 1 回だけ復帰する。 */
+  async function recoverFromDrop(): Promise<void> {
+    if (connecting || liveSession) return;
+    if (reconnectTried) { announceDrop(false); return; }
+    reconnectTried = true;
+    trace('LIVE_RECOVER', currentQ?.id ?? null);
+    announceDrop(true);
+    connecting = true;
+    setStatus('つなぎ直しています…');
+    try {
+      await startLive();
+    } catch {
+      announceDrop(false);
+      setStatus('切断 — 🎙ボタンで再開してください');
+    } finally {
+      connecting = false;
+    }
+  }
+
   async function toggleSession(): Promise<void> {
     if (liveSession) {
       stopLive();
@@ -1007,10 +1059,20 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
       return;
     }
     trace('MODEL_TURN_SEND', qid ?? null);
-    liveSession.sendClientContent({
-      turns: [{ role: 'user', parts: [{ text }] }],
-      turnComplete: true,
-    });
+    /*
+     * **送れなかったことを黙って流さない。** 閉じかけの WebSocket に送ると
+     * SDK は警告を出すだけで例外も投げないので、ここで捕まえられるとは限らない。
+     * 捕まえられた回だけでも画面に出し、`onclose` 側の復帰に繋ぐ。
+     */
+    try {
+      liveSession.sendClientContent({
+        turns: [{ role: 'user', parts: [{ text }] }],
+        turnComplete: true,
+      });
+    } catch {
+      trace('MODEL_TURN_FAILED', qid ?? null);
+      announceDrop(false);
+    }
   }
 
   /**
@@ -1034,6 +1096,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
   // ── Live API 接続 ──────────────────────────────
 
   async function startLive(): Promise<void> {
+    intentionalStop = false;
     const res = await fetch('/api/live-token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1082,6 +1145,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
         onopen: () => {
           setStatus('🎙 接続済 — 話せます / タップ可');
           setConnected(true);
+          reconnectTried = false;   // つながったので、次に切れたらまた 1 回試せる
           // engine 起動: 最初の Q を画面に即表示 (AI を待たない)
           // EXAM-TYPE は申込情報から供給し設問を提示しない (空なら通常設問にフォールバック)。
           //
@@ -1127,9 +1191,14 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
         },
         onclose: (e) => {
           const reason = (e as { reason?: string })?.reason;
+          const code = (e as { code?: number })?.code;
+          // **なぜ切れたか**を残す。次に起きたとき推測しないで済むように。
+          trace('LIVE_CLOSE', currentQ?.id ?? null, { code: typeof code === 'number' ? code : -1 });
           setStatus(reason ? `切断: ${reason}` : '切断');
           liveSession = null;
           setConnected(false);
+          // 問診の途中で勝手に切れたときだけ、黙らずに復帰する。
+          if (!intentionalStop && currentQ) void recoverFromDrop();
         },
       },
     });
@@ -1143,6 +1212,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
   }
 
   function stopLive(): void {
+    intentionalStop = true;   // ここ経由の切断は想定内 (復帰しない)
     audio.stop();
     // 切断後に切れ目のタイマーが起きて、もう無い設問へ回答を入れないようにする。
     cancelUtteranceSettle();

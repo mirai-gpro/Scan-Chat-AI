@@ -151,6 +151,41 @@ ok('マイク音声は sendRealtimeInput(audio)', /sendRealtimeInput\(\{?\s*\n?\
     '発話や回答が観測ログに入る口を作らない');
 }
 
+/*
+ * ⑥-d **Live の切断を黙って見逃さない** (実障害 2026-09-23)。
+ *
+ * 症状は「問診の途中から質問が読み上げられない」。止まる問番号は回ごとに変わった。
+ * 実機コンソールに `WebSocket is already in CLOSING or CLOSED state. send @ …`。
+ * `onclose` は `liveSession = null` にするが **CLOSING の間はまだ非 null** なので
+ * `if (!liveSession)` を素通りし、SDK は警告を出すだけで例外も投げない
+ * → **画面に何も出ないまま質問だけが読まれない**。
+ *
+ * モデルの挙動だと 2 回誤診した。**見えないものは誤診する。**
+ */
+{
+  ok('切断の理由 (code) を観測ログに残す',
+    /trace\('LIVE_CLOSE'/.test(ctrl),
+    'なぜ切れたかが分からないと、また推測することになる');
+
+  const close = spanOf(ctrl, 'onclose: (e) =>', '{', '}');
+  ok('想定外の切断なら復帰する',
+    /!intentionalStop && currentQ\) void recoverFromDrop\(\)/.test(close),
+    '黙って切れたままになり、以降の質問が一切読まれない');
+  ok('意図した停止では復帰しない',
+    /intentionalStop = true/.test(spanOf(ctrl, 'function stopLive()', '{', '}')),
+    '中止ボタンを押したのに勝手につなぎ直すと、止められない');
+
+  const rec = spanOf(ctrl, 'async function recoverFromDrop()', '{', '}');
+  ok('復帰は 1 回だけ試す', /if \(reconnectTried\)/.test(rec),
+    '再接続ループを作らない');
+  ok('切れたことを画面に出す', /announceDrop\(/.test(rec),
+    '黙って復帰/失敗すると、利用者は何が起きたか分からない');
+
+  ok('送信の失敗を握りつぶさない',
+    /catch \{\s*trace\('MODEL_TURN_FAILED'/.test(ctrl),
+    '送れなかった回が無言で流れる');
+}
+
 // ⑦ 既存の約束を壊していない
 ok('NO_INTERRUPTION を維持', /activityHandling:\s*ActivityHandling\.NO_INTERRUPTION/.test(ctrl));
 ok('interrupted → flushPlayback を維持', /serverContent\?\.interrupted[\s\S]{0,200}flushPlayback\(\)/.test(ctrl));
