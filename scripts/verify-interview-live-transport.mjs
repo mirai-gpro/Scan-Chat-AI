@@ -83,6 +83,43 @@ ok('未開始時の自由発話も sendUserText を呼ぶ',
 // ⑥ マイク音声は realtimeInput のまま
 ok('マイク音声は sendRealtimeInput(audio)', /sendRealtimeInput\(\{?\s*\n?\s*audio:/.test(ctrl));
 
+/*
+ * ⑥-b **回答の取り込みをモデルのターンに依存させない (2026-09-23)。**
+ *
+ * 実障害: 音声で答えても記録されない / 選択肢のとき特に通らない /
+ * 「70kg 70kg」と前の発話が連結される。
+ *
+ * 真因は、確定も `userBuf` の消去も `turnComplete` の内側だけにあったこと。
+ * 公式リファレンスの `turnComplete` は **"the model has completed its turn"** =
+ * モデル側の事象で、自動 VAD には「利用者が言い終えた」を知らせるサーバメッセージが
+ * **無い**。結果「モデルが喋らないと回答が確定しない」循環になり、
+ * **動くかどうかがモデル次第**だった (3.8 の proactive audio は頻度を上げるだけ)。
+ *
+ * ここで見るのは「確定の口が 1 つで、モデルのターンに縛られていないこと」。
+ * 画面は普通に見えるので、目視では絶対に捕まらない。
+ */
+{
+  const inTrans = spanOf(ctrl, 'const inText = msg.serverContent?.inputTranscription?.text;', '{', '}');
+  ok('文字起こしが届いた時点で確定を仕掛ける',
+    /scheduleUtteranceSettle\(\)/.test(inTrans),
+    'モデルが喋らないと回答が確定しない循環に戻る');
+
+  const calls = (ctrl.match(/maybeHandleVoiceAnswer\(/g) ?? []).length;
+  ok('回答の取り込みは定義と 1 つの呼び出しだけ', calls === 2, `${calls} 箇所`);
+
+  const fin = spanOf(ctrl, 'function finalizeUserUtterance(', '{', '}');
+  ok('その呼び出し元は finalizeUserUtterance', /maybeHandleVoiceAnswer\(finished\)/.test(fin));
+  ok('確定と同時に userBuf を空にする', /userBuf = ''/.test(fin),
+    '空にしないと次の発話が連結される (「70kg 70kg」)');
+
+  const turn = spanOf(ctrl, 'if (msg.serverContent?.turnComplete)', '{', '}');
+  ok('turnComplete 側も同じ口を通す', /finalizeUserUtterance\('turn_complete'\)/.test(turn),
+    '確定の口が 2 つあると二重記録する');
+  ok('turnComplete の中で userBuf を直接読まない',
+    !/userBuf/.test(turn),
+    '確定の口を 1 つに保つ');
+}
+
 // ⑦ 既存の約束を壊していない
 ok('NO_INTERRUPTION を維持', /activityHandling:\s*ActivityHandling\.NO_INTERRUPTION/.test(ctrl));
 ok('interrupted → flushPlayback を維持', /serverContent\?\.interrupted[\s\S]{0,200}flushPlayback\(\)/.test(ctrl));
