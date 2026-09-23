@@ -108,6 +108,17 @@ export const GET: APIRoute = async (ctx) => {
    * 画面だけでは「顧客が居ない」と「呼び出しが失敗した」を区別できない。
    */
   const bridge = await inspectBridge(viewer.uid, viewer.origin);
+  /*
+   * **「AI 問診を完了したのに進捗が『未実行』」の切り分け** (実障害 2026-09-23)。
+   *
+   * 画面は「未実行」としか言わないので、原因が
+   *   ① 記録が無い (書き出しが届かなかった / migration 未適用)
+   *   ② 記録はあるが**別の uid**で入っている (代理表示 `?u=` のとき読む側とずれる)
+   * のどちらかを区別できない。**表示中の uid と本人の uid の両方**を引いて並べる。
+   *
+   * 出すのは**件数と日時だけ**。回答の中身は引かない (医療情報なので保管場所を増やさない)。
+   */
+  const interview = await inspectInterview(viewer.uid, viewer.selfUid);
 
   return json({
     ok: true,
@@ -127,6 +138,7 @@ export const GET: APIRoute = async (ctx) => {
     report,
     artifacts,
     bridge,
+    interview,
     cookie: {
       present: !!raw,
       valid: !!verified,
@@ -414,5 +426,54 @@ async function inspectArtifacts(viewerUid: string | null, origin: BridgeOrigin):
     };
   } catch (err) {
     return { error: String(err instanceof Error ? err.message : err) };
+  }
+}
+
+/**
+ * **AI 問診の完了記録を、表示中の uid と本人の uid の両方で引く。**
+ *
+ * `diagnosis.interview_completions` は
+ *   ・**書く**のは `viewer.selfUid` (Cookie の本人)
+ *   ・**読む**のは画面が表示している uid
+ * なので、代理表示 (`?u=`) 中は**別人の行を見に行く**。ここで並べれば一目で分かる。
+ *
+ * テーブルが無い (migration 未適用) ときは `error` にそのまま出す
+ * — 画面側は握りつぶして「未実行」を出すので、ここでしか気づけない。
+ */
+async function inspectInterview(uid: string | null, selfUid: string | null): Promise<unknown> {
+  const sb = getServerSupabase();
+  if (!sb) return { note: '(Supabase 未設定)' };
+  if (!uid && !selfUid) return { note: '(uid なし = 未サインイン)' };
+
+  const look = async (target: string | null) => {
+    if (!target) return null;
+    const { data, error } = await (sb.schema('diagnosis') as any)
+      .from('interview_completions')
+      .select('completed_at, answered_count')
+      .eq('diagnostic_user_id', target)
+      .order('completed_at', { ascending: false })
+      .limit(5);
+    if (error) return { error: error.message };
+    const rows = data ?? [];
+    return { rows: rows.length, latest: rows[0]?.completed_at ?? null, answered: rows[0]?.answered_count ?? null };
+  };
+
+  try {
+    const shown = await look(uid);
+    const self = uid === selfUid ? null : await look(selfUid);
+    const out: Record<string, unknown> = { displayed_uid: shown };
+    if (self) out.self_uid = self;
+    const shownRows = (shown as { rows?: number } | null)?.rows ?? 0;
+    const selfRows = (self as { rows?: number } | null)?.rows ?? 0;
+    out.verdict = (shown as { error?: string } | null)?.error
+      ? '照会に失敗。テーブルが無い (migration 未適用) 可能性 → 画面は黙って「未実行」になる'
+      : shownRows > 0
+        ? '記録あり → 進捗は「完了済」になるはず。まだ「未実行」ならダッシュボードの取得側を見る'
+        : selfRows > 0
+          ? '**表示中の uid には無いが本人の uid にはある** = 代理表示 (?u=) で別人を見ている'
+          : '記録が 0 件 → 問診の書き出しが届いていない (完了直後の遷移で POST が切れた等)';
+    return out;
+  } catch (e) {
+    return { error: e instanceof Error ? e.message : String(e) };
   }
 }
