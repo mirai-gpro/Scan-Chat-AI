@@ -737,6 +737,66 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
    * 音声 transcript を現在設問の回答として取り込む。
    * 選択式は選択肢へマッチング、自由記述は transcript をそのまま採用する。
    */
+  /*
+   * ━━ 利用者の回答の確定は、**モデルのターンに依存させない** (2026-09-23) ━━
+   *
+   * 【直した不具合】音声で答えても記録されない / 選択肢のとき特に通らない /
+   * 「70kg 70kg」のように前の発話が残って連結される。
+   *
+   * 【真因】確定も `userBuf` の消去も `serverContent.turnComplete` の内側だけにあった。
+   * 公式リファレンス (ai.google.dev/api/live) の定義は
+   *   turnComplete       … "the **model** has completed its turn"
+   *   generationComplete … "the **model** is done generating"
+   *   interrupted        … "a client message has interrupted current **model** generation"
+   * で **3 つともモデル側の事象**。自動 VAD で「利用者が言い終えた」を知らせる
+   * サーバメッセージは**文書化されていない** (実際に引いて確認)。
+   *
+   * そのため、こういう循環で詰まっていた:
+   *   ① 質問を送る → ② モデルが読み上げ turnComplete (このとき userBuf は空=何も起きない)
+   *   → ③ 利用者が答える (userBuf に溜まる) → ④ **モデルに喋る用事が無い**
+   *   → ⑤ turnComplete が来ない → 回答が確定しない → 次の質問も送られない
+   * たまたまモデルが自発的に喋った回だけ通る = **動くかどうかがモデル次第**だった。
+   * `gemini-3.8-live` の proactive audio ("can proactively decide not to respond") は
+   * この頻度を上げるだけで、**循環そのものは 3.1 でも起きる**。
+   *
+   * 【これはターン制御ではない】マイクを止めず、発話を出し分けず、モデルの順番にも
+   * 口を出さない。**既に受け取った文字列を、いつプログラムの台帳に書くか**だけ。
+   * 責務分界 (音声のターン=LLM / 回答データ=プログラム) に**戻す**変更。
+   *
+   * 【なぜタイマーか】上記のとおり終話を知らせる公式イベントが無いので、
+   * **文字起こしが届かなくなったこと**で 1 発話の切れ目とみなす。
+   */
+  const UTTERANCE_SETTLE_MS = 1000;
+  let settleTimer: ReturnType<typeof setTimeout> | null = null;
+
+  function cancelUtteranceSettle(): void {
+    if (settleTimer !== null) { clearTimeout(settleTimer); settleTimer = null; }
+  }
+
+  /** 文字起こしが届くたびに切れ目の判定をやり直す。 */
+  function scheduleUtteranceSettle(): void {
+    cancelUtteranceSettle();
+    settleTimer = setTimeout(() => { settleTimer = null; finalizeUserUtterance('settle'); }, UTTERANCE_SETTLE_MS);
+  }
+
+  /**
+   * **利用者の 1 発話を確定する唯一の口。**
+   * 切れ目 (`settle`) と モデルのターン完了 (`turn_complete`) の**どちらが先でもよい** —
+   * 先に来たほうが `userBuf` を空にするので、後から来たほうは空振りする (二重記録しない)。
+   */
+  function finalizeUserUtterance(via: 'settle' | 'turn_complete'): void {
+    cancelUtteranceSettle();
+    const finished = userBuf.trim();
+    if (!finished) return;
+    // `TraceDetail` は**発話の中身を書けないよう意図的に狭い** (医療情報)。
+    // どちらの口で確定したかは真偽値で残す (true = 切れ目 / false = モデルのターン完了)。
+    trace('USER_UTTERANCE', currentQ?.id ?? null, { settle: via === 'settle' });
+    finalizeStream('user', userBuf);
+    userBuf = '';
+    sawInputThisTurn = false;
+    maybeHandleVoiceAnswer(finished);
+  }
+
   function maybeHandleVoiceAnswer(transcript: string): void {
     if (advancing) return; // 受付処理中は無視 (二重取り込み防止)
     const q = currentQ;
@@ -1043,6 +1103,9 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
 
   function stopLive(): void {
     audio.stop();
+    // 切断後に切れ目のタイマーが起きて、もう無い設問へ回答を入れないようにする。
+    cancelUtteranceSettle();
+    userBuf = '';
     try { liveSession?.close(); } catch {}
     liveSession = null;
     setConnected(false);
@@ -1079,6 +1142,8 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
       userBuf += inText;
       ensureStreamBubble('user').textContent = userBuf;
       refs.log.scrollTop = refs.log.scrollHeight;
+      // **モデルの発話を待たずに**、文字起こしが止まった時点で 1 発話として確定する。
+      scheduleUtteranceSettle();
     }
     // (出力 = AI) — cleanTranscript で関数呼び出し漏れを除去してから表示
     const outText = msg.serverContent?.outputTranscription?.text;
@@ -1094,14 +1159,14 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
       sawAudioThisTurn = false;
       sawInputThisTurn = false;
       const cleanedAssistant = cleanTranscript(assistantBuf);
-      const finishedUser = userBuf.trim();
-      finalizeStream('user', userBuf);
+      /*
+       * 音声回答 → 選択肢へマッチングして engine に反映 (タップと等価)。
+       * **確定の口は `finalizeUserUtterance` 1 つだけ** — 切れ目で既に確定済みなら
+       * `userBuf` は空なので、ここは空振りする (二重記録しない)。
+       */
+      finalizeUserUtterance('turn_complete');
       finalizeStream('assistant', assistantBuf);
-      userBuf = '';
       assistantBuf = '';
-
-      // 音声回答 → 選択肢へマッチングして engine に反映 (タップと等価)
-      if (finishedUser) maybeHandleVoiceAnswer(finishedUser);
 
       // ループ検出: 直近 10 秒以内に同じ発話を完了したら重複カウント
       const now = Date.now();
