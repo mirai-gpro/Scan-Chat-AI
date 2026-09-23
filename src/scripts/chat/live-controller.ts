@@ -1226,6 +1226,28 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
   // ── サーバメッセージ ────────────────────────────
 
   function handleServerMessage(msg: LiveServerMessage): void {
+    /*
+     * ━━ **割り込みは、このメッセージの音声を積む「前」に処理する** (2026-09-23) ━━
+     *
+     * 以前はハンドラの**最後**で見ていた (音声を積むのが 1240 行・割り込みが 1326 行)。
+     * 1 つのメッセージに `interrupted` と音声が同時に入ると、
+     * **鳴らす予約をしてから、その直後に自分で捨てる**ことになる
+     * (`flushPlayback` は `playingSources` を**全部**止めるため)。
+     *
+     * `interrupted` の意味は「**それまでに積んだものを捨てろ**」なので、
+     * **このメッセージの中身より先**に適用するのが正しい。
+     *
+     * **これが現在の不具合の原因だと確認したわけではない** (実機でしか順序は分からない)。
+     * ただし順序としては誤っているので、原因かどうかに関わらず直す。
+     */
+    if (msg.serverContent?.interrupted) {
+      // サーバが「割り込んだ」と言ったときだけ捨てる (UI 起点の強制停止ではない)。
+      trace('SERVER_INTERRUPTED', currentQ?.id ?? null);
+      audio.flushPlayback();
+      trace('AUDIO_FLUSH', currentQ?.id ?? null);
+      sawAudioThisTurn = false;
+    }
+
     // 1) PCM 音声 chunk → 再生（muted 中はスキップ）。
     //    VAD / echo / barge-in は Live API サーバ側が処理するため、ここで mic を
     //    gating しない（barge-in が壊れる）。
@@ -1320,15 +1342,6 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
         response: { result: 'ignored — engine 駆動で tool は廃止しました' },
       }));
       liveSession.sendToolResponse({ functionResponses: responses });
-    }
-
-    // 5) 割り込み
-    if (msg.serverContent?.interrupted) {
-      // サーバが「割り込んだ」と言ったときだけ捨てる (UI 起点の強制停止ではない)。
-      trace('SERVER_INTERRUPTED', currentQ?.id ?? null);
-      audio.flushPlayback();
-      trace('AUDIO_FLUSH', currentQ?.id ?? null);
-      sawAudioThisTurn = false;
     }
 
     if (msg.goAway) setStatus('まもなく切断（再接続してください）');
