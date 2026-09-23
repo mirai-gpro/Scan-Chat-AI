@@ -24,7 +24,7 @@ import {
 } from '@google/genai';
 import { marked } from 'marked';
 import { LiveAudioManager } from './live-audio-manager';
-import { initLiveTrace, trace } from './live-trace';
+import { initLiveTrace, mountTraceButton, trace } from './live-trace';
 import { createMicGate, type MicGate } from './mic-gate';
 import {
   clearChatSession,
@@ -209,6 +209,8 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
   /** そのターンでマイクが何か拾ったか (観測ログ用。**中身は記録しない**)。 */
   let sawInputThisTurn = false;
   initLiveTrace();
+  // 観測ログが有効なときだけ、画面から取り出すボタンを出す (実機に JS コンソールが無いため)。
+  mountTraceButton();
   let liveSession: Session | null = null;
   let connecting = false;
 

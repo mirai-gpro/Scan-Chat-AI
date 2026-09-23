@@ -134,6 +134,23 @@ ok('マイク音声は sendRealtimeInput(audio)', /sendRealtimeInput\(\{?\s*\n?\
     '確定の口を 1 つに保つ');
 }
 
+/*
+ * ⑥-c **観測ログのボタンは、観測ログが有効なときだけ出す** (2026-09-23)。
+ * 実機は iPhone で JS コンソールを開けず `window.__liveTrace()` を実行できない。
+ * そのせいで「読み上げされない」の原因を**推測で 2 回続けて外した**ので、
+ * 画面から取り出せるようにした。**通常の問診画面には出さない。**
+ */
+{
+  const tr = code('src/scripts/chat/live-trace.ts');
+  const body = spanOf(tr, 'export function mountTraceButton(', '{', '}');
+  ok('観測ログのボタンは trace 有効時だけ出す',
+    /if \(!enabled/.test(body),
+    '通常の問診画面にデバッグ用のボタンが出てしまう');
+  ok('積んでいるのは数値と列挙値だけ (自由入力を受け取らない型)',
+    /export type TraceDetail = Record<string, number \| boolean \| 'tap' \| 'voice' \| null>/.test(tr),
+    '発話や回答が観測ログに入る口を作らない');
+}
+
 // ⑦ 既存の約束を壊していない
 ok('NO_INTERRUPTION を維持', /activityHandling:\s*ActivityHandling\.NO_INTERRUPTION/.test(ctrl));
 ok('interrupted → flushPlayback を維持', /serverContent\?\.interrupted[\s\S]{0,200}flushPlayback\(\)/.test(ctrl));
