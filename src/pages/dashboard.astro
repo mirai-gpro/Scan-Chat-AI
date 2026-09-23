@@ -379,6 +379,25 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
           <dl class="mt-3 space-y-1 text-sm text-slate-600">
             <div class="flex justify-between gap-3"><dt>diagnostic_user_id:</dt><dd class="font-mono break-all">{data?.diagnosticUserId}</dd></div>
             {/*
+              **AI問診を観測ログ付きで開く導線** (2026-09-23)。
+              `?trace=1` を付けて開いた回だけ、問診画面の右下に
+              「観測ログをコピー」が出る (`live-trace.ts` の `mountTraceButton`)。
+
+              【なぜ要るか】実機は iPhone で JS コンソールを開けないうえ、
+              **ホーム画面から起動していると URL 欄が無く `?trace=1` を付けられない**。
+              読み上げが飛ぶ不具合の原因を、採取できないまま推測で 2 回外している。
+              ここに置けば**1 タップ**で採れる。デバッグ欄なので通常の利用者には出ない。
+            */}
+            <div class="flex justify-between gap-3">
+              <dt>AI問診の観測ログ:</dt>
+              <dd>
+                <a href={`/chat${q ? `${q}&` : '?'}trace=1`} class="font-semibold text-brand-700 underline">
+                  観測ログ付きで開く
+                </a>
+                <span class="ml-1 text-slate-500">（画面右下の「観測ログをコピー」で採取）</span>
+              </dd>
+            </div>
+            {/*
               **admin 判定とその根拠**。判定は静かに外れるので、根拠を画面に出せないと
               「なぜダミーが出ないのか」が誰にも分からない (実測 2026-08-30: 本番で
               報告書が空になり、原因の特定に何往復もした)。**推測でなくここを見る。**
