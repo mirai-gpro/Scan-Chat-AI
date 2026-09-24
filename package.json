@@ -49,6 +49,7 @@
     "verify:scan-pages": "node scripts/verify-scan-pages.mjs",
     "verify:scan-persist": "esbuild scripts/verify-scan-persist.ts --bundle --platform=node --format=esm --log-level=error \"--define:import.meta.env={}\" --outfile=node_modules/.cache/verify-scan-persist.mjs && node node_modules/.cache/verify-scan-persist.mjs",
     "verify:interview-cycle": "esbuild scripts/verify-interview-cycle.ts --bundle --platform=node --format=esm --log-level=error \"--define:import.meta.env={}\" --outfile=node_modules/.cache/verify-interview-cycle.mjs && node node_modules/.cache/verify-interview-cycle.mjs",
+    "verify:scan-age": "esbuild scripts/verify-scan-age.ts --bundle --platform=node --format=esm --log-level=error \"--define:import.meta.env={}\" --outfile=node_modules/.cache/verify-scan-age.mjs && node node_modules/.cache/verify-scan-age.mjs",
     "verify:interview-ui": "node scripts/verify-interview-ui.mjs",
     "verify:laif-revoke-key": "node scripts/verify-laif-revoke-key.mjs",
     "verify:interview-live-transport": "node scripts/verify-interview-live-transport.mjs"
