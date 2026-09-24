@@ -26,8 +26,17 @@ interface Props {
    * (アプリが助言文を作らない方針のため、ここでは文面を持たない)。
    */
   followup?: string | null;
+  /**
+   * 「グラフ」ボタンを活性にするか (時系列が 2 点以上あるか)。他の検査カードと同じ規律で、
+   * **推移は 2 回目の算出から**。1 点以下は非活性 (線が引けない)。
+   */
+  canGraph?: boolean;
+  /** ?u= を引き継ぐためのクエリ文字列 ('' か '?u=…')。 */
+  q?: string;
 }
-const { latest, followup = null } = Astro.props;
+const { latest, followup = null, canGraph = false, q = '' } = Astro.props;
+// ウェルネス年齢の推移も他の検査と同じ /trend で見せる (別テーブル health_age_scores 由来)。
+const graphHref = `/trend${q ? `${q}&` : '?'}type=wellness`;
 
 const bio = latest.biologicalAge;
 const delta = latest.delta;
@@ -148,6 +157,24 @@ const isReference = imputed.length > 0 || carried.length > 0;
       {missing.length > 0 && <span class="block mt-1 text-sm text-slate-600">（不足: {jp(missing)}）</span>}
     </p>
   )}
+
+  {/* 過去のウェルネス年齢との推移。他の検査カードと同じ「グラフ」ボタン (btn-graph) を
+      1 つだけ置く (この機能には「データ」に当たる結果ページが無く、カード自体が結果のため)。
+      推移は 2 回目の算出から (canGraph)。1 点以下は非活性にし、理由を小さく添える。 */}
+  <div class="mt-4 flex items-center justify-end gap-3">
+    {!canGraph && (
+      <span class="text-sm text-slate-600">推移グラフは 2 回目の算出から</span>
+    )}
+    {canGraph ? (
+      <a href={graphHref} class="btn-pair btn-graph px-5">
+        <AppIcon name="trend" size={18} />グラフ
+      </a>
+    ) : (
+      <span class="btn-pair btn-pair-off px-5" aria-disabled="true">
+        <AppIcon name="trend" size={18} />グラフ
+      </span>
+    )}
+  </div>
 
   {/* 実年齢より高い場合の案内。表示帯は上のバッジと同じ (delta > 2)。
       文面は設定値をそのまま出す。アプリは文言を生成しない。 */}

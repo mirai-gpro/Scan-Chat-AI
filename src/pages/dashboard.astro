@@ -301,7 +301,7 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
         */}
         {healthAge?.latest ? (
           <div class="grid grid-cols-1 items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_17rem]">
-            <HealthAgeCard latest={healthAge.latest} followup={healthAgeFollowup} />
+            <HealthAgeCard latest={healthAge.latest} followup={healthAgeFollowup} canGraph={(healthAge.trend?.points?.length ?? 0) >= 2} q={q} />
             <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
           </div>
         ) : (
