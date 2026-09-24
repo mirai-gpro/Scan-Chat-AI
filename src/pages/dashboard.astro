@@ -162,6 +162,28 @@ const checkups = (data?.artifacts ?? []).filter((a) => a.test_type === 'health_c
  */
 const reportAvailable = !!data?.latestResult || demoShown;
 
+/*
+ * **報告書の「New」(新着) 判定** (発注者要望 2026-09「作成済のステータス New バッジ等」)。
+ *
+ * 定義 = **受領日 (received_at) から N 日以内**。決定論・新規状態なし・PII なし・サーバ側で完結する。
+ * 「未閲覧か」では判定しない — 端末をまたぐ閲覧済みの記録 (DB 列/localStorage) が要り、
+ * per-device で不整合が出るため (この定義は後で差し替え可・app_config は見せ方だけ持つ)。
+ *
+ * N は app_config `ui.report_new_days` (既定 14)。整数でない/0 以下は既定に落とす。
+ * デモのサンプルは received_at が無い → New は出ない (新着ではないので正しい)。
+ */
+const reportNewDays = (() => {
+  const n = Number.parseInt(cfg('ui.report_new_days'), 10);
+  return Number.isFinite(n) && n > 0 ? n : 14;
+})();
+const reportIsNew = (() => {
+  const iso = data?.latestResult?.received_at;
+  if (!iso) return false;
+  const received = new Date(iso).getTime();
+  if (Number.isNaN(received)) return false;
+  return Date.now() - received <= reportNewDays * 24 * 60 * 60 * 1000;
+})();
+
 // 画面文言 (app_config)。未設定なら空文字が返り、UI 側で非表示になる。
 const healthAgeFollowup = cfg('ui.health_age_followup');
 const supportContact = cfg('ui.support_contact');
@@ -280,10 +302,10 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
         {healthAge?.latest ? (
           <div class="grid grid-cols-1 items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_17rem]">
             <HealthAgeCard latest={healthAge.latest} followup={healthAgeFollowup} />
-            <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} />
+            <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
           </div>
         ) : (
-          <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} />
+          <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
         )}
 
         {/*
@@ -302,6 +324,7 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
           checkupCount={checkups.length}
           latestCheckupDate={checkups[0]?.test_date ?? null}
           reportReceivedAt={data?.latestResult?.received_at ?? null}
+          reportIsNew={reportIsNew}
           shipments={data?.shipments ?? []}
           nextTestAt={data?.subscription?.next_test_at}
           diagnosticUserId={data?.diagnosticUserId ?? ''}

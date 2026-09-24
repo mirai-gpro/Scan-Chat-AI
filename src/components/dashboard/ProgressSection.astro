@@ -36,6 +36,12 @@ interface Props {
   latestCheckupDate: string | null;
   /** `diagnosis_results.received_at`。null = まだ届いていない。 */
   reportReceivedAt: string | null;
+  /**
+   * **新着 (New) か** (発注者要望 2026-09「作成済のステータス New バッジ等」)。
+   * 受領日から N 日以内 (判定は dashboard.astro が持つ・app_config `ui.report_new_days`)。
+   * reportDone かつ新着のときだけ New ピルを出す。
+   */
+  reportIsNew?: boolean;
   /** 以下は course のみ。 */
   shipments?: (KitShipment & { lab_name: string | null })[];
   nextTestAt?: string | null;
@@ -51,6 +57,7 @@ const {
   checkupCount,
   latestCheckupDate,
   reportReceivedAt,
+  reportIsNew = false,
   shipments = [],
   nextTestAt = null,
   diagnosticUserId = '',
@@ -178,6 +185,9 @@ const steps = [
           <span class={`status-pill ${reportDone ? 'status-ok' : 'status-unknown'}`}>
             <AppIcon name={reportDone ? 'ok' : 'clock'} size={14} />{reportDone ? 'お届け済み' : '未着'}
           </span>
+          {reportDone && reportIsNew && (
+            <span class="rounded-full bg-brand-600 px-2 py-0.5 text-xs font-bold tracking-wide text-white">New</span>
+          )}
         </span>
         {reportDone && <span class="tnum text-sm font-medium text-brand-700">{shortJpDate(reportReceivedAt)}</span>}
         <span class="text-sm text-slate-600">
