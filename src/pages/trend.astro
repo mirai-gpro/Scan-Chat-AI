@@ -4,8 +4,9 @@ import AppNav from '../components/AppNav.astro';
 import BaseLayout from '../layouts/BaseLayout.astro';
 import MetricTrendChart from '../components/dashboard/MetricTrendChart.astro';
 import TrendItemsDialog from '../components/dashboard/TrendItemsDialog.astro';
-import { loadDashboard, testTypeLabel } from '../lib/dashboard-queries';
+import { loadDashboard, testTypeLabel, getHealthAge } from '../lib/dashboard-queries';
 import { getMeasurementTrend, getTrendCandidates, DEFAULT_TREND_ITEMS } from '../lib/measurement-queries';
+import { WELLNESS_AGE_LABEL } from '../lib/wellness-age';
 import { countUnreadImportant } from '../lib/notice-queries';
 import { refreshConfig, cfg } from '../lib/app-config';
 import { resolveViewer } from '../lib/viewer';
@@ -54,26 +55,40 @@ const result = needsSignIn ? null : await loadDashboard(u, viewer.origin);
 const hasError = result ? 'error' in result : false;
 const data = !result || hasError ? null : (result as Exclude<typeof result, { error: string }>);
 
-const candidates = data ? await getTrendCandidates(data.resultUid, type ?? undefined) : [];
+/*
+ * **ウェルネス年齢は別テーブル (health_age_scores) 由来**なので measurement_values の
+ * 経路 (getTrendCandidates / getMeasurementTrend) を通さない。`getHealthAge().trend` を
+ * そのまま MetricTrendChart に渡す (ダッシュボードのカードと同じデータ)。
+ * 項目選択 (TrendItemsDialog) は単一系列なので出さない。
+ */
+const isWellness = type === 'wellness';
+
+const candidates = data && !isWellness ? await getTrendCandidates(data.resultUid, type ?? undefined) : [];
 
 // 既定の選択: 従来出していた項目のうち実在するもの → 足りなければ候補の先頭から補う。
 const preferred = candidates.filter((n) => (DEFAULT_TREND_ITEMS as readonly string[]).includes(n));
 const defaults = (preferred.length > 0 ? preferred : candidates).slice(0, MAX_ITEMS);
 
-// カードは候補を全部描く (出し分けはクライアント)。候補が無ければ従来どおり既定で引く。
-const series = data
-  ? await getMeasurementTrend(
+let series: Awaited<ReturnType<typeof getMeasurementTrend>> = [];
+if (data) {
+  if (isWellness) {
+    const ha = await getHealthAge(data.diagnosticUserId);
+    series = ha.trend ? [ha.trend] : [];
+  } else {
+    // カードは候補を全部描く (出し分けはクライアント)。候補が無ければ従来どおり既定で引く。
+    series = await getMeasurementTrend(
       data.resultUid,
       candidates.length > 0 ? candidates : undefined,
       12,
       type ?? undefined,
-    )
-  : [];
+    );
+  }
+}
 
 const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId) : 0;
 const supportContact = cfg('ui.support_contact');
 
-const typeName = type ? testTypeLabel(type).name : null;
+const typeName = isWellness ? WELLNESS_AGE_LABEL : type ? testTypeLabel(type).name : null;
 ---
 
 <BaseLayout title="検査値の推移 | Welltect" width="app">
