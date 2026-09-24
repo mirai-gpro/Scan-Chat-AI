@@ -36,6 +36,8 @@ export interface DeliverResult {
   status: 'delivered' | 'skipped' | 'error';
   reason?: string;
   wellness_age_method?: string | null;
+  /** ウェルネス年齢を載せられなかった理由 (載せられた回は付かない)。 */
+  wellness_reason?: string;
   format_ids?: string[];
   file_count?: number;
   bundle_date?: string;
@@ -88,6 +90,23 @@ function makeSubjectResolver(): (uid: string) => Promise<SubjectInfo | null> {
   };
 }
 
+/**
+ * スキャン確定 Markdown から年齢・性別を拾う (age_at_test が空のスペシャルアカウント向け
+ * の最終フォールバック)。人間ドック様式は見出しに「54歳男」等が出る。捏造せず取れた分だけ。
+ */
+function parseAgeSexFromMarkdown(md: string): { age: number | null; sex: 'male' | 'female' | null } {
+  let age: number | null = null;
+  let sex: 'male' | 'female' | null = null;
+  const am = md.match(/年齢\s*[:：]\s*(\d{1,3})/) ?? md.match(/(\d{1,3})\s*[歳才]/);
+  if (am) {
+    const n = Number.parseInt(am[1], 10);
+    if (Number.isFinite(n) && n >= 18 && n <= 120) age = n;
+  }
+  if (/歳\s*男|才\s*男|性別\s*[:：]?\s*男|男性/.test(md)) sex = 'male';
+  else if (/歳\s*女|才\s*女|性別\s*[:：]?\s*女|女性/.test(md)) sex = 'female';
+  return { age, sex };
+}
+
 /** 生年月日 (YYYY-MM-DD) と検査日 (YYYY-MM-DD or YYYY_MM_DD) から満年齢。どちらか無ければ null。 */
 function ageAt(dob: string | null, testDate: string | null): number | null {
   if (!dob) return null;
@@ -121,8 +140,8 @@ async function materializeHealthCheckup(
   hcKey: string;
   measurements: Record<string, unknown>[];
   testDate: string;
-  ageAtTest: number | null;
-  sex: 'male' | 'female' | null;
+  fallbackAge: number | null;
+  fallbackSex: 'male' | 'female' | null;
 } | null> {
   const sb = getServerSupabase();
   if (!sb) return null;
@@ -183,9 +202,14 @@ async function materializeHealthCheckup(
   } catch {
     return null; // 書き出せなければ納品対象から外す (assemble が拾えないため)
   }
+  // 年齢・性別のフォールバック: ①test_artifacts.age_at_test/sex → ②scan_md から抽出。
+  // (スペシャルアカウントは生年月日が無く age_at_test も空のことがあるため md まで見る)
+  const fromMd = parseAgeSexFromMarkdown(scanMd);
   const ageAtTest = typeof row?.age_at_test === 'number' && Number.isFinite(row.age_at_test) ? row.age_at_test : null;
-  const sex = row?.sex === 'male' || row?.sex === 'female' ? row.sex : null;
-  return { hcKey, measurements, testDate, ageAtTest, sex };
+  const dbSex = row?.sex === 'male' || row?.sex === 'female' ? row.sex : null;
+  const fallbackAge = ageAtTest ?? fromMd.age;
+  const fallbackSex = dbSex ?? fromMd.sex;
+  return { hcKey, measurements, testDate, fallbackAge, fallbackSex };
 }
 
 /** measurements からウェルネス年齢を算出し health_age_scores へ保存。載せられるなら HealthAgeRecord を返す。 */
@@ -197,21 +221,25 @@ async function computeWellnessFromMeasurements(
   fallbackAge: number | null,
   fallbackSex: 'male' | 'female' | null,
   resolveSubject: (u: string) => Promise<SubjectInfo | null>,
-): Promise<HealthAgeRecord | null> {
-  if (!Array.isArray(measurements) || measurements.length === 0) return null;
+): Promise<{ rec: HealthAgeRecord | null; reason: string | null }> {
+  if (!Array.isArray(measurements) || measurements.length === 0) return { rec: null, reason: '測定値なし' };
 
   const subj = await resolveSubject(uid);
   const testDate = hcTestDate;
-  // 年齢: ①顧客DBの生年月日×検査日 → ②スキャンが記録した age_at_test (スペシャルアカウントは
-  // EC顧客でなく生年月日が無いことがあるため必須のフォールバック)。性別も同様に補完。
+  // 年齢: ①顧客DBの生年月日×検査日 → ②age_at_test → ③scan_md 抽出 (materialize が合成した fallback)。
   const age = ageAt(subj?.dateOfBirth ?? null, testDate) ?? fallbackAge;
   const sex = subj?.sex ?? fallbackSex;
 
   const normalized = normalizeMarkers(measurements as RawItem[]);
   const markers: HealthAgeMarkers = { ...normalized, age, sex } as HealthAgeMarkers;
   const result = computeWellnessAge(markers);
-  // 算出不能 (必須マーカー/年齢不足) は載せない・保存しない (捏造ゼロ)。
-  if (!result.ok || result.biological_age == null) return null;
+  // 算出不能 (必須マーカー/年齢不足) は載せない・保存しない (捏造ゼロ)。理由を返して可視化。
+  if (!result.ok || result.biological_age == null) {
+    const missing = Array.isArray(result.missing_simple) && result.missing_simple.length
+      ? result.missing_simple.join('/')
+      : (age == null ? '年齢' : '必須項目');
+    return { rec: null, reason: `算出不能(不足: ${missing})` };
+  }
 
   const tDate = /^\d{4}-\d{2}-\d{2}$/.test(testDate) ? testDate : new Date().toISOString().slice(0, 10);
   const computedAt = new Date().toISOString();
@@ -242,13 +270,16 @@ async function computeWellnessFromMeasurements(
   }
 
   return {
-    biological_age: result.biological_age,
-    chronological_age: age,
-    sex,
-    test_date: tDate,
-    computed_at: computedAt,
-    delta: result.delta ?? null,
-    model_version: result.model_version ?? null,
+    rec: {
+      biological_age: result.biological_age,
+      chronological_age: age,
+      sex,
+      test_date: tDate,
+      computed_at: computedAt,
+      delta: result.delta ?? null,
+      model_version: result.model_version ?? null,
+    },
+    reason: null,
   };
 }
 
@@ -318,6 +349,7 @@ export async function deliverReadySpecialAccounts(opts: {
   const healthAgeByRef: Record<string, HealthAgeRecord> = {};
   const manualMapping: Record<string, Partial<Record<'HealthCheckupData' | 'LifestyleQuestionnaireData', string>>> = {};
   const methodByUid = new Map<string, string | null>();
+  const wellnessReasonByUid = new Map<string, string>();
   const hcKeyByUid = new Map<string, string>();
 
   // ① 各 uid の HealthCheckupData を DB(scan_md) から Elith 形式で生成し S3(source) へ置く。
@@ -329,12 +361,13 @@ export async function deliverReadySpecialAccounts(opts: {
       continue;
     }
     hcKeyByUid.set(uid, mat.hcKey);
-    const rec = await computeWellnessFromMeasurements(uid, mat.measurements, mat.testDate, mat.hcKey, mat.ageAtTest, mat.sex, resolveSubject);
+    const { rec, reason } = await computeWellnessFromMeasurements(uid, mat.measurements, mat.testDate, mat.hcKey, mat.fallbackAge, mat.fallbackSex, resolveSubject);
     if (rec) {
       healthAgeByRef[mat.hcKey] = rec;
       methodByUid.set(uid, rec.model_version);
     } else {
       methodByUid.set(uid, null); // 算出不能 → HealthAge 非同梱 (捏造しない)
+      wellnessReasonByUid.set(uid, reason ?? '算出不能');
     }
   }
 
@@ -393,6 +426,7 @@ export async function deliverReadySpecialAccounts(opts: {
       uid: u.userId,
       status: 'delivered',
       wellness_age_method: method,
+      ...(method ? {} : { wellness_reason: wellnessReasonByUid.get(u.userId) ?? '算出不能' }),
       format_ids: formatIds,
       file_count: u.sources.length,
       bundle_date: bundleDate,
