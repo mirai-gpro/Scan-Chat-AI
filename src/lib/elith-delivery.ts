@@ -24,6 +24,7 @@ import {
   type SubjectInfo,
 } from './elith-assemble';
 import { measurementsFromMarkdown, ELITH_HANDOFF_SCHEMA_VERSION } from './elith-export';
+import { extractAgeSex as parseAgeSexFromMarkdown } from './scan-age';
 import { normalizeMarkers, type HealthAgeMarkers, type RawItem } from './health-age';
 import { computeWellnessAge } from './wellness-age';
 import { getServerSupabase } from './supabase';
@@ -88,23 +89,6 @@ function makeSubjectResolver(): (uid: string) => Promise<SubjectInfo | null> {
     cache.set(uid, info);
     return info;
   };
-}
-
-/**
- * スキャン確定 Markdown から年齢・性別を拾う (age_at_test が空のスペシャルアカウント向け
- * の最終フォールバック)。人間ドック様式は見出しに「54歳男」等が出る。捏造せず取れた分だけ。
- */
-function parseAgeSexFromMarkdown(md: string): { age: number | null; sex: 'male' | 'female' | null } {
-  let age: number | null = null;
-  let sex: 'male' | 'female' | null = null;
-  const am = md.match(/年齢\s*[:：]\s*(\d{1,3})/) ?? md.match(/(\d{1,3})\s*[歳才]/);
-  if (am) {
-    const n = Number.parseInt(am[1], 10);
-    if (Number.isFinite(n) && n >= 18 && n <= 120) age = n;
-  }
-  if (/歳\s*男|才\s*男|性別\s*[:：]?\s*男|男性/.test(md)) sex = 'male';
-  else if (/歳\s*女|才\s*女|性別\s*[:：]?\s*女|女性/.test(md)) sex = 'female';
-  return { age, sex };
 }
 
 /** 生年月日 (YYYY-MM-DD) と検査日 (YYYY-MM-DD or YYYY_MM_DD) から満年齢。どちらか無ければ null。 */

@@ -17,6 +17,7 @@
 
 import { extractExamDate, measurementsFromMarkdown } from './elith-export';
 import { persistMeasurements, type SchemaClient } from './measurement-persist';
+import { extractAgeSex } from './scan-age';
 
 /** JST の今日 (YYYY-MM-DD)。受診日が読めなかったときの既定。 */
 function jstToday(): string {
@@ -69,6 +70,14 @@ export async function saveScanResult(
 
   const { kept } = measurementsFromMarkdown(md);
 
+  /*
+   * 年齢・性別をスキャン本文から拾って保存する (発注者判断 2026-09-24「スキャンから抽出」)。
+   * ウェルネス年齢は実年齢が必須だが、生年月日を持たない利用者 (スペシャルアカウント等) では
+   * 顧客DBから年齢を引けない。人間ドック/健診には年齢・性別が印字されるので、ここで拾って
+   * `age_at_test` / `sex` に残す。**取れないときは null** (捏造しない・NOT NULL でないので可)。
+   */
+  const { age: ageAtTest, sex } = extractAgeSex(md);
+
   const { data, error } = await sb
     .schema('diagnosis')
     .from('test_artifacts')
@@ -86,6 +95,8 @@ export async function saveScanResult(
         imported_by: 'user',
         status: 'active',
         scan_md: md,
+        ...(ageAtTest != null ? { age_at_test: ageAtTest } : {}),
+        ...(sex ? { sex } : {}),
         // measurements(jsonb) は下の persistMeasurements が書く (両層の唯一の入口)。
       },
     ])
