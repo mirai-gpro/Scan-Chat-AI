@@ -232,11 +232,20 @@ LAiF の正式フォーム `input_format_new_202312.xlsx`（シート `KM`・No.
 **E. 実装状況 / 段階**
 - **実装済**: 単品/スペシャル（type2）の納品 `elith-delivery.ts`（条件＝問診済 ∧ スキャン済）を、
   admin ボタン＋**23:00 cron** の両方から起動（cron は `skipDelivered:true`）。
-- **未実装（本項の主眼・コースプラン化）**: (1) 契約テーブル（`subscriptions`/`plan_compositions*`）埋め込み →
-  権利の機械判定、(2) 回ごとの「予定検査 vs 受領」照合＝条件判定、(3) その結果を上記 cron の対象へ広げる（§7 未実装(c)）。
-  → **(1) が全ての前提**（契約テーブルが実在 0 件）。埋め込み前は cron が拾えるのは単品/スペシャルのみで、
-  コースプランは従来どおり admin 手動。埋め込み後、cron 本体（`deliverReadySpecialAccounts` 相当）の対象を
-  契約由来の ready 判定へ拡張する。
+- **契約テーブルの埋め込み（権利判定の前提・(1)）の進捗**（2026-09-24）:
+  - **DDL 済**: `wellfort-site supabase/migrations/20260910000010_kit_composition_model.sql`
+    （`test_kits`/`plan_compositions`/`plan_composition_items` ＋ `subscriptions.plan_composition_id`・additive）。
+  - **マスタ seed 済（ファイル）**: `wellfort-site scripts/seed-kit-composition.sql`
+    （キット 5 件 ＋ 4 プランの構成 version=1・冪等・staging の `test_products.id` 依存）。
+  - **遡及 backfill 用意（今回・§9-4 への回答）**: `wellfort-site scripts/backfill-subscription-composition.sql`。
+    既存契約を **version=1（契約時の版）** へ pin（NULL 行だけ・冪等・将来の version=2 に引きずられない）。
+  - **新規契約の pin**: create-order 改修（§8.3・`ec_order_on_payment_success_spec`）に折り込む。
+    **決済戻り `gmo-return` には後付けしない**（慎重区画）。
+  - **DB 適用は発注者の操作**（staging の SQL Editor・§10.1-5）。**Production NO-TOUCH**。
+- **未実装（本項の主眼・コースプラン化）**: (2) 回ごとの「予定検査 vs 受領」照合＝条件判定、
+  (3) Scan-Chat-AI の cron から**契約由来の ready 判定**（`subscriptions.plan_composition_id` →
+  `plan_composition_items` の予定 vs 受領）を bridge 経由で読み、対象をコースプランへ広げる（§7 未実装(c)）。
+  → 埋め込み（DDL＋seed＋backfill）適用後に着手できる。それまで cron が拾えるのは単品/スペシャルのみ。
 
 ---
 
