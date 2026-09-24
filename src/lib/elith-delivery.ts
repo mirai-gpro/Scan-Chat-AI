@@ -286,6 +286,36 @@ async function computeWellnessFromMeasurements(
   };
 }
 
+/**
+ * 既に納品済みの `uid|YYYY-MM-DD` を集める (夜間 cron が同じ回を毎晩 Elith へ再送しないため)。
+ *
+ * **取れなければ空集合を返す (fail-open)** — 取りこぼしよりは、同一内容の再ラップ (無害・
+ * 決定論で同じ JSON を同じキーへ上書き) の方がまし。呼び出し側は skipDelivered のときだけ使う。
+ */
+async function loadDeliveredBundles(uids: string[], deliveryPrefix: string): Promise<Set<string>> {
+  const set = new Set<string>();
+  if (uids.length === 0) return set;
+  try {
+    const sb = getServerSupabase();
+    if (!sb) return set;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data } = await (sb.schema('diagnosis') as any)
+      .from('elith_deliveries')
+      .select('diagnostic_user_id, bundle_date')
+      .in('diagnostic_user_id', uids)
+      .eq('delivery_prefix', deliveryPrefix)
+      .eq('status', 'delivered');
+    for (const r of data ?? []) {
+      const uid = String(r.diagnostic_user_id ?? '').toLowerCase();
+      const d = typeof r.bundle_date === 'string' ? r.bundle_date.slice(0, 10) : '';
+      if (uid && d) set.add(`${uid}|${d}`);
+    }
+  } catch (e) {
+    console.warn('[elith-delivery] loadDeliveredBundles 失敗 (全件処理へ):', e instanceof Error ? e.message : e);
+  }
+  return set;
+}
+
 /** elith_deliveries に 1 件記録 (冪等: uid×bundle_date×delivery_prefix)。失敗は投げない。 */
 async function recordDelivery(row: {
   uid: string;
@@ -326,6 +356,11 @@ export async function deliverReadySpecialAccounts(opts: {
   sourcePrefix: string;
   deliveryPrefix: string;
   bundleDate?: string;
+  /**
+   * **既に納品済みの回を再送しない** (夜間 cron 用)。admin ボタンは未指定=false で
+   * 従来どおり毎回ラップし直す (手動で「作り直したい」に応えるため)。cron は true。
+   */
+  skipDelivered?: boolean;
 }): Promise<DeliverSummary> {
   await refreshConfig(true);
   const snap = listSpecialAccounts();
@@ -355,12 +390,21 @@ export async function deliverReadySpecialAccounts(opts: {
   const wellnessReasonByUid = new Map<string, string>();
   const hcKeyByUid = new Map<string, string>();
 
+  // 夜間 cron 用: 既に納品済みの回 (uid|test_date) は再送しない (skipDelivered)。
+  const deliveredSet = opts.skipDelivered ? await loadDeliveredBundles(ready, opts.deliveryPrefix) : new Set<string>();
+
   // ① 各 uid の HealthCheckupData を DB(scan_md) から Elith 形式で生成し S3(source) へ置く。
   //    ウェルネス年齢も同じ measurements から算出 (S3 再読み不要)。
   for (const uid of ready) {
     const mat = await materializeHealthCheckup(uid, opts.sourcePrefix);
     if (!mat) {
       results.push({ uid, status: 'skipped', reason: '確定スキャン(scan_md)が無く HealthCheckupData を生成できない' });
+      continue;
+    }
+    // この回が納品済みなら manualMapping に入れない = Elith(納品先)へ再送しない。
+    // (source への HC 書き出しは同一内容の上書きで無害。判定は納品済みの test_date と突合。)
+    if (opts.skipDelivered && deliveredSet.has(`${uid.toLowerCase()}|${mat.testDate}`)) {
+      results.push({ uid, status: 'skipped', reason: 'この回は既に納品済み' });
       continue;
     }
     hcKeyByUid.set(uid, mat.hcKey);

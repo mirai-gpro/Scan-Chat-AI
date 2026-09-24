@@ -183,6 +183,61 @@ LAiF の正式フォーム `input_format_new_202312.xlsx`（シート `KM`・No.
 - 全必要データ（当該回の検査結果＋問診＋ウェルネス年齢等）が揃った時点で、**Elith 形式 JSON 生成＋S3受渡を指示**（`docs/elith/elith_batch_centralization_design.md`／`elith_assembly_wrapping_spec.md`）。
 - ウェルネス年齢・AI疾病予測も §該当仕様どおり同梱（検査日毎の時系列）。作成/受渡の状態を記録。
 
+#### 4.3.1 権利と条件（Elith AI診断の自動生成トリガ・確定 2026-09-24 発注者判断）
+
+**目的**: 「Elith AI診断（＝AI疾病予防）の権利があるユーザーで、その回の必要データが揃ったら、
+自動で Elith 用 JSON をラップして S3 へ書き出す」ための **権利（entitlement）と条件（readiness）** の定義。
+納品の単位・形式は §1〜§2・`elith_assembly_wrapping_spec` に従う（**1 受診回 = 1 `date/` フォルダ**）。
+
+**A. 権利（誰が対象か）= 契約 `plan_composition` から自動判定（発注者判断）**
+- **4 プラン全部が AI疾病予防を含む**（回数だけ違う。§1 / §6.1 の初期データ）＋ **AI疾病予防 単品購入**も対象。
+  → 権利 = **有効なコースプラン契約（`test_products` の 4 バリアントいずれか）** または **AI疾病予防 単品購入**。
+- 判定元は **`subscriptions.plan_composition_id` → `plan_compositions` → `plan_composition_items`**（§6.1）。
+  **プラン名では判定しない**（名称は改称が続く・§1 冒頭）。
+- **type 判定はアプリが持つ**（その回の入力にがんリスク検査があれば type1／無ければ type2。Elith 出力から推測しない・`CLAUDE.md`）。
+- **前提（ブロッカー）**: `subscriptions` / `plan_compositions` / `plan_composition_items` は**本番・staging とも実在 0 件**
+  （`docs/subscription/検査キット_データモデル_仕様書.md`）。**契約テーブルの埋め込みが自動判定の先行条件**。
+  それまでの経過措置は単品/スペシャルと同じ admin 手動（`elith-delivery.ts`）。
+
+**B. 条件（いつ発火するか）= その回の予定検査が「全部揃ってから」（発注者判断）**
+- ある回の**予定検査**は `plan_composition_items`（`ship_rule`・`qty_per_year`）から回ごとに展開する。
+- 発火 = **その回に予定された検査結果が全て受領済み（§4.2）** ∧ **当該回窓の AI問診が完了**。
+  一部欠けている間は**発火しない**（＝後追い再納品を原則不要にする。発注者判断）。
+- **回窓連動**: 問診は「その回の窓の最新」を要求する（`account-progress` / `interview-cycle` の考え方）。
+  窓 = その回の受診サイクル（前回受診〜今回受診）。窓外の古い問診は満たさない。
+- **HealthAgeData は算出可能なら同梱・不能なら非同梱で続行**（値を作らない＝捏造ゼロ・`elith-delivery.ts` と同規律）。
+  HealthAge の有無は発火のブロッカーにしない。
+
+**C. 回ごとの必須 format（B の「予定検査」の内訳）**
+
+| 回の種類 | 必須 format（その回にその検査が予定されている場合） |
+|---|---|
+| 共通（全回・両type） | `LifestyleQuestionnaireData`（問診・回窓最新）＋ `HealthAgeData`（算出可能なら） |
+| 人間ドック回（年1・全プラン） | `HealthCheckupData`（アプリ AI スキャン） |
+| 中間回（がんリスク／血液） | `CancerRiskAssessmentData`（＋スタンダードは `BloodTestData`） |
+| 初回のみ | `GeneticTestResultData`（遺伝子・生涯 1 回・初回の回に相乗り） |
+| 別系統（年1・発火の同期対象外） | `Other`/`ai_prediction`（LAiF・データ受領。回の必須には含めず、受領時に当該 `date/` へ同梱） |
+
+- **プラン別の年間発行回数**（＝AI疾病予防の回数）: スタンダード50+ = 4 / スタンダード30・40代 = 2 /
+  ライト = 各 1（§1）。回数は `plan_compositions.per_year` に一致（ライトは中間回の検査が少なく年 1）。
+
+**D. 発火の運用 = 毎日 23:00 (JST) の cron（確定 2026-09-24・発注者指示）**
+- **Elith 側が毎日深夜バッチで取り込む**ので、こちらは**毎日 23:00 JST に「条件が揃ったもの」を納品ラップ**する。
+- 実装: `GET /api/cron/elith-deliver`（Bearer `CRON_SECRET`／手動確認は `ADMIN_API_KEY`・fail-closed）。
+  スケジュールは `vercel.json` の `crons`（**`0 14 * * *` = 14:00 UTC = 23:00 JST**。Vercel cron は UTC）。
+- **冪等**: `skipDelivered:true` で、既に納品済みの回（`elith_deliveries` の (uid, bundle_date, delivery_prefix)）は
+  Elith へ**再送しない**（毎晩の重複取り込みを防ぐ）。source への HC 書き出しは同一内容の上書きで無害。
+- **admin ボタン（手動）は従来どおり**（`skipDelivered` 未指定＝毎回ラップし直す。「作り直したい」に応える）。
+
+**E. 実装状況 / 段階**
+- **実装済**: 単品/スペシャル（type2）の納品 `elith-delivery.ts`（条件＝問診済 ∧ スキャン済）を、
+  admin ボタン＋**23:00 cron** の両方から起動（cron は `skipDelivered:true`）。
+- **未実装（本項の主眼・コースプラン化）**: (1) 契約テーブル（`subscriptions`/`plan_compositions*`）埋め込み →
+  権利の機械判定、(2) 回ごとの「予定検査 vs 受領」照合＝条件判定、(3) その結果を上記 cron の対象へ広げる（§7 未実装(c)）。
+  → **(1) が全ての前提**（契約テーブルが実在 0 件）。埋め込み前は cron が拾えるのは単品/スペシャルのみで、
+  コースプランは従来どおり admin 手動。埋め込み後、cron 本体（`deliverReadySpecialAccounts` 相当）の対象を
+  契約由来の ready 判定へ拡張する。
+
 ---
 
 ## 5. 全体フロー

@@ -11,6 +11,10 @@
     {
       "path": "/api/cron/elith-intake",
       "schedule": "0 0 * * *"
+    },
+    {
+      "path": "/api/cron/elith-deliver",
+      "schedule": "0 14 * * *"
     }
   ]
 }
