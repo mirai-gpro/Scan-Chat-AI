@@ -31,6 +31,7 @@ import { isAdminAuthorized } from '../../../lib/api-auth';
 import { refreshConfig, setConfig } from '../../../lib/app-config';
 import { hashEmail, isUuid, maskEmail, parseEmailEntries, parseEntries, serializeEmailEntries } from '../../../lib/demo-accounts';
 import { listSpecialAccounts, serializeUidEntries } from '../../../lib/special-accounts';
+import { getAccountProgress } from '../../../lib/account-progress';
 
 export const prerender = false;
 
@@ -54,7 +55,19 @@ async function snapshot() {
 export const GET: APIRoute = async ({ request }) => {
   if (!isAdminAuthorized(request)) return json({ ok: false, error: 'unauthorized' }, 401);
   try {
-    return json({ ok: true, ...(await snapshot()) });
+    const snap = await snapshot();
+    /*
+     * **AI問診 / スキャンの完了ステータスを uid ごとに添える** (発注者要望 2026-09-24)。
+     * rows(uid あり) と emails(サインイン済みで uid あり) の uid を集めて一括取得。
+     * データは Scan-Chat-AI の diagnosis スキーマ (interview_completions / test_artifacts)。
+     * **失敗しても一覧は返す** (status は空になるだけ・画面を壊さない)。
+     */
+    const uids = [
+      ...snap.rows.map((r) => r.uid),
+      ...snap.emails.map((e) => e.uid).filter((u): u is string => !!u),
+    ];
+    const status = await getAccountProgress(uids);
+    return json({ ok: true, ...snap, status });
   } catch (e) {
     return json({ ok: false, error: 'list_failed', detail: String((e as { message?: string })?.message ?? e) }, 500);
   }
