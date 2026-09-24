@@ -87,6 +87,12 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     description: '**供給元に関わらず資格を止める uid。** これが緊急停止の手段'
       + ' (供給元を書き換えず引き算するので「戻す」で元に戻る)。'
       + ' 直接編集せず /admin/special-accounts から操作すること。' },
+  { key: 'special.account_dob', type: 'string', group: 'スペシャル', label: 'スペシャルアカウントの生年月日・性別 (ウェルネス年齢用)', default: '',
+    description: '**PII。admin 画面へはマスクして返す (生年月日はブラインド表示)。** '
+      + 'EC 購入が無いスペシャルアカウントは顧客DBに生年月日を持たず、ウェルネス年齢 (実年齢が必須) を'
+      + '算出できない。登録時に控えて年齢ソースにする。1 行 = メールの sha256 + 生年月日(YYYY-MM-DD) + 性別(male/female)。'
+      + ' 直接編集せず /admin/special-accounts の登録フォームから入れること。メール本体 (special.account_emails) とは'
+      + '別キーに隔離してある (あちらは admin へ生テキストを返して編集させるため)。' },
 
   // ── AI疾病予防報告書 (docs/旧版・ボツ/ai_prevention_report_generation_spec.md) ──
   // A「初期がんの早期発見」のフォールバック文言 (spec §4.0.1)。

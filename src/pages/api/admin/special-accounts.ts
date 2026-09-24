@@ -30,7 +30,10 @@ import type { APIRoute } from 'astro';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 import { refreshConfig, setConfig } from '../../../lib/app-config';
 import { hashEmail, isUuid, maskEmail, parseEmailEntries, parseEntries, serializeEmailEntries } from '../../../lib/demo-accounts';
-import { listSpecialAccounts, serializeUidEntries } from '../../../lib/special-accounts';
+import {
+  listSpecialAccounts, serializeUidEntries,
+  parseDobEntries, serializeDobEntries, normSexToken,
+} from '../../../lib/special-accounts';
 import { getAccountProgress } from '../../../lib/account-progress';
 
 export const prerender = false;
@@ -38,6 +41,22 @@ export const prerender = false;
 const KEY = 'special.account_uids';
 const EMAIL_KEY = 'special.account_emails';
 const DENY_KEY = 'special.account_denied_uids';
+const DOB_KEY = 'special.account_dob';
+
+const DOB_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** 生年月日として妥当なら YYYY-MM-DD を返す。実在しない日付・範囲外は '' (捏造しない)。 */
+function validDob(v: unknown): string {
+  const s = String(v ?? '').trim();
+  if (!DOB_RE.test(s)) return '';
+  const t = Date.parse(`${s}T00:00:00Z`);
+  if (Number.isNaN(t)) return '';
+  // Date.parse は '2026-02-31' を丸める (3/3 になる) ので、往復で一致を確認する。
+  if (new Date(t).toISOString().slice(0, 10) !== s) return '';
+  const y = Number(s.slice(0, 4));
+  const nowY = new Date().getUTCFullYear();
+  return y >= 1900 && y <= nowY ? s : '';
+}
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -50,6 +69,27 @@ function json(body: unknown, status = 200): Response {
 async function snapshot() {
   await refreshConfig(true);
   return listSpecialAccounts();
+}
+
+/**
+ * ブラウザへ返す形に整える。**生年月日はマスク**し、生テキスト (`dobRaw`) は落とす
+ * (発注者指示 2026-09-24「生年月日の表示はブラインドに」)。生の日付はここより外へ出さない。
+ * 各メール行に `has_dob` (登録済みか) / `dob_masked` (`****-**-**`) / `sex` を添える。
+ */
+function present(snap: ReturnType<typeof listSpecialAccounts>) {
+  const dobByHash = new Map(parseDobEntries(snap.dobRaw).map((d) => [d.hash, d]));
+  const emails = snap.emails.map((e) => {
+    const d = dobByHash.get(e.hash);
+    return {
+      ...e,
+      sex: d?.sex ?? '',
+      has_dob: !!(d && d.dob),
+      dob_masked: d && d.dob ? '****-**-**' : '',
+    };
+  });
+  const { dobRaw: _dobRaw, ...rest } = snap;
+  void _dobRaw;
+  return { ...rest, emails };
 }
 
 export const GET: APIRoute = async ({ request }) => {
@@ -67,7 +107,8 @@ export const GET: APIRoute = async ({ request }) => {
       ...snap.emails.map((e) => e.uid).filter((u): u is string => !!u),
     ];
     const status = await getAccountProgress(uids);
-    return json({ ok: true, ...snap, status });
+    // 生年月日はブラインド表示 (present で dobRaw を落としマスクを添える・発注者指示 2026-09-24)。
+    return json({ ok: true, ...present(snap), status });
   } catch (e) {
     return json({ ok: false, error: 'list_failed', detail: String((e as { message?: string })?.message ?? e) }, 500);
   }
@@ -104,6 +145,8 @@ export const POST: APIRoute = async ({ request }) => {
   // **編集できるのは app_config 由来だけ。** 組み込みと env はここからは動かせない。
   const entries = parseEntries(cur.configRaw);
   const emails = parseEmailEntries(cur.emailsRaw);
+  // 生年月日・性別は専用キー (PII 隔離)。email のハッシュで引く。
+  const dobEntries = parseDobEntries(cur.dobRaw);
   const rejected: { uid: string; reason: string }[] = [];
 
   for (const raw of add) {
@@ -148,6 +191,9 @@ export const POST: APIRoute = async ({ request }) => {
   for (const raw of addEmail) {
     const addr = String((raw as { email?: unknown })?.email ?? raw ?? '').trim().toLowerCase();
     const label = String((raw as { label?: unknown })?.label ?? '').replace(/[\r\n#]/g, ' ').trim().slice(0, 80);
+    // 生年月日・性別 (ウェルネス年齢用)。**任意** — 入力があったときだけ控える。
+    const dob = validDob((raw as { dob?: unknown })?.dob);
+    const sex = normSexToken((raw as { sex?: unknown })?.sex);
     // 形だけ見る。**実在確認はしない** (できない)。
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(addr)) {
       rejected.push({ uid: addr, reason: 'メールアドレスの形式が違う' });
@@ -157,6 +203,12 @@ export const POST: APIRoute = async ({ request }) => {
     const at = emails.findIndex((e) => e.hash === h);
     if (at >= 0) emails[at] = { ...emails[at], label: label || emails[at].label };
     else emails.push({ hash: h, masked: maskEmail(addr), uid: '', label });
+    // DOB は専用キーへ (PII 隔離)。**入力があったフィールドだけ上書き** — 空で既存を消さない。
+    if (dob || sex) {
+      const di = dobEntries.findIndex((e) => e.hash === h);
+      if (di >= 0) dobEntries[di] = { hash: h, dob: dob || dobEntries[di].dob, sex: sex || dobEntries[di].sex };
+      else dobEntries.push({ hash: h, dob, sex });
+    }
   }
   for (const key of removeEmail) {
     // 画面からは hash を渡す (現物のアドレスを往復させない)。
@@ -173,6 +225,9 @@ export const POST: APIRoute = async ({ request }) => {
       const ui = entries.findIndex((e) => e.uid === linked);
       if (ui >= 0) entries.splice(ui, 1);
     }
+    // 生年月日・性別も同じハッシュの行を消す (PII を残さない)。
+    const di = dobEntries.findIndex((e) => e.hash === key);
+    if (di >= 0) dobEntries.splice(di, 1);
   }
 
   /*
@@ -198,6 +253,7 @@ export const POST: APIRoute = async ({ request }) => {
   const value = serializeUidEntries(entries);
   const deniedValue = serializeUidEntries(denied);
   const emailValue = serializeEmailEntries(emails);
+  const dobValue = serializeDobEntries(dobEntries);
 
   /*
    * **中身が変わらないなら保存しない。**
@@ -208,11 +264,13 @@ export const POST: APIRoute = async ({ request }) => {
   if (value !== cur.configRaw) updates[KEY] = value;
   if (emailValue !== cur.emailsRaw) updates[EMAIL_KEY] = emailValue;
   if (deniedValue !== cur.deniedRaw) updates[DENY_KEY] = deniedValue;
+  if (dobValue !== cur.dobRaw) updates[DOB_KEY] = dobValue;
   if (Object.keys(updates).length > 0) {
     const updatedBy = typeof body.updated_by === 'string' ? body.updated_by : undefined;
     const r = await setConfig(updates, updatedBy);
     if (!r.ok) return json({ ok: false, error: 'save_failed', detail: r, rejected }, 400);
   }
 
-  return json({ ok: true, ...(await snapshot()), rejected });
+  // present で生年月日をマスクし dobRaw を落とす (POST の応答でも生の日付を返さない)。
+  return json({ ok: true, ...present(await snapshot()), rejected });
 };

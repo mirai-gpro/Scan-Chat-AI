@@ -101,7 +101,7 @@ console.log('\n② 資格の判定 (admin を混ぜない・uid だけで決ま�
   ok('純粋関数はデモ枠から import している (再実装しない)',
     /from '\.\/demo-accounts'/.test(sa) && !/SHA-256/.test(sa),
     'hashEmail 等を書き写すと片方だけ直って黙ってすれ違う');
-  for (const k of ['special.account_emails', 'special.account_uids', 'special.account_denied_uids']) {
+  for (const k of ['special.account_emails', 'special.account_uids', 'special.account_denied_uids', 'special.account_dob']) {
     ok(`app-config.ts に ${k} がある`, read('src/lib/app-config.ts').includes(`key: '${k}'`),
       'setConfig が未知キーとして弾く');
   }
@@ -278,6 +278,58 @@ console.log('\n⑥ uid の採番 (記録済み → 既存 → 新規発行)\n');
     await M.resolveSpecialUidByEmail(MAIL, EXIST), minted);
   eq('  → 現物のアドレスは保存物のどこにも無い',
     /invited@example\.com/.test(JSON.stringify(STORE)), false);
+}
+
+console.log('\n⑦ 生年月日・性別 (ウェルネス年齢用・PII 隔離・ブラインド表示)\n');
+{
+  // ── ラウンドトリップと壊れた行の排除 ──
+  const H = 'a'.repeat(64);
+  const rt = M.serializeDobEntries(M.parseDobEntries(`${H} 1970-05-15 male`));
+  eq('保存 → 解析 → 保存が一致する', rt, `${H} 1970-05-15 male`);
+  eq('性別だけでも持てる', M.parseDobEntries(`${H} - female`).map((e) => [e.dob, e.sex]), [['', 'female']]);
+  eq('壊れた日付は捨てる', M.parseDobEntries(`${H} 1970-13-40 male`).map((e) => e.dob), ['']);
+  eq('hash でない行は捨てる', M.parseDobEntries('notahash 1970-05-15 male').length, 0);
+  eq('中身が空の行は持たない', M.parseDobEntries(`${H} - -`).length, 0);
+  eq('性別トークンを吸収 (男/M/female)',
+    [M.normSexToken('男'), M.normSexToken('M'), M.normSexToken('female'), M.normSexToken('x')],
+    ['male', 'male', 'female', '']);
+
+  // ── uid → 生年月日・性別 の突き合わせ (email 行の uid↔hash を辿る) ──
+  reset();
+  const MAIL = 'dobuser@example.com';
+  const UID = 'eeeeeeee-1111-2222-3333-444444444444';
+  const h = await M.demo.hashEmail(MAIL);
+  STORE['special.account_emails'] = M.demo.serializeEmailEntries([{ hash: h, masked: M.demo.maskEmail(MAIL), uid: UID, label: '招待' }]);
+  STORE['special.account_dob'] = `${h} 1970-05-15 male`;
+  eq('サインイン済みの uid から生年月日・性別を引ける',
+    M.specialSubjectByUid(UID), { dateOfBirth: '1970-05-15', sex: 'male' });
+  eq('登録の無い uid は null (捏造しない)',
+    M.specialSubjectByUid('ffffffff-1111-2222-3333-444444444444'), null);
+
+  // サインイン前 (uid 未確定) の DOB 行は uid から引けない (email 行に uid が無い)。
+  STORE['special.account_emails'] = M.demo.serializeEmailEntries([{ hash: h, masked: M.demo.maskEmail(MAIL), uid: '', label: '招待' }]);
+  eq('サインイン待ちの間は uid から引けない', M.specialSubjectByUid(UID), null);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑧ 生年月日はブラウザへ生で返さない (API のブラインド化・静的ガード)
+// ══════════════════════════════════════════════════════════════════════
+//
+// present() を経ずに生スナップショットを返すと、dobRaw (生の日付) が画面に載る。
+// **退行を注入するとここで落ちる** (発注者指示「生年月日の表示はブラインドに」)。
+console.log('\n⑧ API がブラインド化してから返す\n');
+{
+  const api = read('src/pages/api/admin/special-accounts.ts');
+  ok('present() で整形してから返す (GET/POST とも)',
+    (api.match(/present\(/g) || []).length >= 2, 'present を通さないと生年月日が生で返る');
+  ok('生スナップショットをそのまま返していない',
+    !/\.\.\.\(await snapshot\(\)\)/.test(api) && !/\.\.\.snap[,\s}]/.test(api),
+    'dobRaw ごとブラウザへ流れる');
+  ok('present は dobRaw を落とす',
+    /const \{ dobRaw:[^}]*\} = snap/.test(api), 'dobRaw を返却に混ぜてはいけない');
+  ok('マスク文字列を添える (dob_masked)', /dob_masked/.test(api), '登録済みかだけ分かればよい');
+  ok('生年月日の生値をレスポンスに入れない',
+    !/dob:\s*d\.dob/.test(api), '生の日付を JSON に載せない');
 }
 
 // ══════════════════════════════════════════════════════════════════════

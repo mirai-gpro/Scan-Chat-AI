@@ -54,9 +54,9 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
   GET でカタログ+現在値、POST で upsert。**UI は wellfort-site admin 側** (この作業ツリーには
   未取得のため実装状況は未確認)。
 
-**app_config の現行キー (31 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
+**app_config の現行キー (32 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
 `demo.account_emails` / `demo.account_uids` / `demo.account_denied_uids` / `demo.seeded_from_admins` /
-`special.account_emails` / `special.account_uids` / `special.account_denied_uids` /
+`special.account_emails` / `special.account_uids` / `special.account_denied_uids` / `special.account_dob` /
 `ui.single_purchase_plan_name` /
 `ui.save_steps` / `report.sections.order` / `report.sections.hidden` /
 `report.sections.labels` / `report.sections.collapsed` /
@@ -1147,7 +1147,7 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
         - **文言は app_config `ui.save_steps` で差し替え可** (OS 更新でメニュー名が変わるため)。
           書式 `端末キー=手順1｜手順2｜手順3` をカンマ区切り。**上書きは素の文**になる。
           解釈できないキー・空の手順は無視 = **手順が 1 行も無い状態を作らない**。
-          → **app_config 現行 31 件**。
+          → **app_config 現行 32 件**。
         - **検証**: `verify:screen` に ①端末 4 種が描かれ判定不能なら 4 つとも見える
           ②**印刷ビューに保存手順が出ていない** ③UA 別 (Windows/Mac/iPhone/**iPad**/Android) の
           分岐と `autoprint` の有無 を追加。**3 つとも壊して落ちることを確認済み**。
@@ -1834,11 +1834,31 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   - **サインインの橋渡しは `api/auth/resolve.ts` の未連携 early return より前・デモ枠より先**。
     後ろだと到達せず入口で弾かれる。先に置くのは実データ側を優先するため。
   - **管理者リストからの初回登録は実装しない** (デモ枠だけの仕組み。実データが紐づく枠では危険)。
+  - **【生年月日・性別を登録項目に追加 2026-09-24・発注者指示「生年月日の表示はブラインドに」】**
+    スペシャルアカウントは EC 購入が無く `customer_profiles` に生年月日を持たないため、
+    **ウェルネス年齢 (実年齢が必須) が算出できない** (実測「算出不能(不足: 年齢)」)。登録フォームに
+    生年月日 (date) + 性別 (select) を足し、年齢ソースにする。
+    - **専用キー `special.account_dob` に隔離** (1 行 = `<メール sha256> <YYYY-MM-DD> <male|female>`)。
+      メール本体 (`special.account_emails`) と混ぜない — あちらは admin へ生テキスト (emailsRaw) を
+      返して編集させるので、生年月日を載せると**ブラインド表示が崩れる**。登録時は uid がまだ無い
+      (サインイン前) ので**メールの sha256 で控える**。uid からの参照は email 行 (uid↔hash) を辿る
+      (`specialSubjectByUid(uid)`)。
+    - **生年月日はブラウザへ生で返さない**。API GET/POST は `present()` を通し、生テキスト (dobRaw) を
+      落として **`has_dob` + `dob_masked=****-**-**` + `sex`** だけを添える。一覧では `****-**-**`。
+    - **ウェルネス年齢の年齢は customer → 登録DOB → age_at_test → scan_md の順**
+      (`elith-delivery.ts` の subject resolver が customer 欠落時に `specialSubjectByUid` で補う。
+      customer が正・欠けた項目だけ補う)。これで DOB 登録済みの回は「算出不能(不足: 年齢)」が解消する。
+    - **共有の純粋関数には手を入れていない** (仕様書 §9.1)。DOB は special 専用の追加
+      (`parseDobEntries` / `serializeDobEntries` / `specialSubjectByUid` / `normSexToken`)。
+    - **任意項目**。空なら送らない (既存を空で上書きしない)。同じメールで登録し直すと上書き。
+      **uid 直接追加の経路には DOB 欄を付けない** (メール登録が主経路)。
   - 増減は wellfort-site `/admin/special-accounts` (サイドバー「設定」・**デモ用アカウントとは別メニュー**)。
     UI=wellfort-site / 処理=Scan-Chat-AI `/api/admin/special-accounts` (Bearer `ADMIN_API_KEY`)。
-  - **検証 `npm run verify:special-accounts` 56 件** (CI の A 層)。`demoFallbackEnabled` の本体を
+  - **検証 `npm run verify:special-accounts` 70 件** (CI の A 層)。`demoFallbackEnabled` の本体を
     切り出して実際に動かし、`demo-accounts.ts` / `special-accounts.ts` は app_config だけスタブに
     差し替えて実物を呼ぶ。**退行注入 10 種**で名指しに落ちることを確認済み。
+    ⑦生年月日=DOB のラウンドトリップ/暦日検証/uid↔hash 突き合わせ・⑧API のブラインド化 (present で
+    dobRaw を落としマスクだけ返す) を含む。
   - 切り分け = `GET /api/debug/viewer` の **`is_special`** と `using_demo_data`。
     **両方 true なら 1 行の止めが効いていない** (即座に調べる)。
   - **【ダッシュボードは「単品購入」の形にする 2026-09-15・発注者指示】仕様書 §14。**
