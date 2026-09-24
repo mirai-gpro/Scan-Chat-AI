@@ -16,13 +16,14 @@
  *   （HC+Lifestyle だけ納品し `wellness_age_method=null`）。値を作らない。
  */
 
-import { getObjectText, putFiles, type S3PutFile } from './s3';
+import { putFiles, type S3PutFile } from './s3';
 import {
   assembleElithDeliverySet,
   inventoryElithSource,
   type HealthAgeRecord,
   type SubjectInfo,
 } from './elith-assemble';
+import { measurementsFromMarkdown, ELITH_HANDOFF_SCHEMA_VERSION } from './elith-export';
 import { normalizeMarkers, type HealthAgeMarkers, type RawItem } from './health-age';
 import { computeWellnessAge } from './wellness-age';
 import { getServerSupabase } from './supabase';
@@ -98,29 +99,101 @@ function ageAt(dob: string | null, testDate: string | null): number | null {
   return age >= 0 && age < 130 ? age : null;
 }
 
-/** HC JSON からウェルネス年齢を算出し health_age_scores へ保存。載せられるなら HealthAgeRecord を返す。 */
-async function computeWellnessForSource(
+/**
+ * DB の最新 health_checkup を取り、確定 Markdown (scan_md) から Elith HealthCheckupData を
+ * **画像なしで**生成して S3 (sourcePrefix) へ書き出す。
+ *
+ * 【なぜ要るか】ユーザースキャンの S3 書き出しは `scan-export-v0` 形式 (フォルダ
+ * `{prefix}{diagnosticId}/`) で、Elith 納品形式 `user/{uid}/date/…/HealthCheckupData_…json`
+ * ではないため、assemble の inventory が拾えない。`test_artifacts.scan_md`
+ * (ユーザースキャン経路だけが書く確定 Markdown) から Elith 形式を起こして揃える。
+ * `buildElithScanBundle` は画像を Gemini で再スキャンする設計で原本画像が要るため使えない
+ * (ユーザースキャンは原本画像を保存しない)。measurementsFromMarkdown で決定論生成する。
+ *
+ * 返り値: 生成した HC の {hcKey, measurements, testDate}。scan_md 無し等は null。
+ */
+async function materializeHealthCheckup(
   uid: string,
-  hcKey: string,
-  hcDate: string,
-  resolveSubject: (u: string) => Promise<SubjectInfo | null>,
-): Promise<HealthAgeRecord | null> {
-  let obj: Record<string, unknown>;
+  sourcePrefix: string,
+): Promise<{ hcKey: string; measurements: Record<string, unknown>[]; testDate: string } | null> {
+  const sb = getServerSupabase();
+  if (!sb) return null;
+  let row: { scan_md?: string | null; test_date?: string | null } | null = null;
   try {
-    obj = JSON.parse(await getObjectText(hcKey)) as Record<string, unknown>;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data } = await (sb.schema('diagnosis') as any)
+      .from('test_artifacts')
+      .select('scan_md, test_date')
+      .eq('diagnostic_user_id', uid)
+      .eq('test_type', 'health_checkup')
+      .eq('status', 'active')
+      .order('test_date', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    row = data ?? null;
   } catch {
     return null;
   }
-  const data = (obj.data ?? {}) as Record<string, unknown>;
-  const measurements: RawItem[] = Array.isArray(data.measurements) ? (data.measurements as RawItem[]) : [];
+  const scanMd = typeof row?.scan_md === 'string' ? row.scan_md : '';
+  if (!scanMd.trim()) return null; // 確定 Markdown が無い = 生成不能 (捏造しない)
+
+  const measurements = measurementsFromMarkdown(scanMd).kept;
   if (measurements.length === 0) return null;
 
+  const testDate =
+    typeof row?.test_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(row.test_date)
+      ? row.test_date
+      : new Date().toISOString().slice(0, 10);
+  const dateFolder = testDate.replace(/-/g, '_');
+
+  // Elith HealthCheckupData JSON (buildElithScanBundle と同じ shape・source_image/画像は無し)。
+  const json = {
+    format_id: 'HealthCheckupData',
+    schema_version: ELITH_HANDOFF_SCHEMA_VERSION,
+    kind: 'scan',
+    client_id: uid,
+    diagnostic_id: uid,
+    source_image: null,
+    test_date: testDate,
+    date_source: 'test_artifacts',
+    exported_at: new Date().toISOString(),
+    subject: { sex: null, age: null },
+    source: {
+      origin: 'scan-chat-ai',
+      app: 'scan-chat-ai',
+      note: 'special-account deliver: test_artifacts.scan_md から生成 (画像なし・決定論)',
+      lab_name: null,
+    },
+    data: { measurements, notes: [] as unknown[] },
+    raw_markdown: scanMd,
+  };
+  const prefix = sourcePrefix ? sourcePrefix.replace(/^\/+/, '').replace(/\/*$/, '/') : '';
+  const hcKey = `${prefix}user/${uid}/date/${dateFolder}/HealthCheckupData_date_${dateFolder}_user_${uid}.json`;
+  const body = JSON.stringify(json, null, 2);
+  try {
+    await putFiles([{ key: hcKey, contentType: 'application/json; charset=utf-8', body, bytes: Buffer.byteLength(body, 'utf8') }]);
+  } catch {
+    return null; // 書き出せなければ納品対象から外す (assemble が拾えないため)
+  }
+  return { hcKey, measurements, testDate };
+}
+
+/** measurements からウェルネス年齢を算出し health_age_scores へ保存。載せられるなら HealthAgeRecord を返す。 */
+async function computeWellnessFromMeasurements(
+  uid: string,
+  measurements: Record<string, unknown>[],
+  hcTestDate: string,
+  hcKey: string,
+  resolveSubject: (u: string) => Promise<SubjectInfo | null>,
+): Promise<HealthAgeRecord | null> {
+  if (!Array.isArray(measurements) || measurements.length === 0) return null;
+
   const subj = await resolveSubject(uid);
-  const testDate = typeof obj.test_date === 'string' ? obj.test_date : hcDate.replace(/_/g, '-');
+  const testDate = hcTestDate;
   const age = ageAt(subj?.dateOfBirth ?? null, testDate);
   const sex = subj?.sex ?? null;
 
-  const normalized = normalizeMarkers(measurements);
+  const normalized = normalizeMarkers(measurements as RawItem[]);
   const markers: HealthAgeMarkers = { ...normalized, age, sex } as HealthAgeMarkers;
   const result = computeWellnessAge(markers);
   // 算出不能 (必須マーカー/年齢不足) は載せない・保存しない (捏造ゼロ)。
@@ -227,39 +300,50 @@ export async function deliverReadySpecialAccounts(opts: {
     return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: 0, delivered: 0 };
   }
 
-  const inv = await inventoryElithSource(opts.sourcePrefix);
-  const latestByClient = (fmt: 'HealthCheckupData' | 'LifestyleQuestionnaireData', uid: string) => {
-    const items = (inv.byFormat[fmt] ?? []).filter((c) => c.clientId === uid);
-    if (items.length === 0) return null;
-    // 日付 desc → キー desc の最新 1 件。
-    items.sort((a, b) => (a.date === b.date ? b.key.localeCompare(a.key) : b.date.localeCompare(a.date)));
-    return items[0];
-  };
-
   const resolveSubject = makeSubjectResolver();
   const healthAgeByRef: Record<string, HealthAgeRecord> = {};
   const manualMapping: Record<string, Partial<Record<'HealthCheckupData' | 'LifestyleQuestionnaireData', string>>> = {};
   const methodByUid = new Map<string, string | null>();
+  const hcKeyByUid = new Map<string, string>();
 
+  // ① 各 uid の HealthCheckupData を DB(scan_md) から Elith 形式で生成し S3(source) へ置く。
+  //    ウェルネス年齢も同じ measurements から算出 (S3 再読み不要)。
   for (const uid of ready) {
-    const hc = latestByClient('HealthCheckupData', uid);
-    if (!hc) {
-      results.push({ uid, status: 'skipped', reason: 'S3 に HealthCheckupData が見つからない' });
+    const mat = await materializeHealthCheckup(uid, opts.sourcePrefix);
+    if (!mat) {
+      results.push({ uid, status: 'skipped', reason: '確定スキャン(scan_md)が無く HealthCheckupData を生成できない' });
       continue;
     }
-    const lq = latestByClient('LifestyleQuestionnaireData', uid);
-    manualMapping[uid] = {
-      HealthCheckupData: hc.key,
-      ...(lq ? { LifestyleQuestionnaireData: lq.key } : {}),
-    };
-
-    const rec = await computeWellnessForSource(uid, hc.key, hc.date, resolveSubject);
+    hcKeyByUid.set(uid, mat.hcKey);
+    const rec = await computeWellnessFromMeasurements(uid, mat.measurements, mat.testDate, mat.hcKey, resolveSubject);
     if (rec) {
-      healthAgeByRef[hc.key] = rec;
+      healthAgeByRef[mat.hcKey] = rec;
       methodByUid.set(uid, rec.model_version);
     } else {
-      methodByUid.set(uid, null); // 算出不能 → HealthAge 非同梱
+      methodByUid.set(uid, null); // 算出不能 → HealthAge 非同梱 (捏造しない)
     }
+  }
+
+  if (hcKeyByUid.size === 0) {
+    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: ready.length, delivered: 0 };
+  }
+
+  // ② HC を置いた後で inventory (HealthCheckupData + Lifestyle を拾える)。
+  const inv = await inventoryElithSource(opts.sourcePrefix);
+  const latestByClient = (fmt: 'HealthCheckupData' | 'LifestyleQuestionnaireData', uid: string) => {
+    const items = (inv.byFormat[fmt] ?? []).filter((c) => c.clientId === uid);
+    if (items.length === 0) return null;
+    items.sort((a, b) => (a.date === b.date ? b.key.localeCompare(a.key) : b.date.localeCompare(a.date)));
+    return items[0];
+  };
+
+  for (const uid of hcKeyByUid.keys()) {
+    const hcKey = hcKeyByUid.get(uid)!;
+    const lq = latestByClient('LifestyleQuestionnaireData', uid);
+    manualMapping[uid] = {
+      HealthCheckupData: hcKey,
+      ...(lq ? { LifestyleQuestionnaireData: lq.key } : {}),
+    };
   }
 
   if (Object.keys(manualMapping).length === 0) {
