@@ -28,7 +28,7 @@ import { extractAgeSex as parseAgeSexFromMarkdown } from './scan-age';
 import { normalizeMarkers, type HealthAgeMarkers, type RawItem } from './health-age';
 import { computeWellnessAge } from './wellness-age';
 import { getServerSupabase } from './supabase';
-import { listSpecialAccounts } from './special-accounts';
+import { listSpecialAccounts, specialSubjectByUid } from './special-accounts';
 import { getAccountProgress } from './account-progress';
 import { refreshConfig } from './app-config';
 
@@ -85,6 +85,25 @@ function makeSubjectResolver(): (uid: string) => Promise<SubjectInfo | null> {
       }
     } catch {
       /* customer 未設定/権限無しは非充填で継続 */
+    }
+    /*
+     * **スペシャルアカウントの登録値でフォールバック** (発注者指示 2026-09-24)。
+     * EC 購入が無い枠は customer_profiles に生年月日を持たないため、登録時に控えた
+     * 生年月日・性別 (`special.account_dob`) を年齢ソースにする。customer 側に値が
+     * あればそちらを優先し、欠けている項目だけ補う (customer が正)。
+     */
+    if (!info || !info.dateOfBirth || !info.sex) {
+      try {
+        const sp = specialSubjectByUid(uid);
+        if (sp) {
+          info = {
+            sex: info?.sex ?? sp.sex,
+            dateOfBirth: info?.dateOfBirth ?? sp.dateOfBirth,
+          };
+        }
+      } catch {
+        /* 登録が無ければ従来どおり (フォールバックしないだけ) */
+      }
     }
     cache.set(uid, info);
     return info;

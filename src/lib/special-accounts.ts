@@ -220,10 +220,13 @@ export function listSpecialAccounts(): {
   configRaw: string;
   emailsRaw: string;
   deniedRaw: string;
+  /** 生年月日・性別の生テキスト (PII)。**admin 画面へはそのまま返さない** — API GET でマスクする。 */
+  dobRaw: string;
 } {
   const configRaw = cfg('special.account_uids');
   const emailsRaw = cfg('special.account_emails');
   const deniedRaw = cfg('special.account_denied_uids');
+  const dobRaw = cfg('special.account_dob');
   const denied = deniedUids();
   const rows: SpecialAccountRow[] = [
     ...BUILTIN_SPECIAL_UIDS.map((uid) => ({ uid, label: BUILTIN_LABELS[uid] ?? '', source: 'builtin' as const })),
@@ -248,7 +251,7 @@ export function listSpecialAccounts(): {
     if (denied.has(r.uid)) r.denied = true;
   }
 
-  return { rows, emails, configRaw, emailsRaw, deniedRaw };
+  return { rows, emails, configRaw, emailsRaw, deniedRaw, dobRaw };
 }
 
 /** 監査・診断用の件数だけ (`/api/debug/viewer` が使う)。 */
@@ -262,5 +265,97 @@ export function specialAccountStats(): {
     builtin: by('builtin'),
     fromEnv: by('env'),
     fromConfig: by('config'),
+  };
+}
+
+
+// ══════════════════════════════════════════════════════════════════════
+// 生年月日・性別 (ウェルネス年齢用・PII) — 発注者指示 2026-09-24
+// ══════════════════════════════════════════════════════════════════════
+//
+// **なぜ要るか**: スペシャルアカウントは EC 購入が無く `customer_profiles` に
+// 生年月日を持たないため、ウェルネス年齢 (実年齢が必須) が算出できない
+// (実測: 「算出不能(不足: 年齢)」)。登録時に控えて年齢ソースにする。
+//
+// **なぜ別キー (`special.account_dob`) か**: メール本体 (`special.account_emails`)
+// は admin 画面へ生テキスト (emailsRaw) を返して編集させるので、生年月日を混ぜると
+// **ブラインド表示が崩れる**。DOB は専用キーに隔離し、**admin へは API GET でマスクして返す**。
+// 登録時点では uid はまだ無い (サインイン前) ので **email の sha256 で控える**。
+// uid からの参照はサインイン済みの email 行 (uid↔hash) を辿る。
+//
+// **共有の純粋関数には手を入れていない** (仕様書 §9.1)。DOB は special 専用の追加。
+
+export interface SpecialDobEntry {
+  /** メールアドレスの sha256 (`special.account_emails` の hash と対応)。 */
+  hash: string;
+  /** 生年月日 YYYY-MM-DD。 */
+  dob: string;
+  /** 'male' | 'female'。 */
+  sex: 'male' | 'female' | '';
+}
+
+const HASH64_RE = /^[0-9a-f]{64}$/;
+const DOB_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** 実在する暦日か (形式 + カレンダー往復)。`2026-02-31` 等は false。 */
+function isRealDob(v: string): boolean {
+  if (!DOB_RE.test(v)) return false;
+  const t = Date.parse(`${v}T00:00:00Z`);
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === v;
+}
+
+/** 性別トークンを 'male'|'female'|'' に (日本語・英字・M/F を吸収)。 */
+export function normSexToken(v: unknown): 'male' | 'female' | '' {
+  const s = String(v ?? '').trim().toLowerCase();
+  if (s === 'm' || s === 'male' || s === '男' || s === '男性') return 'male';
+  if (s === 'f' || s === 'female' || s === '女' || s === '女性') return 'female';
+  return '';
+}
+
+/** 保存形式は 1 行 = `<sha256> <YYYY-MM-DD> <male|female>`。壊れた / 空の行は捨てる。 */
+export function parseDobEntries(raw: string): SpecialDobEntry[] {
+  const out: SpecialDobEntry[] = [];
+  for (const line of String(raw ?? '').split(/\r?\n/)) {
+    const hashIdx = line.indexOf('#');
+    const parts = (hashIdx >= 0 ? line.slice(0, hashIdx) : line).trim().split(/\s+/).filter(Boolean);
+    if (parts.length === 0) continue;
+    const h = parts[0].toLowerCase();
+    if (!HASH64_RE.test(h)) continue;
+    const dob = isRealDob(parts[1] ?? '') ? parts[1] : '';
+    const sex = normSexToken(parts[2] ?? '');
+    if (!dob && !sex) continue; // 中身が無ければ持たない
+    out.push({ hash: h, dob, sex });
+  }
+  return out;
+}
+
+export function serializeDobEntries(list: SpecialDobEntry[]): string {
+  return list
+    .filter((e) => e.dob || e.sex)
+    .map((e) => `${e.hash} ${e.dob || '-'} ${e.sex || '-'}`)
+    .join('\n');
+}
+
+export function specialDobEntries(): SpecialDobEntry[] {
+  return parseDobEntries(cfg('special.account_dob'));
+}
+
+/**
+ * **uid → 登録時に控えた生年月日・性別。** ウェルネス年齢の年齢ソース。
+ *
+ * 顧客レコードを持たない枠のためのフォールバックなので、email 行 (uid↔hash) を
+ * 辿って DOB キーを引く。**サインイン済み (uid が埋まっている) 行のみ**。
+ * 無ければ null (捏造しない)。
+ */
+export function specialSubjectByUid(uid: string): { dateOfBirth: string | null; sex: 'male' | 'female' | null } | null {
+  const u = norm(uid);
+  if (!u) return null;
+  const em = specialEmailEntries().find((e) => e.uid === u);
+  if (!em) return null;
+  const d = specialDobEntries().find((x) => x.hash === em.hash);
+  if (!d) return null;
+  return {
+    dateOfBirth: DOB_RE.test(d.dob) ? d.dob : null,
+    sex: d.sex === 'male' || d.sex === 'female' ? d.sex : null,
   };
 }
