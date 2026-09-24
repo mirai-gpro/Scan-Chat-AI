@@ -46,6 +46,8 @@ export interface DeliverSummary {
   delivery_prefix: string;
   ready: number;
   delivered: number;
+  /** うちウェルネス年齢(HealthAgeData)を同梱できた件数。算出不能はここに数えない。 */
+  wellness_delivered: number;
 }
 
 /** customer.sex 表記を 'male'|'female'|null に (elith-assemble.ts と同じ規則)。 */
@@ -115,15 +117,21 @@ function ageAt(dob: string | null, testDate: string | null): number | null {
 async function materializeHealthCheckup(
   uid: string,
   sourcePrefix: string,
-): Promise<{ hcKey: string; measurements: Record<string, unknown>[]; testDate: string } | null> {
+): Promise<{
+  hcKey: string;
+  measurements: Record<string, unknown>[];
+  testDate: string;
+  ageAtTest: number | null;
+  sex: 'male' | 'female' | null;
+} | null> {
   const sb = getServerSupabase();
   if (!sb) return null;
-  let row: { scan_md?: string | null; test_date?: string | null } | null = null;
+  let row: { scan_md?: string | null; test_date?: string | null; age_at_test?: number | null; sex?: string | null } | null = null;
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data } = await (sb.schema('diagnosis') as any)
       .from('test_artifacts')
-      .select('scan_md, test_date')
+      .select('scan_md, test_date, age_at_test, sex')
       .eq('diagnostic_user_id', uid)
       .eq('test_type', 'health_checkup')
       .eq('status', 'active')
@@ -175,7 +183,9 @@ async function materializeHealthCheckup(
   } catch {
     return null; // 書き出せなければ納品対象から外す (assemble が拾えないため)
   }
-  return { hcKey, measurements, testDate };
+  const ageAtTest = typeof row?.age_at_test === 'number' && Number.isFinite(row.age_at_test) ? row.age_at_test : null;
+  const sex = row?.sex === 'male' || row?.sex === 'female' ? row.sex : null;
+  return { hcKey, measurements, testDate, ageAtTest, sex };
 }
 
 /** measurements からウェルネス年齢を算出し health_age_scores へ保存。載せられるなら HealthAgeRecord を返す。 */
@@ -184,14 +194,18 @@ async function computeWellnessFromMeasurements(
   measurements: Record<string, unknown>[],
   hcTestDate: string,
   hcKey: string,
+  fallbackAge: number | null,
+  fallbackSex: 'male' | 'female' | null,
   resolveSubject: (u: string) => Promise<SubjectInfo | null>,
 ): Promise<HealthAgeRecord | null> {
   if (!Array.isArray(measurements) || measurements.length === 0) return null;
 
   const subj = await resolveSubject(uid);
   const testDate = hcTestDate;
-  const age = ageAt(subj?.dateOfBirth ?? null, testDate);
-  const sex = subj?.sex ?? null;
+  // 年齢: ①顧客DBの生年月日×検査日 → ②スキャンが記録した age_at_test (スペシャルアカウントは
+  // EC顧客でなく生年月日が無いことがあるため必須のフォールバック)。性別も同様に補完。
+  const age = ageAt(subj?.dateOfBirth ?? null, testDate) ?? fallbackAge;
+  const sex = subj?.sex ?? fallbackSex;
 
   const normalized = normalizeMarkers(measurements as RawItem[]);
   const markers: HealthAgeMarkers = { ...normalized, age, sex } as HealthAgeMarkers;
@@ -297,7 +311,7 @@ export async function deliverReadySpecialAccounts(opts: {
     results.push({ uid: u, status: 'skipped', reason: '問診またはスキャンが未完了' });
   }
   if (ready.length === 0) {
-    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: 0, delivered: 0 };
+    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: 0, delivered: 0, wellness_delivered: 0 };
   }
 
   const resolveSubject = makeSubjectResolver();
@@ -315,7 +329,7 @@ export async function deliverReadySpecialAccounts(opts: {
       continue;
     }
     hcKeyByUid.set(uid, mat.hcKey);
-    const rec = await computeWellnessFromMeasurements(uid, mat.measurements, mat.testDate, mat.hcKey, resolveSubject);
+    const rec = await computeWellnessFromMeasurements(uid, mat.measurements, mat.testDate, mat.hcKey, mat.ageAtTest, mat.sex, resolveSubject);
     if (rec) {
       healthAgeByRef[mat.hcKey] = rec;
       methodByUid.set(uid, rec.model_version);
@@ -325,7 +339,7 @@ export async function deliverReadySpecialAccounts(opts: {
   }
 
   if (hcKeyByUid.size === 0) {
-    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: ready.length, delivered: 0 };
+    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: ready.length, delivered: 0, wellness_delivered: 0 };
   }
 
   // ② HC を置いた後で inventory (HealthCheckupData + Lifestyle を拾える)。
@@ -347,7 +361,7 @@ export async function deliverReadySpecialAccounts(opts: {
   }
 
   if (Object.keys(manualMapping).length === 0) {
-    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: ready.length, delivered: 0 };
+    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: ready.length, delivered: 0, wellness_delivered: 0 };
   }
 
   const assembled = await assembleElithDeliverySet({
@@ -385,11 +399,14 @@ export async function deliverReadySpecialAccounts(opts: {
     });
   }
 
+  const wellnessDelivered = assembled.users.filter((u) => methodByUid.get(u.userId)).length;
+
   return {
     results,
     put_count: uploaded.length,
     delivery_prefix: assembled.deliveryPrefix,
     ready: ready.length,
     delivered: assembled.users.length,
+    wellness_delivered: wellnessDelivered,
   };
 }
