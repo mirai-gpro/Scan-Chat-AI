@@ -183,7 +183,7 @@ await page.route('**/api/scan/upload-ticket', async (route) => {
       key: S3_KEY,
       headers: { 'content-type': JSON.parse(route.request().postData() ?? '{}').contentType },
       expires_in: 900,
-      max_bytes: 10 * 1024 * 1024,
+      max_bytes: 40 * 1024 * 1024,
     }),
   });
 });
@@ -195,9 +195,11 @@ await page.route('https://s3.example.invalid/**', async (route) => {
 
 {
   // PDF は縮小できないので、S3 が無いと送れなかったファイル。
-  const r = await upload({ name: 'big.pdf', type: 'application/pdf', bytes: 8 * 1024 * 1024 });
+  // **10 MB 超**を使う: 受付上限 (40 MB) と S3 チケット上限が食い違っていると
+  // (かつて 10 MB のまま上げ忘れた回帰) ここが 3 MB 圧縮へ落ちて失敗する。
+  const r = await upload({ name: 'big.pdf', type: 'application/pdf', bytes: 12 * 1024 * 1024 });
   ok('予算超えの PDF が S3 経由で通る (エラーにならない)', !r.err, r.err);
-  ok('ファイル本体が S3 へ PUT された', putBytes === 8 * 1024 * 1024, `PUT ${putBytes} bytes`);
+  ok('ファイル本体が S3 へ PUT された', putBytes === 12 * 1024 * 1024, `PUT ${putBytes} bytes`);
   ok('PUT の Content-Type が署名と一致する', putContentType === 'application/pdf', String(putContentType));
   if (r.body) {
     const sent = JSON.parse(r.body);

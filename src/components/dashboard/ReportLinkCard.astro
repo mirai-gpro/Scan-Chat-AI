@@ -32,8 +32,15 @@ interface Props {
    * 呼び出し側が「開けるか」を決めて渡す。
    */
   available?: boolean;
+  /**
+   * **新着 (New) か** (発注者要望 2026-09「作成済のステータス New バッジ等」)。
+   * 受領日から N 日以内 (判定は呼び出し側 dashboard.astro が持つ・app_config `ui.report_new_days`)。
+   * available かつ isNew のときだけ New ピルを出す (開けない報告書に New は付けない)。
+   */
+  isNew?: boolean;
 }
-const { href, receivedAt = null, available = true } = Astro.props as Props;
+const { href, receivedAt = null, available = true, isNew = false } = Astro.props as Props;
+const showNew = available && isNew;
 ---
 
 <section class:list={[
@@ -48,7 +55,13 @@ const { href, receivedAt = null, available = true } = Astro.props as Props;
       <AppIcon name="report" size={20} />
     </span>
     <span class="flex min-w-0 flex-col">
-      <span class="text-base font-bold">{AI_PREVENTION_REPORT_LABEL}</span>
+      <span class="flex flex-wrap items-center gap-2">
+        <span class="text-base font-bold">{AI_PREVENTION_REPORT_LABEL}</span>
+        {showNew && (
+          /* brand 塗りの面に載るので白地 + brand 文字 (7.09:1・実測) で目立たせる。 */
+          <span class="rounded-full bg-white px-2 py-0.5 text-xs font-bold tracking-wide text-brand-700">New</span>
+        )}
+      </span>
       {available
         ? receivedAt && <span class="tnum whitespace-nowrap text-sm">{formatJpDate(receivedAt)}</span>
         : <span class="text-sm">まだ届いていません</span>}
