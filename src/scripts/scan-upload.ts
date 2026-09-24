@@ -18,19 +18,20 @@
  * (黙って 413 にしない)。HEIC はデコーダを持つブラウザ (Safari) でだけ縮小できる。
  */
 
+import { SCAN_UPLOAD_MAX_BYTES } from '../lib/scan-upload-limits';
+
 /**
  * 受け付けるファイルの上限 (発注者指示: 4 MB → 10 MB → **40 MB** 2026-09-17)。
  *
- * **10 MB だった根拠はもう無い。** あれは Vercel のリクエストボディ 4.5 MB 制限が
- * 前提で、その中に収まるよう縮小して送っていたため。いまは**ブラウザ → S3 直 PUT**
- * があり、**ファイル本体は関数を通らない**ので上限に縛られない
- * (`prepareScanUpload` の経路②)。複数年の人間ドックは 10 MB では詰まる。
+ * **値は `scan-upload-limits.ts` に集約**し、サーバの S3 チケット
+ * (`scan-upload-ticket.ts` の `MAX_SCAN_UPLOAD_BYTES`) と**同じ定数**を使う
+ * (以前は別リテラルで、上げ忘れると 10 MB 超が 3 MB 圧縮へ落ちる回帰が起きた)。
  *
  * **S3 が使えない回はここまで通らない** — 画像は `WIRE_BUDGET_BYTES` まで縮小し、
  * **PDF は縮小できないので理由を出して止める** (黙って 413 にしない)。
  * つまり 40 MB は「S3 が効いているときに通る上限」で、経路③ の保険は変わらない。
  */
-export const MAX_INPUT_BYTES = 40 * 1024 * 1024;
+export const MAX_INPUT_BYTES = SCAN_UPLOAD_MAX_BYTES;
 
 /** Vercel Functions のリクエストボディ上限。10 進の 4.5 MB として保守側に取る。 */
 const VERCEL_BODY_LIMIT = 4_500_000;

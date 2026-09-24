@@ -33,9 +33,15 @@
 import { PutObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getS3Config, makeS3Client, type S3Config } from './s3';
+import { SCAN_UPLOAD_MAX_BYTES } from './scan-upload-limits';
 
-/** 受け付ける上限。**クライアント (`scan-upload.ts`) と必ず一致させる**。 */
-export const MAX_SCAN_UPLOAD_BYTES = 10 * 1024 * 1024;
+/**
+ * 受け付ける上限。**クライアント (`scan-upload.ts`) と同じ定数**を使う。
+ * 以前は別リテラル (10 MB) で、クライアントを 40 MB へ上げたとき上げ忘れて
+ * 10 MB 超が S3 直アップロードに乗れず 3 MB 圧縮へ落ちる回帰を招いた
+ * (`scan-upload-limits.ts` に集約して再発を止めた)。
+ */
+export const MAX_SCAN_UPLOAD_BYTES = SCAN_UPLOAD_MAX_BYTES;
 
 /** presigned URL の有効期限 (秒)。PUT を開始できる猶予であって転送時間ではない。 */
 export const PRESIGN_EXPIRES_SEC = 900;
