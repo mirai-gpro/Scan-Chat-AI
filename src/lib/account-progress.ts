@@ -23,12 +23,15 @@ export interface CompletionStat {
 export interface AccountProgress {
   interview: CompletionStat;
   scan: CompletionStat;
+  /** Elith 納品済みか (`diagnosis.elith_deliveries` の delivered 行があるか)。 */
+  delivered: CompletionStat;
 }
 
 function emptyProgress(): AccountProgress {
   return {
     interview: { done: false, latest: null, count: 0 },
     scan: { done: false, latest: null, count: 0 },
+    delivered: { done: false, latest: null, count: 0 },
   };
 }
 
@@ -46,12 +49,13 @@ export async function getAccountProgress(
   if (!sb) return out;
 
   try {
-    type Row = { diagnostic_user_id: string; completed_at?: string | null; test_date?: string | null };
+    type Row = { diagnostic_user_id: string; completed_at?: string | null; test_date?: string | null; delivered_at?: string | null };
     const diagnosis = sb.schema('diagnosis') as unknown as {
       from: (t: string) => {
         select: (c: string) => {
           in: (col: string, v: string[]) => Promise<{ data: Row[] | null }>;
           eq: (col: string, v: string) => {
+            in: (col: string, v: string[]) => Promise<{ data: Row[] | null }>;
             eq: (col: string, v: string) => {
               in: (col: string, v: string[]) => Promise<{ data: Row[] | null }>;
             };
@@ -60,13 +64,18 @@ export async function getAccountProgress(
       };
     };
 
-    const [iv, sc] = await Promise.all([
+    const [iv, sc, dl] = await Promise.all([
       diagnosis.from('interview_completions').select('diagnostic_user_id, completed_at').in('diagnostic_user_id', clean),
       diagnosis
         .from('test_artifacts')
         .select('diagnostic_user_id, test_date')
         .eq('test_type', 'health_checkup')
         .eq('status', 'active')
+        .in('diagnostic_user_id', clean),
+      diagnosis
+        .from('elith_deliveries')
+        .select('diagnostic_user_id, delivered_at')
+        .eq('status', 'delivered')
         .in('diagnostic_user_id', clean),
     ]);
 
@@ -85,6 +94,14 @@ export async function getAccountProgress(
       p.scan.done = true;
       const d = r.test_date ? String(r.test_date) : null;
       if (d && (!p.scan.latest || d > p.scan.latest)) p.scan.latest = d;
+    }
+    for (const r of dl.data ?? []) {
+      const p = out[r.diagnostic_user_id];
+      if (!p) continue;
+      p.delivered.count += 1;
+      p.delivered.done = true;
+      const t = r.delivered_at ? String(r.delivered_at) : null;
+      if (t && (!p.delivered.latest || t > p.delivered.latest)) p.delivered.latest = t;
     }
   } catch {
     // 失敗時は空 (未完了) のまま返す。画面は成立させる。
