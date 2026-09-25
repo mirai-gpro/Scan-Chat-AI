@@ -1909,6 +1909,21 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
         **問診(Lifestyle)は 1 回だけ**（過去年に当時の問診は無い＝案 A）。冪等は年(uid|test_date)単位・
         全年納品済みの uid だけ cron がスキップ。以前は最新1年だけ納品する不具合だった
         (`materializeHealthCheckup` が `limit(1)`)。正本 `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md §6.2`。
+      - **【受診日 today ガード 2026-09-25・honda で 5 年分→1 JSON に潰れた事故の修正】**
+        Elith 納品は `date/{YYYY_MM_DD}/` 単位＝5 JSON には**5 通りの受診日**が要る
+        (`materializeHealthCheckups` は dateFolder で dedup)。受診日を読めない回が今日の日付で
+        積まれると全部同じフォルダに畳まれて 1 年に潰れる。**真因は 2 つ**: ①§4.3-1 の today ガード
+        未実装 (`saveScanToDb` が `date_source` を見ていなかった) ②複数年でも**背景ジョブ経路
+        (送信=完了) に載って検証画面ごと飛んでいた** (`sendAll` が全ページ S3 キー揃いで enqueue)。
+        → **スペシャルのときだけ** `scan-persist.saveScanResult(requireReadableDate)` が
+        `date_source:'today'` を **insert 前に** `blocked` で差し戻し (保存しない=捏造ゼロ)、
+        `api/scan/save` は `isSpecialAccount(uid)` で立てて **422 `exam_date_unreadable`**、
+        `scan.astro` はこの回を止め受診日を画面に出す、`sendAll` は複数年 (`doneEl`) を背景に載せず
+        前景検証を通す、`scan-worker` にも保険ガード (来たら `failJob`)。**通常利用者は不変**。
+        **既存 honda データは事後に直せない=再アップロードが要る**。切り分けは
+        `GET /api/debug/viewer` の **`health_checkup_years`** (active 行/distinct 受診日=JSON 数)。
+        **残る穴 (§11)**: `extractExamDate` は最初の日付を採るので生年月日/印字日を年跨ぎで拾い衝突し得る
+        (読み取り仕様は変えない方針=実物を見てから判断)。検証 `verify:scan-async` ⑥ + `verify:scan-persist` 17 件。
     - 検証 `npm run verify:single-purchase` 55 件 (CI の A 層)・**退行注入 22 種**。
       **うち 1 つは最初の版で落ちなかったので差し替えた** (ヘッダー側の同じ条件を拾っていた)。
 

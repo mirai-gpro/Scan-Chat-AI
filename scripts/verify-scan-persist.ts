@@ -64,6 +64,71 @@ const cases: [string, boolean, string][] = [
   ['受診日が YYYY-MM-DD', /^\d{4}-\d{2}-\d{2}$/.test(r.testDate), r.testDate],
 ];
 
+/*
+ * ── 受診日ガード (§4.3-1) ────────────────────────────────────────────────
+ * スペシャルアカウントの複数年取り込みでは、受診日を読めなかった回
+ * (`date_source: 'today'`) を保存しない。今日の日付で積むと別の年が同じ
+ * date フォルダへ畳まれて Elith 納品が 1 年に潰れるため。
+ * 上の `md` には日付トークンが無い = extractExamDate は today を返す。
+ */
+// (a) requireReadableDate なし = 通常の利用者 → today でも insert する (r は上で実行済み)。
+const normalInsertedToday = !!captured.insert && r.dateSource === 'today' && !r.blocked;
+
+// (b) requireReadableDate あり = today は保存せず差し戻す。
+const capturedGuard: Record<string, unknown> = {};
+const sbGuard = {
+  schema: () => ({
+    from: (table: string) => ({
+      insert: (rows: Record<string, unknown>[]) => {
+        if (table === 'test_artifacts') capturedGuard.insert = rows[0];
+        return {
+          select: async () => ({ data: [{ id: 'should-not-happen' }], error: null }),
+          then: (res: (v: { error: null }) => unknown) => res({ error: null }),
+        };
+      },
+    }),
+  }),
+};
+const blocked = await saveScanResult(sbGuard as never, {
+  diagnosticUserId: 'd0000001-0000-0000-0000-000000000000',
+  markdownClean: md,
+  pageCount: 1,
+  requireReadableDate: true,
+});
+
+// (c) requireReadableDate あり + 受診日が読める md → 通常どおり insert する。
+const capturedOk: Record<string, unknown> = {};
+const sbOk = {
+  schema: () => ({
+    from: (table: string) => ({
+      insert: (rows: Record<string, unknown>[]) => {
+        if (table === 'test_artifacts') capturedOk.insert = rows[0];
+        return {
+          select: async () => ({ data: [{ id: 'art-2222' }], error: null }),
+          then: (res: (v: { error: null }) => unknown) => res({ error: null }),
+        };
+      },
+      update: () => ({ eq: async () => ({ error: null }) }),
+      delete: () => ({ eq: async () => ({ error: null }) }),
+    }),
+  }),
+};
+const okDated = await saveScanResult(sbOk as never, {
+  diagnosticUserId: 'd0000001-0000-0000-0000-000000000000',
+  markdownClean: md + '\n\n受診日 2023-04-18',
+  pageCount: 1,
+  requireReadableDate: true,
+});
+
+cases.push(
+  ['通常利用者 (gate なし) は today でも保存する', normalInsertedToday, `${r.dateSource}`],
+  ['ガード: today の回は blocked を返す', blocked.blocked === 'exam_date_unreadable', String(blocked.blocked)],
+  ['ガード: today の回は insert しない', capturedGuard.insert === undefined, ''],
+  ['ガード: today の回は artifactId を作らない', blocked.artifactId === null, String(blocked.artifactId)],
+  ['ガード: 受診日が読めれば通常どおり insert', !!capturedOk.insert && okDated.blocked === undefined, ''],
+  ['ガード: 読めた受診日を採用 (today でない)', okDated.testDate === '2023-04-18', okDated.testDate],
+);
+
 let failed = 0;
 for (const [name, ok, detail] of cases) {
   if (!ok) failed += 1;

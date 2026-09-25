@@ -119,6 +119,14 @@ export const GET: APIRoute = async (ctx) => {
    * 出すのは**件数と日時だけ**。回答の中身は引かない (医療情報なので保管場所を増やさない)。
    */
   const interview = await inspectInterview(viewer.uid, viewer.selfUid);
+  /*
+   * **「5 年分アップしたのに Elith 納品が 1 年分に潰れる」の切り分け** (honda・2026-09-25)。
+   * Elith 納品は `date/{YYYY_MM_DD}/` 単位なので、5 つの JSON には **5 通りの受診日** が要る。
+   * `materializeHealthCheckups` と同じ条件 (active・scan_md あり・測定値 >0) で
+   * health_checkup を全件引き、**受診日が何通りあるか (= 納品される JSON 数)** を出す。
+   * 日付だけ (PII 非含有)。
+   */
+  const healthCheckupYears = await inspectHealthCheckupYears(viewer.uid);
 
   return json({
     ok: true,
@@ -137,6 +145,7 @@ export const GET: APIRoute = async (ctx) => {
     },
     report,
     artifacts,
+    health_checkup_years: healthCheckupYears,
     bridge,
     interview,
     cookie: {
@@ -423,6 +432,68 @@ async function inspectArtifacts(viewerUid: string | null, origin: BridgeOrigin):
       using_demo_data: r.usingDemoData,
       by_test_type: byKind,
       ...(other.length ? { 画面に出ない種別: other } : {}),
+    };
+  } catch (err) {
+    return { error: String(err instanceof Error ? err.message : err) };
+  }
+}
+
+/**
+ * **複数年スキャンが Elith 納品で何年分に展開されるかを直接見る。**
+ *
+ * `materializeHealthCheckups` (elith-delivery) と**同じ条件**で `test_artifacts` を引き、
+ * 受診日 (test_date) が何通りあるかを数える。Elith 納品は `date/{YYYY_MM_DD}/` 単位なので、
+ * **納品される HealthCheckupData JSON の数 = 受診日の distinct 数**。
+ * 5 年分アップしたのに 1 通りしか無ければ、受診日が読めず今日の日付で畳まれている
+ * (§4.3-1 のガード対象)。日付と件数だけ (PII 非含有)。
+ */
+async function inspectHealthCheckupYears(uid: string | null): Promise<Record<string, unknown>> {
+  if (!uid) return { note: '(uid なし)' };
+  const sb = getServerSupabase();
+  if (!sb) return { note: '(Supabase 未設定)' };
+  try {
+    const { measurementsFromMarkdown } = await import('../../../lib/elith-export');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data } = await (sb.schema('diagnosis') as any)
+      .from('test_artifacts')
+      .select('test_date, scan_md, status, created_at')
+      .eq('diagnostic_user_id', uid)
+      .eq('test_type', 'health_checkup')
+      .eq('status', 'active')
+      .order('test_date', { ascending: false })
+      .limit(20);
+    const rows: Array<{ test_date?: string | null; scan_md?: string | null; created_at?: string | null }> =
+      Array.isArray(data) ? data : [];
+    if (rows.length === 0) return { active_rows: 0, note: 'health_checkup の active 行が無い' };
+
+    const folders = new Set<string>();
+    let deliverable = 0;
+    let emptyMd = 0;
+    let zeroMeas = 0;
+    const perRow = rows.map((r) => {
+      const md = typeof r.scan_md === 'string' ? r.scan_md : '';
+      const hasMd = !!md.trim();
+      const meas = hasMd ? measurementsFromMarkdown(md).kept.length : 0;
+      const readable = /^\d{4}-\d{2}-\d{2}$/.test(String(r.test_date ?? ''));
+      const folder = readable ? String(r.test_date).replace(/-/g, '_') : '(受診日なし→今日で保存)';
+      if (!hasMd) emptyMd += 1;
+      else if (meas === 0) zeroMeas += 1;
+      else { deliverable += 1; folders.add(folder); }
+      return { test_date: r.test_date ?? null, scan_md: hasMd, measurements: meas };
+    });
+    return {
+      active_rows: rows.length,
+      // 実際に Elith へ出る JSON 数 (= 受診日の distinct 数)。
+      distinct_test_dates: folders.size,
+      json_will_be_delivered: folders.size,
+      deliverable_rows: deliverable,
+      skipped_empty_scan_md: emptyMd,
+      skipped_zero_measurements: zeroMeas,
+      rows: perRow,
+      hint:
+        folders.size < deliverable
+          ? '受診日が重複 (同じ日付/受診日なし) している回がある = 年が畳まれて 1 JSON に潰れる'
+          : '受診日は年ごとに分かれている',
     };
   } catch (err) {
     return { error: String(err instanceof Error ? err.message : err) };

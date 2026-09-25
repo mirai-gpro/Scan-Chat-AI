@@ -15,6 +15,8 @@ import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../lib/viewer';
 import { getServerSupabase } from '../../../lib/supabase';
 import { saveScanResult } from '../../../lib/scan-persist';
+import { isSpecialAccount } from '../../../lib/special-accounts';
+import { refreshConfig } from '../../../lib/app-config';
 
 export const prerender = false;
 
@@ -47,13 +49,30 @@ export const POST: APIRoute = async (ctx) => {
   const sb = getServerSupabase();
   if (!sb) return json({ ok: false, error: 'supabase_not_configured' }, 503);
 
+  /*
+   * スペシャルアカウント (複数年取り込み) では、受診日を読めなかった回を
+   * 今日の日付で積むと、別の年が同じ date フォルダへ畳まれて Elith 納品が
+   * 1 年に潰れる (§4.3-1 / §9)。**保存する前に**受診日の読み取り可否で差し戻す。
+   * 通常の利用者 (単発の 1 回) には効かせない。
+   */
+  await refreshConfig();
+  const requireReadableDate = isSpecialAccount(uid);
+
   try {
     const r = await saveScanResult(sb as never, {
       diagnosticUserId: uid,
       markdownClean,
       pageCount: typeof body.pageCount === 'number' ? body.pageCount : 1,
       examDate: typeof body.examDate === 'string' ? body.examDate : null,
+      requireReadableDate,
     });
+    if (r.blocked) {
+      // 保存していない。クライアントは受診日を出して回を先へ進ませない (§4.3-1)。
+      return json(
+        { ok: false, error: r.blocked, date_source: r.dateSource, test_date: r.testDate },
+        422,
+      );
+    }
     return json({
       ok: true,
       artifact_id: r.artifactId,

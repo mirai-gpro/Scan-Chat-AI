@@ -598,6 +598,8 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
           <h2 class="text-lg font-bold text-navy-800">
             <span class="tnum">{roundsDone + 1}</span> 回目を登録しました
           </h2>
+          {/* 読み取れた受診日を回ごとに出す (§4.3-1)。JS が値を入れたときだけ見せる。 */}
+          <p id="done-exam-date" class="text-sm font-medium text-brand-700" hidden></p>
           {/*
             **残り回数を言い切らない。** 実際に何年分あるかは本人しか知らないので、
             「あと N 年分あります」ではなく「最大 N 年分まで」と枠だけを伝える。
@@ -659,6 +661,8 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
 
   // 直近の読込元ファイル名 (アップロード経由のみ。書き出しファイル名に組み込む)
   let lastSourceFileName: string | null = null;
+  // 直近の回で読み取れた受診日 (§4.3-1「回ごとに検査日を画面へ出す」)
+  let lastSavedExamDate: string | null = null;
 
   type Panel = 'ready' | 'active' | 'confirm' | 'review' | 'result' | 'error' | 'done' | 'sent';
   const panels: Partial<Record<Panel, HTMLElement>> = {
@@ -889,8 +893,17 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
      * 回線断のどれかで、こちらでは判別できない。待たせることにはなるが、
      * **読み取り自体は必ず成立する**方に倒す (fail-safe)。
      */
+    /*
+     * **複数年 (スペシャルアカウント) は背景経路に載せない。**
+     * 背景経路は「送信＝完了」で読み取り画面を出さないため、回ごとの
+     *   ①受診日の確認と today ガード (§4.3-1)
+     *   ②「別の年度を続けて登録」の導線 (§4)
+     * が全て飛ばされ、受診日を読めない回が今日の日付で積まれて Elith 納品が
+     * 1 年に潰れる (honda で実測した事故)。複数年は必ず前景の検証経路を通す。
+     * `doneEl` (panel-done) の有無が multiYear の合図。
+     */
     const keys = pages.all.map((p) => p.imageKey).filter((k): k is string => !!k);
-    if (keys.length === total) {
+    if (!doneEl && keys.length === total) {
       const queued = await enqueueScanJob(keys);
       if (queued) {
         pages.clear();
@@ -953,20 +966,35 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
      * 「人間ドック / 健康診断」の中身を出せなかった (原本画像は保存しない方針)。
      * **失敗しても S3 書き出しは続ける** — 片方が落ちてもう片方まで止めない。
      */
-    async function saveScanToDb(markdownClean: string): Promise<void> {
+    async function saveScanToDb(
+      markdownClean: string,
+    ): Promise<{ blocked: boolean; testDate: string | null; dateSource: string | null }> {
       try {
         const res = await fetch('/api/scan/save', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({ markdownClean, pageCount: r.pageCount ?? 1 }),
         });
-        const data = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+        const data = (await res.json().catch(() => ({}))) as {
+          ok?: boolean; error?: string; test_date?: string; date_source?: string;
+        };
+        /*
+         * スペシャルアカウントの複数年取り込みで、受診日を読めなかった回は
+         * サーバが 422 で差し戻す (§4.3-1)。保存されていないので、呼び出し側で
+         * この回を先へ進ませない。
+         */
+        if (res.status === 422 && data.error === 'exam_date_unreadable') {
+          return { blocked: true, testDate: data.test_date ?? null, dateSource: data.date_source ?? null };
+        }
         if (!res.ok || !data.ok) {
           // 黙って落とさない。書き出し状況の行に併記する。
           exportStatus.textContent = `検査結果の保存に失敗しました (${data.error ?? res.status})`;
+          return { blocked: false, testDate: null, dateSource: null };
         }
+        return { blocked: false, testDate: data.test_date ?? null, dateSource: data.date_source ?? null };
       } catch (err) {
         exportStatus.textContent = `検査結果の保存に失敗しました (${String(err)})`;
+        return { blocked: false, testDate: null, dateSource: null };
       }
     }
 
@@ -979,7 +1007,22 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
       }
       const diagnosticUserId = new URLSearchParams(location.search).get('u');
       // 先にアプリの DB へ (画面に出すのはこちら)。落ちても S3 書き出しは続ける。
-      await saveScanToDb(markdownClean);
+      const saved = await saveScanToDb(markdownClean);
+      /*
+       * **受診日を読めなかった回は、ここで止める (§4.3-1)。** 今日の日付で保存すると
+       * 別の年と同じ date フォルダへ畳まれ、Elith 納品が 1 年に潰れる。保存もされて
+       * いないので、S3 書き出しもせずに送信フローを中断する (呼び出し側=bindSubmit が
+       * この名前の例外を見て回を積まない)。
+       */
+      if (saved.blocked) {
+        exportStatus.textContent =
+          'この用紙から受診日を読み取れませんでした。受診日が印字された検診・人間ドックの結果を選び直してください（今日の日付では別の年と区別できません）。';
+        const e = new Error('exam_date_unreadable');
+        e.name = 'ExamDateUnreadable';
+        throw e;
+      }
+      // 読み取れた受診日を控える (§4.3-1「回ごとに検査日を画面へ出す」)。
+      lastSavedExamDate = saved.testDate;
       exportStatus.textContent = ' S3へ書き出し中…';
       try {
         const res = await fetch('/api/scan/export', {
@@ -1031,7 +1074,22 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
          * **行き先。** 通常は渡さない = 従来どおり /chat へ遷移する (挙動不変)。
          * 複数年のときだけ「別の年度を続けますか?」を尋ねる画面で止める。
          */
-        onSubmitted: doneEl ? () => { show('done'); window.scrollTo(0, 0); } : undefined,
+        onSubmitted: doneEl
+          ? () => {
+              // 読み取れた受診日をこの回の完了画面に出す (§4.3-1)。
+              const de = document.getElementById('done-exam-date');
+              if (de) {
+                if (lastSavedExamDate) {
+                  de.textContent = `受診日: ${lastSavedExamDate}`;
+                  de.hidden = false;
+                } else {
+                  de.hidden = true;
+                }
+              }
+              show('done');
+              window.scrollTo(0, 0);
+            }
+          : undefined,
       },
       r,
       diagnosticId,
