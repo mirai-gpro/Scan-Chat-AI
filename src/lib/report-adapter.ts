@@ -28,6 +28,7 @@ import type {
 } from './report-model';
 import { CHAPTER_REGISTRY, REPORT_AXES, anchorFor, chapterAnchor, resolveChapters } from './report-sections';
 import { paragraphizeJa } from './report-view';
+import { findByAlias } from './standard-master';
 
 /** 紙面テンプレートの版 (spec §1.3.9)。紙面を変えたら上げ、紙面に印字する。 */
 export const SHEET_VERSION = 'v1.0';
@@ -391,13 +392,20 @@ export function flattenLabFiles(
 /**
  * 検査値の表を組む。**受領した検査値ファイルの写しに徹する** (発注者指示 2026-09-18)。
  *
- * - 出すのは **項目名と値だけ**。受領ファイルが持つのはこの 2 つ (と日付) だけで、
- *   **基準値・判定のフィールドは存在しない**。無い欄を当社が作らない。
- * - 並びは**受領ファイルのキー順のまま**。並べ替えない。
- * - **同名別値は自動採用しない** (spec §7.1)。両方を行として残し、**監査で報せる**
- *   (紙面に当社の注記「N 通り」を出すのはやめた)。
- * - 本文にしかない値は**本文のまま**章に出る。表へ移さない
- *   (移すと「検査値ファイルに入っていた」ことになるため)。
+ * - 出すのは **項目名・今回値・検査日**。受領ファイルの各エントリが持つのは
+ *   `date` と `value` だけで、**基準値・判定のフィールドは存在しない**。無い欄は作らない。
+ * - **今回 (最新日) の値を採る** (Wellfort レビュー①③・2026-09-25)。
+ *   以前は配列の**先頭=最古**を日付なしで出していたため、2 年前の値が「今回の値」に
+ *   見えていた (実測: honda の ALT は 2024-09-03=131 を出していたが今回 2026-09-16=77)。
+ *   本文 (Elith の散文) は今回値を論じているのに表だけ古い値=齟齬の原因でもあった (③)。
+ * - **単位ゆれ・別名を 1 行に集約する** (Wellfort レビュー②)。受領 JSON には
+ *   `eGFR [mL/min/1.73m2]` / `[mL/min/1.73m²]` / `[mL/min]` / `[mL/分]` のように
+ *   **同一項目が単位表記だけ違う別キーで複数届く**ことがある (Elith 由来)。
+ *   標準マスタの `canonical_name` (無ければ単位を外した項目名) で束ね、
+ *   **その束の中で最新日の 1 件**だけを出す。項目名・単位は採用したエントリの受領表記のまま
+ *   (canonical へ書き換えない = 逐語)。集約したことは**監査に出す** (黙って捨てない)。
+ * - **今回が同日で別値のときは自動採用しない** (spec §7.1・捏造ゼロ)。両方を行に残し監査で報せる。
+ * - 本文にしかない値は**本文のまま**章に出る。表へ移さない。
  */
 export function buildMeasurements(
   checkup: Record<string, { date?: string; value?: unknown }[]> | null,
@@ -415,28 +423,49 @@ export function buildMeasurements(
    * いま作るのは **項目名と値だけ**。順序も受領ファイルのキー順のまま
    * (「Elith が本文で言及した順」に並べ替えるのも当社の解釈なので行わない)。
    */
-  const rows: MeasurementRow[] = [];
-  const seenNames = new Map<string, number>();
   const entries = Object.entries(checkup ?? {});
 
-  for (const [key] of entries) {
-    const { name } = splitCheckupKey(key);
-    seenNames.set(name, (seenNames.get(name) ?? 0) + 1);
-  }
-
-  for (const [key, arr] of entries) {
-    const { name, unit } = splitCheckupKey(key);
-    const first = Array.isArray(arr) ? arr[0] : undefined;
-    if (!first || first.value === undefined || first.value === null) continue;
-    rows.push({ name, value: unit ? `${first.value} ${unit}` : String(first.value) });
-  }
-
   /*
-   * **同名別値は自動採用しない** (spec §7.1)。ただし紙面にバッジ (「N 通り」) を
-   * 出すのはやめた — **当社の注記だから**。両方の行をそのまま載せ、監査で報せる。
+   * ① 今回(最新日)の値を採る ＋ ② 単位ゆれ・別名を canonical で 1 行に束ねる。
+   * グループキー = 標準マスタの canonical_name (無ければ単位を外した項目名)。
+   * findByAlias は正規化した完全一致のみ (部分一致=誤マップ=捏造をしない)。
    */
-  for (const [name, count] of seenNames) {
-    if (count > 1) anomalies.push(`同名別値: ${name} が ${count} 通り届いています (自動採用しません)`);
+  interface Cand { name: string; unit: string; date: string; value: unknown }
+  const groups = new Map<string, { order: number; cands: Cand[] }>();
+  let order = 0;
+  for (const [key, arr] of entries) {
+    if (!Array.isArray(arr)) continue;
+    const { name, unit } = splitCheckupKey(key);
+    const gkey = findByAlias(name)?.canonical_name ?? name;
+    let g = groups.get(gkey);
+    if (!g) { g = { order: order++, cands: [] }; groups.set(gkey, g); }
+    for (const e of arr) {
+      if (e?.value === undefined || e?.value === null) continue;
+      g.cands.push({ name, unit, date: typeof e.date === 'string' ? e.date : '', value: e.value });
+    }
+  }
+
+  const rows: MeasurementRow[] = [];
+  for (const [gkey, g] of [...groups.entries()].sort((a, b) => a[1].order - b[1].order)) {
+    if (!g.cands.length) continue;
+    // 最新日を選ぶ (YYYY-MM-DD の文字列比較で単調。日付欠落は最古扱い)。
+    const maxDate = g.cands.reduce((m, c) => (c.date > m ? c.date : m), '');
+    const latest = g.cands.filter((c) => c.date === maxDate);
+    // 別名/単位ゆれ/過去回を束ねたときは監査に出す (黙って捨てない)。
+    const sourceNames = [...new Set(g.cands.map((c) => c.name))];
+    if (g.cands.length > latest.length || sourceNames.length > 1) {
+      anomalies.push(
+        `集約: 「${gkey}」に ${g.cands.length} 件 (別名/単位ゆれ/過去回: ${sourceNames.join('・')})`
+        + ` → 今回(${maxDate || '日付不明'})の値を採用`);
+    }
+    // 今回が同日で別値なら自動採用しない (§7.1・捏造ゼロ)。両方を行に残す。
+    const distinct = [...new Map(latest.map((c) => [`${c.value}|${c.unit}`, c])).values()];
+    if (distinct.length > 1) {
+      anomalies.push(`同名別値: 「${gkey}」の今回(${maxDate}) が ${distinct.length} 通り (自動採用しません)`);
+    }
+    for (const c of distinct) {
+      rows.push({ name: c.name, value: c.unit ? `${c.value} ${c.unit}` : String(c.value), date: c.date || '' });
+    }
   }
 
   /*
@@ -653,6 +682,16 @@ export function buildReportVM(input: BuildInput): ReportVM {
     }
   }
 
+  /*
+   * ⑧ アブストラクトと重複する冒頭段落を、後段のダイジェストで繰り返さない
+   * (Wellfort レビュー⑧・2026-09-25)。Elith が abstract / summary / medical_visit の
+   * 冒頭に**同一段落**を入れているため、同じ文が紙面で何度も出ていた。
+   * **当社が同じ文を繰り返さない** (逐語は保ったまま「出す/出さない」の選択だけを行う)。
+   * 節間の重複そのもの (summary・medical_visit) は受領 JSON 由来 = Elith へ確認依頼。
+   */
+  const normDup = (s: string) => s.replace(/\s+/g, '');
+  const abstractLead = leadSection ? normDup(leadSentences(leadSection.text.trim(), 2)) : '';
+
   for (const spec of specs) {
     if (spec.key === 'abstract') continue;   // 冒頭に出したので二重に置かない
     const section = sec(spec.sourceKey);
@@ -700,10 +739,20 @@ export function buildReportVM(input: BuildInput): ReportVM {
         const steps: DigestItem[] = blocks.slice(1).map((b) => ({
           heading: b.heading, text: leadSentences(b.body, 1),
         })).filter((s) => s.heading && s.text);
-        built = card(spec.key, title, spec.axis,
-          steps.length ? `${section.section_name} §1〜§${blocks.length}`
-                       : `${section.section_name} 冒頭 2 文`, [
-            ...(lead ? [{ kind: 'paragraphs' as const, items: [leadSentences(lead.body, 2)] }] : []),
+        // ⑧ 冒頭段落がアブストラクトと同一なら繰り返さない。
+        // **ただし steps があるときだけ**外す — steps が無い世代 (honda: 節見出しが
+        // 「■」で splitTopics が拾えず 1 ブロック) で外すとカードが空になり
+        // 「医療受診の目安」が丸ごと消える (漏れ)。空にするくらいなら重複を残す。
+        const leadText = lead ? leadSentences(lead.body, 2) : '';
+        const leadDupAbstract = !!abstractLead && steps.length > 0 && normDup(leadText) === abstractLead;
+        /*
+         * 【出典は Elith の節名だけにする・Wellfort レビュー⑥・2026-09-25】
+         * 旧: 「医療受診の目安 §1〜§4」「… 冒頭 2 文」。この「§1〜§N」「冒頭 2 文」
+         * 「（各節の…冒頭文）」は**当社が付けた生成過程の注記**で、読む人には
+         * 内部の scaffolding が漏れているように見えていた。節名 (Elith の逐語) だけ残す。
+         */
+        built = card(spec.key, title, spec.axis, section.section_name, [
+            ...(lead && !leadDupAbstract ? [{ kind: 'paragraphs' as const, items: [leadText] }] : []),
             { kind: 'steps' as const, items: steps },
           ]);
         break;
@@ -726,7 +775,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
         const blocks = topicsOrWhole(section);
         const lead = blocks[0];
         if (!lead) break;
-        built = card(spec.key, title, spec.axis, `${section.section_name} 冒頭 2 文`,
+        built = card(spec.key, title, spec.axis, section.section_name,
           [{ kind: 'paragraphs', items: [leadSentences(lead.body, 2)] }]);
         break;
       }
@@ -734,8 +783,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
       case 'lifestyle': {
         if (!section) break;
         const pairs = buildLifestylePairs(section.text);
-        built = card(spec.key, title, spec.axis,
-          `${section.section_name} §1〜§${pairs.length}（各節の【現状評価】【行動提案】冒頭文）`,
+        built = card(spec.key, title, spec.axis, section.section_name,
           [{ kind: 'pairs', items: pairs }]);
         break;
       }
@@ -747,8 +795,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
         if (!plan) break;
         const weeks = splitWeeks(plan.body);
         // **見出しは Elith が本文に書いたものを使う** (当社のラベルを先に当てない)。
-        built = card(spec.key, plan.heading || spec.label, 'b',
-          `${diet.section_name} §4`, [
+        built = card(spec.key, plan.heading || spec.label, 'b', diet.section_name, [
             { kind: 'paragraphs', items: [leadSentences(plan.body.split('【第')[0], 2)] },
             { kind: 'weeks', items: weeks },
           ]);
@@ -764,9 +811,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
         const items = hasHeadings
           ? blocks.map((b) => leadSentences(b.body, 1)).filter(Boolean)
           : [leadSentences(blocks[0]?.body ?? '', 2)].filter(Boolean);
-        built = card(spec.key, title, spec.axis,
-          hasHeadings ? `${section.section_name} §1〜§${blocks.length}`
-                      : `${section.section_name} 冒頭 2 文`,
+        built = card(spec.key, title, spec.axis, section.section_name,
           [{ kind: 'paragraphs', items }]);
         break;
       }
