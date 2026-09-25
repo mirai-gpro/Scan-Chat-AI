@@ -18,6 +18,7 @@
 import { extractExamDate, measurementsFromMarkdown } from './elith-export';
 import { persistMeasurements, type SchemaClient } from './measurement-persist';
 import { extractAgeSex } from './scan-age';
+import { getServerSupabase } from './supabase';
 
 /** JST の今日 (YYYY-MM-DD)。受診日が読めなかったときの既定。 */
 function jstToday(): string {
@@ -148,4 +149,93 @@ export async function saveScanResult(
   }
 
   return { artifactId, testDate, dateSource, measurements, blocked: undefined };
+}
+
+/**
+ * **admin バッチ (elith-scan / elith-hc-merge finalize) が読んだ人間ドックを、本人の
+ * ダッシュボードにも出すために `test_artifacts` / `measurement_values` へ保存する。**
+ *
+ * これまで admin バッチは Elith 納品用に S3 へ書くだけで、ダッシュボードが読む Supabase
+ * には残していなかった (発注者判断 2026-09-25「検査値もダッシュボードに出す・source=admin_batch」)。
+ * ユーザーのアプリスキャン (`saveScanResult`) と同じ 2 層 (jsonb + 正規化) へ書く。
+ *
+ * - `source='admin_batch'` で記録 (ユーザーの `user_upload` と区別)。
+ * - **冪等**: 同一 (uid, health_checkup, test_date, source=admin_batch) の既存行を
+ *   **hard delete してから入れ直す** (ダッシュボードは status で絞らないため superseded だと
+ *   重複表示になる。measurement_values は FK on delete cascade で一緒に消える)。
+ *   `user_upload` 行や別 date は触らない。
+ * - 測定値は **既に lean (sanitizeMeasurementsForDelivery 済み)** の前提で受け取り、
+ *   `persistMeasurements` へそのまま渡す (ここで整形しない = 二重管理しない)。
+ * - 失敗しても呼び出し側 (Elith 納品) は止めない。理由を返して可視化する。
+ */
+export async function persistAdminBatchHc(input: {
+  diagnosticUserId: string;
+  /** 確定スキャン Markdown (scan_md 用・監査/表示の原文)。 */
+  markdownClean: string;
+  /** 納品と同一の lean measurements (整形済み)。 */
+  measurements: Record<string, unknown>[];
+  /** 受診日 YYYY-MM-DD (今回)。 */
+  testDate: string;
+  pageCount?: number;
+}): Promise<{ artifactId: string | null; rows: number; reason?: string }> {
+  const sb = getServerSupabase();
+  if (!sb) return { artifactId: null, rows: 0, reason: 'supabase_not_configured' };
+  const md = String(input.markdownClean ?? '');
+  const testDate = /^\d{4}-\d{2}-\d{2}$/.test(input.testDate) ? input.testDate : jstToday();
+  const { age: ageAtTest, sex } = extractAgeSex(md);
+
+  // 冪等: 同一 (uid, health_checkup, test_date, source=admin_batch) を消してから入れ直す。
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await (sb.schema('diagnosis') as any)
+      .from('test_artifacts')
+      .delete()
+      .eq('diagnostic_user_id', input.diagnosticUserId)
+      .eq('test_type', 'health_checkup')
+      .eq('test_date', testDate)
+      .eq('source', 'admin_batch');
+  } catch {
+    /* 消せなくても続行 (最悪その日付が重複表示になるだけ) */
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (sb.schema('diagnosis') as any)
+    .from('test_artifacts')
+    .insert([
+      {
+        diagnostic_user_id: input.diagnosticUserId,
+        source: 'admin_batch',
+        test_type: 'health_checkup',
+        test_date: testDate,
+        lab_name: null,
+        schema_version: '1.0',
+        display_mode: 'single',
+        page_count: input.pageCount ?? 1,
+        imported_by: 'admin',
+        status: 'active',
+        scan_md: md,
+        ...(ageAtTest != null ? { age_at_test: ageAtTest } : {}),
+        ...(sex ? { sex } : {}),
+      },
+    ])
+    .select('id');
+  if (error) return { artifactId: null, rows: 0, reason: `test_artifacts 保存失敗: ${error.message}` };
+  const artifactId = data?.[0]?.id;
+  if (!artifactId) return { artifactId: null, rows: 0, reason: 'test_artifacts の id を取得できず' };
+
+  let rows = 0;
+  try {
+    const r = await persistMeasurements(sb as unknown as SchemaClient, {
+      artifactId,
+      diagnosticUserId: input.diagnosticUserId,
+      testType: 'health_checkup',
+      testDate,
+      measurements: input.measurements as never,
+      sourceFileKind: 'scan_md',
+    });
+    rows = r.rows;
+  } catch {
+    rows = 0;
+  }
+  return { artifactId, rows };
 }

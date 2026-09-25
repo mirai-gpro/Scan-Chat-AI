@@ -35,6 +35,7 @@ import { refreshConfig } from '../../../lib/app-config';
 import { getS3Config, isS3Configured, putFiles, type S3PutFile } from '../../../lib/s3';
 import { checkNecessity } from '../../../lib/elith-necessity-check';
 import { writeHealthAgeForHc } from '../../../lib/elith-delivery';
+import { persistAdminBatchHc } from '../../../lib/scan-persist';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 
 export const prerender = false;
@@ -272,11 +273,19 @@ export const POST: APIRoute = async ({ request }) => {
       } catch (e) {
         healthAge = { written: false, reason: String(e instanceof Error ? e.message : e) };
       }
+      // 本人ダッシュボード表示用に Supabase (test_artifacts / measurement_values) へも保存 (source=admin_batch)。
+      let dashboard: { artifactId: string | null; rows: number; reason?: string } | null = null;
+      try {
+        dashboard = await persistAdminBatchHc({ diagnosticUserId: clientId, markdownClean: jsonObj.raw_markdown, measurements, testDate, pageCount: parts.length });
+      } catch (e) {
+        dashboard = { artifactId: null, rows: 0, reason: String(e instanceof Error ? e.message : e) };
+      }
       return json({
         ok: true, action: 'finalize', configured: true, bucket: cfg.bucket,
         client_id: clientId, format_id: 'HealthCheckupData', test_date: testDate,
         part_count: parts.length, rows: measurements.length, measurements, json_key, necessity, canon: canonAudit, dedup: dedupAuditOut, trend_dropped: trendDropped, scramble, reassigned: reassign?.reassigned ?? null, eye_resolved: eye?.resolved ?? null, lipid_fix: lipid && lipid.swapped ? lipid.detail : null,
         health_age: healthAge, // ウェルネス年齢の書き出し結果 (written/key/reason)
+        dashboard, // 本人ダッシュボード保存結果 (artifactId/rows)
         scan_model: MODELS.scan, // 実際に使用したスキャンモデル (lite/3.5 判別用)
         uri: uploaded[0]?.uri ?? null,
       });
