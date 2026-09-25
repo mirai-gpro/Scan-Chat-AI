@@ -447,13 +447,14 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
                   <div class="-mx-1 overflow-x-auto">
                     <table class="rp-table text-sm">
                       <thead>
-                        <tr><th>項目名</th><th>値</th></tr>
+                        <tr><th>項目名</th><th>値</th><th>検査日</th></tr>
                       </thead>
                       <tbody>
                         {block.rows.map((r) => (
                           <tr>
                             <td>{r.name}</td>
                             <td class="whitespace-nowrap font-mono tabular-nums">{r.value}</td>
+                            <td class="whitespace-nowrap font-mono tabular-nums text-slate-600">{r.date}</td>
                           </tr>
                         ))}
                       </tbody>
@@ -583,13 +584,14 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
                 <div class="overflow-x-auto">
                   <table class="rp-table text-sm">
                     <thead>
-                      <tr><th>項目名</th><th>値</th></tr>
+                      <tr><th>項目名</th><th>値</th><th>検査日</th></tr>
                     </thead>
                     <tbody>
                       {ch.table.map((r) => (
                         <tr>
                           <td>{r.name}</td>
                           <td class="whitespace-nowrap font-mono tabular-nums">{r.value}</td>
+                          <td class="whitespace-nowrap font-mono tabular-nums text-slate-600">{r.date}</td>
                         </tr>
                       ))}
                     </tbody>

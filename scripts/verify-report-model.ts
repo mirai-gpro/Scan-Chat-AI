@@ -19,7 +19,7 @@ import T1_TEXT from '../src/data/elith/type1_20260824/report_text.json';
 import T1_CHECKUP from '../src/data/elith/type1_20260824/health_checkup.json';
 import T1_BLOOD from '../src/data/elith/type1_20260824/blood_test.json';
 import T1_CANCER from '../src/data/elith/type1_20260824/cancer_risk.json';
-import { buildReportVM, leadSentences } from '../src/lib/report-adapter';
+import { buildReportVM, buildMeasurements, leadSentences } from '../src/lib/report-adapter';
 import { anchorFor, resolveChapters } from '../src/lib/report-sections';
 import type { ReportVM } from '../src/lib/report-model';
 import { loadReportVM } from '../src/lib/elith-report-queries';
@@ -102,10 +102,12 @@ for (const card of vm.digest) {
       }
     }
     if (b.kind === 'table') {
-      // 【2026-09-18】表は項目名と値だけ。判定・基準値の欄は廃止した (受領 JSON に無い欄だった)。
+      // 【2026-09-18/2026-09-25】表の列は受領ファイルが持つものだけ = 項目名・値・検査日。
+      // 判定・基準値の欄 (受領 JSON に無い欄) は作らない。date は各エントリの受領フィールド。
       for (const r of b.rows) {
-        check(`${card.key}/${r.name}: 表の列は項目名と値の 2 つだけ`,
-          Object.keys(r).length === 2 && 'name' in r && 'value' in r, Object.keys(r).join(','));
+        check(`${card.key}/${r.name}: 表の列は受領項目 (項目名・値・検査日) だけ`,
+          Object.keys(r).every((k) => ['name', 'value', 'date'].includes(k)) && 'name' in r && 'value' in r,
+          Object.keys(r).join(','));
       }
     }
   }
@@ -147,7 +149,7 @@ check('タイプ 2 と判定', vm.reportType === 2, String(vm.reportType));
 // **残るのは 1 本だけ**で、丸バッジ (A/B) も紙面に出さない (バッジは `verify:screen` が見る)。
 check('軸は 1 本だけ', vm.axes.length === 1, vm.axes.map((a) => a.key).join(','));
 check('残った軸は疾病予防アドバイス', vm.axes[0]?.key === 'b'
-  && vm.axes[0]?.title === 'AI 診断による疾病予防アドバイス', vm.axes[0]?.title ?? '');
+  && vm.axes[0]?.title === 'AI 疾病予防アドバイス', vm.axes[0]?.title ?? '');
 check('廃止した軸 A のカードが残っていない', !vm.digest.some((c) => c.axis === 'a'));
 // 帯にリードを持たせない (ポリシーの説明文を紙面に載せない・spec §4.-1)。
 check('軸は見出しだけを持つ',
@@ -164,8 +166,9 @@ const allRows = vm.chapters.find((c) => c.key === 'measurements')?.table ?? [];
  * 空欄に「—」を置いて "欄はあるが該当なし" に見せていたのが捏造だったので、
  * 検査も「欄が無いこと」を見る側へ変える。
  */
-check('表の列は項目名と値の 2 つだけ (基準値・判定の欄を作らない)',
-  allRows.length > 0 && allRows.every((r) => Object.keys(r).length === 2 && 'name' in r && 'value' in r),
+check('表の列は受領項目 (項目名・値・検査日) だけ (基準値・判定の欄を作らない)',
+  allRows.length > 0 && allRows.every((r) =>
+    Object.keys(r).every((k) => ['name', 'value', 'date'].includes(k)) && 'name' in r && 'value' in r),
   allRows.length ? Object.keys(allRows[0]).join(',') : '0 行');
 // 同名別値は自動採用しない (spec §7.1)。**紙面のバッジではなく監査で報せる。**
 check('同名別値を監査に出す', vm.audit.anomalies.some((a) => a.startsWith('同名別値:')));
@@ -664,6 +667,42 @@ check('タイプ1 でもダイジェストの段落は受領本文の逐語',
   // 実検体 (2026-08-26) は問診値を渡していないので 1 か所も付かない。
   check('問診値を渡していない実検体では付かない',
     !vm.chapters.flatMap((c) => c.topics.map((t) => t.body)).join('').includes('（問診時）'));
+}
+
+// ── 検査値の表: 今回(最新日)を採る＋単位ゆれ・別名の集約 (Wellfort レビュー①②③) ──────
+// honda 実データで顕在化した退行を固定する:
+//   ① 配列先頭=最古を出していた (ALT 2024-09-03=131 が「今回の値」に見えた) → 最新日を採る
+//   ② eGFR が単位表記だけ違う 4 キーで届く / 血色素量とヘモグロビンが別名 → canonical で 1 行に集約
+//   ③ 表が古い異常値 (CK409) を出し本文 (今回=214) と食い違う → 最新日採用で解消
+{
+  const oldestFirst = {
+    'ALT [U/L]': [
+      { date: '2024-09-03', value: 131 }, { date: '2026-09-16', value: 77 },
+    ],
+    'eGFR [mL/min/1.73m2]': [{ date: '2026-08-19', value: 68.5 }],
+    'eGFR [mL/min]': [{ date: '2025-12-24', value: 60.4 }, { date: '2026-09-16', value: 48.5 }],
+    'eGFR [mL/分]': [{ date: '2024-09-03', value: 52.1 }],
+    '血色素量 [g/dL]': [{ date: '2026-09-16', value: 15.9 }],
+    'ヘモグロビン [g/dL]': [{ date: '2024-09-03', value: 16.7 }],
+  } as unknown as Record<string, { date?: string; value?: unknown }[]>;
+  const m = buildMeasurements(oldestFirst, null);
+  const alt = m.rows.filter((r) => r.name === 'ALT');
+  check('① ALT は今回(2026-09-16=77)を採る (最古2024=131を出さない)',
+    alt.length === 1 && alt[0].value.startsWith('77') && alt[0].date === '2026-09-16',
+    alt.map((r) => `${r.value}@${r.date}`).join(','));
+  const egfr = m.rows.filter((r) => r.name === 'eGFR');
+  check('② eGFR は単位ゆれ 4 キーを 1 行に集約し今回(48.5)を採る',
+    egfr.length === 1 && egfr[0].value.startsWith('48.5') && egfr[0].date === '2026-09-16',
+    egfr.map((r) => `${r.value}@${r.date}`).join(','));
+  // 血色素量 と ヘモグロビン は標準マスタで同一 canonical = 1 行に集約 (今回=血色素量15.9)。
+  const hb = m.rows.filter((r) => r.name === '血色素量' || r.name === 'ヘモグロビン');
+  check('② 血色素量とヘモグロビン(別名)を 1 行に集約',
+    hb.length === 1 && hb[0].value.startsWith('15.9'), hb.map((r) => r.name + r.value).join(','));
+  // 同日別値は自動採用しない (§7.1・捏造ゼロ)。
+  const tie = buildMeasurements({
+    'X [mg/dL]': [{ date: '2026-09-16', value: 1.1 }, { date: '2026-09-16', value: 2.2 }],
+  } as unknown as Record<string, { date?: string; value?: unknown }[]>, null);
+  check('§7.1 同日別値は両方残す (自動採用しない)', tie.rows.length === 2);
 }
 
 // ── 結果 ──────────────────────────────────────────────────────────
