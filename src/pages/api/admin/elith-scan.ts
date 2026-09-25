@@ -32,6 +32,7 @@ import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
 import { checkNecessity } from '../../../lib/elith-necessity-check';
 import { masterItemNames } from '../../../lib/standard-master';
 import { writeHealthAgeForHc } from '../../../lib/elith-delivery';
+import { persistAdminBatchHc } from '../../../lib/scan-persist';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 
 export const prerender = false;
@@ -188,12 +189,19 @@ export const POST: APIRoute = async ({ request }) => {
      * これで promote が HC と一緒に HealthAgeData も納品先へ複製できる(複数年=年ごとに1つ)。
      */
     let healthAge: { written: boolean; key?: string; reason?: string; biological_age?: number | null; chronological_age?: number | null } | null = null;
+    let dashboard: { artifactId: string | null; rows: number; reason?: string } | null = null;
     if (formatId === 'HealthCheckupData') {
       const measurements = ((bundle.json as { data?: { measurements?: unknown[] } })?.data?.measurements ?? []) as Record<string, unknown>[];
       try {
         healthAge = await writeHealthAgeForHc({ uid: clientId, measurements, testDate: bundle.testDate, hcKey: bundle.jsonKey, prefix });
       } catch (e) {
         healthAge = { written: false, reason: String(e instanceof Error ? e.message : e) };
+      }
+      // 本人ダッシュボード表示用に Supabase (test_artifacts / measurement_values) へも保存 (source=admin_batch)。
+      try {
+        dashboard = await persistAdminBatchHc({ diagnosticUserId: clientId, markdownClean: bundle.markdown, measurements, testDate: bundle.testDate });
+      } catch (e) {
+        dashboard = { artifactId: null, rows: 0, reason: String(e instanceof Error ? e.message : e) };
       }
     }
     return json({
@@ -211,6 +219,7 @@ export const POST: APIRoute = async ({ request }) => {
       canon: bundle.canon,
       cancer_fix: bundle.cancerFix,
       health_age: healthAge, // ウェルネス年齢の書き出し結果 (written/key/reason)
+      dashboard, // 本人ダッシュボード保存結果 (artifactId/rows) = 検査値の表示・推移用
       preview: bundle.json, // 🎯/🔍 照合用: 納品JSON(data.measurements)を返す(他分岐と同様)。
       uploaded: uploaded.map((u) => ({ key: u.key, uri: u.uri })),
     });
