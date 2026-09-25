@@ -19,6 +19,7 @@
 import type { APIRoute } from 'astro';
 import { getS3Config } from '../../../lib/s3';
 import { deliverReadySpecialAccounts } from '../../../lib/elith-delivery';
+import { deliverReadyDiagnosisCycles } from '../../../lib/elith-deliver-cycles';
 
 export const prerender = false;
 
@@ -58,8 +59,23 @@ export const GET: APIRoute = async ({ request }) => {
 
   const started = Date.now();
   try {
+    // ① 単品/スペシャル経路 (従来どおり・**挙動を変えない**)。
     const summary = await deliverReadySpecialAccounts({ deliveryPrefix, sourcePrefix, skipDelivered: true });
-    return json({ ok: true, elapsed_ms: Date.now() - started, ...summary });
+
+    /*
+     * ② 契約者経路 (Diagnosis Cycle 単位・P0-2)。**単品経路とは完全に分離**する。
+     *   どの段でも「分からない」なら納品せず reason を返す (fail-closed)。
+     *   bridge view / diagnosis_cycle が未適用の環境では候補 0 件になるだけで、
+     *   ①の結果には影響しない。
+     */
+    let cycles: Awaited<ReturnType<typeof deliverReadyDiagnosisCycles>> | { error: string };
+    try {
+      cycles = await deliverReadyDiagnosisCycles({ deliveryPrefix, sourcePrefix, skipDelivered: true });
+    } catch (e) {
+      cycles = { error: String((e as { message?: string })?.message ?? e) };
+    }
+
+    return json({ ok: true, elapsed_ms: Date.now() - started, ...summary, diagnosis_cycles: cycles });
   } catch (e) {
     return json(
       { ok: false, error: 'deliver_failed', detail: String((e as { message?: string })?.message ?? e) },

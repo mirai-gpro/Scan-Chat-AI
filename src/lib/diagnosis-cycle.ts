@@ -241,3 +241,16 @@ export async function loadCycleLinks(
     return { links: {}, reason: 'db_unavailable' };
   }
 }
+
+/**
+ * Elith の format_id を `cycle_links` に載せられる型へ寄せる。
+ * **HealthAgeData は算出物なので link しない**（null を返す）。未知も null。
+ */
+export function toLinkableFormat(formatId: string | null | undefined): LinkableFormat | null {
+  const t = (formatId ?? '').trim();
+  const allowed: LinkableFormat[] = [
+    'HealthCheckupData', 'LifestyleQuestionnaireData', 'BloodTestData',
+    'CancerRiskAssessmentData', 'GeneticTestResultData', 'Other',
+  ];
+  return (allowed as string[]).includes(t) ? (t as LinkableFormat) : null;
+}
