@@ -31,6 +31,7 @@ import { refreshConfig } from '../../../lib/app-config';
 import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
 import { checkNecessity } from '../../../lib/elith-necessity-check';
 import { masterItemNames } from '../../../lib/standard-master';
+import { writeHealthAgeForHc } from '../../../lib/elith-delivery';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 
 export const prerender = false;
@@ -180,6 +181,21 @@ export const POST: APIRoute = async ({ request }) => {
 
   try {
     const uploaded = await putFiles(bundle.files);
+    /*
+     * 人間ドック/検診は、同じ date フォルダへ **HealthAgeData(ウェルネス年齢)** も書く。
+     * 実年齢は顧客DB → スペシャルアカウント登録DOB(special.account_dob) → scan 抽出年齢 の順で解決。
+     * 算出不能(年齢/必須マーカー不足)なら書かない(捏造ゼロ)。失敗しても HC 納品は取り消さない。
+     * これで promote が HC と一緒に HealthAgeData も納品先へ複製できる(複数年=年ごとに1つ)。
+     */
+    let healthAge: { written: boolean; key?: string; reason?: string; biological_age?: number | null; chronological_age?: number | null } | null = null;
+    if (formatId === 'HealthCheckupData') {
+      const measurements = ((bundle.json as { data?: { measurements?: unknown[] } })?.data?.measurements ?? []) as Record<string, unknown>[];
+      try {
+        healthAge = await writeHealthAgeForHc({ uid: clientId, measurements, testDate: bundle.testDate, hcKey: bundle.jsonKey, prefix });
+      } catch (e) {
+        healthAge = { written: false, reason: String(e instanceof Error ? e.message : e) };
+      }
+    }
     return json({
       ok: true,
       configured: true,
@@ -194,6 +210,7 @@ export const POST: APIRoute = async ({ request }) => {
       necessity,
       canon: bundle.canon,
       cancer_fix: bundle.cancerFix,
+      health_age: healthAge, // ウェルネス年齢の書き出し結果 (written/key/reason)
       preview: bundle.json, // 🎯/🔍 照合用: 納品JSON(data.measurements)を返す(他分岐と同様)。
       uploaded: uploaded.map((u) => ({ key: u.key, uri: u.uri })),
     });

@@ -34,6 +34,7 @@ import { MODELS } from '../../../lib/gemini';
 import { refreshConfig } from '../../../lib/app-config';
 import { getS3Config, isS3Configured, putFiles, type S3PutFile } from '../../../lib/s3';
 import { checkNecessity } from '../../../lib/elith-necessity-check';
+import { writeHealthAgeForHc } from '../../../lib/elith-delivery';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 
 export const prerender = false;
@@ -260,10 +261,22 @@ export const POST: APIRoute = async ({ request }) => {
     }
     try {
       const uploaded = await putFiles([{ key: json_key, contentType: 'application/json; charset=utf-8', body: jsonBody, bytes: utf8Bytes(jsonBody) }]);
+      /*
+       * 同じ date フォルダへ HealthAgeData(ウェルネス年齢)も書く。実年齢は顧客DB →
+       * スペシャルアカウント登録DOB → scan 抽出年齢 の順で解決。算出不能なら書かない(捏造ゼロ)。
+       * 失敗しても HC 納品は取り消さない。promote が HC と一緒に複製できる(複数年=年ごとに1つ)。
+       */
+      let healthAge: { written: boolean; key?: string; reason?: string; biological_age?: number | null; chronological_age?: number | null } | null = null;
+      try {
+        healthAge = await writeHealthAgeForHc({ uid: clientId, measurements, testDate, hcKey: json_key, prefix });
+      } catch (e) {
+        healthAge = { written: false, reason: String(e instanceof Error ? e.message : e) };
+      }
       return json({
         ok: true, action: 'finalize', configured: true, bucket: cfg.bucket,
         client_id: clientId, format_id: 'HealthCheckupData', test_date: testDate,
         part_count: parts.length, rows: measurements.length, measurements, json_key, necessity, canon: canonAudit, dedup: dedupAuditOut, trend_dropped: trendDropped, scramble, reassigned: reassign?.reassigned ?? null, eye_resolved: eye?.resolved ?? null, lipid_fix: lipid && lipid.swapped ? lipid.detail : null,
+        health_age: healthAge, // ウェルネス年齢の書き出し結果 (written/key/reason)
         scan_model: MODELS.scan, // 実際に使用したスキャンモデル (lite/3.5 判別用)
         uri: uploaded[0]?.uri ?? null,
       });
