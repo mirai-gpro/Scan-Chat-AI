@@ -123,32 +123,40 @@ function ageAt(dob: string | null, testDate: string | null): number | null {
   return age >= 0 && age < 130 ? age : null;
 }
 
-/**
- * DB の最新 health_checkup を取り、確定 Markdown (scan_md) から Elith HealthCheckupData を
- * **画像なしで**生成して S3 (sourcePrefix) へ書き出す。
- *
- * 【なぜ要るか】ユーザースキャンの S3 書き出しは `scan-export-v0` 形式 (フォルダ
- * `{prefix}{diagnosticId}/`) で、Elith 納品形式 `user/{uid}/date/…/HealthCheckupData_…json`
- * ではないため、assemble の inventory が拾えない。`test_artifacts.scan_md`
- * (ユーザースキャン経路だけが書く確定 Markdown) から Elith 形式を起こして揃える。
- * `buildElithScanBundle` は画像を Gemini で再スキャンする設計で原本画像が要るため使えない
- * (ユーザースキャンは原本画像を保存しない)。measurementsFromMarkdown で決定論生成する。
- *
- * 返り値: 生成した HC の {hcKey, measurements, testDate}。scan_md 無し等は null。
- */
-async function materializeHealthCheckup(
-  uid: string,
-  sourcePrefix: string,
-): Promise<{
+/** materialize した 1 年分の HealthCheckupData。 */
+interface MaterializedHc {
   hcKey: string;
   measurements: Record<string, unknown>[];
-  testDate: string;
+  testDate: string;   // YYYY-MM-DD
+  dateFolder: string; // YYYY_MM_DD
   fallbackAge: number | null;
   fallbackSex: 'male' | 'female' | null;
-} | null> {
+}
+
+/**
+ * DB の health_checkup を **全件 (複数年・最大5年)** 取り、確定 Markdown (scan_md) から
+ * Elith HealthCheckupData を**画像なしで年ごとに** S3 (sourcePrefix) へ書き出す。
+ *
+ * 【なぜ全年か】複数年スキャン仕様 (`docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md`
+ * §4.1/§6.2)= 1 送信 = 1 件の test_artifacts で、最大 5 年分が積まれる。**年ごとに
+ * `user/{uid}/date/{YYYY_MM_DD}/HealthCheckupData_…json` を作る**のが仕様。
+ * assemble は HealthCheckupData を「時系列 format」として date フォルダごとに納品するので
+ * (`elith-assemble.ts` の SERIES_FORMATS)、ここで全年を source に置けば年ごとに 1 つずつ出る。
+ *
+ * 【なぜ scan_md から起こすか】ユーザースキャンの S3 書き出しは `scan-export-v0` 形式で
+ * Elith 納品形式ではなく、原本画像も保存しないため `buildElithScanBundle` (画像再スキャン) は
+ * 使えない。`test_artifacts.scan_md` (ユーザースキャンだけが書く確定 Markdown) から決定論生成する。
+ *
+ * 納品ゲート (仕様 §6.2): scan_md 無し / 読み取り 0 項目の回は作らない (捏造しない)。
+ * 返り値: 年ごとの MaterializedHc[] (test_date desc)。無ければ空配列。
+ */
+async function materializeHealthCheckups(
+  uid: string,
+  sourcePrefix: string,
+): Promise<MaterializedHc[]> {
   const sb = getServerSupabase();
-  if (!sb) return null;
-  let row: { scan_md?: string | null; test_date?: string | null; age_at_test?: number | null; sex?: string | null } | null = null;
+  if (!sb) return [];
+  let rows: Array<{ scan_md?: string | null; test_date?: string | null; age_at_test?: number | null; sex?: string | null }> = [];
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const { data } = await (sb.schema('diagnosis') as any)
@@ -158,61 +166,73 @@ async function materializeHealthCheckup(
       .eq('test_type', 'health_checkup')
       .eq('status', 'active')
       .order('test_date', { ascending: false })
-      .limit(1)
-      .maybeSingle();
-    row = data ?? null;
+      .limit(20); // 複数年 (仕様上限 5 年に十分な安全枠)
+    rows = Array.isArray(data) ? data : [];
   } catch {
-    return null;
+    return [];
   }
-  const scanMd = typeof row?.scan_md === 'string' ? row.scan_md : '';
-  if (!scanMd.trim()) return null; // 確定 Markdown が無い = 生成不能 (捏造しない)
 
-  const measurements = measurementsFromMarkdown(scanMd).kept;
-  if (measurements.length === 0) return null;
-
-  const testDate =
-    typeof row?.test_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(row.test_date)
-      ? row.test_date
-      : new Date().toISOString().slice(0, 10);
-  const dateFolder = testDate.replace(/-/g, '_');
-
-  // Elith HealthCheckupData JSON (buildElithScanBundle と同じ shape・source_image/画像は無し)。
-  const json = {
-    format_id: 'HealthCheckupData',
-    schema_version: ELITH_HANDOFF_SCHEMA_VERSION,
-    kind: 'scan',
-    client_id: uid,
-    diagnostic_id: uid,
-    source_image: null,
-    test_date: testDate,
-    date_source: 'test_artifacts',
-    exported_at: new Date().toISOString(),
-    subject: { sex: null, age: null },
-    source: {
-      origin: 'scan-chat-ai',
-      app: 'scan-chat-ai',
-      note: 'special-account deliver: test_artifacts.scan_md から生成 (画像なし・決定論)',
-      lab_name: null,
-    },
-    data: { measurements, notes: [] as unknown[] },
-    raw_markdown: scanMd,
-  };
   const prefix = sourcePrefix ? sourcePrefix.replace(/^\/+/, '').replace(/\/*$/, '/') : '';
-  const hcKey = `${prefix}user/${uid}/date/${dateFolder}/HealthCheckupData_date_${dateFolder}_user_${uid}.json`;
-  const body = JSON.stringify(json, null, 2);
-  try {
-    await putFiles([{ key: hcKey, contentType: 'application/json; charset=utf-8', body, bytes: Buffer.byteLength(body, 'utf8') }]);
-  } catch {
-    return null; // 書き出せなければ納品対象から外す (assemble が拾えないため)
+  const out: MaterializedHc[] = [];
+  const seen = new Set<string>(); // 同一検査日はキー衝突するので 1 つに畳む (先頭=最新キー)
+
+  for (const row of rows) {
+    const scanMd = typeof row?.scan_md === 'string' ? row.scan_md : '';
+    if (!scanMd.trim()) continue; // 確定 Markdown 無し = 生成不能 (捏造しない)
+
+    const measurements = measurementsFromMarkdown(scanMd).kept;
+    if (measurements.length === 0) continue; // 読み取り 0 項目は納品しない (仕様 §6.2)
+
+    const testDate =
+      typeof row?.test_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(row.test_date)
+        ? row.test_date
+        : new Date().toISOString().slice(0, 10);
+    const dateFolder = testDate.replace(/-/g, '_');
+    if (seen.has(dateFolder)) continue;
+    seen.add(dateFolder);
+
+    // Elith HealthCheckupData JSON (buildElithScanBundle と同じ shape・source_image/画像は無し)。
+    const json = {
+      format_id: 'HealthCheckupData',
+      schema_version: ELITH_HANDOFF_SCHEMA_VERSION,
+      kind: 'scan',
+      client_id: uid,
+      diagnostic_id: uid,
+      source_image: null,
+      test_date: testDate,
+      date_source: 'test_artifacts',
+      exported_at: new Date().toISOString(),
+      subject: { sex: null, age: null },
+      source: {
+        origin: 'scan-chat-ai',
+        app: 'scan-chat-ai',
+        note: 'special-account deliver: test_artifacts.scan_md から生成 (画像なし・決定論)',
+        lab_name: null,
+      },
+      data: { measurements, notes: [] as unknown[] },
+      raw_markdown: scanMd,
+    };
+    const hcKey = `${prefix}user/${uid}/date/${dateFolder}/HealthCheckupData_date_${dateFolder}_user_${uid}.json`;
+    const body = JSON.stringify(json, null, 2);
+    try {
+      await putFiles([{ key: hcKey, contentType: 'application/json; charset=utf-8', body, bytes: Buffer.byteLength(body, 'utf8') }]);
+    } catch {
+      continue; // この年は書けなければ飛ばす (他の年は続行)
+    }
+    // 年齢・性別のフォールバック: ①test_artifacts.age_at_test/sex → ②scan_md から抽出。
+    const fromMd = parseAgeSexFromMarkdown(scanMd);
+    const ageAtTest = typeof row?.age_at_test === 'number' && Number.isFinite(row.age_at_test) ? row.age_at_test : null;
+    const dbSex = row?.sex === 'male' || row?.sex === 'female' ? row.sex : null;
+    out.push({
+      hcKey,
+      measurements,
+      testDate,
+      dateFolder,
+      fallbackAge: ageAtTest ?? fromMd.age,
+      fallbackSex: dbSex ?? fromMd.sex,
+    });
   }
-  // 年齢・性別のフォールバック: ①test_artifacts.age_at_test/sex → ②scan_md から抽出。
-  // (スペシャルアカウントは生年月日が無く age_at_test も空のことがあるため md まで見る)
-  const fromMd = parseAgeSexFromMarkdown(scanMd);
-  const ageAtTest = typeof row?.age_at_test === 'number' && Number.isFinite(row.age_at_test) ? row.age_at_test : null;
-  const dbSex = row?.sex === 'male' || row?.sex === 'female' ? row.sex : null;
-  const fallbackAge = ageAtTest ?? fromMd.age;
-  const fallbackSex = dbSex ?? fromMd.sex;
-  return { hcKey, measurements, testDate, fallbackAge, fallbackSex };
+  return out;
 }
 
 /** measurements からウェルネス年齢を算出し health_age_scores へ保存。載せられるなら HealthAgeRecord を返す。 */
@@ -386,43 +406,47 @@ export async function deliverReadySpecialAccounts(opts: {
   const resolveSubject = makeSubjectResolver();
   const healthAgeByRef: Record<string, HealthAgeRecord> = {};
   const manualMapping: Record<string, Partial<Record<'HealthCheckupData' | 'LifestyleQuestionnaireData', string>>> = {};
-  const methodByUid = new Map<string, string | null>();
   const wellnessReasonByUid = new Map<string, string>();
-  const hcKeyByUid = new Map<string, string>();
+  const wellnessYearsByUid = new Map<string, number>(); // その uid で HealthAge を載せた年数
+  const repHcKeyByUid = new Map<string, string>();       // manualMapping 用の代表(最新年)キー
 
   // 夜間 cron 用: 既に納品済みの回 (uid|test_date) は再送しない (skipDelivered)。
   const deliveredSet = opts.skipDelivered ? await loadDeliveredBundles(ready, opts.deliveryPrefix) : new Set<string>();
 
-  // ① 各 uid の HealthCheckupData を DB(scan_md) から Elith 形式で生成し S3(source) へ置く。
-  //    ウェルネス年齢も同じ measurements から算出 (S3 再読み不要)。
+  // ① 各 uid の HealthCheckupData を **年ごと(複数年)** に DB(scan_md) から Elith 形式で生成し
+  //    S3(source) へ置く。ウェルネス年齢も **年ごと** に算出し、各年の hcKey で healthAgeByRef へ。
   for (const uid of ready) {
-    const mat = await materializeHealthCheckup(uid, opts.sourcePrefix);
-    if (!mat) {
+    const mats = await materializeHealthCheckups(uid, opts.sourcePrefix);
+    if (mats.length === 0) {
       results.push({ uid, status: 'skipped', reason: '確定スキャン(scan_md)が無く HealthCheckupData を生成できない' });
       continue;
     }
-    // この回が納品済みなら manualMapping に入れない = Elith(納品先)へ再送しない。
-    // (source への HC 書き出しは同一内容の上書きで無害。判定は納品済みの test_date と突合。)
-    if (opts.skipDelivered && deliveredSet.has(`${uid.toLowerCase()}|${mat.testDate}`)) {
-      results.push({ uid, status: 'skipped', reason: 'この回は既に納品済み' });
+    // 冪等: skipDelivered のとき、**全ての年が納品済み**なら uid ごとスキップ。
+    // 新しい年が 1 つでもあれば全体を出し直す (assemble は inventory の全 date を出すため。
+    // 既納品の年は同一内容・同一キーの上書きで無害)。
+    if (opts.skipDelivered && mats.every((m) => deliveredSet.has(`${uid.toLowerCase()}|${m.testDate}`))) {
+      results.push({ uid, status: 'skipped', reason: '全ての回が既に納品済み' });
       continue;
     }
-    hcKeyByUid.set(uid, mat.hcKey);
-    const { rec, reason } = await computeWellnessFromMeasurements(uid, mat.measurements, mat.testDate, mat.hcKey, mat.fallbackAge, mat.fallbackSex, resolveSubject);
-    if (rec) {
-      healthAgeByRef[mat.hcKey] = rec;
-      methodByUid.set(uid, rec.model_version);
-    } else {
-      methodByUid.set(uid, null); // 算出不能 → HealthAge 非同梱 (捏造しない)
-      wellnessReasonByUid.set(uid, reason ?? '算出不能');
+    repHcKeyByUid.set(uid, mats[0].hcKey); // mats は test_date desc = 先頭が最新
+    let wellnessYears = 0;
+    let lastReason: string | null = null;
+    for (const m of mats) {
+      const { rec, reason } = await computeWellnessFromMeasurements(
+        uid, m.measurements, m.testDate, m.hcKey, m.fallbackAge, m.fallbackSex, resolveSubject,
+      );
+      if (rec) { healthAgeByRef[m.hcKey] = rec; wellnessYears++; }
+      else lastReason = reason ?? '算出不能';
     }
+    wellnessYearsByUid.set(uid, wellnessYears);
+    if (wellnessYears === 0 && lastReason) wellnessReasonByUid.set(uid, lastReason);
   }
 
-  if (hcKeyByUid.size === 0) {
+  if (repHcKeyByUid.size === 0) {
     return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: ready.length, delivered: 0, wellness_delivered: 0 };
   }
 
-  // ② HC を置いた後で inventory (HealthCheckupData + Lifestyle を拾える)。
+  // ② HC を置いた後で inventory (問診 Lifestyle を拾う。HealthCheckup は assemble が全 date を出す)。
   const inv = await inventoryElithSource(opts.sourcePrefix);
   const latestByClient = (fmt: 'HealthCheckupData' | 'LifestyleQuestionnaireData', uid: string) => {
     const items = (inv.byFormat[fmt] ?? []).filter((c) => c.clientId === uid);
@@ -431,11 +455,12 @@ export async function deliverReadySpecialAccounts(opts: {
     return items[0];
   };
 
-  for (const uid of hcKeyByUid.keys()) {
-    const hcKey = hcKeyByUid.get(uid)!;
+  for (const uid of repHcKeyByUid.keys()) {
     const lq = latestByClient('LifestyleQuestionnaireData', uid);
     manualMapping[uid] = {
-      HealthCheckupData: hcKey,
+      // 代表(最新年)のみ渡すが、assemble は HealthCheckupData を時系列 format として
+      // この client の**全 date フォルダ**へ展開する (年ごとに 1 つずつ納品される)。
+      HealthCheckupData: repHcKeyByUid.get(uid)!,
       ...(lq ? { LifestyleQuestionnaireData: lq.key } : {}),
     };
   }
@@ -457,30 +482,42 @@ export async function deliverReadySpecialAccounts(opts: {
   const files: S3PutFile[] = assembled.users.flatMap((u) => u.files);
   const uploaded = await putFiles(files);
 
+  // 納品記録・集計は **年(date フォルダ)ごと**。elith_deliveries は (uid, bundle_date) 単位なので
+  // 各年を 1 行として記録する (冪等の skipDelivered もこの粒度で効く)。
+  let wellnessDeliveredYears = 0; // うちウェルネス年齢(HealthAgeData)を載せた年数
   for (const u of assembled.users) {
-    const formatIds = Array.from(new Set(u.sources.map((s) => s.formatId)));
-    const bundleDate = u.sources[0]?.deliveredDate ?? new Date().toISOString().slice(0, 10).replace(/-/g, '_');
-    const method = methodByUid.get(u.userId) ?? null;
-    await recordDelivery({
-      uid: u.userId,
-      bundleDate,
-      deliveryPrefix: opts.deliveryPrefix,
-      formatIds,
-      fileCount: u.sources.length,
-      wellnessAgeMethod: method,
-    });
+    const byDate = new Map<string, typeof u.sources>();
+    for (const s of u.sources) {
+      const arr = byDate.get(s.deliveredDate);
+      if (arr) arr.push(s);
+      else byDate.set(s.deliveredDate, [s]);
+    }
+    const uidFormatIds = Array.from(new Set(u.sources.map((s) => s.formatId)));
+    for (const [date, srcs] of byDate) {
+      const formatIds = Array.from(new Set(srcs.map((s) => s.formatId)));
+      const hasHealthAge = formatIds.includes('HealthAgeData');
+      if (hasHealthAge) wellnessDeliveredYears++;
+      await recordDelivery({
+        uid: u.userId,
+        bundleDate: date,
+        deliveryPrefix: opts.deliveryPrefix,
+        formatIds,
+        fileCount: srcs.length,
+        wellnessAgeMethod: hasHealthAge ? 'CABA' : null,
+      });
+    }
+    const years = wellnessYearsByUid.get(u.userId) ?? 0;
     results.push({
       uid: u.userId,
       status: 'delivered',
-      wellness_age_method: method,
-      ...(method ? {} : { wellness_reason: wellnessReasonByUid.get(u.userId) ?? '算出不能' }),
-      format_ids: formatIds,
+      wellness_age_method: years > 0 ? 'CABA' : null,
+      ...(years > 0 ? {} : { wellness_reason: wellnessReasonByUid.get(u.userId) ?? '算出不能' }),
+      format_ids: uidFormatIds,
       file_count: u.sources.length,
-      bundle_date: bundleDate,
+      // 複数年は date をまとめて出す (何年分納品したかが分かる)。
+      bundle_date: Array.from(byDate.keys()).sort().join(','),
     });
   }
-
-  const wellnessDelivered = assembled.users.filter((u) => methodByUid.get(u.userId)).length;
 
   return {
     results,
@@ -488,6 +525,7 @@ export async function deliverReadySpecialAccounts(opts: {
     delivery_prefix: assembled.deliveryPrefix,
     ready: ready.length,
     delivered: assembled.users.length,
-    wellness_delivered: wellnessDelivered,
+    // **年単位**の件数 (複数年なら 1 uid で複数)。「うちウェルネス年齢 N 件」= HealthAge を載せた年数。
+    wellness_delivered: wellnessDeliveredYears,
   };
 }
