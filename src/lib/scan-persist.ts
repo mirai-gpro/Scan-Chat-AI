@@ -33,13 +33,23 @@ export interface SaveScanInput {
   pageCount?: number;
   /** 呼び出し側が受診日を明示する場合 (YYYY-MM-DD)。 */
   examDate?: string | null;
+  /**
+   * 受診日を読めなかった回 (`date_source: 'today'`) を **保存せずに差し戻す**。
+   * スペシャルアカウントの複数年取り込み専用のガード。
+   * 今日の日付で積むと、別々の年が同じ `date/{YYYY_MM_DD}/` へ畳まれて
+   * Elith 納品が 1 年分に潰れる (§4.3-1 / §9・「臨時案件で実測した事故」)。
+   */
+  requireReadableDate?: boolean;
 }
 
 export interface SaveScanResult {
-  artifactId: string;
+  /** ガードで差し戻したときは null (保存していない)。 */
+  artifactId: string | null;
   testDate: string;
   dateSource: string;
   measurements: number;
+  /** requireReadableDate かつ受診日が読めなかったとき。保存はしていない。 */
+  blocked?: 'exam_date_unreadable';
 }
 
 /**
@@ -67,6 +77,16 @@ export async function saveScanResult(
   const { date: testDate, source: dateSource } = provided
     ? { date: provided, source: 'provided' }
     : extractExamDate(md, today);
+
+  /*
+   * 受診日が読めない回のガード (§4.3-1)。**insert より前に**差し戻す。
+   * ここで today のまま保存すると、複数年の別の回と同じ date フォルダへ畳まれ、
+   * Elith 納品が 1 年に潰れる (materializeHealthCheckups は dateFolder で dedup する)。
+   * 通常の利用者 (単発の 1 回) には効かせない — requireReadableDate が false のため。
+   */
+  if (input.requireReadableDate && dateSource === 'today') {
+    return { artifactId: null, testDate, dateSource, measurements: 0, blocked: 'exam_date_unreadable' };
+  }
 
   const { kept } = measurementsFromMarkdown(md);
 
@@ -127,5 +147,5 @@ export async function saveScanResult(
     measurements = 0;
   }
 
-  return { artifactId, testDate, dateSource, measurements };
+  return { artifactId, testDate, dateSource, measurements, blocked: undefined };
 }

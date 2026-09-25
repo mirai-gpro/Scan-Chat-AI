@@ -34,6 +34,8 @@ const worker = read('src/pages/api/cron/scan-worker.ts');
 const jobsApi = read('src/pages/api/scan/jobs.ts');
 const exportApi = read('src/pages/api/scan/export.ts');
 const verif = read('src/scripts/scan-verification.ts');
+const persist = read('src/lib/scan-persist.ts');
+const saveApi = read('src/pages/api/scan/save.ts');
 
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n① 全ページが S3 に載る (P2)\n');
@@ -69,8 +71,17 @@ console.log('\n① 全ページが S3 に載る (P2)\n');
 console.log('\n② 送信したら終わり (P4)\n');
 {
   ok('全ページにキーが揃ったらジョブを積んで終わる',
-    /const keys = pages\.all\.map\(\(p\) => p\.imageKey\)[\s\S]{0,200}?if \(keys\.length === total\)/.test(scan),
+    /const keys = pages\.all\.map\(\(p\) => p\.imageKey\)[\s\S]{0,400}?if \(!doneEl && keys\.length === total\)/.test(scan),
     '1 枚でも欠けたら前景へ落とす (待たせるが必ず読める方へ倒す)');
+  /*
+   * **複数年 (スペシャルアカウント) は背景経路に載せない** (§4.3-1)。
+   * 背景経路は読み取り画面を出さないので、受診日の today ガードと「別の年度を
+   * 続けて登録」の導線が飛ばされ、受診日を読めない回が今日の日付で畳まれて
+   * Elith 納品が 1 年に潰れる (honda で実測)。前景の検証経路を必ず通す。
+   */
+  ok('複数年 (multiYear) は背景ジョブに載せず前景の検証経路を通す',
+    /if \(!doneEl && keys\.length === total\)/.test(scan),
+    '`doneEl` (panel-done) が multiYear の合図。背景の enqueue はこれで止める');
   ok('積めたら「送信しました」で終わる',
     /show\('sent'\);\s*return;/.test(scan));
   /*
@@ -227,6 +238,48 @@ console.log('\n⑤ cron と監視 (P4 / P5)\n');
     '赤くなればメールが飛ぶ = これが通知の代わり');
   ok('secret が無い環境では赤くしない', /確認をスキップしました/.test(wf),
     '「未設定」と「異常」を同じ赤にすると、赤の意味が薄れて誰も見なくなる');
+}
+
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑥ 複数年の受診日ガード (§4.3-1 / §9 / §10)\n');
+{
+  /*
+   * スペシャルアカウントの複数年取り込みでは、受診日を読めなかった回
+   * (`date_source: 'today'`) を今日の日付で積むと、別の年が同じ
+   * `date/{YYYY_MM_DD}/` へ畳まれて Elith 納品が 1 年に潰れる (honda で実測)。
+   * 5 年分 → 5 JSON には **5 通りの受診日** が要る。ガードが各層に居ることを固定する。
+   * **静かに壊れる** (画面は正常に見えて納品だけ潰れる) ので目視では守れない。
+   */
+  ok('scan-persist: today の回は保存せず差し戻す (requireReadableDate)',
+    /requireReadableDate\?: boolean/.test(persist)
+      && /input\.requireReadableDate && dateSource === 'today'/.test(persist)
+      && /blocked: 'exam_date_unreadable'/.test(persist),
+    'これが無いと today のまま insert され、dedup で 1 年に潰れる');
+  ok('scan-persist: ガードは insert より前',
+    persist.indexOf("blocked: 'exam_date_unreadable'") < persist.indexOf('.insert(['),
+    'insert の後で弾いても行は既にできている');
+  ok('save API: スペシャルだけ requireReadableDate を立てる',
+    /const requireReadableDate = isSpecialAccount\(uid\)/.test(saveApi)
+      && /requireReadableDate,/.test(saveApi),
+    '通常の利用者 (単発 1 回) には効かせない');
+  ok('save API: 差し戻しは 422 で受診日を添える',
+    /if \(r\.blocked\)[\s\S]{0,220}error: r\.blocked[\s\S]{0,120}422/.test(saveApi),
+    '画面が「受診日が読めない」と出して回を進ませないため');
+  ok('scan.astro: 差し戻しで送信を中断し回を積まない',
+    /saved\.blocked/.test(scan) && /name = 'ExamDateUnreadable'/.test(scan),
+    'today の回を done パネルへ進めない');
+  ok('scan-verification: ExamDateUnreadable はボタンを戻して留まる',
+    /err\.name === 'ExamDateUnreadable'/.test(verif)
+      && /return; \/\/ onSubmitted へ進めない/.test(verif),
+    'この回を積まずに同じ画面へ戻す');
+  ok('受診日を回ごとに画面へ出す (§4.3-1)',
+    /done-exam-date/.test(scan) && /受診日: /.test(scan),
+    '読み取れた受診日を完了画面に出す');
+  ok('ワーカーも today を弾く (背景に来た場合の保険)',
+    /const requireReadableDate = isSpecialAccount\(job\.diagnostic_user_id\)/.test(worker)
+      && /if \(saved\.blocked\)/.test(worker)
+      && /failJob\(job\.id, job\.attempts, 'exam_date_unreadable'\)/.test(worker),
+    '黙って潰さず admin の監視へ出す');
 }
 
 console.log('');

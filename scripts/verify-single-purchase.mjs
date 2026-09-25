@@ -306,7 +306,8 @@ console.log('\n④-3 複数年アップロード\n');
     /if \(this\.refs\.onSubmitted\) \{[\s\S]{0,120}?\}\s*window\.location\.href = '\/chat';/.test(vfy),
     '通常の利用者の挙動を変えない');
   ok('複数年のときだけ行き先を差し替える',
-    /onSubmitted: doneEl \? \(\) => \{ show\('done'\)/.test(scan));
+    /onSubmitted:\s*doneEl\s*\?[\s\S]{0,500}?show\('done'\)/.test(scan),
+    'doneEl があるときだけ done パネルへ (受診日表示を挟んでも routing は同じ)');
 
   /*
    * **フラグを別に持たず、要素の有無を条件にする。** 値と DOM が食い違う余地を作らない

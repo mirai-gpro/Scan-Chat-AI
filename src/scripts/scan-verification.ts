@@ -910,8 +910,19 @@ export class ScanVerificationController {
         this.refs.submitBtn.textContent = '書き出し中…';
         try {
           await this.refs.onBeforeSubmit();
-        } catch {
-          /* テスト用途のため失敗は握りつぶし、遷移は続行 */
+        } catch (err) {
+          /*
+           * **受診日を読めなかった回は先へ進ませない (§4.3-1)。**
+           * 今日の日付で保存すると別の年と同じ date フォルダへ畳まれ、
+           * Elith 納品が 1 年に潰れる。ボタンを戻してこの回に留める。
+           * それ以外の失敗 (テスト用途の書き出し失敗など) は従来どおり握りつぶして遷移を続行。
+           */
+          if (err instanceof Error && err.name === 'ExamDateUnreadable') {
+            this.refs.submitBtn.disabled = false;
+            this.refs.submitBtn.textContent = '✓ 確認して送信';
+            return; // onSubmitted へ進めない = 回を積まない
+          }
+          /* それ以外の失敗は握りつぶし、遷移は続行 */
         }
       }
       /*

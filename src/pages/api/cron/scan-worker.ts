@@ -22,6 +22,8 @@ import { fetchScanUpload } from '../../../lib/scan-upload-ticket';
 import { readScanPage } from '../../../lib/scan-read-page';
 import { stripColumnFromTables, joinPageMarkdown } from '../../../lib/scan-markdown';
 import { saveScanResult } from '../../../lib/scan-persist';
+import { isSpecialAccount } from '../../../lib/special-accounts';
+import { refreshConfig } from '../../../lib/app-config';
 import { putScanExport } from '../../../lib/scan-export-put';
 import { deleteObjects } from '../../../lib/s3';
 import {
@@ -138,11 +140,24 @@ async function runJob(
      * (`scan-markdown.ts`)。ここで別の書き方をすると、同じ紙から違う結果が出る。
      */
     const markdownClean = joinPageMarkdown(parts.map((p) => stripColumnFromTables(p, ['推論値', '推定値'])));
+    /*
+     * **スペシャルアカウント (複数年) は受診日を読めない回を保存しない (§4.3-1)。**
+     * 本来こういう回は前景の検証経路 (scan.astro sendAll) を通すので背景には来ないが、
+     * 万一来たときに today で保存すると別の年と同じ date フォルダへ畳まれて Elith 納品が
+     * 1 年に潰れる。ここでは黙って潰さず、ジョブを失敗にして admin の監視へ出す。
+     */
+    await refreshConfig();
+    const requireReadableDate = isSpecialAccount(job.diagnostic_user_id);
     const saved = await saveScanResult(sb as never, {
       diagnosticUserId: job.diagnostic_user_id,
       markdownClean,
       pageCount: parts.length,
+      requireReadableDate,
     });
+    if (saved.blocked) {
+      await failJob(job.id, job.attempts, 'exam_date_unreadable');
+      return { status: 'failed', done, failed };
+    }
     await advanceJob(job.id, { doneCount: done, failedPages: failed, markdown: parts.join(PAGE_SEP) });
     /*
      * **`artifact_id` を必ず書く。** 後から読み取り結果を確認・修正する入口
