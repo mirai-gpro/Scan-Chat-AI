@@ -56,7 +56,8 @@
     "verify:interview-live-transport": "node scripts/verify-interview-live-transport.mjs",
     "verify:assemble-regression": "node scripts/verify-assemble-regression.mjs",
     "verify:elith-readiness": "esbuild scripts/verify-elith-readiness.ts --bundle --platform=node --format=esm --log-level=error \"--define:import.meta.env={}\" | node --input-type=module",
-    "verify:assemble-exact-source": "node scripts/verify-assemble-exact-source.mjs"
+    "verify:assemble-exact-source": "node scripts/verify-assemble-exact-source.mjs",
+    "verify:diagnosis-cycle": "node scripts/verify-diagnosis-cycle.mjs"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
