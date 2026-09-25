@@ -1901,6 +1901,14 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
       (保存が失敗した回まで数えない)。**残り年数は言い切らない**。
       **通常の利用者の画面は変えない** — `scan-verification.ts` の `onSubmitted` を
       渡さなければ従来どおり送信後 `/chat` へ遷移する。`verify:scan-pages` 47/47 で回帰なし。
+      - **【Elith 納品も年ごと 2026-09-25・発注者指示「A」】** 複数年アップした人は
+        **年ごとに 1 つずつ HealthCheckupData JSON** を作る（5 年分→5 つ）。`elith-delivery.ts`
+        `materializeHealthCheckups` が health_checkup を**全件(最大5年)** materialize →
+        assemble が時系列 format として date フォルダごとに展開。**ウェルネス年齢も年ごと**に算出し
+        各年フォルダへ HealthAgeData を同梱（`health_age_scores` も年ごと=推移グラフに乗る）。
+        **問診(Lifestyle)は 1 回だけ**（過去年に当時の問診は無い＝案 A）。冪等は年(uid|test_date)単位・
+        全年納品済みの uid だけ cron がスキップ。以前は最新1年だけ納品する不具合だった
+        (`materializeHealthCheckup` が `limit(1)`)。正本 `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md §6.2`。
     - 検証 `npm run verify:single-purchase` 55 件 (CI の A 層)・**退行注入 22 種**。
       **うち 1 つは最初の版で落ちなかったので差し替えた** (ヘッダー側の同じ条件を拾っていた)。
 
