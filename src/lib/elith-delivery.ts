@@ -20,6 +20,7 @@ import { putFiles, type S3PutFile } from './s3';
 import {
   assembleElithDeliverySet,
   inventoryElithSource,
+  buildHealthAgeJson,
   type HealthAgeRecord,
   type SubjectInfo,
 } from './elith-assemble';
@@ -304,6 +305,54 @@ async function computeWellnessFromMeasurements(
     },
     reason: null,
   };
+}
+
+/**
+ * **admin バッチ (elith-scan / elith-hc-merge finalize) から使う: HealthCheckupData と同じ
+ * date フォルダへ HealthAgeData JSON を書く。**
+ *
+ * バッチ経路は assemble を通らないので、ここで年齢を解決してウェルネス年齢を算出し、
+ * HealthCheckupData と同じ `user/{uid}/date/{YYYY_MM_DD}/` へ HealthAgeData を並べる。
+ * これで promote が HC と一緒に HealthAgeData も納品先へ複製できる (複数年=年ごとに 1 つずつ)。
+ *
+ * 年齢の解決は deliver 経路と同一 (`makeSubjectResolver`): 顧客DB生年月日 → スペシャル
+ * アカウント登録DOB (`special.account_dob`) → 呼び出し側の fallback (scan 抽出年齢)。
+ * **算出不能 (年齢/必須マーカー不足) は書かない・捏造しない**。理由を返して可視化する。
+ * health_age_scores への保存は `computeWellnessFromMeasurements` が行う (source_ref=hcKey)。
+ */
+export async function writeHealthAgeForHc(opts: {
+  uid: string;
+  measurements: Record<string, unknown>[];
+  testDate: string; // YYYY-MM-DD (今回受診日)
+  hcKey: string; // HealthCheckupData の S3 キー (source_ref)
+  prefix: string; // AWS_S3_PREFIX (例 scan-accuracy-test/)
+  fallbackAge?: number | null;
+  fallbackSex?: 'male' | 'female' | null;
+}): Promise<{ written: boolean; key?: string; reason?: string; biological_age?: number | null; chronological_age?: number | null }> {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(opts.testDate)) return { written: false, reason: '受診日が不正' };
+  const resolveSubject = makeSubjectResolver();
+  const { rec, reason } = await computeWellnessFromMeasurements(
+    opts.uid,
+    opts.measurements,
+    opts.testDate,
+    opts.hcKey,
+    opts.fallbackAge ?? null,
+    opts.fallbackSex ?? null,
+    resolveSubject,
+  );
+  if (!rec) return { written: false, reason: reason ?? '算出不能' };
+
+  const subj = await resolveSubject(opts.uid).catch(() => null);
+  const dateFolder = opts.testDate.replace(/-/g, '_');
+  const cleanPrefix = opts.prefix ? opts.prefix.replace(/^\/+/, '').replace(/\/*$/, '/') : '';
+  const key = `${cleanPrefix}user/${opts.uid}/date/${dateFolder}/HealthAgeData_date_${dateFolder}_user_${opts.uid}.json`;
+  const body = buildHealthAgeJson(opts.uid, dateFolder, rec, opts.hcKey, subj);
+  try {
+    await putFiles([{ key, contentType: 'application/json; charset=utf-8', body, bytes: Buffer.byteLength(body, 'utf8') }]);
+  } catch (err) {
+    return { written: false, reason: `S3 書き込み失敗: ${String(err instanceof Error ? err.message : err)}` };
+  }
+  return { written: true, key, biological_age: rec.biological_age, chronological_age: rec.chronological_age };
 }
 
 /**

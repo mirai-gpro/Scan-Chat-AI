@@ -263,7 +263,7 @@ function groupByClient(items: CatalogItem[]): Map<string, CatalogItem[]> {
 }
 
 /** ウェルネス年齢の納品ファイル (エンベロープは他の検査ファイルに準拠)。 */
-function buildHealthAgeJson(userId: string, bundleDate: string, rec: HealthAgeRecord, sourceRef: string, subj: SubjectInfo | null): string {
+export function buildHealthAgeJson(userId: string, bundleDate: string, rec: HealthAgeRecord, sourceRef: string, subj: SubjectInfo | null): string {
   const testDate = rec.test_date && /^\d{4}-\d{2}-\d{2}$/.test(rec.test_date) ? rec.test_date : bundleDate.replace(/_/g, '-');
   const computedDate = rec.computed_at ? rec.computed_at.slice(0, 10) : null;
   // subject: 案B=顧客DB由来で充填 (年齢=生年月日×test_date)。無ければ算出時の値にフォールバック。
