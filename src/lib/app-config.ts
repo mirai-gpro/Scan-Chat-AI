@@ -79,6 +79,13 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     description: '判定に使う diagnostic_user_id をカンマ / 空白 / 改行 区切りで。'
       + ' env SPECIAL_ALLOWED_UIDS に足される (和であって上書きではない)。'
       + ' 通常は手で書かず、上のメール登録から自動で埋まる。' },
+  { key: 'elith.plan_formats', type: 'string', group: 'Elith', label: 'プラン別の必要 format (自動納品の判定)', default: '',
+    description: '夜間 cron (`/api/cron/elith-deliver`) が「揃った」を判定するための plan_code → format 対応。'
+      + ' 書式 `plan_code=HealthCheckupData|LifestyleQuestionnaireData, 別plan=...`。'
+      + ' **空 / 未知の plan_code は納品しない (fail-closed)** — 分からないまま出すと誤納品になるため。'
+      + ' 出さなかった理由は cron 応答と admin の一覧に出る。'
+      + ' ※ 本来の正本は Wellfort 側の `plan_compositions` / `single_product_spec` で、'
+      + ' `app_bridge` にマスタが公開されたら供給元をそちらへ差し替える (二重管理にしない)。' },
   { key: 'ui.single_purchase_plan_name', type: 'string', group: 'スペシャル', label: '単品購入のプラン名表示', default: 'AI疾病予防報告書（単品）',
     description: '進捗セクションの右肩に出すプラン名。コースプランは契約から引くが、'
       + '**単品購入 (スペシャルアカウント) は EC 購入が無いので契約から引けない**ため、ここの文言を出す。'

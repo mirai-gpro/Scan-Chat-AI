@@ -30,8 +30,8 @@ import { normalizeMarkers, type HealthAgeMarkers, type RawItem } from './health-
 import { computeWellnessAge } from './wellness-age';
 import { getServerSupabase } from './supabase';
 import { listSpecialAccounts, specialSubjectByUid } from './special-accounts';
-import { getAccountProgress } from './account-progress';
 import { refreshConfig } from './app-config';
+import { checkFormatsReady, listEntitledSubscribers, type ElithFormat } from './elith-entitlement';
 
 export interface DeliverResult {
   uid: string;
@@ -433,20 +433,56 @@ export async function deliverReadySpecialAccounts(opts: {
 }): Promise<DeliverSummary> {
   await refreshConfig(true);
   const snap = listSpecialAccounts();
-  const uids = Array.from(
+  /*
+   * 母集団 = 単品/スペシャル ∪ **契約者 (コースプラン)**。
+   *
+   * 【なぜ広げたか】従来はスペシャルアカウントだけを見ていたため、本番で実購入が入っても
+   * **契約者は永久に拾われなかった** (データが揃っても納品されず、しかも黙って起きる)。
+   * 契約者は `app_bridge.subscription` の **status='active' だけ**を採る
+   * (`create-order` は決済前に pending で契約行を作るので、pending を権利と読むと
+   *  未決済の人へ納品してしまう)。
+   */
+  const singleUids = Array.from(
     new Set([
       ...snap.rows.filter((r) => !r.denied).map((r) => r.uid),
       ...snap.emails.map((e) => e.uid).filter((u): u is string => !!u),
     ]),
   );
+  const subscribers = await listEntitledSubscribers();
+  const uids = Array.from(new Set([...singleUids, ...subscribers.map((s) => s.uid)]));
 
   const results: DeliverResult[] = [];
-  const progress = await getAccountProgress(uids);
-  const ready = uids.filter((u) => progress[u]?.interview.done && progress[u]?.scan.done);
 
-  const notReady = uids.filter((u) => !ready.includes(u));
-  for (const u of notReady) {
-    results.push({ uid: u, status: 'skipped', reason: '問診またはスキャンが未完了' });
+  /*
+   * 揃い判定は **プランごとの required_formats の総当たり** (§4.3.1)。
+   * 単品/スペシャルは従来どおり「問診 ∧ 人間ドック」を必要 format として扱う
+   * (これは従来の固定 2 条件と同一 = 既存挙動を変えない)。
+   * 契約者は plan_code → required_formats を引く。**引けなければ納品しない (fail-closed)**。
+   */
+  const SINGLE_FORMATS: ElithFormat[] = ['LifestyleQuestionnaireData', 'HealthCheckupData'];
+  const requiredByUid = new Map<string, ElithFormat[] | null>();
+  for (const u of singleUids) requiredByUid.set(u, SINGLE_FORMATS);
+  for (const s of subscribers) {
+    // 単品/スペシャルにも登録されている人は、緩い方 (単品) を残さず契約の仕様を優先する。
+    if (s.requiredFormats) requiredByUid.set(s.uid, s.requiredFormats);
+    else if (!singleUids.includes(s.uid)) requiredByUid.set(s.uid, null);
+  }
+
+  const readiness = await checkFormatsReady(uids, requiredByUid);
+  const ready = uids.filter((u) => readiness[u]?.ready);
+
+  for (const u of uids) {
+    if (readiness[u]?.ready) continue;
+    const req = requiredByUid.get(u);
+    const planCode = subscribers.find((s) => s.uid === u)?.planCode ?? null;
+    results.push({
+      uid: u,
+      status: 'skipped',
+      // **黙って落とさない。** 「何が足りないか」「仕様が引けないのか」を必ず出す。
+      reason: !req || req.length === 0
+        ? `必要 format の仕様を引けないため納品しません (plan_code=${planCode ?? '不明'})`
+        : `未着の検査があります: ${(readiness[u]?.missing ?? []).join(' / ')}`,
+    });
   }
   if (ready.length === 0) {
     return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: 0, delivered: 0, wellness_delivered: 0 };
