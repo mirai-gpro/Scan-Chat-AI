@@ -132,6 +132,41 @@ function demoLatest(): LatestMeasurements {
   };
 }
 
+/**
+ * この人の **active な** test_artifact の id 一覧を返す。
+ *
+ * 【なぜ要るか — 2026-09-27 に判明】
+ *   `measurement_values` は artifact を FK で参照するだけで **status を持たない**。
+ *   一方 `test_artifacts.status` は active / superseded / withdrawn を取り、
+ *   再取込で古い回を superseded に落としたり、誤りと分かった回を withdrawn にしたりする。
+ *   にもかかわらずこのモジュールの 3 つのクエリは `diagnostic_user_id` だけで引いていたので、
+ *   **差し替えたはずの古い値・取り下げた値がグラフと「読み取り結果」に混ざる**状態だった。
+ *   実際、同じ受診日について壊れた回と直した回が両方 measurement_values に残り、
+ *   どちらが出るかは並び順まかせだった。
+ *
+ *   後から弾くのではなく**そもそも読まない**ようにする。status は artifact 側にしか無いので、
+ *   先に active な id を引いてから `.in('artifact_id', …)` で絞る。
+ *   (PostgREST の埋め込みリソース経由のフィルタは FK の解決名に依存して壊れやすいため、
+ *    2 クエリに分ける方を採る。1 人分なので件数は数十件。)
+ *
+ * 失敗したら **throw する**。呼び出し側の catch が「データ無し」を返す
+ * = 古い値を出すくらいなら空にする (fail-closed)。
+ */
+async function activeArtifactIds(
+  sb: NonNullable<ReturnType<typeof getServerSupabase>>,
+  diagnosticUserId: string,
+): Promise<string[]> {
+  const { data, error } = await sb
+    .schema('diagnosis')
+    .from('test_artifacts')
+    .select('id')
+    .eq('diagnostic_user_id', diagnosticUserId)
+    .eq('status', 'active')
+    .limit(2000);
+  if (error) throw new Error(`test_artifacts(active) の取得に失敗: ${error.message}`);
+  return ((data ?? []) as unknown as { id: string }[]).map((r) => String(r.id));
+}
+
 /** 直近 1 回分の検査値を取得する。無ければ null (テストフェーズはデモへ)。 */
 export async function getLatestMeasurements(
   diagnosticUserId: string,
@@ -141,6 +176,9 @@ export async function getLatestMeasurements(
   const sb = getServerSupabase();
   if (!sb) return null;
   try {
+    // superseded / withdrawn の回は読まない (差し替え前の値を出さない)。
+    const active = await activeArtifactIds(sb, diagnosticUserId);
+    if (active.length === 0) return null;
     // 最新の test_date を持つ 1 検査分だけを取る。
     const { data, error } = await sb
       .schema('diagnosis')
@@ -149,6 +187,7 @@ export async function getLatestMeasurements(
         'artifact_id, test_type, test_date, seq, item_name, canonical_name, value, value_num, unit, ref_low, ref_high, ref_low_num, ref_high_num, flag, assessment',
       )
       .eq('diagnostic_user_id', diagnosticUserId)
+      .in('artifact_id', active)
       .order('test_date', { ascending: false })
       .order('seq', { ascending: true })
       .limit(400);
@@ -221,11 +260,15 @@ export async function getTrendCandidates(
   if (demoFallbackEnabled(diagnosticUserId)) return demoMetricTrend(testType).map((x) => x.label);
   if (!sb) return [];
   try {
+    // superseded / withdrawn の回は候補に出さない (消したはずの項目が選択肢に残らないように)。
+    const active = await activeArtifactIds(sb, diagnosticUserId);
+    if (active.length === 0) return [];
     let q = sb
       .schema('diagnosis')
       .from('measurement_values')
       .select('canonical_name, item_name, test_type, test_date, value_num')
       .eq('diagnostic_user_id', diagnosticUserId)
+      .in('artifact_id', active)
       .not('value_num', 'is', null)
       .limit(4000);
     if (testType) q = q.eq('test_type', testType);
@@ -281,6 +324,10 @@ export async function getMeasurementTrend(
   if (demoFallbackEnabled(diagnosticUserId)) return demoMetricTrend(testType);
   if (!sb || canonicalNames.length === 0) return [];
   try {
+    // superseded / withdrawn の回は点として打たない
+    // (差し替え前の値が線に残ると「前回はこうだった」という誤った推移になる)。
+    const active = await activeArtifactIds(sb, diagnosticUserId);
+    if (active.length === 0) return [];
     const { data, error } = await sb
       .schema('diagnosis')
       .from('measurement_values')
@@ -288,6 +335,7 @@ export async function getMeasurementTrend(
         'artifact_id, test_type, test_date, seq, item_name, canonical_name, value, value_num, unit, ref_low, ref_high, ref_low_num, ref_high_num, flag, assessment',
       )
       .eq('diagnostic_user_id', diagnosticUserId)
+      .in('artifact_id', active)
       .not('value_num', 'is', null)
       .order('test_date', { ascending: true })
       // 項目の絞り込みは JS 側で行う (下)。canonical_name が null の行も対象にする必要があり、

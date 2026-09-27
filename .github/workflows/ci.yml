@@ -82,6 +82,13 @@ jobs:
       - run: npm run verify:report-render
       - run: npm run verify:scan-upload-key
       - run: npm run verify:scan-persist
+      # コードが書く値が DB の CHECK に載っているか (2026-09-27 の実障害の固定)。
+      # source='admin_batch' が CHECK に無く insert が全件 23514 で失敗していたのに、
+      # 応答の dashboard.reason にしか出ず**画面は成功に見えていた**。鍵もサーバも要らない。
+      - run: npm run verify:db-enums
+      # 検査値を読むクエリが active な artifact に絞っているか (2026-09-27)。
+      # 絞り忘れると差し替え前・取り下げ後の値が画面に混ざるが、**エラーは出ない**。
+      - run: npm run verify:measurement-status
       - run: npm run verify:blood-csv
       - run: npm run verify:blood-parser
       - run: npm run verify:intake-scope
