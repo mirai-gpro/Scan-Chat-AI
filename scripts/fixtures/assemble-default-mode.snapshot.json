@@ -1,0 +1,345 @@
+{
+  "manual": {
+    "deliveryPrefix": "fixture-out/",
+    "users": [
+      {
+        "userId": "11111111-1111-4111-8111-111111111111",
+        "sources": [
+          {
+            "formatId": "HealthCheckupData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/HealthCheckupData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_05_10",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/HealthCheckupData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 5
+          },
+          {
+            "formatId": "HealthCheckupData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/HealthCheckupData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2025_05_10",
+            "deliveredDate": "2025_05_10",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/HealthCheckupData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 4
+          },
+          {
+            "formatId": "HealthCheckupData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2024_05_10/HealthCheckupData_date_2024_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2024_05_10",
+            "deliveredDate": "2024_05_10",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2024_05_10/HealthCheckupData_date_2024_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 3
+          },
+          {
+            "formatId": "BloodTestData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/BloodTestData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_05_10",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/BloodTestData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 6
+          },
+          {
+            "formatId": "BloodTestData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/BloodTestData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2025_05_10",
+            "deliveredDate": "2025_05_10",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/BloodTestData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 2
+          },
+          {
+            "formatId": "GeneticTestResultData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2024_05_10/GeneticTestResultData_date_2024_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2024_05_10",
+            "deliveredDate": "2026_09_25",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_09_25/GeneticTestResultData_date_2026_09_25_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 1
+          },
+          {
+            "formatId": "CancerRiskAssessmentData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/CancerRiskAssessmentData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_05_10",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/CancerRiskAssessmentData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 1
+          },
+          {
+            "formatId": "LifestyleQuestionnaireData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/LifestyleQuestionnaireData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_09_25",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_09_25/LifestyleQuestionnaireData_date_2026_09_25_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 2
+          },
+          {
+            "formatId": "Other",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/Other_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_05_10",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/Other_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 2
+          },
+          {
+            "formatId": "HealthAgeData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/HealthCheckupData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_05_10",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/HealthAgeData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 1
+          },
+          {
+            "formatId": "HealthAgeData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/HealthCheckupData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2025_05_10",
+            "deliveredDate": "2025_05_10",
+            "newKey": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/HealthAgeData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "dataItems": 1
+          }
+        ],
+        "files": [
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/HealthCheckupData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 1139,
+            "body": "{\n  \"format_id\": \"HealthCheckupData\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"test_date\": \"2026-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"12\",\n        \"value_num\": 12,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"13\",\n        \"value_num\": 13,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"14\",\n        \"value_num\": 14,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/HealthCheckupData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 955,
+            "body": "{\n  \"format_id\": \"HealthCheckupData\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"test_date\": \"2025-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"12\",\n        \"value_num\": 12,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"13\",\n        \"value_num\": 13,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2024_05_10/HealthCheckupData_date_2024_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 771,
+            "body": "{\n  \"format_id\": \"HealthCheckupData\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"test_date\": \"2024-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"12\",\n        \"value_num\": 12,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/BloodTestData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 1319,
+            "body": "{\n  \"format_id\": \"BloodTestData\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"test_date\": \"2026-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"12\",\n        \"value_num\": 12,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"13\",\n        \"value_num\": 13,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"14\",\n        \"value_num\": 14,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"15\",\n        \"value_num\": 15,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/BloodTestData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 583,
+            "body": "{\n  \"format_id\": \"BloodTestData\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"test_date\": \"2025-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_09_25/GeneticTestResultData_date_2026_09_25_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 407,
+            "body": "{\n  \"format_id\": \"GeneticTestResultData\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"test_date\": \"2024-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/CancerRiskAssessmentData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 410,
+            "body": "{\n  \"format_id\": \"CancerRiskAssessmentData\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"test_date\": \"2026-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_09_25/LifestyleQuestionnaireData_date_2026_09_25_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 596,
+            "body": "{\n  \"format_id\": \"LifestyleQuestionnaireData\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"test_date\": \"2026-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/Other_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 575,
+            "body": "{\n  \"format_id\": \"Other\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"test_date\": \"2026-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/HealthAgeData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 730,
+            "body": "{\n  \"format_id\": \"HealthAgeData\",\n  \"schema_version\": \"elith-handoff-v0.1\",\n  \"kind\": \"health_age\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"diagnostic_id\": \"<uuid>\",\n  \"test_date\": \"2026-05-10\",\n  \"exported_at\": \"<ts>\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": 56\n  },\n  \"source\": {\n    \"origin\": \"scan-chat-ai\",\n    \"app\": \"scan-chat-ai\",\n    \"model\": \"CABA-v5.4\",\n    \"note\": \"ウェルネス年齢 (旧称: 健康年齢 / CABA)。実年齢との差 delta を含む。JSON のキー名 health_age / format_id HealthAgeData は互換のため据え置き。\",\n    \"lab_name\": null\n  },\n  \"data\": {\n    \"health_age\": 47.7,\n    \"actual_age\": 56,\n    \"computed_date\": null,\n    \"model_version\": \"CABA-v5.4\"\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/HealthAgeData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "bytes": 730,
+            "body": "{\n  \"format_id\": \"HealthAgeData\",\n  \"schema_version\": \"elith-handoff-v0.1\",\n  \"kind\": \"health_age\",\n  \"client_id\": \"11111111-1111-4111-8111-111111111111\",\n  \"diagnostic_id\": \"<uuid>\",\n  \"test_date\": \"2025-05-10\",\n  \"exported_at\": \"<ts>\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": 55\n  },\n  \"source\": {\n    \"origin\": \"scan-chat-ai\",\n    \"app\": \"scan-chat-ai\",\n    \"model\": \"CABA-v5.4\",\n    \"note\": \"ウェルネス年齢 (旧称: 健康年齢 / CABA)。実年齢との差 delta を含む。JSON のキー名 health_age / format_id HealthAgeData は互換のため据え置き。\",\n    \"lab_name\": null\n  },\n  \"data\": {\n    \"health_age\": 48.2,\n    \"actual_age\": 55,\n    \"computed_date\": null,\n    \"model_version\": \"CABA-v5.4\"\n  }\n}"
+          }
+        ]
+      },
+      {
+        "userId": "22222222-2222-4222-8222-222222222222",
+        "sources": [
+          {
+            "formatId": "HealthCheckupData",
+            "sourceKey": "fixture-src/user/22222222-2222-4222-8222-222222222222/date/2026_06_01/HealthCheckupData_date_2026_06_01_user_22222222-2222-4222-8222-222222222222.json",
+            "sourceDate": "2026_06_01",
+            "deliveredDate": "2026_06_01",
+            "newKey": "fixture-out/user/22222222-2222-4222-8222-222222222222/date/2026_06_01/HealthCheckupData_date_2026_06_01_user_22222222-2222-4222-8222-222222222222.json",
+            "dataItems": 0
+          },
+          {
+            "formatId": "LifestyleQuestionnaireData",
+            "sourceKey": "fixture-src/user/22222222-2222-4222-8222-222222222222/date/2026_06_01/LifestyleQuestionnaireData_date_2026_06_01_user_22222222-2222-4222-8222-222222222222.json",
+            "sourceDate": "2026_06_01",
+            "deliveredDate": "2026_09_25",
+            "newKey": "fixture-out/user/22222222-2222-4222-8222-222222222222/date/2026_09_25/LifestyleQuestionnaireData_date_2026_09_25_user_22222222-2222-4222-8222-222222222222.json",
+            "dataItems": 1
+          }
+        ],
+        "files": [
+          {
+            "key": "fixture-out/user/22222222-2222-4222-8222-222222222222/date/2026_06_01/HealthCheckupData_date_2026_06_01_user_22222222-2222-4222-8222-222222222222.json",
+            "bytes": 215,
+            "body": "{\n  \"format_id\": \"HealthCheckupData\",\n  \"client_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"test_date\": \"2026-06-01\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": []\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/22222222-2222-4222-8222-222222222222/date/2026_09_25/LifestyleQuestionnaireData_date_2026_09_25_user_22222222-2222-4222-8222-222222222222.json",
+            "bytes": 412,
+            "body": "{\n  \"format_id\": \"LifestyleQuestionnaireData\",\n  \"client_id\": \"22222222-2222-4222-8222-222222222222\",\n  \"test_date\": \"2026-06-01\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          }
+        ]
+      }
+    ]
+  },
+  "auto": {
+    "deliveryPrefix": "fixture-out/",
+    "users": [
+      {
+        "userId": "fx-001",
+        "sources": [
+          {
+            "formatId": "HealthCheckupData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/HealthCheckupData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_05_10",
+            "newKey": "fixture-out/user/fx-001/date/2026_05_10/HealthCheckupData_date_2026_05_10_user_fx-001.json",
+            "dataItems": 5
+          },
+          {
+            "formatId": "HealthCheckupData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/HealthCheckupData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2025_05_10",
+            "deliveredDate": "2025_05_10",
+            "newKey": "fixture-out/user/fx-001/date/2025_05_10/HealthCheckupData_date_2025_05_10_user_fx-001.json",
+            "dataItems": 4
+          },
+          {
+            "formatId": "HealthCheckupData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2024_05_10/HealthCheckupData_date_2024_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2024_05_10",
+            "deliveredDate": "2024_05_10",
+            "newKey": "fixture-out/user/fx-001/date/2024_05_10/HealthCheckupData_date_2024_05_10_user_fx-001.json",
+            "dataItems": 3
+          },
+          {
+            "formatId": "BloodTestData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/BloodTestData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_05_10",
+            "newKey": "fixture-out/user/fx-001/date/2026_05_10/BloodTestData_date_2026_05_10_user_fx-001.json",
+            "dataItems": 6
+          },
+          {
+            "formatId": "BloodTestData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/BloodTestData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2025_05_10",
+            "deliveredDate": "2025_05_10",
+            "newKey": "fixture-out/user/fx-001/date/2025_05_10/BloodTestData_date_2025_05_10_user_fx-001.json",
+            "dataItems": 2
+          },
+          {
+            "formatId": "GeneticTestResultData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2024_05_10/GeneticTestResultData_date_2024_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2024_05_10",
+            "deliveredDate": "2026_09_25",
+            "newKey": "fixture-out/user/fx-001/date/2026_09_25/GeneticTestResultData_date_2026_09_25_user_fx-001.json",
+            "dataItems": 1
+          },
+          {
+            "formatId": "CancerRiskAssessmentData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/CancerRiskAssessmentData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_05_10",
+            "newKey": "fixture-out/user/fx-001/date/2026_05_10/CancerRiskAssessmentData_date_2026_05_10_user_fx-001.json",
+            "dataItems": 1
+          },
+          {
+            "formatId": "LifestyleQuestionnaireData",
+            "sourceKey": "fixture-src/user/22222222-2222-4222-8222-222222222222/date/2026_06_01/LifestyleQuestionnaireData_date_2026_06_01_user_22222222-2222-4222-8222-222222222222.json",
+            "sourceDate": "2026_06_01",
+            "deliveredDate": "2026_09_25",
+            "newKey": "fixture-out/user/fx-001/date/2026_09_25/LifestyleQuestionnaireData_date_2026_09_25_user_fx-001.json",
+            "dataItems": 1
+          },
+          {
+            "formatId": "Other",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/Other_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_05_10",
+            "newKey": "fixture-out/user/fx-001/date/2026_05_10/Other_date_2026_05_10_user_fx-001.json",
+            "dataItems": 2
+          },
+          {
+            "formatId": "HealthAgeData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2026_05_10/HealthCheckupData_date_2026_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2026_05_10",
+            "deliveredDate": "2026_05_10",
+            "newKey": "fixture-out/user/fx-001/date/2026_05_10/HealthAgeData_date_2026_05_10_user_fx-001.json",
+            "dataItems": 1
+          },
+          {
+            "formatId": "HealthAgeData",
+            "sourceKey": "fixture-src/user/11111111-1111-4111-8111-111111111111/date/2025_05_10/HealthCheckupData_date_2025_05_10_user_11111111-1111-4111-8111-111111111111.json",
+            "sourceDate": "2025_05_10",
+            "deliveredDate": "2025_05_10",
+            "newKey": "fixture-out/user/fx-001/date/2025_05_10/HealthAgeData_date_2025_05_10_user_fx-001.json",
+            "dataItems": 1
+          }
+        ],
+        "files": [
+          {
+            "key": "fixture-out/user/fx-001/date/2026_05_10/HealthCheckupData_date_2026_05_10_user_fx-001.json",
+            "bytes": 1109,
+            "body": "{\n  \"format_id\": \"HealthCheckupData\",\n  \"client_id\": \"fx-001\",\n  \"test_date\": \"2026-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"12\",\n        \"value_num\": 12,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"13\",\n        \"value_num\": 13,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"14\",\n        \"value_num\": 14,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/fx-001/date/2025_05_10/HealthCheckupData_date_2025_05_10_user_fx-001.json",
+            "bytes": 925,
+            "body": "{\n  \"format_id\": \"HealthCheckupData\",\n  \"client_id\": \"fx-001\",\n  \"test_date\": \"2025-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"12\",\n        \"value_num\": 12,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"13\",\n        \"value_num\": 13,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/fx-001/date/2024_05_10/HealthCheckupData_date_2024_05_10_user_fx-001.json",
+            "bytes": 741,
+            "body": "{\n  \"format_id\": \"HealthCheckupData\",\n  \"client_id\": \"fx-001\",\n  \"test_date\": \"2024-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"12\",\n        \"value_num\": 12,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/fx-001/date/2026_05_10/BloodTestData_date_2026_05_10_user_fx-001.json",
+            "bytes": 1289,
+            "body": "{\n  \"format_id\": \"BloodTestData\",\n  \"client_id\": \"fx-001\",\n  \"test_date\": \"2026-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"12\",\n        \"value_num\": 12,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"13\",\n        \"value_num\": 13,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"14\",\n        \"value_num\": 14,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"15\",\n        \"value_num\": 15,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/fx-001/date/2025_05_10/BloodTestData_date_2025_05_10_user_fx-001.json",
+            "bytes": 553,
+            "body": "{\n  \"format_id\": \"BloodTestData\",\n  \"client_id\": \"fx-001\",\n  \"test_date\": \"2025-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/fx-001/date/2026_09_25/GeneticTestResultData_date_2026_09_25_user_fx-001.json",
+            "bytes": 377,
+            "body": "{\n  \"format_id\": \"GeneticTestResultData\",\n  \"client_id\": \"fx-001\",\n  \"test_date\": \"2024-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/fx-001/date/2026_05_10/CancerRiskAssessmentData_date_2026_05_10_user_fx-001.json",
+            "bytes": 380,
+            "body": "{\n  \"format_id\": \"CancerRiskAssessmentData\",\n  \"client_id\": \"fx-001\",\n  \"test_date\": \"2026-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/fx-001/date/2026_09_25/LifestyleQuestionnaireData_date_2026_09_25_user_fx-001.json",
+            "bytes": 382,
+            "body": "{\n  \"format_id\": \"LifestyleQuestionnaireData\",\n  \"client_id\": \"fx-001\",\n  \"test_date\": \"2026-06-01\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/fx-001/date/2026_05_10/Other_date_2026_05_10_user_fx-001.json",
+            "bytes": 545,
+            "body": "{\n  \"format_id\": \"Other\",\n  \"client_id\": \"fx-001\",\n  \"test_date\": \"2026-05-10\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": null\n  },\n  \"data\": {\n    \"measurements\": [\n      {\n        \"name\": null,\n        \"value\": \"10\",\n        \"value_num\": 10,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      },\n      {\n        \"name\": null,\n        \"value\": \"11\",\n        \"value_num\": 11,\n        \"unit\": \"mg/dL\",\n        \"ref_low\": null,\n        \"ref_high\": null,\n        \"flag\": null\n      }\n    ]\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/fx-001/date/2026_05_10/HealthAgeData_date_2026_05_10_user_fx-001.json",
+            "bytes": 700,
+            "body": "{\n  \"format_id\": \"HealthAgeData\",\n  \"schema_version\": \"elith-handoff-v0.1\",\n  \"kind\": \"health_age\",\n  \"client_id\": \"fx-001\",\n  \"diagnostic_id\": \"<uuid>\",\n  \"test_date\": \"2026-05-10\",\n  \"exported_at\": \"<ts>\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": 56\n  },\n  \"source\": {\n    \"origin\": \"scan-chat-ai\",\n    \"app\": \"scan-chat-ai\",\n    \"model\": \"CABA-v5.4\",\n    \"note\": \"ウェルネス年齢 (旧称: 健康年齢 / CABA)。実年齢との差 delta を含む。JSON のキー名 health_age / format_id HealthAgeData は互換のため据え置き。\",\n    \"lab_name\": null\n  },\n  \"data\": {\n    \"health_age\": 47.7,\n    \"actual_age\": 56,\n    \"computed_date\": null,\n    \"model_version\": \"CABA-v5.4\"\n  }\n}"
+          },
+          {
+            "key": "fixture-out/user/fx-001/date/2025_05_10/HealthAgeData_date_2025_05_10_user_fx-001.json",
+            "bytes": 700,
+            "body": "{\n  \"format_id\": \"HealthAgeData\",\n  \"schema_version\": \"elith-handoff-v0.1\",\n  \"kind\": \"health_age\",\n  \"client_id\": \"fx-001\",\n  \"diagnostic_id\": \"<uuid>\",\n  \"test_date\": \"2025-05-10\",\n  \"exported_at\": \"<ts>\",\n  \"subject\": {\n    \"sex\": null,\n    \"age\": 55\n  },\n  \"source\": {\n    \"origin\": \"scan-chat-ai\",\n    \"app\": \"scan-chat-ai\",\n    \"model\": \"CABA-v5.4\",\n    \"note\": \"ウェルネス年齢 (旧称: 健康年齢 / CABA)。実年齢との差 delta を含む。JSON のキー名 health_age / format_id HealthAgeData は互換のため据え置き。\",\n    \"lab_name\": null\n  },\n  \"data\": {\n    \"health_age\": 48.2,\n    \"actual_age\": 55,\n    \"computed_date\": null,\n    \"model_version\": \"CABA-v5.4\"\n  }\n}"
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -22,6 +22,7 @@ import { fetchScanUpload } from '../../../lib/scan-upload-ticket';
 import { readScanPage } from '../../../lib/scan-read-page';
 import { stripColumnFromTables, joinPageMarkdown } from '../../../lib/scan-markdown';
 import { saveScanResult } from '../../../lib/scan-persist';
+import { autoLinkOpenCycle } from '../../../lib/diagnosis-cycle';
 import { isSpecialAccount } from '../../../lib/special-accounts';
 import { refreshConfig } from '../../../lib/app-config';
 import { putScanExport } from '../../../lib/scan-export-put';
@@ -164,6 +165,22 @@ async function runJob(
      * (発注者判断 2026-09-10「確認は任意にする」= 案B)。ここを書き忘れると辿れない。
      */
     await finishJob(job.id, saved.artifactId);
+
+    /*
+     * ★ P0-2: open な Diagnosis Cycle へ自動 link (最終実装指示 §10・方式 a)。
+     *   背景ジョブなので回が分からない。open がちょうど 1 件のときだけ結び付ける。
+     *   **日付で選ばない。** link に失敗してもジョブは成功のまま (読み取り結果は残す)。
+     */
+    {
+      const link = await autoLinkOpenCycle({
+        diagnosticUserId: job.diagnostic_user_id,
+        formatId: 'HealthCheckupData',
+        artifactId: saved.artifactId,
+      });
+      if (!link.linked) {
+        console.warn(`[scan-worker] Diagnosis Cycle へ link しませんでした: ${link.reason} (job=${job.id})`);
+      }
+    }
 
     /*
      * ── Elith 納品 JSON を S3 へ ─────────────────────────────────

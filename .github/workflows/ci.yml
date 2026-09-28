@@ -74,6 +74,12 @@ jobs:
       - run: npm run verify:demo-gate
       - run: npm run verify:special-accounts
       - run: npm run verify:single-purchase
+      # P0-2 (Elith 自動納品): 判定は静かに壊れるので CI の A 層で見張る
+      - run: npm run verify:elith-entitlement
+      - run: npm run verify:elith-readiness
+      - run: npm run verify:diagnosis-cycle
+      - run: npm run verify:assemble-regression
+      - run: npm run verify:assemble-exact-source
       - run: npm run verify:interview-speech
       - run: npm run verify:voice-choice
       - run: npm run verify:interview-live-transport

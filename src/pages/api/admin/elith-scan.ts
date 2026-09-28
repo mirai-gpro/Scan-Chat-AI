@@ -34,6 +34,7 @@ import { masterItemNames } from '../../../lib/standard-master';
 import { writeHealthAgeForHc } from '../../../lib/elith-delivery';
 import { persistAdminBatchHc } from '../../../lib/scan-persist';
 import { isAdminAuthorized } from '../../../lib/api-auth';
+import { linkCycle, toLinkableFormat } from '../../../lib/diagnosis-cycle';
 
 export const prerender = false;
 
@@ -56,6 +57,14 @@ interface Body {
   requiredItems?: unknown;
   /** 不足(deficient)でも強制書出しする管理者オーバーライド。 */
   override?: unknown;
+  /*
+   * ★ P0-2 (最終実装指示 §11): この取込がどの Diagnosis Cycle のものかを **明示指定**する。
+   *   3 つ揃ったときだけ `cycle_links` を作る。**日付からは推測しない。**
+   *   指定しなければ link されない = その回は契約者向け自動納品の対象にならない (fail-closed)。
+   */
+  subscriptionId?: unknown;
+  cycleYear?: unknown;
+  diagnosisCycleSeq?: unknown;
 }
 
 function str(v: unknown): string | null {
@@ -204,12 +213,42 @@ export const POST: APIRoute = async ({ request }) => {
         dashboard = { artifactId: null, rows: 0, reason: String(e instanceof Error ? e.message : e) };
       }
     }
+    /*
+     * ★ P0-2 (§11): Diagnosis Cycle が明示指定されていれば `cycle_links` を作る。
+     *   採用 source は **いま書き出した S3 キー** なので、納品 (exact-source) がここから辿れる。
+     *   3 つ揃っていなければ link しない (fail-closed)。**日付から回を推測しない。**
+     *   link の成否で S3 書き出しは取り消さない。
+     */
+    let cycleLink: { linked: boolean; reason: string | null } | null = null;
+    const subId = str(body.subscriptionId);
+    const cYear = Number(body.cycleYear);
+    const cSeq = Number(body.diagnosisCycleSeq);
+    if (subId && Number.isInteger(cYear) && cYear >= 1 && Number.isInteger(cSeq) && cSeq >= 1) {
+      const linkable = toLinkableFormat(formatId);
+      if (!linkable) {
+        cycleLink = { linked: false, reason: 'format_not_linkable' };
+      } else {
+        const r = await linkCycle({
+          diagnosticUserId: clientId,
+          subscriptionId: subId,
+          cycleYear: cYear,
+          diagnosisCycleSeq: cSeq,
+          formatId: linkable,
+          sourceRef: bundle.jsonKey,
+          linkedBy: 'admin_batch',
+        });
+        cycleLink = { linked: r.linked, reason: r.reason };
+      }
+    }
+
     return json({
       ok: true,
       configured: true,
       bucket: cfg.bucket,
       client_id: clientId,
       format_id: formatId,
+      cycle_link: cycleLink, // null = 回が指定されていない (契約者向け自動納品の対象外)
+
       test_date: bundle.testDate,
       date_source: bundle.dateSource,
       rows,
