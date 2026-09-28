@@ -151,28 +151,49 @@ export async function saveScanResult(
   return { artifactId, testDate, dateSource, measurements, blocked: undefined };
 }
 
+/** Elith の format_id → `test_artifacts.test_type`。CHECK の値と 1:1 で対応させる。 */
+export const TEST_TYPE_BY_FORMAT: Record<string, ArtifactTestType> = {
+  HealthCheckupData: 'health_checkup',
+  BloodTestData: 'blood',
+  CancerRiskAssessmentData: 'cancer_urine',
+  GeneticTestResultData: 'genetics',
+  Other: 'ai_prediction', // LAiF「AI疾病発症予測」
+};
+
+/** `test_artifacts.test_type` の CHECK と同じ集合 (20260601000010:192)。 */
+export type ArtifactTestType =
+  | 'health_checkup' | 'blood' | 'genetics' | 'cancer_urine' | 'ai_prediction';
+
 /**
- * **admin バッチ (elith-scan / elith-hc-merge finalize) が読んだ人間ドックを、本人の
- * ダッシュボードにも出すために `test_artifacts` / `measurement_values` へ保存する。**
+ * **admin バッチ (elith-scan / elith-hc-merge / elith-genetic-merge) が読んだ検査を、
+ * 本人のダッシュボードにも出すために `test_artifacts` / `measurement_values` へ保存する。**
  *
  * これまで admin バッチは Elith 納品用に S3 へ書くだけで、ダッシュボードが読む Supabase
  * には残していなかった (発注者判断 2026-09-25「検査値もダッシュボードに出す・source=admin_batch」)。
  * ユーザーのアプリスキャン (`saveScanResult`) と同じ 2 層 (jsonb + 正規化) へ書く。
  *
+ * 【2026-09-28 に全検査種別へ一般化】以前は人間ドック専用 (`persistAdminBatchHc`) で、
+ * `test_type` が `'health_checkup'` にベタ書きだった。そのため **admin バッチで読んだ
+ * がんリスク・遺伝子・AI疾病発症予測は DB に 1 行も入らず**、Elith には渡っているのに
+ * 本人のダッシュボードでは 0 件、という食い違いが起きていた。
+ *
  * - `source='admin_batch'` で記録 (ユーザーの `user_upload` と区別)。
- * - **冪等**: 同一 (uid, health_checkup, test_date, source=admin_batch) の既存行を
- *   **hard delete してから入れ直す** (ダッシュボードは status で絞らないため superseded だと
- *   重複表示になる。measurement_values は FK on delete cascade で一緒に消える)。
- *   `user_upload` 行や別 date は触らない。
+ * - **冪等**: 同一 (uid, test_type, test_date, source=admin_batch) の既存行を
+ *   **hard delete してから入れ直す**。`user_upload` 行や別 date は触らない。
+ *   (measurement_values は FK on delete cascade で一緒に消える)
  * - 測定値は **既に lean (sanitizeMeasurementsForDelivery 済み)** の前提で受け取り、
  *   `persistMeasurements` へそのまま渡す (ここで整形しない = 二重管理しない)。
+ *   **遺伝子・AI疾病発症予測は `data.items[]` で measurements を持たない**ので
+ *   空配列で呼ぶ。行は作られ、`scan_md` が「データ」の中身になる。
  * - 失敗しても呼び出し側 (Elith 納品) は止めない。理由を返して可視化する。
  */
-export async function persistAdminBatchHc(input: {
+export async function persistAdminBatchArtifact(input: {
   diagnosticUserId: string;
+  /** 検査種別。未指定は人間ドック (旧シグネチャ互換)。 */
+  testType?: ArtifactTestType;
   /** 確定スキャン Markdown (scan_md 用・監査/表示の原文)。 */
   markdownClean: string;
-  /** 納品と同一の lean measurements (整形済み)。 */
+  /** 納品と同一の lean measurements (整形済み)。持たない形式は [] を渡す。 */
   measurements: Record<string, unknown>[];
   /** 受診日 YYYY-MM-DD (今回)。 */
   testDate: string;
@@ -181,17 +202,18 @@ export async function persistAdminBatchHc(input: {
   const sb = getServerSupabase();
   if (!sb) return { artifactId: null, rows: 0, reason: 'supabase_not_configured' };
   const md = String(input.markdownClean ?? '');
+  const testType: ArtifactTestType = input.testType ?? 'health_checkup';
   const testDate = /^\d{4}-\d{2}-\d{2}$/.test(input.testDate) ? input.testDate : jstToday();
   const { age: ageAtTest, sex } = extractAgeSex(md);
 
-  // 冪等: 同一 (uid, health_checkup, test_date, source=admin_batch) を消してから入れ直す。
+  // 冪等: 同一 (uid, test_type, test_date, source=admin_batch) を消してから入れ直す。
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     await (sb.schema('diagnosis') as any)
       .from('test_artifacts')
       .delete()
       .eq('diagnostic_user_id', input.diagnosticUserId)
-      .eq('test_type', 'health_checkup')
+      .eq('test_type', testType)
       .eq('test_date', testDate)
       .eq('source', 'admin_batch');
   } catch {
@@ -205,7 +227,7 @@ export async function persistAdminBatchHc(input: {
       {
         diagnostic_user_id: input.diagnosticUserId,
         source: 'admin_batch',
-        test_type: 'health_checkup',
+        test_type: testType,
         test_date: testDate,
         lab_name: null,
         schema_version: '1.0',
@@ -223,12 +245,16 @@ export async function persistAdminBatchHc(input: {
   const artifactId = data?.[0]?.id;
   if (!artifactId) return { artifactId: null, rows: 0, reason: 'test_artifacts の id を取得できず' };
 
+  // 測定値を持たない形式 (遺伝子 / AI疾病発症予測 = data.items[]) は artifact 行だけで終わる。
+  // **これは失敗ではない** ので rows=0 をそのまま返す (呼び出し側が警告にしないこと)。
+  if (input.measurements.length === 0) return { artifactId, rows: 0 };
+
   let rows = 0;
   try {
     const r = await persistMeasurements(sb as unknown as SchemaClient, {
       artifactId,
       diagnosticUserId: input.diagnosticUserId,
-      testType: 'health_checkup',
+      testType,
       testDate,
       measurements: input.measurements as never,
       sourceFileKind: 'scan_md',
@@ -239,3 +265,10 @@ export async function persistAdminBatchHc(input: {
   }
   return { artifactId, rows };
 }
+
+/**
+ * 旧名。人間ドック専用だった頃の呼び出し元のために残す (中身は一般化版へ委譲)。
+ * 新しい呼び出しは `persistAdminBatchArtifact` を使う。
+ */
+export const persistAdminBatchHc = (input: Parameters<typeof persistAdminBatchArtifact>[0]) =>
+  persistAdminBatchArtifact({ ...input, testType: input.testType ?? 'health_checkup' });

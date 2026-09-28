@@ -136,6 +136,27 @@ const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId) :
 const singlePurchase = isSpecialAccount(data?.diagnosticUserId);
 
 /*
+ * 単品購入で出す検査種別 = **人間ドック ∪ 実際にデータがある種別** (2026-09-28)。
+ *
+ * 以前は `['health_checkup']` のベタ書きだった。「他 4 種は構造的に来ない」という
+ * 前提はふつうの単品購入では正しいが、**イレギュラーで他の検査を持つ人**が出たとき
+ * (EC を通さない招待で、がんリスク・遺伝子・AI疾病発症予測を別途取り込んだ場合)、
+ * **持っているデータが画面から消える**。
+ *
+ * **個人名や uid で分岐しない**のが要点。「データがあるものは出す」という規則にすれば、
+ * ふつうの単品購入は他種別を持たないので **1 種のまま = 仕様どおり**で、
+ * 持っている人にだけ自動的に増える。空のカードも増えない。
+ *
+ * コースプランは従来どおり `undefined` (5 種すべて・0 件でも枠を出す)。
+ */
+const singlePurchaseTypes = singlePurchase
+  ? Array.from(new Set<string>([
+      'health_checkup',
+      ...(data?.artifacts ?? []).map((a) => a.test_type).filter(Boolean),
+    ]))
+  : undefined;
+
+/*
  * ① AI問診の完了。**DB の事実だけ**を見る (`diagnosis.interview_completions`)。
  * 端末の localStorage は見ない — スマホで問診して PC で開くと「未回答」になるため
  * (この記録を足した理由そのもの)。
@@ -339,7 +360,7 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
           v1.0 で「直近の検査結果 (項目カード)」「検査値の推移」「検査履歴」をここに統合した。
           推移グラフは種別ごとに /trend へ切り出し、履歴は「データ」の遷移先 (結果ページ) に置く。
         */}
-        <TestResultsSection artifacts={data?.artifacts ?? []} q={q} onlyTypes={singlePurchase ? ['health_checkup'] : undefined} />
+        <TestResultsSection artifacts={data?.artifacts ?? []} q={q} onlyTypes={singlePurchaseTypes} />
 
 
         {/*

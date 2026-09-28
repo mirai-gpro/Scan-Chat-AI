@@ -119,9 +119,32 @@ console.log('\n② 埋まらない枠を並べない\n');
   ok('進捗カードが検査結果より上にある', iProgress >= 0 && iTests >= 0 && iProgress < iTests,
     'まだ空の検査カードを越えた先に本題が来てしまう');
 
-  ok('単品購入では検査を人間ドックの 1 種に絞る',
-    /onlyTypes=\{singlePurchase \? \['health_checkup'\] : undefined\}/.test(dash),
-    '血液 / がんリスク / AI疾病予測 / 遺伝子 は構造的に来ない = 行き止まりが 4 つ並ぶ');
+  /*
+   * 【2026-09-28 に約束を更新】以前は `['health_checkup']` のベタ書きを固定していた。
+   * 守りたかったのは「**データが無い種別のカードを並べない**」(行き止まりを作らない) で、
+   * 「常に 1 種」はその手段にすぎない。
+   *
+   * イレギュラーで他の検査を持つ人 (EC を通さない招待で、がんリスク等を別途取り込んだ人) が
+   * 出たとき、ベタ書きだと**持っているデータが画面から消える**。
+   * → 規則を「人間ドック ∪ 実際にデータがある種別」に変えた。ふつうの単品購入は
+   *   他種別を持たないので **1 種のまま**＝元の約束は保たれる。
+   *
+   * ここで見るのは **①データ由来であること ②空の種別を足さないこと** の 2 点。
+   */
+  ok('単品購入の検査種別は artifacts 由来で決める',
+    /onlyTypes=\{singlePurchaseTypes\}/.test(dash)
+    && /const singlePurchaseTypes = singlePurchase/.test(dash)
+    && /\(data\?\.artifacts \?\? \[\]\)\.map\(\(a\) => a\.test_type\)/.test(dash),
+    'ベタ書きに戻すと、イレギュラーで他検査を持つ人のデータが画面から消える');
+
+  ok('人間ドックは必ず含む',
+    /'health_checkup',\s*\n\s*\.\.\.\(data\?\.artifacts/.test(dash),
+    'スキャン前 (artifacts 0 件) の人の画面から検査結果セクションごと消える');
+
+  ok('データの無い種別を足さない',
+    !/onlyTypes=\{[^}]*'blood'|onlyTypes=\{[^}]*'cancer_urine'/.test(dash)
+    && /new Set<string>/.test(dash),
+    '空のカードが並ぶと行き止まりになる (種別を決め打ちで足さない・重複も潰す)');
 
   ok('単品購入でもプラン名を出す',
     /planName=\{singlePurchase \? singlePurchasePlanName : data\?\.subscription\?\.plan_name\}/.test(dash),

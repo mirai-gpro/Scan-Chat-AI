@@ -15,6 +15,7 @@ import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../lib/viewer';
 import { getServerSupabase } from '../../../lib/supabase';
 import { saveScanResult } from '../../../lib/scan-persist';
+import { autoLinkOpenCycle } from '../../../lib/diagnosis-cycle';
 import { isSpecialAccount } from '../../../lib/special-accounts';
 import { refreshConfig } from '../../../lib/app-config';
 
@@ -73,12 +74,29 @@ export const POST: APIRoute = async (ctx) => {
         422,
       );
     }
+    /*
+     * ★ P0-2: open な Diagnosis Cycle へ自動 link (最終実装指示 §10・方式 a)。
+     *   ブラウザ発なので回が分からない。open がちょうど 1 件のときだけ結び付ける。
+     *   **日付で選ばない。** link に失敗してもスキャンの保存は成立させる。
+     */
+    const link = await autoLinkOpenCycle({
+      diagnosticUserId: uid,
+      formatId: 'HealthCheckupData',
+      artifactId: r.artifactId,
+    });
+    if (!link.linked) {
+      console.warn(`[scan/save] Diagnosis Cycle へ link しませんでした: ${link.reason} (uid=${uid})`);
+    }
+
     return json({
       ok: true,
       artifact_id: r.artifactId,
       test_date: r.testDate,
       date_source: r.dateSource,
       measurements: r.measurements,
+      // 監査: 回に結び付いたか (黙って落とさない)。
+      cycle_linked: link.linked,
+      cycle_reason: link.reason,
     });
   } catch (err) {
     return json({ ok: false, error: String(err instanceof Error ? err.message : err) }, 500);

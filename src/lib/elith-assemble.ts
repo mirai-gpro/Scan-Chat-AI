@@ -205,6 +205,19 @@ export interface AssembleOptions {
    * DOB自体は出力しない (PII非送付)。未指定/該当顧客なしの場合は subject を変更しない。
    */
   resolveSubject?: SubjectResolver;
+  /**
+   * **exact-source モード** (P0-2・最終実装指示 §14)。既定 false = 従来モード。
+   *
+   * - 従来モード (既定): SERIES_FORMATS (血液/がん/検診/AI疾病予測) は
+   *   その clientId の **全 date** を納品する。admin の手動ラップはこちら。**挙動を変えない。**
+   * - exact-source: `manualMapping` (= `cycle_links.source_ref`) で**明示指定された source だけ**を
+   *   納品する。Diagnosis Cycle 単位の自動納品用。第 2 回を指定したときに第 1 回・第 3 回が
+   *   混入しないようにするためのもの。HealthAgeData も当該 source だけを対象にする。
+   *
+   * **モードを渡さない既存の呼び出しは 1 バイトも挙動が変わらない**
+   * (`scripts/verify-assemble-regression.mjs` が固定している)。
+   */
+  exactSource?: boolean;
 }
 
 /** 本日 (UTC) を YYYY_MM_DD で返す。 */
@@ -375,6 +388,11 @@ export async function assembleElithDeliverySet(opts: AssembleOptions): Promise<A
   const bundleDate =
     opts.bundleDate && /^\d{4}_\d{2}_\d{2}$/.test(opts.bundleDate) ? opts.bundleDate : todayYmd();
   const inv = await inventoryElithSource(opts.sourcePrefix);
+  /*
+   * exact-source モード (P0-2 §14)。**既定は false = 従来モード**なので、
+   * 渡さない既存の呼び出し (admin 手動ラップ) は挙動が一切変わらない。
+   */
+  const exactSource = opts.exactSource === true;
 
   // ソース JSON を GET してキャッシュ (空データ判定と本コピーで再利用し二重取得を避ける)
   const textCache = new Map<string, string>();
@@ -406,9 +424,14 @@ export async function assembleElithDeliverySet(opts: AssembleOptions): Promise<A
         if (item) picks[f] = item; // 手動指定は明示尊重 (空でもそのまま)
       }
       // 血液は指定キーの client の時系列を丸ごと納品する。
+      // ★ exact-source モードでは **指定されたキーをそのまま使う**。
+      //   ここで series[0] に差し替えると、第 2 回を指定したのに別の回の血液が出てしまう
+      //   (実測でそうなっていた)。従来モードの挙動は変えない。
       const bi = picks.BloodTestData;
-      const bloodSeries = bi ? (bi.clientId ? bloodByClient.get(bi.clientId) ?? [bi] : [bi]) : [];
-      if (bloodSeries.length) picks.BloodTestData = bloodSeries[0];
+      const bloodSeries = exactSource
+        ? (bi ? [bi] : [])
+        : (bi ? (bi.clientId ? bloodByClient.get(bi.clientId) ?? [bi] : [bi]) : []);
+      if (!exactSource && bloodSeries.length) picks.BloodTestData = bloodSeries[0];
       plan.push({ userId, picks, bloodSeries });
     }
   } else {
@@ -483,10 +506,11 @@ export async function assembleElithDeliverySet(opts: AssembleOptions): Promise<A
     for (const f of DELIVERY_FORMAT_IDS) {
       const item = p.picks[f];
       if (!item) continue;
-      const seriesMap = seriesByFormat.get(f);
+      const seriesMap = exactSource ? null : seriesByFormat.get(f);
       if (seriesMap) {
         // 時系列 format (血液/がん/検診/AI疾病予測): この client の当該 format 全 date を
         // 各 date フォルダへ丸ごと納品 (時系列保持・ファイル名衝突回避)。
+        // ★ exact-source モードでは**この分岐に入らない** (指定された 1 件だけを納品する)。
         const series = seriesMap.get(item.clientId ?? '(unknown)') ?? [item];
         for (const s of series) {
           const text = await fetchText(s.key);
@@ -516,14 +540,20 @@ export async function assembleElithDeliverySet(opts: AssembleOptions): Promise<A
       const collect = (f: ElithFormatId, overwrite: boolean) => {
         const item = p.picks[f];
         if (!item) return;
-        const sm = seriesByFormat.get(f);
+        // ★ exact-source モードでは series 展開しない = **当該 Diagnosis Cycle の source だけ**
+        //   (指示 §14)。過去回のウェルネス年齢が混入するのを防ぐ。
+        const sm = exactSource ? null : seriesByFormat.get(f);
         const series = sm ? (sm.get(item.clientId ?? '(unknown)') ?? [item]) : [item];
         for (const s of series) {
           const haRec = opts.healthAgeByRef![s.key];
           // その回のスコアが無い、または算出不能(biological_age=null=必須マーカー不足)は載せない。
           // 後者は health_age:null の HealthAgeData を Elith へ渡さないため(捏造ゼロ・"載せない"原則)。
           if (!haRec || haRec.biological_age == null) continue;
-          const bd = /^\d{4}_\d{2}_\d{2}$/.test(s.date) ? s.date : bundleDate;
+          // exact-source は **1 回分 = 1 date フォルダ** (Elith 仕様 §3.3) に揃えるため
+          // 他 format と同じ bundleDate へ出す。従来モードは source の date を維持する。
+          const bd = exactSource
+            ? bundleDate
+            : (/^\d{4}_\d{2}_\d{2}$/.test(s.date) ? s.date : bundleDate);
           if (overwrite || !byDate.has(bd)) byDate.set(bd, s.key);
         }
       };

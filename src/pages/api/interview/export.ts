@@ -25,6 +25,7 @@
 import type { APIRoute } from 'astro';
 import { buildElithInterviewBundle } from '../../../lib/interview-export';
 import { recordInterviewCompletion } from '../../../lib/interview-completion';
+import { autoLinkOpenCycle } from '../../../lib/diagnosis-cycle';
 import { resolveViewer } from '../../../lib/viewer';
 import type { AnswerValue } from '../../../scripts/chat/interview-script';
 import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
@@ -94,6 +95,22 @@ export const POST: APIRoute = async (ctx) => {
     answeredCount: Object.keys(answers).length,
     diagnosticId,
   });
+
+  /*
+   * ★ P0-2: open な Diagnosis Cycle へ自動 link する (最終実装指示 §10・方式 a)。
+   *   ブラウザ発なので契約も回も分からない。**Wellfort が open にした回が
+   *   ちょうど 1 件のときだけ**結び付け、0 件・複数件は link しない (fail-closed)。
+   *   **日付で選ばない。** 失敗しても問診の完了記録・S3 書き出しは止めない。
+   */
+  if (viewer.selfUid) {
+    const r = await autoLinkOpenCycle({
+      diagnosticUserId: viewer.selfUid,
+      formatId: 'LifestyleQuestionnaireData',
+    });
+    if (!r.linked) {
+      console.warn(`[interview/export] Diagnosis Cycle へ link しませんでした: ${r.reason} (uid=${viewer.selfUid})`);
+    }
+  }
 
   const cfg = getS3Config();
   const prefix = cfg?.prefix ?? '';
