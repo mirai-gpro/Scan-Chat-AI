@@ -32,7 +32,7 @@ import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
 import { checkNecessity } from '../../../lib/elith-necessity-check';
 import { masterItemNames } from '../../../lib/standard-master';
 import { writeHealthAgeForHc } from '../../../lib/elith-delivery';
-import { persistAdminBatchHc } from '../../../lib/scan-persist';
+import { persistAdminBatchArtifact, TEST_TYPE_BY_FORMAT } from '../../../lib/scan-persist';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 import { linkCycle, toLinkableFormat } from '../../../lib/diagnosis-cycle';
 
@@ -199,16 +199,34 @@ export const POST: APIRoute = async ({ request }) => {
      */
     let healthAge: { written: boolean; key?: string; reason?: string; biological_age?: number | null; chronological_age?: number | null } | null = null;
     let dashboard: { artifactId: string | null; rows: number; reason?: string } | null = null;
+    const measurements = ((bundle.json as { data?: { measurements?: unknown[] } })?.data?.measurements ?? []) as Record<string, unknown>[];
     if (formatId === 'HealthCheckupData') {
-      const measurements = ((bundle.json as { data?: { measurements?: unknown[] } })?.data?.measurements ?? []) as Record<string, unknown>[];
       try {
         healthAge = await writeHealthAgeForHc({ uid: clientId, measurements, testDate: bundle.testDate, hcKey: bundle.jsonKey, prefix });
       } catch (e) {
         healthAge = { written: false, reason: String(e instanceof Error ? e.message : e) };
       }
-      // 本人ダッシュボード表示用に Supabase (test_artifacts / measurement_values) へも保存 (source=admin_batch)。
+    }
+    /*
+     * 本人ダッシュボード表示用に Supabase (test_artifacts / measurement_values) へも保存
+     * (source=admin_batch)。
+     *
+     * 【2026-09-28】**人間ドック限定をやめた。** 以前はこのブロックが
+     * `if (formatId === 'HealthCheckupData')` の中にあり、admin バッチで読んだ
+     * **がんリスクは DB に 1 行も入らなかった**。Elith には渡っているのに本人の
+     * ダッシュボードでは 0 件、という食い違いの原因。
+     * (遺伝子・AI疾病発症予測はこの API を通らない = `elith-genetic-merge` 側で保存する)
+     */
+    const testType = TEST_TYPE_BY_FORMAT[formatId];
+    if (testType) {
       try {
-        dashboard = await persistAdminBatchHc({ diagnosticUserId: clientId, markdownClean: bundle.markdown, measurements, testDate: bundle.testDate });
+        dashboard = await persistAdminBatchArtifact({
+          diagnosticUserId: clientId,
+          testType,
+          markdownClean: bundle.markdown,
+          measurements,
+          testDate: bundle.testDate,
+        });
       } catch (e) {
         dashboard = { artifactId: null, rows: 0, reason: String(e instanceof Error ? e.message : e) };
       }

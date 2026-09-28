@@ -117,7 +117,15 @@ export async function loadDashboard(
       { data: resultsRaw, error: resErr },
     ] = await Promise.all([
       dsb.from('app_users').select('*').eq('diagnostic_user_id', uid).maybeSingle(),
-      dsb.from('test_artifacts').select('*').eq('diagnostic_user_id', uid).order('test_date', { ascending: false }),
+      /*
+       * **`status='active'` で絞る (2026-09-28)。**
+       * 絞っていなかったため、再取込で `superseded` に落とした回や取り下げた回まで
+       * 検査結果の件数に入っていた (実測: 人間ドックが 5 件のはずが **12 件**)。
+       * `measurement_values` 側は 2026-09-27 に絞ったが、**この artifacts 経路が残っていた**。
+       * 差し替え前の回は「消さずに superseded にする」運用 (監査のため) なので、
+       * 読む側で必ず絞る。
+       */
+      dsb.from('test_artifacts').select('*').eq('diagnostic_user_id', uid).eq('status', 'active').order('test_date', { ascending: false }),
       dsb.from('diagnosis_results').select('*').eq('diagnostic_user_id', uid).order('received_at', { ascending: false }),
     ]);
 

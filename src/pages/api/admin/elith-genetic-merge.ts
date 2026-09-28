@@ -15,6 +15,7 @@ import { scanGeneticPage, scanAiPredictionPage } from '../../../lib/elith-geneti
 import { consolidateAiPredictionItems, type ConsolidateAudit } from '../../../lib/ai-prediction-consolidate';
 import { ELITH_HANDOFF_SCHEMA_VERSION, jstTodayIso } from '../../../lib/elith-export';
 import { refreshConfig, cfgBool } from '../../../lib/app-config';
+import { persistAdminBatchArtifact, TEST_TYPE_BY_FORMAT } from '../../../lib/scan-persist';
 import { MODELS } from '../../../lib/gemini';
 import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
 import { isAdminAuthorized } from '../../../lib/api-auth';
@@ -184,11 +185,42 @@ export const POST: APIRoute = async ({ request }) => {
       const uploaded = await putFiles([
         { key: json_key, contentType: 'application/json; charset=utf-8', body: jsonBody, bytes: utf8Bytes(jsonBody) },
       ]);
+      /*
+       * 本人ダッシュボード表示用に Supabase (`test_artifacts`) へも保存 (2026-09-28 追加)。
+       *
+       * **この経路は これまで S3 にしか書いていなかった**ので、admin バッチで読んだ
+       * 遺伝子 / AI疾病発症予測 は Elith には渡るのに本人の画面では 0 件だった。
+       *
+       * **測定値は無い** (この形式は `data.items[]` で `measurements` を持たない) ので
+       * `measurements: []` で呼び、artifact 行だけを作る。`scan_md` にはページ単位の
+       * 生出力を連結して入れる = 「データ」で中身が読める。**rows=0 は失敗ではない。**
+       */
+      let dashboard: { artifactId: string | null; rows: number; reason?: string } | null = null;
+      const testType = TEST_TYPE_BY_FORMAT[formatId];
+      if (testType) {
+        try {
+          const md = parts
+            .map((p, i) => `<!-- ===== page ${i + 1}/${parts.length} ===== -->\n${str(p.raw) || '(なし)'}`)
+            .join('\n\n');
+          dashboard = await persistAdminBatchArtifact({
+            diagnosticUserId: clientId,
+            testType,
+            markdownClean: md,
+            measurements: [],
+            testDate,
+            pageCount: parts.length,
+          });
+        } catch (e) {
+          dashboard = { artifactId: null, rows: 0, reason: String(e instanceof Error ? e.message : e) };
+        }
+      }
       return json({
         ok: true, action: 'finalize', configured: true, bucket: cfg.bucket,
         client_id: clientId, format_id: formatId, test_date: testDate,
         page_count: parts.length, item_count: deliverItems.length, json_key,
         uri: uploaded[0]?.uri ?? null,
+        dashboard, // 本人ダッシュボード保存結果 (artifactId/rows)。rows=0 は正常 (測定値を持たない形式)
+        date_source: providedDate ? 'provided' : 'today', // 'today' = 受診日を指定せず実行日になった
         consolidation, // LAiF 統合監査 (件数/統合/競合)。null=未実施 (env off or 非Other)。納品 data には含めない。
         preview: jsonObj, // 🎯 照合用: 納品JSON(data.items)を返す(S3未設定分岐と同様)。
       });
