@@ -9,10 +9,20 @@
  *   (`readUploadedOriginal`)。改竄検知の根拠なので、ブラウザの申告は使わない。
  *   PUT されていなければ `not_found` で落ちる = 「上げたことにして DB だけ書く」が起きない。
  *
- * 【どの artifact に付けるか】
- *   - `test_artifact_id` … 既存の検査に原本を足す (種別は既存行のまま)
- *   - 省略時 … `test_artifacts` を新規作成する。`diagnostic_user_id` を渡せば
- *     **その人に紐付く**。渡さなければ従来どおり UNASSIGNED (`upload.ts` と同じ)。
+ * 【**既存の artifact に足す。勝手に作らない**】(発注者指示 2026-09-29)
+ *   この口の用途は「原本 PDF の差し替え・紐付け」であって検査の新規登録ではない。
+ *   本田さんの遺伝子 / AI疾病予測は既に artifact があり、**`display_mode='three_mode'`
+ *   などの既存の状態を壊してはならない**。そこで:
+ *     - `test_artifact_id` を渡せばその行に足す
+ *     - 渡さなければ `diagnostic_user_id` + 検査種別 (+ 受診日) で
+ *       **active な既存行を一意に解決**する
+ *     - 見つからない / 複数ある → **エラーで止める**。`allow_create: true` を
+ *       明示したときだけ新規作成する (fail-closed)
+ *   **`test_artifacts` は一切 UPDATE しない** = 既存の display_mode / test_date を触らない。
+ *
+ * 【二重登録しない】同じ artifact に同じ `file_kind` の行が既にあれば
+ *   `file_exists` で止める。`replace: true` を明示したときだけ、
+ *   その種別の既存行を消してから入れ直す (S3 側は versioning が履歴を持つ)。
  *
  * 【redaction は未実装】PDF は `raw_pdf` で登録する。`raw_pdf_redacted` は
  *   PII 除去を実装した経路でだけ使う (実態と名前を一致させる・CLAUDE.md)。
@@ -36,7 +46,7 @@ const LAB_COMPANY_TO_TEST_TYPE: Record<string, string> = {
   laif: 'ai_prediction',
 };
 
-/** 顧客未割当 (`upload.ts:30` と同じ値)。 */
+/** 顧客未割当 (`upload.ts:30` と同じ値)。**新規作成を明示したときだけ使う。** */
 const UNASSIGNED_UID = '00000000-0000-0000-0000-000000000000';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -48,6 +58,20 @@ function json(data: unknown, status = 200): Response {
   });
 }
 const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null);
+
+// supabase-js の型を引き回さずに使うための最小形。
+type Db = { from: (t: string) => any }; // eslint-disable-line @typescript-eslint/no-explicit-any
+const db = (sb: NonNullable<ReturnType<typeof getServerSupabase>>): Db =>
+  sb.schema('diagnosis') as unknown as Db;
+
+interface ArtifactRow {
+  id: string;
+  diagnostic_user_id: string;
+  test_type: string;
+  test_date: string | null;
+  status: string;
+  display_mode: string;
+}
 
 export const POST: APIRoute = async ({ request }) => {
   if (!isAdminAuthorized(request)) return json({ ok: false, error: 'unauthorized' }, 401);
@@ -65,35 +89,93 @@ export const POST: APIRoute = async ({ request }) => {
   if (!key) return json({ ok: false, error: 'key_required' }, 400);
 
   const labCompany = str(body.lab_company);
-  const artifactId = str(body.test_artifact_id);
-  if (!artifactId) {
-    if (!labCompany || !LAB_COMPANY_TO_TEST_TYPE[labCompany]) {
-      return json({ ok: false, error: 'invalid_lab_company', detail: 'test_artifact_id を渡さない場合は必須' }, 400);
+  const testType = labCompany ? LAB_COMPANY_TO_TEST_TYPE[labCompany] : null;
+  const wantId = str(body.test_artifact_id);
+  const uid = str(body.diagnostic_user_id);
+  const testDate = str(body.test_date);
+  const allowCreate = body.allow_create === true;
+  const replace = body.replace === true;
+
+  if (wantId && !UUID_RE.test(wantId)) return json({ ok: false, error: 'invalid_test_artifact_id' }, 400);
+  if (uid && !UUID_RE.test(uid)) return json({ ok: false, error: 'invalid_diagnostic_user_id' }, 400);
+  if (testDate && !DATE_RE.test(testDate)) return json({ ok: false, error: 'invalid_test_date' }, 400);
+  if (!wantId && !uid) {
+    return json(
+      { ok: false, error: 'target_required', detail: 'test_artifact_id か diagnostic_user_id のどちらかが要ります' },
+      400,
+    );
+  }
+  if (!wantId && !testType) {
+    return json({ ok: false, error: 'invalid_lab_company', detail: '既存行を探すには検査会社が要ります' }, 400);
+  }
+
+  // ── ① 付け先の artifact を決める。**ここで新規作成はしない** ─────────
+  let target: ArtifactRow | null = null;
+
+  if (wantId) {
+    const { data, error } = await db(sb)
+      .from('test_artifacts')
+      .select('id, diagnostic_user_id, test_type, test_date, status, display_mode')
+      .eq('id', wantId)
+      .maybeSingle();
+    if (error) return json({ ok: false, error: 'db_error', detail: error.message }, 500);
+    if (!data) return json({ ok: false, error: 'artifact_not_found', detail: wantId }, 404);
+    target = data as ArtifactRow;
+    // 取り違え防止: uid / 種別を渡しているなら一致を要求する。
+    if (uid && target.diagnostic_user_id.toLowerCase() !== uid.toLowerCase()) {
+      return json(
+        { ok: false, error: 'artifact_user_mismatch', detail: `この artifact は別の利用者のものです`, artifact_user: target.diagnostic_user_id },
+        409,
+      );
+    }
+    if (testType && target.test_type !== testType) {
+      return json(
+        { ok: false, error: 'artifact_type_mismatch', detail: `artifact は ${target.test_type}、指定は ${testType}` },
+        409,
+      );
+    }
+  } else {
+    let q = db(sb)
+      .from('test_artifacts')
+      .select('id, diagnostic_user_id, test_type, test_date, status, display_mode')
+      .eq('diagnostic_user_id', uid)
+      .eq('test_type', testType)
+      .eq('status', 'active')
+      .order('test_date', { ascending: false });
+    if (testDate) q = q.eq('test_date', testDate);
+    const { data, error } = await q;
+    if (error) return json({ ok: false, error: 'db_error', detail: error.message }, 500);
+    const rows = (data ?? []) as ArtifactRow[];
+
+    if (rows.length === 1) {
+      target = rows[0];
+    } else if (rows.length > 1) {
+      // **どれに付けるかを機械で決めない。** 候補を返して人に選ばせる。
+      return json(
+        {
+          ok: false,
+          error: 'artifact_ambiguous',
+          detail: `active な ${testType} が ${rows.length} 件あります。test_artifact_id か test_date で指定してください。`,
+          candidates: rows.map((r) => ({ id: r.id, test_date: r.test_date, display_mode: r.display_mode })),
+        },
+        409,
+      );
+    } else if (!allowCreate) {
+      return json(
+        {
+          ok: false,
+          error: 'artifact_not_found',
+          detail: `active な ${testType} が見つかりません。既存に付けるなら test_artifact_id を、新規に作るなら allow_create を指定してください。`,
+        },
+        404,
+      );
     }
   }
 
-  const uid = str(body.diagnostic_user_id);
-  if (uid && !UUID_RE.test(uid)) return json({ ok: false, error: 'invalid_diagnostic_user_id' }, 400);
-  const testDate = str(body.test_date);
-  if (testDate && !DATE_RE.test(testDate)) return json({ ok: false, error: 'invalid_test_date' }, 400);
-
-  // ── ① S3 の実体を読む。ここで存在・サイズ・ハッシュが決まる ──────────
-  const got = await readUploadedOriginal(key);
-  if (!got.ok) {
-    const status = got.error === 'originals_s3_not_configured' ? 503 : got.error === 'not_found' ? 404 : 400;
-    return json({ ok: false, error: got.error, detail: got.detail ?? null, key }, status);
-  }
-
-  // ── ② 付け先の artifact ────────────────────────────────────────
-  let targetId = artifactId;
+  // ── ② 見つからず、かつ明示的に許可されたときだけ新規作成 ────────────
   let created = false;
-  if (!targetId) {
-    const testType = LAB_COMPANY_TO_TEST_TYPE[labCompany as string];
-    const { data, error } = await (sb.schema('diagnosis') as never as {
-      from: (t: string) => {
-        insert: (v: unknown) => { select: (c: string) => { single: () => Promise<{ data: { id: string } | null; error: { message: string } | null }> } };
-      };
-    })
+  if (!target) {
+    const { data, error } = await db(sb)
       .from('test_artifacts')
       .insert({
         diagnostic_user_id: uid ?? UNASSIGNED_UID,
@@ -106,39 +188,91 @@ export const POST: APIRoute = async ({ request }) => {
         status: 'active',
         notes: 'uploaded via /admin/lab-results/upload-ticket (S3 direct)',
       })
-      .select('id')
+      .select('id, diagnostic_user_id, test_type, test_date, status, display_mode')
       .single();
     if (error || !data) return json({ ok: false, error: 'db_error', detail: error?.message ?? 'insert failed' }, 500);
-    targetId = data.id;
+    target = data as ArtifactRow;
     created = true;
   }
 
-  // ── ③ 台帳へ登録。**ここが入って初めて /result で原本が出る** ────────
+  // ── ③ S3 の実体を読む。存在・サイズ・ハッシュはここで決まる ──────────
+  const got = await readUploadedOriginal(key);
+  if (!got.ok) {
+    const status = got.error === 'originals_s3_not_configured' ? 503 : got.error === 'not_found' ? 404 : 400;
+    return json({ ok: false, error: got.error, detail: got.detail ?? null, key }, status);
+  }
+
+  // ── ④ 同じ種別の原本が既にあるか。**黙って二重に足さない** ───────────
   const fileKind = key.toLowerCase().endsWith('.csv') ? 'raw_csv' : 'raw_pdf';
-  const { error: fileErr } = await (sb.schema('diagnosis') as never as {
-    from: (t: string) => { insert: (v: unknown) => Promise<{ error: { message: string } | null }> };
-  })
+  const { data: existing, error: exErr } = await db(sb)
+    .from('test_artifact_files')
+    .select('id, file_kind, storage_url, sha256, size_bytes, created_at')
+    .eq('test_artifact_id', target.id)
+    .eq('file_kind', fileKind);
+  if (exErr) return json({ ok: false, error: 'db_error', detail: exErr.message }, 500);
+
+  const prior = (existing ?? []) as { id: string; storage_url: string; sha256: string; size_bytes: number; created_at: string }[];
+  if (prior.length > 0) {
+    if (prior.some((p) => p.sha256 === got.sha256)) {
+      // 中身が同じ = 既に登録済み。何もしない (再実行しても増えない)。
+      return json({
+        ok: true,
+        already_registered: true,
+        test_artifact_id: target.id,
+        file_kind: fileKind,
+        sha256: got.sha256,
+        detail: '同じ内容の原本が既に登録されています。何も変更していません。',
+      });
+    }
+    if (!replace) {
+      return json(
+        {
+          ok: false,
+          error: 'file_exists',
+          detail: `この検査には ${fileKind} が既に ${prior.length} 件あります。差し替えるなら replace を指定してください。`,
+          test_artifact_id: target.id,
+          existing: prior.map((p) => ({ id: p.id, storage_url: p.storage_url, sha256: p.sha256, size_bytes: p.size_bytes, created_at: p.created_at })),
+        },
+        409,
+      );
+    }
+    // 差し替え: 台帳の古い行だけ消す。**S3 のオブジェクトは消さない**
+    // (原本は 10 年保管・削除不可。versioning が履歴を持つ)。
+    const { error: delErr } = await db(sb)
+      .from('test_artifact_files')
+      .delete()
+      .eq('test_artifact_id', target.id)
+      .eq('file_kind', fileKind);
+    if (delErr) return json({ ok: false, error: 'db_error', detail: delErr.message }, 500);
+  }
+
+  // ── ⑤ 台帳へ登録。**ここが入って初めて /result で原本が出る** ────────
+  const { error: fileErr } = await db(sb)
     .from('test_artifact_files')
     .insert({
-      test_artifact_id: targetId,
+      test_artifact_id: target.id,
       file_kind: fileKind,
       storage_url: got.storageUrl,
       sha256: got.sha256,
       size_bytes: got.sizeBytes,
     });
   if (fileErr) {
-    // artifact だけ作って台帳が空、という半端な状態を黙って残さない。
     return json(
-      { ok: false, error: 'db_error', detail: fileErr.message, test_artifact_id: targetId, artifact_created: created },
+      { ok: false, error: 'db_error', detail: fileErr.message, test_artifact_id: target.id, artifact_created: created },
       500,
     );
   }
 
   return json({
     ok: true,
-    test_artifact_id: targetId,
+    test_artifact_id: target.id,
     artifact_created: created,
-    diagnostic_user_id: uid ?? (created ? UNASSIGNED_UID : null),
+    // **触っていないことを応答で示す** (three_mode が保たれたかを目で確かめられるように)。
+    diagnostic_user_id: target.diagnostic_user_id,
+    test_type: target.test_type,
+    test_date: target.test_date,
+    display_mode: target.display_mode,
+    replaced: prior.length > 0,
     file_kind: fileKind,
     storage_url: got.storageUrl,
     sha256: got.sha256,

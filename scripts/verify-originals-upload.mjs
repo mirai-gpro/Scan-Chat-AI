@@ -162,5 +162,28 @@ for (const f of ['src/pages/api/admin/lab-results/upload-ticket.ts', 'src/pages/
   }
 }
 
+// ── ⑦ 既存 artifact に足す口であること (発注者指示 2026-09-29) ──────────
+// 本田さんの遺伝子 / AI疾病予測は既存行があり、**display_mode='three_mode' を壊せない**。
+// 「見つからなければ勝手に作る」に戻ると静かに二重登録が起きるので固定する。
+console.log('\n⑦ 既存 artifact への紐付け');
+{
+  const reg = readFileSync('src/pages/api/admin/lab-results/register.ts', 'utf8');
+  ok(/allow_create/.test(reg) && /allowCreate\s*=\s*body\.allow_create === true/.test(reg),
+    '新規作成は allow_create を明示したときだけ');
+  ok(/error: 'artifact_not_found'/.test(reg), '見つからなければ止める (artifact_not_found)');
+  ok(/error: 'artifact_ambiguous'/.test(reg) && /candidates/.test(reg),
+    '複数あれば止めて候補を返す (機械で選ばない)');
+  ok(/error: 'artifact_user_mismatch'/.test(reg), '別人の artifact には付けない');
+  ok(/error: 'artifact_type_mismatch'/.test(reg), '種別違いには付けない');
+  ok(/error: 'file_exists'/.test(reg) && /replace/.test(reg), '同種別が既にあれば止める (replace で差し替え)');
+  ok(/already_registered/.test(reg), '同じ内容なら何もしない (再実行で増えない)');
+  // **test_artifacts を更新しない** = display_mode / test_date を触らない。
+  const updatesArtifacts = /from\('test_artifacts'\)[\s\S]{0,200}?\.update\(/.test(reg);
+  ok(!updatesArtifacts, 'test_artifacts を UPDATE しない (three_mode を保つ)');
+  // 差し替えで消すのは台帳だけ。S3 のオブジェクトは消さない (10 年保管)。
+  ok(!/DeleteObjectCommand/.test(reg), 'S3 のオブジェクトは消さない');
+  ok(/from\('test_artifact_files'\)[\s\S]{0,120}?\.delete\(\)/.test(reg), '差し替えは台帳の行だけ消す');
+}
+
 console.log(`\n${pass} / ${pass + fails.length} passed`);
 if (fails.length) { console.error('\n落ちた検査:\n  - ' + fails.join('\n  - ')); process.exit(1); }
