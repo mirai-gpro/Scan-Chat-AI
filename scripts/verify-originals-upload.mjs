@@ -134,5 +134,33 @@ ok(!/body\.sha256|body\.size_bytes/.test(reg), 'register はブラウザ申告�
 ok(/raw_pdf/.test(reg) && !/raw_pdf_redacted/.test(reg.replace(/^.*redacted.*$/gm, (l) => (l.trim().startsWith('*') || l.trim().startsWith('//') ? '' : l))),
   'PDF は raw_pdf で登録する (redaction 未実装)');
 
+// ── ⑥ Astro の checkOrigin に当たらないか ──────────────────────────
+// astro 5.18.2 `core/app/middlewares.js` の判定:
+//   非安全メソッド かつ ①content-type が form 系で別オリジン、
+//   または ②**content-type が無い**で別オリジン → 403。
+// `application/json` は form 系でないので通る。**新しい口が form を受けないこと**を固定する
+// (multipart に戻すと別オリジンからの 403 が再発する)。
+console.log('\n⑥ checkOrigin (Astro 5.x)');
+const FORM_CT = ['application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain'];
+for (const f of ['src/pages/api/admin/lab-results/upload-ticket.ts', 'src/pages/api/admin/lab-results/register.ts']) {
+  const src = readFileSync(f, 'utf8');
+  const n = f.split('/').pop();
+  ok(/await request\.json\(\)/.test(src), `${n} は JSON で受ける`);
+  ok(!/request\.formData\(\)/.test(src), `${n} は formData を受けない`);
+  ok(!FORM_CT.some((ct) => src.includes(ct)), `${n} は form 系 content-type を扱わない`);
+}
+{
+  // 実物の middleware を読んで、判定の前提が変わっていないかを見る。
+  const mw = 'node_modules/astro/dist/core/app/middlewares.js';
+  let src = '';
+  try { src = readFileSync(mw, 'utf8'); } catch { /* 依存未取得 */ }
+  if (src) {
+    ok(FORM_CT.every((ct) => src.includes(ct)), 'form 系 3 種の判定が Astro 側にある');
+    ok(!src.includes('application/json'), 'Astro は application/json を form 扱いしない');
+  } else {
+    console.log('SKIP  astro の middleware を読めませんでした');
+  }
+}
+
 console.log(`\n${pass} / ${pass + fails.length} passed`);
 if (fails.length) { console.error('\n落ちた検査:\n  - ' + fails.join('\n  - ')); process.exit(1); }
