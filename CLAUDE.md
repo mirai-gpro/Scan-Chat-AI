@@ -1987,6 +1987,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/lab/lab_integration_workflow.md` | 検査機関→ユーザー割当ワークフロー (PII 制約) |
 | `docs/lab/kit_progress_management.md` | 検査キット発送・進捗管理 |
 | `docs/architecture/data_integration_requirements.md` | PII 分離・連携要件 |
+| **`docs/operations/がんリスク検査_ALA-PDS_追加登録手順書.md`** | **検査済みなのにダッシュボードに出ていないがんリスク検査 (ALA-PDS) を、原本 PDF から後追いで登録する運用手順**。コード変更なしで既存 admin 画面 2 つだけで完結する (**①`/admin/elith-batch` で回を作り数値を入れる → ②`/admin/lab-results` で原本 PDF を付ける** の順。逆順は必ず `artifact_not_found` で止まる)。**受診日を空欄にすると 2 件が同じ日付になり片方が S3 キー衝突で消える**・`external_test_id` はこの口では入らない・切り分け表つき。ALA 方式の判定 (日付でなく項目名の完全一致)・推移グラフは ALA 最新 2 件だけ、というコード側の前提も記載 (`808e27a`) |
 | `docs/operations/S3原本ストレージ_構築手順書.md` | **原本を S3 ap-northeast-1 へ置くためのインフラ手順** (Object Lock / ライフサイクル / IAM / Vercel env / 動作確認)。Compliance モードの不可逆性に注意 |
 | **`docs/operations/スキャンS3直アップロード_バケット設定手順書.md`** | **スキャンで 10MB を通すための AWS 側作業** (①CORS=必須・無いと PDF は 3.2MB のまま / ②ライフサイクル=推奨)。バケット・プレフィックス・CORS 未設定は**本番の実測値**。設定前後を同じコマンドで判定できる確認手順つき。**CORS はバケットを公開しない**・ライフサイクルの prefix を誤ると Elith 納品が消える、の 2 点が要注意 |
 | `docs/architecture/id_management_and_correlation_spec.md` | **ID体系の正本**(顧客ID/診断ユーザーID=diagnostic_user_id/注文/契約/出荷/検査/各社上りID/Elith client_id を層別整理・採番=現状全てWellfort・相関マップ・PII境界・**将来の各社独自ID/キット物理ID(POS/バーコード)連携=受け皿カラム`lab_tests.external_test_id`/`external_barcode`実在**) |
