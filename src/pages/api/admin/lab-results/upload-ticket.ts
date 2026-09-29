@@ -31,7 +31,7 @@ function json(data: unknown, status = 200): Response {
 export const POST: APIRoute = async ({ request }) => {
   if (!isAdminAuthorized(request)) return json({ ok: false, error: 'unauthorized' }, 401);
 
-  let body: { lab_company?: unknown; file_name?: unknown; bytes?: unknown };
+  let body: { lab_company?: unknown; file_name?: unknown; bytes?: unknown; sha256_base64?: unknown };
   try {
     body = (await request.json()) as typeof body;
   } catch {
@@ -42,6 +42,8 @@ export const POST: APIRoute = async ({ request }) => {
     company: body.lab_company,
     fileName: body.file_name,
     bytes: body.bytes,
+    // Object Lock バケットは checksum 無しの PUT を 400 で拒否する。
+    sha256Base64: body.sha256_base64,
   });
   if (!t.ok) {
     // 設定漏れ (503) と入力の誤り (400) を混ぜない。
@@ -58,8 +60,10 @@ export const POST: APIRoute = async ({ request }) => {
     key: t.key,
     storage_url: t.storageUrl,
     expires_in: t.expiresIn,
-    // PUT のときこのヘッダをそのまま付ける。**署名に固定してあるので変えると S3 が拒否する。**
+    // PUT のときこのヘッダを**そのまま**付ける。署名に固定してあるので変えると S3 が拒否する。
     headers: t.headers,
+    // 切り分け用: 実際に署名へ入ったヘッダ名。
+    signed_headers: t.signedHeaders,
     max_bytes: MAX_ORIGINAL_BYTES,
   });
 };
