@@ -149,7 +149,21 @@ export async function loadResult(
   const siblings = (siblingRows ?? []).map((r) => ({ id: r.id, testDate: r.test_date }));
 
   const original = await resolveOriginal(sb, artifact.id);
-  const samplePdf = SAMPLE_PDF_MAP[artifact.test_type] ?? null;
+  /*
+   * ★ サンプル PDF は**デモ用アカウントにだけ**出す (2026-09-29)。
+   *
+   * `public/kensa_sample/` に置いてあるのは **別人の検査書類**
+   * (Genoplan My Book 207pg・LAiF のレポート等)。原本が未登録の実在の方の
+   * 検査結果ページでこれにフォールバックすると、**その人の画面に他人の書類が出る**。
+   * 実際に本田さんの遺伝子検査・AI疾病予測でそうなった。
+   *
+   * 「（サンプル）」と添えていても、**開けば中身は他人のもの**で区別がつかない。
+   * デモ用アカウントの判定 (`demoFallbackEnabled`) は
+   * `docs/operations/デモ用アカウント_仕様書.md` が正で、
+   * 「実顧客に他人名義のサンプルを見せない」という同じ原則の適用範囲を、
+   * ここにも広げる。**原本が無いなら何も出さない** (空の方が誤解より安全)。
+   */
+  const samplePdf = demoFallbackEnabled(viewerUid) ? (SAMPLE_PDF_MAP[artifact.test_type] ?? null) : null;
   const pdfUrl = original?.url ?? samplePdf?.url ?? null;
   const pdfLabel = original
     ? original.label
