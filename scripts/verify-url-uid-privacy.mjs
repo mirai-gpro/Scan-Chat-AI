@@ -332,6 +332,33 @@ const AI_PREDICTION_REPORT_LABEL = 'AI疾病予測報告書';
   ok('T-18c', 'demo-art-* は DB を引かない (所有者検証より前)', calls.length === 0, `${calls.length} 回`);
 }
 
+// ── ⑧-2 デバッグ欄は admin だけ (T-21〜T-24) ────────────────────
+console.log('\n⑧-2 デバッグ欄の出し分け (T-21〜T-24)');
+{
+  const raw = read('src/pages/dashboard.astro');
+  /*
+   * **CSS で隠すのでは足りない。** HTML には載ってしまうので、
+   * サーバ側で描かない (`{viewer.isAdmin && (…)}`) ことを構文で確かめる。
+   */
+  const open = raw.indexOf('{viewer.isAdmin && (\n        <details');
+  const close = raw.indexOf('</details>\n        )}');
+  ok('T-21a', 'デバッグ欄が {viewer.isAdmin && ( … )} で包まれている', open >= 0 && close > open);
+  const block = open >= 0 && close > open ? raw.slice(open, close) : '';
+  ok('T-21b', '本人の diagnostic_user_id 表示がその中にある',
+    /diagnostic_user_id:/.test(block));
+  ok('T-22', '固定デモ uid の切替リンク 6 件がその中にある',
+    (block.match(/\/dashboard\?u=(?:d0|da)[0-9a-f]{6}-/g) ?? []).length === 6,
+    `${(block.match(/\/dashboard\?u=(?:d0|da)[0-9a-f]{6}-/g) ?? []).length} 件`);
+  // 欄の外に漏れていないこと
+  const outside = raw.slice(0, open) + raw.slice(close);
+  ok('T-21c', 'diagnostic_user_id 表示が欄の外に無い', !/diagnostic_user_id:/.test(outside));
+  ok('T-22b', 'デモ切替リンクが欄の外に無い', !/\/dashboard\?u=(?:d0|da)[0-9a-f]{6}-/.test(outside));
+  // T-23: admin では中身を削っていない (既存のデバッグ項目が残っている)
+  for (const key of ['admin 判定:', '他ユーザーで試す:', '紙面 (受領 JSON から生成):', 'AI問診の観測ログ:']) {
+    ok('T-23', `admin 向けデバッグ項目「${key}」を残している`, block.includes(key));
+  }
+}
+
 // ── ⑨ スコープの約束 ────────────────────────────────────────────
 console.log('\n⑨ スコープ (spec §6 / §17)');
 ok('SCOPE-1', 'index.astro を変更していない (url.search 転送のまま)',
@@ -340,6 +367,9 @@ ok('SCOPE-2', 'live-token.ts が body の uid を受ける形のまま (今回�
   /body\.diagnosticUserId/.test(read('src/pages/api/live-token.ts')));
 ok('SCOPE-3', 'ALLOW_UID_ENTRY の入場分岐が残っている',
   /uidEntryAllowed\(\) && requested/.test(code('src/lib/viewer.ts')));
+ok('T-24', '代理表示の判定に手を入れていない (viewer.isAdmin の参照が増えただけ)',
+  /if \(isAdmin && requested && requested !== selfUid\)/.test(code('src/lib/viewer.ts'))
+  && !/isAdmin/.test(code('src/lib/result-queries.ts')));
 
 console.log(`\n${fails.length === 0 ? '✓ すべて PASS' : `✗ ${fails.length} 件 FAIL`}`);
 if (fails.length) { console.error('\n落ちた検査:\n  - ' + fails.join('\n  - ')); process.exit(1); }

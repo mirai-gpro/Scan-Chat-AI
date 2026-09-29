@@ -420,7 +420,17 @@ const q = viewerLinkQuery(viewer);
              — この下はテストフェーズの確認用フッタで、総合テストで遮蔽する。 */}
         <ProductsLinkCard />
 
-        {/* テストフェーズの確認用フッタ (総合テストで遮蔽する)。§02 参照。 */}
+        {/*
+          テストフェーズの確認用フッタ。**admin だけに出す** (2026-09-29)。
+
+          【なぜサーバ側で出し分けるか】この欄には
+            - 本人の `diagnostic_user_id` の本文表示
+            - 固定のデモ uid を載せた `/dashboard?u=…` の切替リンク 6 件
+          が入っている。CSS で隠しても **HTML には載る**ので、
+          一般ユーザーの画面から識別子を消すには**そもそも描かない**しかない。
+          admin では中身を 1 つも削っていない (デモ切替リンクもそのまま)。
+        */}
+        {viewer.isAdmin && (
         <details class="rounded-2xl border border-dashed border-slate-300 p-4">
           <summary class="min-h-touch cursor-pointer text-sm font-medium text-slate-600">
             デバッグ (テストフェーズ確認用)
@@ -502,6 +512,7 @@ const q = viewerLinkQuery(viewer);
             </div>
           </dl>
         </details>
+        )}
       </main>
     </>
   )}
