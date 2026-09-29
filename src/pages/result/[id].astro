@@ -42,6 +42,23 @@ const linkFor = (m: string) => {
   return `?${qs.toString()}`;
 };
 
+/*
+ * 「検査結果の数値」の列は**中身がある列だけ**出す。
+ * がんリスク検査 (ALA-PDS) は基準値を持たないので、空の「基準値」列を並べると
+ * 全行が「—」になり、**当社が欄を作って埋められなかった**ように見える
+ * (AI疾病予防報告書で同じことを指摘された・CLAUDE.md 2026-09-18)。
+ * **プレースホルダを置かず、列ごと出さない。**
+ */
+const ms = data?.measurements ?? [];
+const hasUnit = ms.some((m) => m.unit != null);
+const hasRef = ms.some((m) => m.refLow != null || m.refHigh != null);
+const hasJudged = ms.some((m) => m.flag != null || m.assessment != null);
+/** 基準値の表示。**原本の表記をそのまま並べるだけ**（計算しない）。 */
+const refText = (m: { refLow: string | null; refHigh: string | null }): string => {
+  if (m.refLow != null && m.refHigh != null) return `${m.refLow}〜${m.refHigh}`;
+  return m.refHigh ?? m.refLow ?? '';
+};
+
 /** 本文 Markdown → HTML。和文組版は src/lib/report-view.ts に集約 (/report と共通)。
     `[pN]` の PDF ページジャンプは廃止した — 新形式に `[pN]` は 0 件で成立しないため
     (docs/旧版・ボツ/ai_prevention_report_generation_spec.md §5.1)。 */
@@ -208,8 +225,70 @@ const pdfSrcWithPage = data?.samplePdfUrl
           </section>
         )}
 
-        {/* Elith JSON が無い + PDF も無い + 読み取り結果も無い場合のみ「処理中」表示 */}
-        {data.sections.length === 0 && !data.samplePdfUrl && !data.artifact.scan_md && (
+        {/*
+          **検査票から読み取った測定値** (`test_artifacts.measurements`)。
+
+          【なぜ足したか (2026-09-30・実測)】この画面は `scan_md` (アプリ内スキャンだけが
+          書く) と原本 PDF しか出していなかったので、**admin 取込のがんリスク検査・血液・
+          遺伝子は「値」が画面のどこにも出ていなかった**。DB には入っているのに読む側が無い、
+          という状態だった。
+
+          出すのは**検査票に印字されている事実だけ** — 項目名・値・単位・基準値と、
+          **検査機関が付けた**印 (flag) / 判定コード (assessment)。
+          **値と基準値から判定を計算しない** (CLAUDE.md「表示の原則 (ミッション④)」)。
+          `flag` が null は「印が無い」であって「基準値内」ではないので、何も出さない。
+
+          `scan_md` がある回 (アプリ内スキャン) では上の「読み取り結果」に同じ値が
+          表の形で出ているため、**二重に出さない**。
+        */}
+        {!data.artifact.scan_md && data.measurements.length > 0 && (
+          <section class="card">
+            <h2 class="flex items-center gap-2 text-base font-bold text-navy-800">
+              <AppIcon name="result" size={20} class="text-brand-700" />
+              検査結果の数値
+            </h2>
+            <p class="mt-1 text-sm text-slate-600">
+              検査票に記載された内容です。判定は検査機関が付けたものだけを表示しています。
+            </p>
+            {/*
+              **表に w-full を当てない** (CLAUDE.md 2026-09-05)。幅 100% で固定すると
+              狭い端末で列が潰れ、和文が 1 文字ずつ縦に折れる。はみ出しは横スクロールへ流す。
+            */}
+            <div class="md-region mt-3 overflow-x-auto">
+              <table class="w-max min-w-full text-sm">
+                <thead>
+                  <tr>
+                    <th class="whitespace-nowrap text-left">項目</th>
+                    <th class="whitespace-nowrap text-left">値</th>
+                    {hasUnit && <th class="whitespace-nowrap text-left">単位</th>}
+                    {hasRef && <th class="whitespace-nowrap text-left">基準値</th>}
+                    {hasJudged && <th class="whitespace-nowrap text-left">検査機関の判定</th>}
+                  </tr>
+                </thead>
+                <tbody>
+                  {data.measurements.map((m) => (
+                    <tr>
+                      <td class="whitespace-nowrap">{m.name}</td>
+                      <td class="tnum whitespace-nowrap">{m.value}</td>
+                      {hasUnit && <td class="whitespace-nowrap">{m.unit}</td>}
+                      {hasRef && <td class="tnum whitespace-nowrap">{refText(m)}</td>}
+                      {hasJudged && (
+                        <td class="whitespace-nowrap">
+                          {m.flag === 'H' && <span class="status-pill status-watch"><AppIcon name="watch" size={16} />高値</span>}
+                          {m.flag === 'L' && <span class="status-pill status-watch"><AppIcon name="watch" size={16} />低値</span>}
+                          {m.assessment}
+                        </td>
+                      )}
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </section>
+        )}
+
+        {/* Elith JSON が無い + PDF も無い + 読み取り結果も無い + 数値も無い場合のみ「処理中」表示 */}
+        {data.sections.length === 0 && !data.samplePdfUrl && !data.artifact.scan_md && data.measurements.length === 0 && (
           <section class="card text-center">
             <p class="text-sm text-slate-600">
               {data.artifact.source === 'user_upload'

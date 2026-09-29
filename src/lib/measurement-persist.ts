@@ -20,6 +20,7 @@
  */
 
 import { findByAlias } from './standard-master';
+import { alaIndexValueNum, isAlaIndexName } from './ala-pds';
 
 /**
  * 受け取る Supabase クライアント。
@@ -76,6 +77,26 @@ export function refToNum(v: string | null | undefined): number | null {
 
 const FLAG = (v: unknown): 'H' | 'L' | null => (v === 'H' || v === 'L' ? v : null);
 
+/**
+ * **数値化できた値だけを返す。** 基本は `m.value_num` をそのまま使う。
+ *
+ * 例外は がんリスク検査 ALA-PDS の **「インデックス値」** だけ。検査票は 0〜8 の
+ * スケールを **`"0.9 / 8.0"` の分数**で印字するため、`toValueNum()`
+ * (`elith-export.ts:190`・スラッシュ混じりは null) を通ると `value_num` が付かず、
+ * **推移グラフに点が 1 つも乗らない**。分子は印字された実測値そのものなので、
+ * ここで補うのは捏造ではない。**`value`（原本表記）は書き換えない。**
+ *
+ * - 完全一致の項目名 (`isAlaIndexName`) ＋ `test_type='cancer_urine'` のときだけ。
+ * - 既に `value_num` が付いていればそちらが勝つ（上書きしない）。
+ * - **Elith 納品の出力は変わらない** — `normalizeCancerRisk()`
+ *   (`cancer-risk-fix.ts:44-50`) が同じ分数を既に 0.9 へ正規化しているため。
+ */
+function valueNumOf(m: LeanMeasurement, testType: string): number | null {
+  if (typeof m.value_num === 'number' && Number.isFinite(m.value_num)) return m.value_num;
+  if (testType === 'cancer_urine' && isAlaIndexName(m.name)) return alaIndexValueNum(m.value);
+  return null;
+}
+
 export async function persistMeasurements(
   sb: SchemaClient,
   input: PersistInput,
@@ -114,7 +135,7 @@ export async function persistMeasurements(
       item_name: name,
       canonical_name: hit?.canonical_name ?? null,
       value: m.value ?? null,
-      value_num: typeof m.value_num === 'number' && Number.isFinite(m.value_num) ? m.value_num : null,
+      value_num: valueNumOf(m, input.testType),
       unit: m.unit ?? null,
       ref_low: m.ref_low ?? null,
       ref_high: m.ref_high ?? null,

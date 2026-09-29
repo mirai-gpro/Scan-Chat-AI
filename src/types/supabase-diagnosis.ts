@@ -59,6 +59,12 @@ export type Database = {
           notes: string | null;
           /** ユーザー検証後の確定 Markdown。アプリ内スキャン経路だけが書く (20260904000010)。 */
           scan_md: string | null;
+          /**
+           * 原本忠実の測定値 (jsonb・20260820000010)。`persistMeasurements()` が唯一の書き込み口。
+           * 中身は lean measurement の配列だが、**DB は形を保証しない**ので
+           * `unknown` のまま受け、読む側で検証する (`result-queries.ts` の `toResultMeasurements`)。
+           */
+          measurements: unknown;
         };
         Insert: {
           id?: string;
