@@ -267,6 +267,86 @@ export async function persistAdminBatchArtifact(input: {
 }
 
 /**
+ * **既存の artifact に `scan_md` と測定値だけを補う。** 行は作らない。
+ *
+ * 【なぜ要るか (2026-09-29・実障害)】本田さんのがんリスク 4 件は
+ * `source='wellfort_lab'` の artifact が**既に active で存在する**のに、
+ * `measurement_values` が 0 件・`measurements` が NULL・`scan_md` が NULL で、
+ * ダッシュボードに出なかった。
+ * ここで `persistAdminBatchArtifact` を普通に流すと `source='admin_batch'` の
+ * **別の 4 行が増えて計 8 件**になる。だから「既存へ入れる」経路を分ける。
+ *
+ * 【触らないもの】`test_date` / `external_test_id` / `source` / `lab_name` /
+ * `notes` / `display_mode` / `status` は**一切更新しない**。
+ * 更新するのは `scan_md` と、`persistMeasurements` が書く `measurements` (jsonb) だけ。
+ *
+ * 【冪等】`persistMeasurements` が artifact 単位で
+ * `measurement_values` を**総入れ替え**する。再実行しても増えない。
+ *
+ * 【取り違え防止】uid / 種別 / 受診日が食い違えば **`mismatch` を返して何もしない**
+ * (呼び出し側は 409 にする)。別人の検査値を混ぜないため。
+ */
+export async function persistIntoExistingArtifact(input: {
+  artifactId: string;
+  diagnosticUserId: string;
+  testType: ArtifactTestType;
+  markdownClean: string;
+  measurements: Record<string, unknown>[];
+  /** 期待する受診日。artifact 側と違えば止める (null なら照合しない)。 */
+  testDate?: string | null;
+}): Promise<{ artifactId: string | null; rows: number; reason?: string; mismatch?: string }> {
+  const sb = getServerSupabase();
+  if (!sb) return { artifactId: null, rows: 0, reason: 'supabase_not_configured' };
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const { data, error } = await (sb.schema('diagnosis') as any)
+    .from('test_artifacts')
+    .select('id, diagnostic_user_id, test_type, test_date, status, source, display_mode')
+    .eq('id', input.artifactId)
+    .maybeSingle();
+  if (error) return { artifactId: null, rows: 0, reason: `test_artifacts 照会失敗: ${error.message}` };
+  if (!data) return { artifactId: null, rows: 0, mismatch: `artifact が見つかりません: ${input.artifactId}` };
+
+  const a = data as { id: string; diagnostic_user_id: string; test_type: string; test_date: string | null };
+  if (a.diagnostic_user_id.toLowerCase() !== input.diagnosticUserId.toLowerCase()) {
+    return { artifactId: null, rows: 0, mismatch: 'この artifact は別の利用者のものです' };
+  }
+  if (a.test_type !== input.testType) {
+    return { artifactId: null, rows: 0, mismatch: `検査種別が違います (artifact=${a.test_type} / 指定=${input.testType})` };
+  }
+  if (input.testDate && a.test_date && a.test_date.slice(0, 10) !== input.testDate) {
+    return { artifactId: null, rows: 0, mismatch: `受診日が違います (artifact=${a.test_date.slice(0, 10)} / 読み取り=${input.testDate})` };
+  }
+
+  // scan_md だけ更新する。**他の列は書かない** (three_mode などを壊さない)。
+  const md = String(input.markdownClean ?? '');
+  if (md) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { error: mdErr } = await (sb.schema('diagnosis') as any)
+      .from('test_artifacts')
+      .update({ scan_md: md })
+      .eq('id', input.artifactId);
+    if (mdErr) return { artifactId: null, rows: 0, reason: `scan_md 保存失敗: ${mdErr.message}` };
+  }
+
+  if (input.measurements.length === 0) return { artifactId: input.artifactId, rows: 0 };
+  try {
+    const r = await persistMeasurements(sb as unknown as SchemaClient, {
+      artifactId: input.artifactId,
+      diagnosticUserId: input.diagnosticUserId,
+      testType: input.testType,
+      // **artifact 側の受診日を使う** (この経路で test_date を書き換えないため)。
+      testDate: (a.test_date ?? input.testDate ?? '').slice(0, 10),
+      measurements: input.measurements as never,
+      sourceFileKind: 'scan_md',
+    });
+    return { artifactId: input.artifactId, rows: r.rows };
+  } catch (e) {
+    return { artifactId: input.artifactId, rows: 0, reason: `measurement_values 保存失敗: ${e instanceof Error ? e.message : e}` };
+  }
+}
+
+/**
  * 旧名。人間ドック専用だった頃の呼び出し元のために残す (中身は一般化版へ委譲)。
  * 新しい呼び出しは `persistAdminBatchArtifact` を使う。
  */
