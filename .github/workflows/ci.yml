@@ -217,6 +217,9 @@ jobs:
           npm run verify:interview-ui
           npm run verify:scan-pages
           npm run verify:scan-upload
+          # 原本の S3 直 PUT: Object Lock バケットは checksum 必須。
+          # 実ブラウザ + SigV4 の検算つきスタブで 3.3MB / 8.3MB を通す。
+          npm run verify:originals-put
 
       - name: dev サーバのログ (失敗時のみ)
         if: failure()

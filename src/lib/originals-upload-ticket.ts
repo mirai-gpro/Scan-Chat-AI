@@ -24,9 +24,22 @@
  *   3. **Content-Type と ContentLength を署名に固定**する
  *      = 別形式・サイズ超過へのすり替えを S3 が拒否する。
  *   4. 期限は 15 分。
- *   5. `requestChecksumCalculation: 'WHEN_REQUIRED'` が**必須**。既定だと SDK が
- *      署名時に空ボディの CRC32 を URL に載せ、実ファイルを PUT した瞬間に S3 が拒否する
- *      (`laif-portal.ts` / `scan-upload-ticket.ts` で踏んだ罠)。
+ *
+ * 【Object Lock バケットは checksum が要る (2026-09-29・実障害)】
+ *   原本バケット `wellfort-diagnosis` は **Object Lock + GOVERNANCE 保持**が有効。
+ *   保持対象への `PutObject` は **Content-MD5 か checksum ヘッダが必須**で、
+ *   どちらも無い PUT は **HTTP 400** になる。
+ *
+ *   スキャン側 (`scan-upload-ticket.ts`) は Object Lock の無いバケット向けに
+ *   `requestChecksumCalculation: 'WHEN_REQUIRED'` で checksum を**外して**いた
+ *   (既定だと SDK が**空ボディの** CRC32 を署名に載せ、実ファイルを PUT した瞬間に
+ *   S3 が拒否するため)。原本バケットでそれを踏襲したのが 400 の原因。
+ *
+ *   → **外すのでなく、正しい値を載せる。** ブラウザがファイルの SHA-256 を計算して
+ *   base64 で渡し、`ChecksumSHA256` として署名に固定する。
+ *   空ボディの CRC32 が載る問題は `WHEN_REQUIRED` のまま回避しつつ、
+ *   明示した SHA-256 だけが署名に入る。
+ *   **ブラウザは署名された checksum ヘッダをそのまま送る** (1 バイトでも違えば S3 が拒否)。
  */
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
@@ -79,6 +92,12 @@ export function safeBaseName(raw: unknown): string | null {
   return cleaned;
 }
 
+/** SHA-256 を base64 にしたもの (32 バイト → 44 文字・末尾 '=')。 */
+const SHA256_B64_RE = /^[A-Za-z0-9+/]{43}=$/;
+export function isSha256Base64(v: unknown): v is string {
+  return typeof v === 'string' && SHA256_B64_RE.test(v);
+}
+
 /** 拡張子から Content-Type。許可外は null (= 署名しない)。 */
 export function contentTypeOf(name: string): string | null {
   const m = /\.([A-Za-z0-9]{1,8})$/.exec(name);
@@ -111,7 +130,7 @@ export function isOriginalUploadKey(key: unknown): key is string {
 }
 
 export type TicketResult =
-  | { ok: true; url: string; key: string; storageUrl: string; expiresIn: number; headers: Record<string, string> }
+  | { ok: true; url: string; key: string; storageUrl: string; expiresIn: number; headers: Record<string, string>; signedHeaders: string }
   | { ok: false; error: string; detail?: string };
 
 /**
@@ -123,6 +142,11 @@ export async function createOriginalUploadTicket(input: {
   company: unknown;
   fileName: unknown;
   bytes: unknown;
+  /**
+   * ファイル本体の SHA-256 (base64)。**Object Lock バケットでは必須。**
+   * ブラウザが `crypto.subtle.digest('SHA-256', file)` で計算して渡す。
+   */
+  sha256Base64: unknown;
 }): Promise<TicketResult> {
   const cfg = getOriginalsS3Config();
   if (!cfg) {
@@ -141,6 +165,13 @@ export async function createOriginalUploadTicket(input: {
   const contentType = contentTypeOf(name);
   if (!contentType) return { ok: false, error: 'invalid_file_type' };
 
+  if (!isSha256Base64(input.sha256Base64)) {
+    return {
+      ok: false,
+      error: 'invalid_sha256',
+      detail: 'ファイルの SHA-256 (base64・44 文字) が要ります。Object Lock バケットは checksum 無しの PUT を 400 で拒否します。',
+    };
+  }
   const bytes = typeof input.bytes === 'number' ? Math.trunc(input.bytes) : NaN;
   if (!Number.isFinite(bytes) || bytes <= 0) return { ok: false, error: 'invalid_size' };
   if (bytes > MAX_ORIGINAL_BYTES) {
@@ -152,6 +183,10 @@ export async function createOriginalUploadTicket(input: {
   if (!isOriginalUploadKey(key)) return { ok: false, error: 'invalid_key', detail: key };
 
   const fullKey = `${cfg.prefix}${key}`.replace(/\/{2,}/g, '/');
+  /*
+   * `WHEN_REQUIRED` のままにするのは、**空ボディの CRC32 を勝手に載せさせない**ため。
+   * 実体の SHA-256 は下で明示するので、署名に入る checksum はこれだけになる。
+   */
   const url = await getSignedUrl(
     client(cfg, { requestChecksumCalculation: 'WHEN_REQUIRED' }),
     new PutObjectCommand({
@@ -159,9 +194,34 @@ export async function createOriginalUploadTicket(input: {
       Key: fullKey,
       ContentType: contentType,
       ContentLength: bytes, // 署名に固定 → サイズ超過の差し替えを S3 が拒否する
+      ChecksumAlgorithm: 'SHA256',
+      ChecksumSHA256: input.sha256Base64, // Object Lock が要求する完全性チェック
     }),
-    { expiresIn: PRESIGN_EXPIRES_SEC, signableHeaders: new Set(['content-type']) },
+    {
+      expiresIn: PRESIGN_EXPIRES_SEC,
+      /*
+       * **`unhoistableHeaders` が無いと checksum が署名に入らない (実測)。**
+       * presigner は既定で `x-amz-*` をクエリへ hoist しようとし、
+       * flexible-checksums の中間層も presign では働かないため、
+       * `signableHeaders` だけ指定しても `SignedHeaders` は
+       * `content-length;content-type;host` のままになる。
+       * → ヘッダのまま残すよう明示してから署名対象に入れる。
+       *   実測: `content-length;content-type;host;x-amz-checksum-sha256;x-amz-sdk-checksum-algorithm`
+       */
+      unhoistableHeaders: new Set(['x-amz-checksum-sha256', 'x-amz-sdk-checksum-algorithm']),
+      signableHeaders: new Set(['content-type', 'x-amz-checksum-sha256', 'x-amz-sdk-checksum-algorithm']),
+    },
   );
+
+  /*
+   * **ブラウザはこの 3 つをそのまま送る。** 署名に含めたヘッダと 1 バイトでも
+   * 違えば S3 が拒否するので、画面側で組み立て直さないこと。
+   * (`X-Amz-SignedHeaders` に載っているものと一致している必要がある)
+   */
+  const signed = new URL(url).searchParams.get('X-Amz-SignedHeaders') ?? '';
+  const headers: Record<string, string> = { 'content-type': contentType };
+  if (signed.includes('x-amz-checksum-sha256')) headers['x-amz-checksum-sha256'] = input.sha256Base64;
+  if (signed.includes('x-amz-sdk-checksum-algorithm')) headers['x-amz-sdk-checksum-algorithm'] = 'SHA256';
 
   return {
     ok: true,
@@ -169,7 +229,8 @@ export async function createOriginalUploadTicket(input: {
     key,
     storageUrl: `s3://${cfg.bucket}/${fullKey}`,
     expiresIn: PRESIGN_EXPIRES_SEC,
-    headers: { 'content-type': contentType },
+    headers,
+    signedHeaders: signed,
   };
 }
 

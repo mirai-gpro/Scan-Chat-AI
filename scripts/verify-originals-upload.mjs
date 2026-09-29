@@ -19,6 +19,9 @@ execSync(
 );
 const m = await import(`../${out}`);
 
+/** 空バイト列の SHA-256 (base64)。値は何でもよいので固定値を使う。 */
+const SHA_B64 = '47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU=';
+
 let pass = 0;
 const fails = [];
 const ok = (cond, label, extra = '') => {
@@ -73,7 +76,7 @@ ok(m.contentTypeOf('a.exe') === null, '許可外は null');
 // **S3 未設定のままだと入力検査まで到達しない**ので、2 段に分けて見る。
 console.log('\n④-1 S3 未設定なら署名しない');
 {
-  const r = await m.createOriginalUploadTicket({ company: 'genoplan', fileName: 'a.pdf', bytes: 100 });
+  const r = await m.createOriginalUploadTicket({ company: 'genoplan', fileName: 'a.pdf', bytes: 100, sha256Base64: SHA_B64 });
   ok(r.ok === false && r.error === 'originals_s3_not_configured', '設定が無ければ発行しない', r.error ?? '');
 }
 
@@ -86,11 +89,13 @@ process.env.AWS_ACCESS_KEY_ID = 'AKIAIOSFODNN7EXAMPLE';
 process.env.AWS_SECRET_ACCESS_KEY = 'wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY';
 
 for (const [label, input, expect] of [
-  ['弾く: 検査会社が不正', { company: 'nope', fileName: 'a.pdf', bytes: 100 }, 'invalid_company'],
-  ['弾く: ファイル名がパス', { company: 'genoplan', fileName: '../../x.exe', bytes: 100 }, 'invalid_file_name'],
-  ['弾く: サイズ 0', { company: 'genoplan', fileName: 'a.pdf', bytes: 0 }, 'invalid_size'],
-  ['弾く: サイズが文字列', { company: 'genoplan', fileName: 'a.pdf', bytes: '100' }, 'invalid_size'],
-  ['弾く: 上限超え (20MB+1)', { company: 'genoplan', fileName: 'a.pdf', bytes: m.MAX_ORIGINAL_BYTES + 1 }, 'too_large'],
+  ['弾く: 検査会社が不正', { company: 'nope', fileName: 'a.pdf', bytes: 100, sha256Base64: SHA_B64 }, 'invalid_company'],
+  ['弾く: ファイル名がパス', { company: 'genoplan', fileName: '../../x.exe', bytes: 100, sha256Base64: SHA_B64 }, 'invalid_file_name'],
+  ['弾く: サイズ 0', { company: 'genoplan', fileName: 'a.pdf', bytes: 0, sha256Base64: SHA_B64 }, 'invalid_size'],
+  ['弾く: サイズが文字列', { company: 'genoplan', fileName: 'a.pdf', bytes: '100', sha256Base64: SHA_B64 }, 'invalid_size'],
+  ['弾く: checksum が無い (Object Lock が 400 にする)', { company: 'genoplan', fileName: 'a.pdf', bytes: 100 }, 'invalid_sha256'],
+  ['弾く: checksum が base64 でない', { company: 'genoplan', fileName: 'a.pdf', bytes: 100, sha256Base64: 'zzz' }, 'invalid_sha256'],
+  ['弾く: 上限超え (20MB+1)', { company: 'genoplan', fileName: 'a.pdf', bytes: m.MAX_ORIGINAL_BYTES + 1, sha256Base64: SHA_B64 }, 'too_large'],
 ]) {
   const r = await m.createOriginalUploadTicket(input);
   ok(r.ok === false && r.error === expect, label, r.error ?? '');
@@ -98,7 +103,7 @@ for (const [label, input, expect] of [
 
 {
   // 8.3 MB の遺伝子 PDF = 今回 413 で落ちていたサイズ。
-  const r = await m.createOriginalUploadTicket({ company: 'genoplan', fileName: '遺伝子結果.pdf', bytes: 8_300_000 });
+  const r = await m.createOriginalUploadTicket({ company: 'genoplan', fileName: '遺伝子結果.pdf', bytes: 8_300_000, sha256Base64: SHA_B64 });
   ok(r.ok === true, '通す: 8.3 MB の PDF (Vercel を通らないので上限に当たらない)');
   if (r.ok) {
     const u = new URL(r.url);
@@ -115,7 +120,20 @@ for (const [label, input, expect] of [
      * (`requestChecksumCalculation: 'WHEN_REQUIRED'` が要る)。
      */
     const chk = [...u.searchParams.keys()].filter((k) => /checksum/i.test(k));
-    ok(chk.length === 0, 'checksum を署名に載せない (PUT が拒否される罠)', chk.join(',') || 'なし');
+    ok(chk.length === 0, 'checksum を**クエリ**に載せない (空ボディ CRC32 の罠)', chk.join(',') || 'なし');
+    /*
+     * **Object Lock バケットは checksum が要る。** 保持対象への PutObject は
+     * Content-MD5 か checksum ヘッダが必須で、無いと 400 (実障害 2026-09-29)。
+     * `unhoistableHeaders` を付けないと SDK が署名から落とすので、実測で固定する。
+     */
+    const sh = u.searchParams.get('X-Amz-SignedHeaders') ?? '';
+    ok(/x-amz-checksum-sha256/.test(sh), 'checksum を**署名**に載せる (Object Lock の必須要件)', sh);
+    ok(/x-amz-sdk-checksum-algorithm/.test(sh), 'checksum アルゴリズムも署名に載せる', '');
+    ok(r.headers['x-amz-checksum-sha256'] && r.headers['x-amz-sdk-checksum-algorithm'] === 'SHA256',
+      'PUT に付けるヘッダとして返す', Object.keys(r.headers).join(', '));
+    // **署名した集合と返す集合が一致すること** (ブラウザは完全一致で送る必要がある)。
+    const signedSet = sh.split(';').filter((h) => h !== 'host' && h !== 'content-length').sort().join(',');
+    ok(Object.keys(r.headers).sort().join(',') === signedSet, '返すヘッダ = 署名したヘッダ (完全一致)', signedSet);
   }
 }
 ok(m.MAX_ORIGINAL_BYTES === 20 * 1024 * 1024, '上限は 20 MB (UI の名乗りと一致)');
