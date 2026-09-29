@@ -47,8 +47,11 @@ interface Props {
   nextTestAt?: string | null;
   diagnosticUserId?: string;
   detailHref?: string;
-  /** `?u=` を引き継ぐためのクエリ (admin の代理表示用)。 */
-  q?: string;
+  /**
+   * リンクに引き継ぐクエリ文字列 ('' か '?u=<uid>')。
+   * **`viewerLinkQuery(viewer)` の値をそのまま渡すこと** (uid を受け取らない・2026-09-29)。
+   */
+  linkQuery?: string;
 }
 const {
   mode,
@@ -62,7 +65,7 @@ const {
   nextTestAt = null,
   diagnosticUserId = '',
   detailHref = '/kit',
-  q = '',
+  linkQuery: q = '',
 } = Astro.props as Props;
 
 const course = mode === 'course';

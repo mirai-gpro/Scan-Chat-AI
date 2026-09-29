@@ -20,8 +20,11 @@ import { AI_PREDICTION_REPORT_LABEL } from '../../lib/display-names';
 
 interface Props {
   artifacts: TestArtifact[];
-  /** ?u= を引き継ぐためのクエリ文字列 ('' か '?u=…')。 */
-  q?: string;
+  /**
+   * リンクに引き継ぐクエリ文字列 ('' か '?u=<uid>')。
+   * **`viewerLinkQuery(viewer)` の値をそのまま渡すこと** (uid を受け取らない・2026-09-29)。
+   */
+  linkQuery?: string;
   /**
    * **出す検査種別を絞る** (単品購入の画面用・2026-09-15)。
    *
@@ -35,7 +38,7 @@ interface Props {
    */
   onlyTypes?: readonly string[];
 }
-const { artifacts, q = '', onlyTypes } = Astro.props as Props;
+const { artifacts, linkQuery: q = '', onlyTypes } = Astro.props as Props;
 
 /**
  * 画面に並べる検査 5 種と、その並び順。データが 1 件も無い種別も枠だけ出す

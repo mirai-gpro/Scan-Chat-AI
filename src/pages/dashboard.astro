@@ -22,7 +22,7 @@ import { demoFallbackEnabled } from '../lib/demo-data';
 import { isSpecialAccount } from '../lib/special-accounts';
 import { getLatestInterviewCompletion } from '../lib/interview-completion';
 import { isBridgeConfigured } from '../lib/supabase';
-import { resolveViewer } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
 import {
   extractUrgentAlert,
   extractDailyQuests,
@@ -233,7 +233,12 @@ const isDemoBrand = data?.diagnosticUserId === DEMO_OEM_UID;
 // OEM デモのときだけ差し替える。未指定なら AppLogo が Welltect ロゴを解決する。
 const logoSrc = isDemoBrand ? '/gan-checker-logo.svg' : undefined;
 const logoAlt = isDemoBrand ? 'がんチェッカー' : 'Welltect';
-const q = u ? `?u=${encodeURIComponent(u)}` : '';
+/*
+ * **リンクに引き継ぐクエリ。** 一般ユーザーは `''` = URL に uid を出さない。
+ * admin の代理表示と緊急 `?u=` 入場のときだけ `?u=<uid>` になる (`viewer.ts`)。
+ * **`viewer.uid` から組み立てない** — それだと本人でも必ず値が入る (2026-09-29)。
+ */
+const q = viewerLinkQuery(viewer);
 ---
 
 <BaseLayout title={data ? `${greeting} | Welltect` : 'マイページ | Welltect'} width="app">
@@ -277,7 +282,7 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
 
   {!needsSignIn && !hasError && (
     <>
-      <AppNav u={u} current="/dashboard" unreadNotices={unreadNotices} logoSrc={logoSrc} logoAlt={logoAlt} supportContact={supportContact} />
+      <AppNav linkQuery={q} current="/dashboard" unreadNotices={unreadNotices} logoSrc={logoSrc} logoAlt={logoAlt} supportContact={supportContact} />
 
       {data?.usingDemoData && (
         <div class="border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-center text-sm text-amber-800">
@@ -322,7 +327,7 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
         */}
         {healthAge?.latest ? (
           <div class="grid grid-cols-1 items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_17rem]">
-            <HealthAgeCard latest={healthAge.latest} followup={healthAgeFollowup} canGraph={(healthAge.trend?.points?.length ?? 0) >= 2} q={q} />
+            <HealthAgeCard latest={healthAge.latest} followup={healthAgeFollowup} canGraph={(healthAge.trend?.points?.length ?? 0) >= 2} linkQuery={q} />
             <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
           </div>
         ) : (
@@ -350,7 +355,7 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
           nextTestAt={data?.subscription?.next_test_at}
           diagnosticUserId={data?.diagnosticUserId ?? ''}
           detailHref={`/kit${q}`}
-          q={q}
+          linkQuery={q}
         />
 
         {/* ③ 次にすること — 非表示 (本日の健康クエスト): <DailyQuests quests={quests} /> */}
@@ -360,7 +365,7 @@ const q = u ? `?u=${encodeURIComponent(u)}` : '';
           v1.0 で「直近の検査結果 (項目カード)」「検査値の推移」「検査履歴」をここに統合した。
           推移グラフは種別ごとに /trend へ切り出し、履歴は「データ」の遷移先 (結果ページ) に置く。
         */}
-        <TestResultsSection artifacts={data?.artifacts ?? []} q={q} onlyTypes={singlePurchaseTypes} />
+        <TestResultsSection artifacts={data?.artifacts ?? []} linkQuery={q} onlyTypes={singlePurchaseTypes} />
 
 
         {/*

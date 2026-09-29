@@ -2,7 +2,7 @@
 import AppIcon from '../components/AppIcon.astro';
 import BackToDashboard from '../components/BackToDashboard.astro';
 import BaseLayout from '../layouts/BaseLayout.astro';
-import { resolveViewer } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
 import { noStore } from '../lib/http-cache';
 
 export const prerender = false;
@@ -14,6 +14,8 @@ const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
 const diagnosticUserId = viewer.uid;
+/** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
+const linkQuery = viewerLinkQuery(viewer);
 ---
 
 <BaseLayout title="AI 問診 | Welltect" width="flow">
@@ -24,7 +26,7 @@ const diagnosticUserId = viewer.uid;
   -->
   <header id="chat-header" class="hero-gradient sticky top-0 z-30 px-5 pt-5 pb-3">
     <div class="flex items-center justify-between">
-      <BackToDashboard u={diagnosticUserId} class="!px-2.5 !text-sm" />
+      <BackToDashboard linkQuery={linkQuery} class="!px-2.5 !text-sm" />
       <div class="flex items-center gap-2">
         <span class="relative flex h-2 w-2">
           <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
@@ -73,6 +75,7 @@ const diagnosticUserId = viewer.uid;
     id="chat-main"
     class="flex flex-1 flex-col gap-3 px-5 pt-3 pb-4"
     data-diagnostic-user-id={diagnosticUserId ?? ''}
+    data-dashboard-link-query={linkQuery}
   >
     <div
       id="chat-log"
@@ -360,9 +363,12 @@ const diagnosticUserId = viewer.uid;
   document.addEventListener('DOMContentLoaded', () => {
     const main = document.getElementById('chat-main');
     const diagnosticUserId = main?.dataset.diagnosticUserId || null;
+    // ダッシュボードへ戻るリンクのクエリ。**uid から組み立てない** (2026-09-29)。
+    const dashboardLinkQuery = main?.dataset.dashboardLinkQuery || '';
 
     void initLiveController({
       diagnosticUserId,
+      dashboardLinkQuery,
       log: $('chat-log'),
       status: $('chat-status'),
       resetBtn: $<HTMLButtonElement>('reset-btn'),

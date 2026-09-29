@@ -7,7 +7,7 @@ import { getUserUploads } from '../lib/scan-queries';
 import { testTypeLabel, formatJpDate } from '../lib/dashboard-queries';
 import { qrSvgPath } from '../lib/qr';
 import { publicUrl } from '../lib/public-url';
-import { resolveViewer } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
 import { isSpecialAccount } from '../lib/special-accounts';
 import { refreshConfig } from '../lib/app-config';
 import { noStore } from '../lib/http-cache';
@@ -18,7 +18,14 @@ export const prerender = false;
 noStore(Astro.response);
 
 // PC ではカメラ撮影を提供しない (要件 F-A5) ため、同じページをスマートフォンで
-// 開いてもらうための QR を作る。?u= を含めるので端末を移しても同じユーザーで開く。
+// 開いてもらうための QR を作る。
+//
+// **QR は現在の URL をそのまま符号化する** (`publicUrl` は origin だけ差し替え、
+// パスとクエリは `request.url` のまま)。一般ユーザーの URL には uid が載らなくなったので
+// (2026-09-29)、**QR にも uid は入らない**。
+// なお `?u=` は 2026-08-30 以降 Cookie が無い端末では無視されるので
+// (`viewer.ts` — `ALLOW_UID_ENTRY=on` のときを除く)、**もともと端末を移して
+// 同じユーザーで開く働きはしていない**。スマホ側で改めてサインインしてもらう。
 /*
  * QR は **公開 URL** で作る。`Astro.request.url` はプロキシの内側の URL に
  * なることがあり、実測 (2026-09-04) では 25 モジュール = 約 26 バイトの QR
@@ -31,6 +38,8 @@ const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
 const diagnosticUserId = viewer.uid;
+/** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
+const linkQuery = viewerLinkQuery(viewer);
 const uploads = diagnosticUserId ? await getUserUploads(diagnosticUserId) : [];
 
 /*
@@ -57,12 +66,12 @@ const MAX_ROUNDS = 5;
  */
 const roundsDone = uploads.filter((a) => a.test_type === 'health_checkup').length;
 const canAddMore = multiYear && roundsDone < MAX_ROUNDS;
-const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnosticUserId)}` : '/dashboard';
+const dashUrl = `/dashboard${linkQuery}`;
 ---
 
 <BaseLayout title="AI スキャン | Welltect" width="app">
   <header class="flex items-center justify-between px-5 pt-6 pb-3">
-    <BackToDashboard u={diagnosticUserId} class="!px-2.5 !text-sm" />
+    <BackToDashboard linkQuery={linkQuery} class="!px-2.5 !text-sm" />
     <h1 class="text-base font-semibold">スキャン</h1>
     <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
       1 / 3
@@ -184,9 +193,7 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
           <ul class="space-y-1.5">
             {uploads.slice(0, 5).map((a) => {
               const tt = testTypeLabel(a.test_type);
-              const href = diagnosticUserId
-                ? `/result/${a.id}?u=${encodeURIComponent(diagnosticUserId)}`
-                : `/result/${a.id}`;
+              const href = `/result/${a.id}${linkQuery}`;
               return (
                 <li>
                   <a
@@ -639,7 +646,7 @@ const dashUrl = diagnosticUserId ? `/dashboard?u=${encodeURIComponent(diagnostic
       </div>
       <div class="mt-auto flex w-full flex-col gap-2">
         <button id="error-retry" class="btn-primary w-full !py-4 text-lg">再試行</button>
-        <a href={diagnosticUserId ? `/?u=${encodeURIComponent(diagnosticUserId)}` : '/'} class="btn-secondary text-center">トップへ戻る</a>
+        <a href={`/${linkQuery}`} class="btn-secondary text-center">トップへ戻る</a>
       </div>
     </section>
   </main>

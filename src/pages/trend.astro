@@ -9,7 +9,7 @@ import { getMeasurementTrend, getTrendCandidates, DEFAULT_TREND_ITEMS } from '..
 import { WELLNESS_AGE_LABEL } from '../lib/wellness-age';
 import { countUnreadImportant } from '../lib/notice-queries';
 import { refreshConfig, cfg } from '../lib/app-config';
-import { resolveViewer } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
 import { noStore } from '../lib/http-cache';
 
 /**
@@ -40,6 +40,8 @@ const viewer = await resolveViewer(Astro);
  * **代理表示中 (`?u=` で他人を見ている) は渡さない** — 相手の実データを見せるため。
  */
 const u = viewer.uid;
+/** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
+const linkQuery = viewerLinkQuery(viewer);
 const type = url.searchParams.get('type');
 
 const authEnabled = !!import.meta.env.PUBLIC_GOOGLE_CLIENT_ID;
@@ -92,10 +94,10 @@ const typeName = isWellness ? WELLNESS_AGE_LABEL : type ? testTypeLabel(type).na
 ---
 
 <BaseLayout title="検査値の推移 | Welltect" width="app">
-  <AppNav u={u} current="/dashboard" unreadNotices={unreadNotices} supportContact={supportContact} />
+  <AppNav linkQuery={linkQuery} current="/dashboard" unreadNotices={unreadNotices} supportContact={supportContact} />
 
   <header class="hero-gradient px-5 py-4">
-    <BackToDashboard u={u} />
+    <BackToDashboard linkQuery={linkQuery} />
     <div class="mt-1 flex flex-wrap items-center justify-between gap-3">
       <h1 class="text-2xl font-bold tracking-tight text-navy-800">
         検査値の推移{typeName && <span class="ml-2 text-lg font-medium text-slate-700">{typeName}</span>}

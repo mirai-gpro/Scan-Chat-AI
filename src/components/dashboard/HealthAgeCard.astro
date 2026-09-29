@@ -31,10 +31,13 @@ interface Props {
    * **推移は 2 回目の算出から**。1 点以下は非活性 (線が引けない)。
    */
   canGraph?: boolean;
-  /** ?u= を引き継ぐためのクエリ文字列 ('' か '?u=…')。 */
-  q?: string;
+  /**
+   * リンクに引き継ぐクエリ文字列 ('' か '?u=<uid>')。
+   * **`viewerLinkQuery(viewer)` の値をそのまま渡すこと** (uid を受け取らない・2026-09-29)。
+   */
+  linkQuery?: string;
 }
-const { latest, followup = null, canGraph = false, q = '' } = Astro.props;
+const { latest, followup = null, canGraph = false, linkQuery: q = '' } = Astro.props;
 // ウェルネス年齢の推移も他の検査と同じ /trend で見せる (別テーブル health_age_scores 由来)。
 const graphHref = `/trend${q ? `${q}&` : '?'}type=wellness`;
 

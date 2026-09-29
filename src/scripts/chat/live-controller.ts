@@ -120,6 +120,15 @@ export interface LiveRefs {
    * dev profile では URL `?u=<uuid>` を流用、本番では Auth 連携に置換予定。
    */
   diagnosticUserId?: string | null;
+
+  /**
+   * ダッシュボードへ戻るリンクのクエリ (`''` か `'?u=<uid>'`)。
+   *
+   * **uid から組み立てない** (2026-09-29)。以前は `diagnosticUserId` から
+   * `/dashboard?u=…` を作っていたため、一般ユーザーの問診完了画面のリンクに
+   * 本人の uid が出ていた。サーバ (`chat.astro`) が `viewerLinkQuery()` の値を渡す。
+   */
+  dashboardLinkQuery?: string;
 }
 
 const SESSION_ID = 'default';
@@ -1486,7 +1495,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     // テスト用途のため fire-and-forget (失敗してもUIは止めない)。
     void exportInterviewToS3({ uid, answers, completedAt });
 
-    const dashUrl = uid ? `/dashboard?u=${encodeURIComponent(uid)}` : '/dashboard';
+    const dashUrl = `/dashboard${refs.dashboardLinkQuery ?? ''}`;
 
     refs.questionText.innerHTML = `
       <div class="flex flex-col items-center gap-3 py-2">

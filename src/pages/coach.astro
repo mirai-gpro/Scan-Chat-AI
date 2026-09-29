@@ -23,7 +23,7 @@ import BackToDashboard from '../components/BackToDashboard.astro';
 
 import BaseLayout from '../layouts/BaseLayout.astro';
 import { buildCoachContext } from '../lib/coach-context';
-import { resolveViewer } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
 import { noStore } from '../lib/http-cache';
 
 export const prerender = false;
@@ -35,6 +35,8 @@ const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
 const diagnosticUserId = viewer.uid;
+/** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
+const linkQuery = viewerLinkQuery(viewer);
 
 const ctx = diagnosticUserId ? await buildCoachContext(diagnosticUserId).catch(() => null) : null;
 const hasContext = !!ctx;
@@ -52,7 +54,7 @@ const initialGreeting = urgentAlert
 <BaseLayout title="AI ヘルスコーチ | Welltect" width="flow">
   <header class="hero-gradient relative px-5 pt-5 pb-3">
     <div class="flex items-center justify-between">
-      <BackToDashboard u={diagnosticUserId} class="!px-2.5 !text-sm" />
+      <BackToDashboard linkQuery={linkQuery} class="!px-2.5 !text-sm" />
       <div class="flex items-center gap-2">
         <span class="relative flex h-2 w-2">
           <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>
@@ -89,7 +91,7 @@ const initialGreeting = urgentAlert
       <h2 class="text-base font-semibold">AI疾病予防報告書が見つかりません</h2>
       <p class="text-xs text-slate-500">検査結果が表示されているかダッシュボードでご確認ください。</p>
       <a
-        href={`/dashboard?u=${encodeURIComponent(diagnosticUserId)}`}
+        href={`/dashboard${linkQuery}`}
         class="btn-primary mt-2"
       >ダッシュボードへ</a>
     </main>

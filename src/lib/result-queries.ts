@@ -76,32 +76,62 @@ const HIGHLIGHT_NAMES = [
   '必要とする栄養素/サプリ情報',
 ];
 
+/**
+ * **所有者が違う / 存在しない のどちらでも同じ文言**を返す (2026-09-29)。
+ *
+ * 文言を分けると「その artifact_id は存在する」ことが応答から読み取れてしまい、
+ * 他の利用者の検査の存在を推測できる。**区別できる応答を返さない。**
+ */
+const NOT_FOUND = '検査結果が見つかりません。';
+
 export async function loadResult(
   artifactId: string,
   /**
-   * 閲覧者の diagnostic_user_id。**デモ層の可否判定にだけ使う**
-   * (2026-08-30・デモは admin 限定)。省略時は非 admin 扱い。
+   * 閲覧者の diagnostic_user_id。
+   *
+   * **所有者の検証に使う** (2026-09-29)。**非 demo の artifact は、この値が
+   * 無ければ取得しない**。以前はデモ層の可否判定にしか使っておらず、
+   * `test_artifacts` を `id` だけで引いていたため、**artifact_id を知っていれば
+   * 他人の検査結果と原本 PDF/CSV が開けた** (直接オブジェクト参照)。
+   *
+   * admin の代理表示中は `resolveViewer` が**対象顧客の uid** を返すので
+   * (`viewer.ts` の `impersonating` 分岐)、**admin 専用の例外分岐は要らない。**
    */
   viewerUid?: string | null,
 ): Promise<ResultData | { error: string }> {
   // デモ層 (demo-data.ts) の検査履歴から来た id。DB には存在しないので
   // ここで組み立てて返す。これが無いと検査履歴のリンクがエラー画面になる。
+  // **所有者検証より前**に置く (demo-art-* は DB に無いので条件付き取得に載せられない)。
   if (artifactId.startsWith('demo-art-')) return demoResult(artifactId, viewerUid);
 
   if (!/^[0-9a-f-]{36}$/i.test(artifactId)) {
     return { error: '不正な検査 ID です。' };
   }
+  /*
+   * **閲覧者が分からなければ実データは返さない。**
+   * 未サインイン (Cookie なし) で実在の artifact_id を指定しても、ここで止まる。
+   */
+  const owner = (viewerUid ?? '').trim();
+  if (!owner) return { error: NOT_FOUND };
+
   const sb = getServerSupabase();
   if (!sb) return { error: 'Supabase が未設定です。' };
 
+  /*
+   * **所有者を取得条件に入れる。** 取ってから JS で突き合わせる実装にしない —
+   * 行の中身が一度メモリに載るし、後段 (原本の署名 URL 発行) との順序を
+   * 将来の改変で取り違えやすい。**条件に入れておけば構造的に到達しない。**
+   */
   const { data: artifact, error: artErr } = await sb
     .schema('diagnosis')
     .from('test_artifacts')
     .select('*')
     .eq('id', artifactId)
+    .eq('diagnostic_user_id', owner)
     .maybeSingle();
   if (artErr) return { error: `test_artifacts: ${artErr.message}` };
-  if (!artifact) return { error: '検査結果が見つかりません。' };
+  // 他人の artifact も存在しない artifact も、ここで同じ文言になる。
+  if (!artifact) return { error: NOT_FOUND };
 
   // 同 diagnostic_user_id の最新 published diagnosis_results を取得
   // (Phase 1.0 簡略: artifact と diagnosis_results の直接紐付けはまだ無いため)
@@ -227,9 +257,9 @@ async function resolveOriginal(
  * AI 診断レポートは載せない (実データ経路と同じ扱い — /report が正)。
  */
 function demoResult(artifactId: string, viewerUid?: string | null): ResultData | { error: string } {
-  if (!demoFallbackEnabled(viewerUid)) return { error: '検査結果が見つかりません。' };
+  if (!demoFallbackEnabled(viewerUid)) return { error: NOT_FOUND };
   const artifact = demoArtifacts('').find((a) => a.id === artifactId);
-  if (!artifact) return { error: '検査結果が見つかりません。' };
+  if (!artifact) return { error: NOT_FOUND };
   const samplePdf = SAMPLE_PDF_MAP[artifact.test_type] ?? null;
   // デモ層も同じ種別の全回分を「過去データ」に出す (テストフェーズの表示確認用)。
   const siblings = demoArtifacts('')
