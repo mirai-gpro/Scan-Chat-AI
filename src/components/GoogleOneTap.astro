@@ -199,7 +199,19 @@ const buildSha = (
             return;
           }
 
-          url.searchParams.set('u', payload.diagnosticUserId);
+          /*
+           * **`?u=` は付けない** (2026-09-29)。
+           *
+           * 以前はここで `url.searchParams.set('u', payload.diagnosticUserId)` してから
+           * リダイレクトしていた。**これが一般ユーザーの URL に diagnostic_user_id が
+           * 出る唯一の起点**だった。入場は既に上の `/api/auth/resolve` が発行した
+           * HttpOnly Cookie が担っているので、`?u=` なしで遷移すれば
+           * 次のリクエストで `resolveViewer` が Cookie から本人を解決する。
+           *
+           * **リダイレクト自体と、`resolve` 成功後に行うという順序は変えない** —
+           * `:176-177` の `/` → `/dashboard` の差し替えと、Cookie 発行前に
+           * 遷移しないことの両方が要る。
+           */
           console.log('[OneTap] linked → redirect:', url.toString());
           window.location.replace(url.toString());
         } catch (err) {

@@ -1,0 +1,943 @@
+# 一般ユーザー URL からの diagnostic_user_id 除去 — 改修仕様書
+
+| | |
+|---|---|
+| 文書 ID | `url_uid_privacy_spec_20260929` |
+| 作成日 | 2026-09-29 |
+| 調査基準 | `708dd53`（branch `claude/cool-dirac-1dkyx7`） |
+| 状態 | **仕様書のみ。実装は未着手** |
+
+> **この文書は `docs/specs/_TEMPLATE.md`（`WF-NNNN` 形式の Implementation Spec）ではない。**
+> `scripts/spec-guard.mjs:52` は `docs/specs/WF-\d{4}\.md` のみを検証対象とし、CI には接続されていない
+> （`.github/workflows/*.yml` に `spec-guard` の記述なし）ので、本ファイルの存在は既存の検証を壊さない。
+> 実装フェーズに入るときは、本書を根拠に別途 `WF-NNNN.md` を起こすこと。
+
+---
+
+## 1. 目的
+
+一般ユーザー向け画面の URL から `diagnostic_user_id` を消す。
+
+医療・健康情報を扱うサービスとして、本人の識別は**既存の署名付き HttpOnly Cookie と
+`resolveViewer()` が返す `viewer.uid` を唯一の正**とし、URL には識別子を載せない。
+
+**ハッシュ化・暗号化・別 ID への置換は行わない。** URL 自体にユーザー識別子を持たせない。
+
+**あわせて `/result/[id]` の所有者検証を追加する（レビュー指摘 2026-09-29・実装必須）。**
+`loadResult()` は `test_artifacts.id` だけで取得しており、閲覧者と
+`diagnostic_user_id` の一致を検証していない（§2.6）。URL から uid が消えても
+`artifact_id` は URL に残るため、**同じ改修で閉じる**。
+
+---
+
+## 2. 現行仕様
+
+### 2.1 入場と本人解決（本線・変更しない）
+
+`src/lib/viewer.ts` が本人を解決する。優先順位は同 `:237-240` のコメントどおり。
+
+1. **Cookie（署名検証済み）= 本人**（`:246`）
+2. 本人が admin なら `?u=` を尊重（代理表示・`:271-273`）
+3. `ALLOW_UID_ENTRY=on` のときだけ `?u=` を本人として扱う（緊急用・`:249-257`）
+
+Cookie は `uid.exp.admin[.s].HMAC`（`signViewer` `:88-109`）。`HttpOnly` / `SameSite=Lax` /
+本番は `Secure`（`viewerCookieOptions` `:179-190`）。発行は `POST /api/auth/resolve`。
+
+`?u=` を読むのは **`viewer.ts:244` の 1 か所だけ**（他は `admin/index.astro:9` と
+`admin/lab-results/upload.astro:10` で、いずれも admin 画面）。
+
+### 2.2 `resolveViewer()` が返す値
+
+`Viewer`（`viewer.ts:192-230`）の主要フィールド。
+
+| フィールド | 意味 | 一般ユーザー | Admin 代理表示 | 緊急 `?u=` 入場 |
+|---|---|---|---|---|
+| `uid` | 表示対象 | 本人 | **対象者** | 指定 uid |
+| `selfUid` | サインイン本人 | 本人 | **閲覧者本人** | 指定 uid |
+| `isAdmin` | 本人が admin か | false | true | **false**（`:256`） |
+| `impersonating` | 代理表示中か | false | **true** | **false**（`:256`） |
+
+`impersonating` が true になるのは `isAdmin && requested && requested !== selfUid` の
+ときだけ（`:271`）。**admin が自分の uid を `?u=` に付けた場合も false になる。**
+
+### 2.3 一般ユーザー向けページは全て `resolveViewer()` を通っている
+
+`resolveViewer` の呼び出し元（実測）:
+
+- ページ: `dashboard` / `report` / `trend` / `kit` / `scan` / `chat` / `coach` / `notices` /
+  `result/[id]`
+- API: `api/scan/save.ts` / `api/scan/jobs.ts` / `api/interview/export.ts` / `api/debug/viewer.ts`
+- その他: `components/GoogleOneTap.astro` / `admin/index.astro` / `admin/lab-results/upload.astro`
+
+**つまり、どのユーザー向けページも `?u=` なしで本人を解決できる。**
+各ページは `const u = viewer.uid`（`dashboard.astro:47` 他）としており、
+**`?u=` はデータ取得には使われていない**。使われているのは**リンクの組み立てだけ**。
+
+### 2.4 URL へ UID が載る経路（**初回調査 10 件＋実装時追加発見 6 件**）
+
+> **件数の訂正（2026-09-29・実装後の Docs 同期）**：初版はここを「全件」「全 10 件」と
+> 書いていたが、**初回の調査では 6 か所を取りこぼしていた**。実装中（`4f48b29`）に発見し、
+> 同コミットで修正済み。**これは仕様変更や実装差異ではなく、「実装時調査で追加判明した事実を
+> 正本仕様書へ反映」したもの**。下表を (b) 初回調査 10 件 / (b-2) 実装時追加発見 6 件 に分けて記す。
+>
+> 取りこぼしの原因は、初回調査が **`const q =` / `q()` のような「クエリ変数を組む形」だけを
+> 追った**ことにある。`?u=${encodeURIComponent(...)}` をリンクへ直書きしている箇所
+> （scan / coach / report）と、**別名のヘルパ**（`notices.astro` の `noticesHref()`）は
+> そのパターンに一致せず漏れた。§2.5 の `noStore()` 見落としと**同型の調査ミス**である。
+
+#### (a) 起点 — サインイン直後のリダイレクト
+
+**`src/components/GoogleOneTap.astro:202-204`**
+
+```js
+url.searchParams.set('u', payload.diagnosticUserId);
+window.location.replace(url.toString());
+```
+
+**これが一般ユーザーの URL に UID が出る唯一の起点。** サインインに成功すると、
+現在の URL に `?u=<uid>` を足して必ずリダイレクトする。
+
+#### (b) 伝播 — `q` による引き回し（**初回調査 10 件**）
+
+| # | ファイル:行 | 内容 |
+|---|---|---|
+| 1 | `src/pages/index.astro:12` | `/dashboard${url.search}` — `?u=` をそのまま転送 |
+| 2 | `src/pages/dashboard.astro:236` | `const q = u ? '?u=…' : ''`（`u = viewer.uid`・`:47`） |
+| 3 | `src/components/AppNav.astro:42` | `const q = u ? '?u=…' : ''` → `:44-50` の 7 リンク＋`:71` お知らせ |
+| 4 | `src/components/BackToDashboard.astro:28` | `/dashboard?u=…` |
+| 5 | `src/components/dashboard/HealthAgeCard.astro:39` | `/trend…type=wellness` |
+| 6 | `src/components/dashboard/TestResultsSection.astro:128,139` | `/result/{id}${q}` / `/trend…type=` |
+| 7 | `src/components/dashboard/ProgressSection.astro:91,104` | `/chat${q}` / `/scan${q}` |
+| 8 | `src/pages/report.astro:196-202` | `q()` ヘルパ（`if (u) p.set('u', u)`）→ `:624,628` |
+| 9 | `src/pages/result/[id].astro:32-37, 53-59, 225` | `linkFor` / `siblingHref` / `/report?u=` |
+| 10 | `src/scripts/chat/live-controller.ts:1489` | 問診完了後の `/dashboard?u=…`（クライアント側） |
+
+`dashboard.astro` の `q` の消費先（`:280,325,326,329,352,353,363,381,391,438`）:
+`AppNav` / `HealthAgeCard` / `ReportLinkCard`(`/report`) / `/kit` / `ProgressSection` /
+`TestResultsSection` / `/scan` / `/chat` / `/chat…&trace=1`。
+
+各ページの `BackToDashboard u={…}`: `trend.astro:98` / `kit.astro:108,117` /
+`scan.astro:65` / `chat.astro:27` / `coach.astro:55` / `notices.astro:67` /
+`report.astro:259` / `result/[id].astro:72,80`。
+`AppNav u={u}`: `dashboard.astro:280` / `report.astro:253` / `trend.astro:95` / `kit.astro:114`。
+
+#### (b-2) 伝播 — **実装時に追加発見した 6 件**（リンクへの直書き／別名ヘルパ）
+
+行番号は (b) と同じく**改修前**（`7513836` 時点）のもの。
+
+| # | ファイル:行 | 内容 | なぜ初回調査で漏れたか |
+|---|---|---|---|
+| 11 | `src/pages/scan.astro:60` | `const dashUrl = diagnosticUserId ? `/dashboard?u=…` : '/dashboard'` | `q` でなく `dashUrl` という別名の変数 |
+| 12 | `src/pages/scan.astro:188` | 検査履歴 `/result/{a.id}?u=…` | リンクへの直書き（変数を経由しない） |
+| 13 | `src/pages/scan.astro:642` | エラー画面「トップへ戻る」`/?u=…` | 同上。`/`（index）へ戻る唯一の UID 付きリンク |
+| 14 | `src/pages/coach.astro:92` | `BackToDashboard` ではない独自の戻りリンク `/dashboard?u=…` | 同上 |
+| 15 | `src/pages/notices.astro:47-49` | `noticesHref(overrides)` が `if (u) p.set('u', u)` で全リンクへ付与（消費は `:100,102,174,176,212,214` ほか） | ヘルパ名が `q()` でない |
+| 16 | `src/pages/report.astro:539` | がんリスク検査結果 `/result/{cancerArtifact.id}${u ? `?u=${u}` : ''}` | `q()` を使わず `u` を直接参照 |
+
+**16 件すべてを `viewerLinkQuery()` 経由へ統一済み**（`4f48b29`）。
+§16.1 の実装対象ファイル表・§19 の T-10（`?u=${` の直書き禁止）はこの 6 件も含めて機械で見張る。
+
+#### (c) 死んでいる経路（現状ページから参照されない）
+
+- `src/components/dashboard/HealthInsightCard.astro:89` — `/chat?u=…`。
+  呼び出しは `dashboard.astro:407` で**コメントアウト**されている
+- `src/components/dashboard/TestHistoryList.astro:11,34` — **未参照**
+- `src/components/dashboard/HealthCoachPreview.astro:28` — **未参照**
+
+#### (d) Admin 側の入口（本改修の対象外・維持する）
+
+
+- wellfort-site `src/pages/admin/customers.astro:438` — `{SCAN_APP_BASE}/dashboard?u=<duid>`
+- wellfort-site `src/pages/admin/health-age.astro:261` — 同形
+- Scan-Chat-AI `src/pages/admin/index.astro:9,17` / `admin/lab-results/upload.astro:10`
+
+### 2.5 キャッシュ指示は既に実装済み（8 ページ）
+
+**`src/lib/http-cache.ts` が存在し、`noStore(res)` が `cache-control: private, no-store` を
+セットする。** 呼び出し済みのページ（実測 8 件）:
+
+| ページ | 呼び出し |
+|---|---|
+| `src/pages/dashboard.astro` | `:32` import / `:37` `noStore(Astro.response)` |
+| `src/pages/report.astro` | `:18` / `:41` |
+| `src/pages/trend.astro` | `:13` / `:30` |
+| `src/pages/kit.astro` | `:17` / `:32` |
+| `src/pages/scan.astro` | `:13` / `:18` |
+| `src/pages/chat.astro` | `:6` / `:11` |
+| `src/pages/coach.astro` | `:27` / `:32` |
+| `src/pages/notices.astro` | `:10` / `:15` |
+
+**不足しているのは `src/pages/result/[id].astro` の 1 ページだけ。**
+`src/middleware.ts` は存在せず、**新設もしない**（§14）。
+
+> **調査メモ（初版の誤りの記録）**：初版は「`Cache-Control` 設定箇所 0 件・middleware 新設が必要」と
+> 書いていた。`src/pages/**.astro` を `Cache-Control|no-store|setHeader` で grep したため、
+> **ヘルパ経由（`noStore(...)`）の実装を丸ごと見落とした**。
+> 以後、この種の確認は**ヘルパ名でも grep する**こと。
+
+### 2.6 `/result/[id]` に所有者検証が無い
+
+**`src/lib/result-queries.ts` の `loadResult()` は `test_artifacts` を `id` だけで取得している。**
+
+```ts
+// result-queries.ts:99-103
+const { data: artifact, error: artErr } = await sb
+  .schema('diagnosis')
+  .from('test_artifacts')
+  .select('*')
+  .eq('id', artifactId)          // ← diagnostic_user_id の条件が無い
+  .maybeSingle();
+```
+
+第 2 引数 `viewerUid`（`:85`）は**デモ層の可否判定にしか使われていない**
+（`:89` の `demo-art-` 分岐、`:166` の `SAMPLE_PDF_MAP`、`:230` の `demoResult`）。
+関数のコメント自身が「**デモ層の可否判定にだけ使う**」と明記している（`:82-84`）。
+
+呼び出しは `src/pages/result/[id].astro:26` の `loadResult(id ?? '', u)`（`u = viewer.uid ?? ''`・`:17`）。
+
+**さらに、原本の署名 URL は所有者を確認せずに発行される。**
+`:151` で `resolveOriginal(sb, artifact.id)` を呼び、`:197-222` が
+`test_artifact_files` から `getOriginalSignedUrl()` を発行する。
+
+→ **他人の `artifact_id` を知っていれば、その検査結果と原本 PDF/CSV が閲覧できる。**
+医療データの直接オブジェクト参照（IDOR）であり、**本改修の実装必須要件とする**（§5.3）。
+
+---
+
+## 3. 問題点
+
+1. **一般ユーザーの URL に本人の `diagnostic_user_id` が常時露出する。**
+   ブラウザのアドレスバー・履歴・ブックマーク・`Referer`・スクリーンショット・
+   画面共有・サポート問い合わせのコピペに残る。
+2. `diagnostic_user_id` は PII を含まない設計（`CLAUDE.md`「PII / データ分離」）だが、
+   **Elith 納品の S3 パスや `measurement_values` の主キーであり、他人の識別子を知る手段を
+   増やす**こと自体が望ましくない。
+3. **`ALLOW_UID_ENTRY=on` に切り替わった瞬間、URL の UID がそのまま入場キーになる**
+   （`viewer.ts:249-257`）。緊急用の env だが、URL に UID が載っていなければ
+   「拾った URL でそのまま入れる」経路は成立しない。
+4. `?u=` は非 admin では無視されるので**他人のデータは見えない**（`viewer.ts:271`）。
+   よって「URL の UID 露出」自体は**アクセス制御の欠陥ではなく、識別子の露出**という位置づけ。
+5. **ただし `/result/[id]` は別で、実際にアクセス制御の欠陥がある**（§2.6）。
+   `artifact_id` を知っていれば他人の検査結果と原本 PDF が開ける。
+   **URL から UID が消えても `artifact_id` は URL に残る**ので、この 2 つは同じ改修で閉じる。
+
+---
+
+## 4. 改修方針
+
+**`q`（リンクに付けるクエリ）の作り方を 1 か所に集約し、代理表示のときだけ `?u=` を出す。**
+
+```
+一般ユーザー本人        → q = ''
+Admin 代理表示中        → q = '?u=<対象uid>'
+緊急 ?u= 入場中         → q = '?u=<uid>'   ← §13
+```
+
+### 4.1 判定に使う値
+
+`viewer.impersonating`（`viewer.ts:209,271-273`）が**そのまま使える**。
+一般ユーザーでは常に false、admin 代理表示でだけ true。
+
+ただし**緊急 `?u=` 入場（`ALLOW_UID_ENTRY=on`）では `impersonating` が false になる**
+（`viewer.ts:256`）ため、`impersonating` だけを条件にすると次の遷移で UID を失い、
+**既存の緊急復旧仕様が壊れる**。→ §13 の追加フィールドで解決する。
+
+### 4.2 リンククエリの生成を 1 か所にする（**確定**）
+
+`src/lib/viewer.ts` に**導出専用のヘルパ関数**を追加する（認証本線には手を入れない）。
+
+```ts
+/** リンクに引き継ぐクエリ。一般ユーザーは ''、代理表示/緊急入場のみ '?u=<uid>'。 */
+export function viewerLinkQuery(v: Viewer): string
+```
+
+**`Viewer` に `linkQuery` フィールドを持たせる案は採らない**（レビュー確定 2026-09-29）。
+`Viewer` の意味を「解決結果」に保つ。
+
+各ページ・コンポーネントは `viewer.uid` から `q` を組むのをやめ、この 1 本を使う。
+
+**コンポーネントには uid を渡さない。** `AppNav` / `BackToDashboard` 等の prop は
+**`linkQuery`（クエリ文字列そのもの）**に統一し、内部で組み立てさせない（§10-4）。
+
+### 4.3 サインイン直後のリダイレクトから `?u=` を外す
+
+`GoogleOneTap.astro:202` の `url.searchParams.set('u', …)` を削除する。
+Cookie は同 `:183-187` の `POST /api/auth/resolve` で既に発行されているので、
+**`?u=` なしでリダイレクトすれば次のリクエストで Cookie から本人が解決される。**
+
+**「`?u=` を消すだけ」にせず、リダイレクト自体は残す** — `:176-177` で
+`/` を `/dashboard` に差し替えており、サインイン後の画面遷移に必要。
+
+### 4.4 UID を含む URL で来た一般ユーザーの扱い
+
+既存のブックマーク（`?u=<自分の uid>` 付き）で来る人がいる。
+
+- **データは Cookie で解決される**ので表示は正しい（`viewer.ts:271` は
+  `requested === selfUid` のとき `impersonating=false` を返す）
+- **その画面のリンクからは `?u=` が消える**（`q=''`）ので、1 回遷移すれば URL は綺麗になる
+- **URL からの能動的な除去（`Astro.redirect` で `?u=` を落とす）は行わない**（レビュー確定 2026-09-29）。
+  代理表示と区別する条件が必要でリダイレクトループの危険があり、
+  **一般ユーザーでは次回の内部遷移で自然に消える**ので足りる。
+
+---
+
+## 5. 対象範囲
+
+### 5.1 一般ユーザー向けページ
+
+`/dashboard` `/report` `/trend` `/kit` `/scan` `/chat` `/coach` `/notices` `/result/[id]` `/`
+
+### 5.2 行うこと
+
+1. `viewer.ts` に **`viewerLinkQuery(viewer)` を追加**（既存の解決ロジックは変更しない）
+2. `viewer.ts` に **`Viewer.uidEntry: boolean` を追加**（§13・リンク維持専用）
+3. `GoogleOneTap.astro` のリダイレクトから `?u=` を外す
+4. `q` を組んでいる全箇所（§2.4(b) の 10 件 ＋ **(b-2) の 6 件 = 計 16 件**）を
+   `viewerLinkQuery()` 経由に置き換える
+5. `BackToDashboard` / `AppNav` 等の prop を **`linkQuery`（クエリ文字列）**へ統一する。
+   **uid を prop で渡さない**
+6. `index.astro` の `url.search` 転送は**現行どおり維持**する（§20 確定）
+7. **`src/pages/result/[id].astro` に既存の `noStore()` を適用する**（§14）
+8. **`loadResult()` に所有者検証を追加する**（§5.3・実装必須）
+9. **`/dashboard` のデバッグ欄を `{viewer.isAdmin && ( … )}` で囲む**（§5.4・実装必須）
+10. 回帰検査 `verify:url-uid-privacy`（仮）を追加（§19）
+
+### 5.3 `/result/[id]` の所有者検証（**実装必須**・レビュー指摘 2026-09-29）
+
+§2.6 の IDOR を閉じる。**対象は `src/lib/result-queries.ts` の `loadResult()`。**
+
+#### 実装仕様
+
+1. **非 demo の artifact は、`viewerUid` が null / 空なら取得を禁止**する。
+   未サインインでは実 artifact を一切返さない。
+2. **`test_artifacts` の取得時点で、`id = artifactId` と
+   `diagnostic_user_id = viewerUid` の両方を条件にする。**
+   取得後に JS 側で突き合わせるのではなく、**クエリの条件に入れる**
+   （取得してから弾く実装にすると、行の内容が一度メモリに載る／将来の改変で漏れやすい）。
+3. **不一致・不存在はどちらも同じ `検査結果が見つかりません。` を返す。**
+   既存の `:105` と同じ文言で、**存在する/しないを区別できる応答を返さない**
+   （他ユーザーの artifact の存在を推測させない）。
+4. **所有確認の前に原本の署名 URL を発行しない。**
+   現行は `:151` で `resolveOriginal()` を呼んでいる。条件付き取得（2）が空を返した時点で
+   `return` するので、**署名 URL の発行まで到達しない**構造にする。
+5. **Admin 代理表示は従来どおり閲覧できる。** `resolveViewer()` が返す `viewer.uid` は
+   代理表示中は**対象顧客の uid** なので（`viewer.ts:272`）、条件 2 がそのまま一致する。
+   **admin 用の特別な分岐を足さない。**
+6. **`demo-art-*` の既存判定は維持する。** `:89` の `artifactId.startsWith('demo-art-')` →
+   `demoResult(artifactId, viewerUid)` は**変更しない**（デモ可否は `demo-accounts.ts` が正）。
+7. `diagnosis_results`（`:110-113`）と `siblings`（`:143-146`）は
+   **`artifact.diagnostic_user_id` を条件にしている**ので、条件 2 が通った後は
+   自動的に本人のものだけになる。**追加の変更は不要。**
+
+#### やらないこと
+
+- `test_artifacts` の RLS ポリシー変更（DB は触らない。§6-5）
+- `artifact_id` を推測困難な別 ID に変える（URL の `artifact_id` は維持）
+- `loadResult()` の戻り値の型変更（`ResultData | { error: string }` のまま）
+
+### 5.4 `/dashboard` のデバッグ欄を admin だけに出す（**実装必須**・追加 2026-09-29）
+
+`src/pages/dashboard.astro` 末尾の `<details>`「**デバッグ (テストフェーズ確認用)**」は、
+**サインインした全員の HTML に出ていた**。中身に次の 2 つが含まれる。
+
+1. **本人の `diagnostic_user_id` の本文表示**（`diagnostic_user_id: <uid>`）
+2. **固定デモ UID 入りの切替リンク 6 件**（`/dashboard?u=<デモuid>`）
+
+本改修は「一般ユーザーの URL から UID を外す」ものなので、`href` だけを直しても
+**同じページの本文に UID が印字され、`?u=` 付きリンクが 6 本残る**のでは目的を満たさない。
+
+#### 実装仕様
+
+1. **`<details>` 全体を `{viewer.isAdmin && ( … )}` でサーバ側条件表示にする。**
+2. **CSS（`hidden` / `display:none`）で隠すのでは不可。** 非 admin では **HTML 自体を生成しない**
+   — CSS 非表示は「表示されないだけで、ソースを見れば読める」状態であり、
+   本文の UID とデモ UID 入り URL が一般ユーザーへ配られることに変わりがない。
+3. **admin では既存のデバッグ機能をそのまま維持する。** 中身は 1 行も変更しない
+   （`admin 判定:` / `他ユーザーで試す:` / `紙面 (受領 JSON から生成):` /
+   `AI問診の観測ログ:` を残す）。
+4. **デモ UID リンクそのものの削除・`viewerLinkQuery()` 化は行わない。**
+   admin 専用のデバッグ機能として現状の形を維持する（発注者判断 2026-09-29）。
+   → `?u=<固定デモuid>` は admin の代理表示そのものなので、§12 の後方互換に沿う。
+5. **`viewer.isAdmin` の判定ロジックには手を入れない**（`viewer.ts:271-273` は不変）。
+   参照箇所が 1 か所増えるだけ。
+
+> **経緯**：実装レビュー（`4f48b29`）で**差異 2** として報告した項目。
+> 仕様書 §11 の「URL 以外（本文への埋め込み）は対象外」に形式的には該当するため、
+> 「差異が出たら停止して報告」の原則に従い**勝手に直さず報告**した。
+> 発注者判断により **Production 投入前の追加修正**として本改修へ取り込み、`7a5aff1` で実装。
+> これも**仕様変更ではなく、実装時に判明した事実の仕様への反映**である。
+
+---
+
+## 6. 対象外
+
+1. **Admin 代理表示の `?u=` 廃止**（→ §21 将来対応）
+2. **wellfort-site の変更**（`admin/customers.astro` / `admin/health-age.astro` の
+   リンク形式は維持）
+3. **Scan-Chat-AI の admin 画面**（`admin/index.astro` / `admin/lab-results/upload.astro` ほか）
+4. **Google 認証 / Cookie 発行 / admin 判定の本線**（`api/auth/resolve.ts` /
+   `signViewer` / `verifyViewer` / `isAdminEmailAsync`）
+5. **DB schema**（変更不要）
+6. **`ALLOW_UID_ENTRY` の既存挙動**（維持。§13）
+7. **UID のハッシュ化・暗号化・別 ID 発行**（本改修では行わない）
+8. **`api/live-token.ts:26-28` / `api/insight.ts:30` が body の `diagnosticUserId` を
+   検証せず受け取る問題**（別課題。§15.4 / §18.6 に記録）
+9. **未参照コンポーネント**（`TestHistoryList` / `HealthCoachPreview` /
+   `HealthInsightCard`）— 参照が復活したときに漏れないよう §19 の検査でだけ見張る
+10. **`src/middleware.ts` の新設**（禁止。§14）
+11. **`src/lib/http-cache.ts` の変更**（既存の `noStore()` をそのまま使う）
+12. **`src/pages/index.astro` の変更**（`url.search` 転送は現行維持。§20.1-4）
+
+> **`/result/[id]` の所有者検証は対象外ではなく、実装必須要件**（§5.3）。
+> 初版では「未確認」として §20 の未確定事項に置いていたが、レビューで欠落を確認したため
+> 本改修に取り込んだ。
+
+---
+
+## 7. 現行認証との関係
+
+**本改修は認証を一切変更しない。** 依存するのは以下の既存の性質だけ。
+
+| 依存する性質 | 根拠 |
+|---|---|
+| Cookie だけで本人が解決できる | `viewer.ts:246,260,274` |
+| `?u=` はデータ取得に使われていない（リンク組み立てのみ） | §2.3 |
+| `?u=` は非 admin では無視される | `viewer.ts:271` |
+| 代理表示は `impersonating` で判別できる | `viewer.ts:209,271-273` |
+| Cookie はサインイン時に発行済み | `GoogleOneTap.astro:183-187` |
+
+**署名鍵が無い環境（`secret()` が null・`viewer.ts:52-54`）では Cookie を発行も検証もしない**
+= サインインできない。この fail-closed は変更しない。
+
+---
+
+## 8. self / admin impersonation の扱い
+
+| 状態 | `uid` | `selfUid` | `isAdmin` | `impersonating` | リンククエリ |
+|---|---|---|---|---|---|
+| 未サインイン | null | null | false | false | `''` |
+| 一般ユーザー本人 | 本人 | 本人 | false | false | **`''`** |
+| Admin 本人の画面 | 本人 | 本人 | true | false | **`''`** |
+| Admin 代理表示 | **対象者** | 閲覧者 | true | **true** | **`?u=<対象者>`** |
+| Admin が自分を `?u=` 指定 | 本人 | 本人 | true | **false** | **`''`**（`?u=` が消える） |
+| 緊急 `?u=` 入場 | 指定 uid | 同じ | false | false | **`?u=<uid>`**（§13） |
+
+**「Admin が自分を `?u=` 指定」で `?u=` が消えるのは意図した挙動**
+（本人表示なので URL に識別子を残す理由がない）。
+
+---
+
+## 9. URL 変更前後
+
+### 9.1 一般ユーザー
+
+| 画面 | 現行 | 改修後 |
+|---|---|---|
+| サインイン直後 | `/dashboard?u=5d11742f-f196-450c-800b-d9ffa89ba64b` | **`/dashboard`** |
+| 報告書 | `/report?u=5d11742f-…` | **`/report`** |
+| 推移グラフ | `/trend?u=5d11742f-…&type=wellness` | **`/trend?type=wellness`** |
+| 検査結果 | `/result/9b6bafd0-…?u=5d11742f-…&mode=full` | **`/result/9b6bafd0-…?mode=full`** |
+| 印刷ビュー | `/report?u=5d11742f-…&print=1` | **`/report?print=1`** |
+| キット | `/kit?u=5d11742f-…` | **`/kit`** |
+| スキャン | `/scan?u=5d11742f-…` | **`/scan`** |
+| 問診 | `/chat?u=5d11742f-…` | **`/chat`** |
+
+### 9.2 Admin 代理表示（変更なし）
+
+| 画面 | 現行＝改修後 |
+|---|---|
+| 入口（wellfort-site から） | `/dashboard?u=<対象uid>` |
+| 報告書へ遷移 | `/report?u=<対象uid>` |
+| 推移グラフへ遷移 | `/trend?u=<対象uid>&type=wellness` |
+
+---
+
+## 10. ページ間遷移ルール
+
+1. **リンクの `href` に付けるクエリは `viewerLinkQuery(viewer)` の結果だけ**を使う。
+   各ページ・各コンポーネントで `viewer.uid` から組み立てない。
+2. 既存の `?u=` 以外のクエリ（`type` / `mode` / `print` / `save` / `preview` / `trace` /
+   `debug` / `render`）は**現行どおり保持**する。
+3. クエリの連結は `q ? `${q}&` : '?'` の既存パターンを踏襲する
+   （`HealthAgeCard.astro:39` / `TestResultsSection.astro:139` / `dashboard.astro:438`）。
+   **`q` が空でも `?` が二重にならないこと**を検査で固定する。
+4. `BackToDashboard` / `AppNav` 等は**クエリ文字列そのもの**を受け取る。
+   **prop 名は `linkQuery`**（確定）。現行は uid（`u`）を受け取って内部で組み立てているが、
+   **uid を prop で渡すのをやめる**。「渡された uid をどこかで URL に入れてしまう」
+   経路を構造的に無くすため。
+5. クライアント側の遷移（`live-controller.ts:1489`）も同じクエリを使う。
+   サーバから**クエリ文字列を渡す（uid を渡さない）**。
+
+---
+
+## 11. UID を URL へ出さない範囲
+
+**出さない**
+
+- 一般ユーザー向けページの `href` / `action` / `Location`（リダイレクト先）
+- サインイン直後のリダイレクト先
+- `history.pushState` / `replaceState`（現状 UID を載せる箇所なし。将来も載せない）
+
+**従来どおり出る／出てよい**
+
+- Admin 代理表示中のリンク（`?u=<対象uid>`）
+- Admin 画面（`/admin/**`）
+- 緊急 `?u=` 入場中のリンク（§13）
+
+**URL 以外は対象外**
+
+- サーバがページへ埋め込む uid（`data-diagnostic-user-id` 等・`kit.astro:224`）は
+  **URL ではないので本改修の対象外**。ただし §21 で扱う。
+- API のリクエストボディ（`api/live-token.ts` / `api/insight.ts`）も対象外（§6-8）。
+
+**例外 — `/dashboard` のデバッグ欄だけは本文表示も閉じる（§5.4）**
+
+同欄は **uid の本文表示**と **`?u=<固定デモuid>` リンク 6 本**を同時に持ち、
+**一般ユーザーの HTML に配られていた**ため、URL 側だけ直しても目的を満たさない。
+`{viewer.isAdmin && ( … )}` で**非 admin には HTML ごと出さない**。
+他の埋め込み uid（`data-diagnostic-user-id` 等）は従来どおり §21 の将来対応に残す。
+
+---
+
+## 12. Admin 代理表示の後方互換
+
+1. **wellfort-site 側は 1 行も変更しない。**
+   `/dashboard?u=<duid>` で従来どおり代理表示に入れること。
+2. `viewer.ts:244` の `?u=` 読み取りと `:271-273` の代理表示判定は**変更しない**。
+3. 代理表示中は `report` / `trend` / `kit` / `scan` / `chat` / `coach` / `notices` /
+   `result/[id]` へ遷移しても**対象 uid を維持**する。
+4. `normalizeUid`（`viewer.ts:278-284`）が受ける**先頭 8 桁の短縮形**も従来どおり動くこと。
+5. 代理表示から**本人の画面へ戻る導線は本改修では追加しない**（現状も無い。
+   admin は `?u=` を外して開き直す）。
+
+---
+
+## 13. `ALLOW_UID_ENTRY` との関係
+
+**既存仕様（`viewer.ts:39-41, 249-257`）を変更しない。**
+
+ただし §4.1 のとおり、緊急入場では `impersonating` が false になるため、
+`impersonating` だけでリンククエリを決めると**遷移した瞬間に UID を失って締め出される**。
+緊急復旧の目的（ローンチ直前の切替で締め出された場合の復旧）が果たせなくなる。
+
+**対処（確定）：`Viewer` に「この閲覧者は `?u=` で入場したか」を表す派生フィールドを追加する。**
+
+```ts
+/** `ALLOW_UID_ENTRY=on` で `?u=` から入場した状態か。**リンク維持専用**。 */
+uidEntry: boolean;
+```
+
+- `resolveViewer` の `:256`（緊急入場の return）でのみ `true`。他の return は `false`
+- リンククエリの条件は **`impersonating || uidEntry`**
+- **認証・admin 判定には使用禁止。** 表示リンクの組み立て専用
+  （`isAdmin` / `adminBy` / デモ判定 / スペシャル判定のいずれにも影響させない）
+- これは既存 3 経路の**追加情報**であって、`ALLOW_UID_ENTRY` の挙動そのものは不変
+- `ANONYMOUS`（`viewer.ts:232`）にも `uidEntry: false` を足す
+
+**`ALLOW_UID_ENTRY=on` のときは UID が URL に載り続ける。** これは緊急時の意図した挙動で、
+本番は既定 off（`viewer.ts:19`「本番では off のままにすること」）。
+
+---
+
+## 14. キャッシュ / no-store
+
+**既存の `src/lib/http-cache.ts` の `noStore()` を使う。新規 middleware は作らない。**
+
+`noStore(res)` は `cache-control: private, no-store` をセットする。**8 ページで既に呼ばれている**
+（§2.5 の表）。Vercel の既定 `public, max-age=0, must-revalidate` は
+**共有キャッシュへの保存を許す**のに `Vary` が付かないため、同ファイルの冒頭コメントどおり
+「ある閲覧者の紙面を別の閲覧者へ配り得る」状態を塞ぐためのものである。
+
+**本改修で行うこと（1 点だけ）**
+
+1. **`src/pages/result/[id].astro` に `noStore(Astro.response)` を追加する。**
+   8 ページに入っていて**ここだけ抜けている**。URL から uid が消えると
+   キャッシュキーが全ユーザー共通になるため、**この改修と同時に入れる。**
+
+**やらないこと**
+
+- **`src/middleware.ts` の新設**（禁止・レビュー確定 2026-09-29）
+- `astro.config.mjs` / `vercel.json` への `headers` 追加
+- `noStore()` の実装変更（`private, no-store` のまま）
+- admin 画面（`/admin/**`）への適用（本改修の対象外）
+
+`/report?print=1` / `?render=` は `report.astro:41` の `noStore()` が既に効いている
+（クエリに関係なく同じレスポンスで設定される）。
+**Cookie は `HttpOnly` なのでキャッシュに Cookie は載らない。**
+
+---
+
+## 15. セキュリティ要件
+
+1. **非 admin が `?u=<他人UID>` を指定しても他人に切り替わらないこと**（現行 `viewer.ts:271`）。
+   **本改修で条件を緩めない。**
+2. **`?u=` の読み取りは `viewer.ts:244` の 1 か所のまま**。他のページ・コンポーネントで
+   `searchParams.get('u')` を増やさない。
+3. **リンククエリの生成は 1 か所**（§4.2）。個別ページで `?u=` を組み立てない
+   = 「1 か所直し忘れて UID が漏れる」を構造的に防ぐ。
+4. **`/result/[id]` の所有者検証を行うこと**（§5.3・**実装必須**）。
+   - 非 demo artifact は `viewerUid` が無ければ取得しない
+   - `test_artifacts` を `id` ＋ `diagnostic_user_id` の**両方の条件**で取得する
+   - 不一致と不存在は**同じ文言**を返す（存在を推測させない）
+   - **所有確認の前に原本の署名 URL を発行しない**
+5. `Referer` 経由の漏出が減る（外部リンクを踏んだときに UID が渡らなくなる）。
+6. **UID をハッシュ化して URL に残すことはしない**（要件 H）。ハッシュでも
+   「同一人物を追跡できる安定識別子」である以上、露出を残す意味がない。
+7. **`uidEntry`（§13）を認証・admin 判定に使わないこと。** リンク維持専用。
+   ここを緩めると「URL に uid を書くだけで何かが変わる」経路が復活する。
+8. **`/dashboard` のデバッグ欄は非 admin へ HTML ごと出さないこと**（§5.4・**実装必須**）。
+   - 本人の `diagnostic_user_id` を本文へ印字しない
+   - 固定デモ UID 入りの `/dashboard?u=…` 6 リンクを一般ユーザーの HTML へ出さない
+   - **CSS 非表示では不可**（ソースからは読めてしまう）。サーバ側で描かない
+   - admin では既存のデバッグ機能を維持する
+
+### 15.4 別セキュリティ課題（記録・今回のスコープ外）
+
+**`api/live-token.ts:26-28` と `api/insight.ts:30` は、リクエストボディの
+`diagnosticUserId` を検証せずにそのまま使っている**（`resolveViewer` を通していない）。
+
+```ts
+// api/live-token.ts:26-28
+const body = await request.json().catch(() => null) as { diagnosticUserId?: unknown } | null;
+if (body && typeof body.diagnosticUserId === 'string') {
+  diagnosticUserId = body.diagnosticUserId;
+}
+```
+
+その値は `buildUserContextForChat` / `getCustomerProfile` / `getAppliedExamLabels`
+（`:44-46`）に渡るため、**UID を知っていれば他人の検査文脈を Live プロンプトへ
+載せられる可能性がある**。`api/insight.ts` も同様（`:30` → `:42`）。
+
+**問題は実在するが、今回の実装スコープには含めない**（レビュー確定 2026-09-29）。
+URL から UID が消えることで入手経路は減るが、**穴自体は残る**。
+**別課題として起票すること**（→ §21-2）。
+
+---
+
+## 16. 実装対象候補ファイル
+
+### 16.1 Scan-Chat-AI（変更が見込まれるもの）
+
+| ファイル | 変更内容 |
+|---|---|
+| `src/lib/viewer.ts` | `viewerLinkQuery()` 追加 ＋ `Viewer.uidEntry` 追加（§13）＋ `ANONYMOUS` と 3 つの return に `uidEntry` を足す。**解決の条件分岐そのものは不変** |
+| **`src/lib/result-queries.ts`** | **`loadResult()` に所有者検証を追加（§5.3・実装必須）** |
+| `src/components/GoogleOneTap.astro` | `:202` の `searchParams.set('u', …)` を削除 |
+| `src/pages/dashboard.astro` | `:236` の `q` をヘルパ経由に ＋ **デバッグ欄を `{viewer.isAdmin && ( … )}` で囲む（§5.4・実装必須）** |
+| `src/pages/report.astro` | `:196-202` の `q()` をヘルパ経由に ＋ **`:539` がんリスク結果リンクの直書き（§2.4(b-2)-16）** |
+| `src/pages/trend.astro` | `AppNav` / `BackToDashboard` への引き渡し |
+| `src/pages/kit.astro` | 同上 |
+| `src/pages/scan.astro` | 同上 ＋ **`:60` `dashUrl` / `:188` 検査履歴 / `:642` エラー画面の直書き（§2.4(b-2)-11〜13）** |
+| `src/pages/chat.astro` | 同上 ＋ `live-controller` へ渡すクエリ |
+| `src/pages/coach.astro` | 同上 ＋ **`:92` 独自の戻りリンク（§2.4(b-2)-14）** |
+| `src/pages/notices.astro` | 同上 ＋ **`:47-49` `noticesHref()` の `p.set('u', u)`（§2.4(b-2)-15）** |
+| `src/pages/result/[id].astro` | `:32-37` `linkFor` / `:53-59` `siblingHref` / `:225` ＋ **`noStore(Astro.response)` の追加（§14）** |
+| `src/components/AppNav.astro` | `:42` の `q` 生成を撤去し `linkQuery` prop を受ける |
+| `src/components/BackToDashboard.astro` | `:28` 同上 |
+| `src/components/dashboard/HealthAgeCard.astro` | `:39` |
+| `src/components/dashboard/TestResultsSection.astro` | `:128,139` |
+| `src/components/dashboard/ProgressSection.astro` | `:91,104` |
+| `src/scripts/chat/live-controller.ts` | `:1489` の `/dashboard?u=` |
+| `scripts/verify-url-uid-privacy.mjs`（新設） | §19 の回帰検査 |
+| `package.json` / `.github/workflows/ci.yml` | 検査の登録（CI の A 層） |
+
+**`src/middleware.ts` は作らない**（§14・レビュー確定 2026-09-29）。
+**`src/lib/http-cache.ts` も変更しない**（既存の `noStore()` をそのまま使う）。
+
+`index.astro:12` の `url.search` 転送は**現行どおり維持**するため、**変更しない**（§20-4）。
+
+### 16.2 参照が復活したときに漏れる候補（今回は変更しないが検査で見張る）
+
+- `src/components/dashboard/HealthInsightCard.astro:89`（`dashboard.astro:407` でコメントアウト）
+- `src/components/dashboard/TestHistoryList.astro:11,34`（未参照）
+- `src/components/dashboard/HealthCoachPreview.astro:28`（未参照）
+
+---
+
+## 17. 非対象ファイル
+
+**変更してはならない。**
+
+```
+src/pages/api/auth/resolve.ts
+src/pages/api/auth/refresh-admin.ts
+src/pages/api/live-token.ts
+src/pages/api/insight.ts
+src/lib/admin-auth.ts
+src/lib/hp-edge.ts
+src/lib/http-cache.ts
+src/lib/demo-accounts.ts
+src/lib/special-accounts.ts
+src/lib/originals-storage.ts
+src/middleware.ts（新設も禁止）
+src/pages/admin/**
+supabase/migrations/**
+CLAUDE.md
+（wellfort-site 全体）
+```
+
+`viewer.ts` は §16.1 のとおり**追加のみ**。`signViewer` / `verifyViewer` /
+`viewerCookieOptions` / `resolveViewer` の既存分岐と `normalizeUid` は変更しない。
+
+---
+
+## 18. 回帰リスク
+
+| # | リスク | 内容 | 対策 |
+|---|---|---|---|
+| 1 | **Admin 代理表示の連鎖が切れる** | `q` を一律 `''` にすると、代理表示で `/report` へ移った瞬間に admin 本人の画面になる | §8 の表を検査で固定（`verify` で `impersonating=true` のとき全リンクに `?u=` が付くこと） |
+| 2 | **緊急 `?u=` 入場が使えなくなる** | `impersonating=false` のため（§13） | `uidEntry` フィールドを追加し `impersonating \|\| uidEntry` にする |
+| 3 | **クエリ連結の `?` 二重化** | `q ? `${q}&` : '?'` のパターンで `q=''` の経路が今まで通っていない | `/trend?type=…` `/report?print=1` を実ブラウザで確認 |
+| 4 | **サインイン直後に真っ白** | `?u=` を外した結果、Cookie が未発行のままリダイレクトすると未サインイン扱いになる | `/api/auth/resolve` の成功後にのみリダイレクトする現行順序（`:183-204`）を維持 |
+| 5 | **既存ブックマーク（`?u=` 付き）** | 表示は Cookie で正しく解決される（§4.4）が、`?u=` が残ったままの画面が存在する | 遷移 1 回で消える。能動的除去は §20 |
+| 6 | **body の uid を信じる API** | `api/live-token.ts` / `api/insight.ts`（§15.4）。本改修では変わらない | 別課題として起票 |
+| 6-1 | **所有者検証で本人の画面が開けなくなる** | 条件に `diagnostic_user_id` を足した結果、**代理表示や `origin='staging'` の閲覧者で一致しない**ケースが出ると、正当な利用者が「見つかりません」になる | T-13〜T-16 ＋ `verify:viewer-origin` を回帰で流す。**代理表示は `viewer.uid` が対象顧客なので一致する**（`viewer.ts:272`） |
+| 6-2 | **デモ経路を巻き込む** | `demo-art-*` は DB に無いので条件付き取得に入れてはいけない | `:89` の分岐を**条件追加より前**に置いたまま変更しない。`verify:demo-gate` で回帰 |
+| 6-3 | **`result/[id]` の `noStore()` 追加漏れ** | 8 ページに入っていてここだけ抜けている | T-12 を `/result/{id}` まで広げる |
+| 7 | **デモ / スペシャルアカウントの判定** | `demo-accounts.ts` / `special-accounts.ts` は `viewer.uid` を受け取る。URL とは無関係 | `verify:demo-gate` / `verify:special-accounts` を回帰で流す |
+| 8 | **`/api/debug/viewer` の切り分け** | `?u=` が付いていないかの確認手順が変わる | 切り分け手順を docs へ追記 |
+| 9 | **`report.astro` の `?render=` 経路** | 開発時のローカルレンダリング（`report-local-render.ts`）。`u` と無関係だが `q()` を共有 | `verify:report-render` を回帰で流す |
+
+---
+
+## 19. テスト項目
+
+### 19.1 新設する自動検査 `npm run verify:url-uid-privacy`
+
+**静かに壊れる種類の不具合**（UID が 1 か所だけ残る／代理表示が切れる）なので、
+目視ではなく機械で固定する。
+
+| ID | 検査 |
+|---|---|
+| T-01 | 一般ユーザー（Cookie のみ・非 admin）で `/dashboard` を開き、**HTML 内の全 `href` に `u=` が現れない** |
+| T-02 | 同じく `/report` `/trend` `/kit` `/scan` `/chat` `/coach` `/notices` `/result/{id}` |
+| T-03 | **レスポンスの `Location` ヘッダにも `u=` が無い**（`/` → `/dashboard`） |
+| T-04 | サインイン直後のリダイレクト先に `u=` が無い（`GoogleOneTap` のソース検査で `searchParams.set('u'` が無いこと） |
+| T-05 | admin 代理表示（`?u=<他人>`）で `/dashboard` を開くと、**全ての内部リンクに `?u=<他人>` が付く** |
+| T-06 | 代理表示で `/report` `/trend` `/kit` へ遷移しても対象 uid が維持される |
+| T-07 | 非 admin が `?u=<他人UID>` を付けても、表示されるのは**本人のデータ**（`/api/debug/viewer` の `uid` が本人） |
+| T-08 | `ALLOW_UID_ENTRY=on` ＋ Cookie なし ＋ `?u=<uid>` で、**リンクに `?u=` が維持される** |
+| T-09 | `/trend?type=wellness` `/report?print=1` `/result/{id}?mode=full` が **`?` 二重化なしで生成**される |
+| T-10 | ソース検査：`src/pages/**` `src/components/**` `src/scripts/**` に **`?u=${` / `set('u'` の直書きが無い**（`viewer.ts` と `admin/**` を除く） |
+| T-11 | ソース検査：`searchParams.get('u')` は `viewer.ts` と `admin/**` にしか無い |
+| T-12 | **9 ページすべて**（既存 8 ページ ＋ `/result/{id}`）の応答に `cache-control: private, no-store` が付く |
+| T-13 | **所有者検証 A**：本人の `artifact_id` → 閲覧できる |
+| T-14 | **所有者検証 B**：他人の `artifact_id` → 閲覧できない。**存在しない UUID を指定したときと応答が同一**であること |
+| T-15 | **所有者検証 C**：未ログイン（Cookie なし）＋ 実在の `artifact_id` → 閲覧できない |
+| T-16 | **所有者検証 D**：Admin 代理表示（`?u=<対象顧客>`）＋ 対象顧客の `artifact_id` → **閲覧できる** |
+| T-17 | 所有確認に失敗した回で、**原本の署名 URL が発行されていない**（`getOriginalSignedUrl` に到達しない） |
+| T-18 | `demo-art-*` はデモ用アカウントで従来どおり開ける（非デモは従来どおり「見つかりません」） |
+| T-19 | **`viewerLinkQuery()` の単体**：self → `''` / impersonating → `?u=<対象>` / uidEntry → `?u=<uid>` / 未サインイン → `''` |
+| T-20 | ソース検査：`uidEntry` が `isAdmin` / `adminBy` / デモ判定 / スペシャル判定に使われていない（§13） |
+| **T-21** | **デバッグ欄の出し分け**（§5.4）：`dashboard.astro` の `<details>` が `{viewer.isAdmin && ( … )}` で包まれている（T-21a）／本人の `diagnostic_user_id:` 表示が**その中にある**（T-21b）／**欄の外に無い**（T-21c） |
+| **T-22** | **固定デモ UID 入りの `/dashboard?u=…` が 6 件ともデバッグ欄の中にあり**（T-22）、**欄の外に 1 件も無い**（T-22b） |
+| **T-23** | **admin 向けの既存デバッグ項目を削っていない**（`admin 判定:` / `他ユーザーで試す:` / `紙面 (受領 JSON から生成):` / `AI問診の観測ログ:` の 4 つが欄の中に残っている） |
+| **T-24** | **代理表示の判定に手を入れていない**（`viewer.ts` の `if (isAdmin && requested && requested !== selfUid)` が不変・`result-queries.ts` に `isAdmin` の分岐を足していない）＝ `viewer.isAdmin` の**参照が 1 か所増えただけ**であること |
+
+**T-21〜T-24 は構文検査（ソース）で行う。** レンダリング結果の目視では
+「CSS で隠しただけ」と「HTML ごと出していない」を区別できないため、
+**`{viewer.isAdmin && (` で囲まれている構造そのもの**を機械で固定する。
+
+### 19.2 退行注入（検査が本当に落ちるかの確認）
+
+1. `GoogleOneTap.astro` の `searchParams.set('u', …)` を戻す → **T-04 が落ちる**
+2. リンククエリを `viewer.uid` から組む実装に戻す → **T-01/T-02 が落ちる**
+3. 条件を `impersonating` だけにする → **T-08 が落ちる**
+4. 条件を「常に `?u=`」にする → **T-01 が落ちる**
+5. `result/[id].astro` から `noStore()` を外す → **T-12 が落ちる**
+6. `q ? `${q}&` : '?'` を `${q}&` 固定にする → **T-09 が落ちる**
+7. `loadResult()` の `diagnostic_user_id` 条件を外す → **T-14 と T-15 が落ちる**
+8. 所有者検証を「取得してから JS で突き合わせる」形に変える → **T-17 が落ちる**
+   （署名 URL が発行されてしまう順序になる）
+9. 不一致時のエラー文言を「他人の結果です」等に変える → **T-14 が落ちる**
+10. `uidEntry` を `isAdmin` の判定に混ぜる → **T-20 が落ちる**
+11. デバッグ欄の `{viewer.isAdmin && ( … )}` を外す → **T-21a が落ちる**
+12. 条件表示をやめて `class="hidden"` で隠す形に変える → **T-21a/T-21c/T-22b が落ちる**
+    （CSS 非表示では HTML に載るため）
+13. デモ切替リンクを 1 件でもデバッグ欄の外へ出す → **T-22/T-22b が落ちる**
+14. admin 向けのデバッグ項目を削る → **T-23 が落ちる**
+
+### 19.3 既存検査の回帰（全て緑のままであること）
+
+`verify:demo-gate` / `verify:special-accounts` / `verify:single-purchase` /
+`verify:viewer-origin` / `verify:screen` / `verify:report` / `verify:report-render` /
+`verify:scan-pages` / `verify:scan-async` / `npm run check` / `astro build`
+
+### 19.4 手動確認
+
+1. 本番相当の Google 認証でサインイン → **アドレスバーに UID が出ないこと**
+2. wellfort-site の admin 顧客管理から代理表示 → **従来どおり対象者の画面が出ること**
+3. 代理表示中にメニューから各画面へ移動 → **対象者のまま**であること
+4. ブラウザの履歴に UID を含む URL が増えないこと
+5. **自分の検査結果（`/result/{自分の artifact}`）が従来どおり開くこと**
+6. **他人の `artifact_id` を URL に入れて開くと「検査結果が見つかりません。」になること**
+7. **一般ユーザーで `/dashboard` のソースを表示し、「デバッグ (テストフェーズ確認用)」の
+   markup が 1 行も無いこと**（本文の uid・デモ UID 入りリンクとも出ないこと）
+8. **admin で `/dashboard` を開くと、デバッグ欄が従来どおり全機能そろって出ること**
+
+---
+
+## 20. 受入条件
+
+| ID | 条件 | 対応するテスト |
+|---|---|---|
+| A | 一般ユーザーが `/dashboard` `/report` `/trend` 等を **UID なしで正常利用できる** | T-01, T-02, 19.4-1 |
+| B | 一般ユーザー画面内の**リンクにも UID が出ない** | T-01, T-02, T-03, T-10 |
+| C | 一般ユーザーが手入力で `?u=<他人UID>` を付けても**他人へ切り替わらない** | T-07 |
+| D | Admin は従来どおり `/dashboard?u=<対象UID>` で**代理表示できる** | T-05, 19.4-2 |
+| E | Admin 代理表示中は `report` / `trend` / `kit` 等へ移動しても**対象 UID を維持** | T-06, 19.4-3 |
+| F | **Google 認証・Cookie 発行・Admin 判定を壊さない** | T-04, 19.3, 19.4-1,2 |
+| G | **DB schema 変更が無い** | `git diff --stat` に `supabase/migrations/` を含まない |
+| H | **UID のハッシュ化・暗号化・別 ID 置換を行わない** | T-10, T-11（URL に識別子を載せる実装が無いこと） |
+| I | `ALLOW_UID_ENTRY=on` の**既存挙動が維持される** | T-08, T-19 |
+| J | `/result/[id]` を含む **9 ページが `private, no-store` を返す** | T-12 |
+| **K** | **本人の `artifact_id` は閲覧できる** | T-13, 19.4-5 |
+| **L** | **他人の `artifact_id` は閲覧できない。存在の有無を推測できる応答を返さない** | T-14, T-17, 19.4-6 |
+| **M** | **未ログイン ＋ 実在の `artifact_id` で閲覧できない** | T-15 |
+| **N** | **Admin 代理表示で対象顧客の `artifact_id` を閲覧できる** | T-16 |
+| **O** | **`demo-art-*` の既存挙動が維持される** | T-18, `verify:demo-gate` |
+| **P** | **`uidEntry` が認証・admin 判定に使われていない** | T-20 |
+| **Q** | **`src/middleware.ts` が存在しない**（新設していない） | `git diff --stat` に `src/middleware.ts` を含まない |
+| **R** | **一般ユーザーの `/dashboard` HTML にデバッグ欄が出ない**（本人 uid の本文表示・固定デモ UID 入りリンク 6 件とも） | T-21, T-22, 19.4-7 |
+| **S** | **admin では既存のデバッグ機能が維持される** | T-23, 19.4-8 |
+| **T** | **代理表示・所有者検証の判定に `isAdmin` 分岐を足していない** | T-24 |
+
+### 20.1 確定事項（レビュー 2026-09-29・初版の未確定 7 件をすべて確定）
+
+| # | 論点 | 決定 |
+|---|---|---|
+| 1 | リンククエリの持たせ方 | **`viewerLinkQuery(viewer)` 関数を採用。** `Viewer.linkQuery` フィールドは採らない |
+| 2 | `Viewer` への追加 | **`uidEntry: boolean` を追加**（`ALLOW_UID_ENTRY` 維持のため）。**リンク維持専用で、認証・admin 判定には使用禁止** |
+| 3 | `AppNav` / `BackToDashboard` 等の prop | **`linkQuery`（クエリ文字列）に統一。** **uid そのものを prop で渡して内部生成させない** |
+| 4 | `index.astro:12` の `url.search` 転送 | **現行どおり維持する。** `GoogleOneTap` が新規サインインで `?u=` を付与しなくなるため、通常利用者の新しい URL に UID は出ない。既存 bookmark の `?u=` は次のページ遷移で自然に消える。**Admin / 緊急経路の後方互換を優先** |
+| 5 | 既存 `?u=` bookmark | **能動的な redirect による除去は行わない。** 一般利用者では**次回の内部遷移で自然消滅**させる |
+| 6 | `no-store` の実装 | **既存 `src/lib/http-cache.ts` の `noStore()` を利用。** `src/middleware.ts` の**新設は禁止**。不足している `result/[id].astro` に適用する |
+| 7 | `/result/[id]` の所有者検証 | **未確認ではなく、欠落を確認した**（§2.6）。**本改修の実装必須要件**とする（§5.3）。A〜D の受入テストを追加（受入条件 K〜N） |
+| 8 | `/dashboard` のデバッグ欄（**追加・実装後の Docs 同期 2026-09-29**） | **`{viewer.isAdmin && ( … )}` でサーバ側条件表示にする**（§5.4・実装必須）。**CSS 非表示は不可。** デモ UID リンク自体の削除・`viewerLinkQuery()` 化は**行わない**（admin 専用デバッグ機能として現状維持・発注者判断）。受入条件 R〜T ／ テスト T-21〜T-24 |
+
+### 20.2 実装時に選んでよい事項（仕様として縛らない）
+
+- **T-01〜T-09 / T-13〜T-18 の実行方法** — 実ブラウザ（Playwright・`verify:screen` と同型）でも、
+  dev サーバへの `fetch` ＋ Cookie 自作（`signViewer` を transpile・`verify:special-accounts` と同型）でもよい。
+  **`viewerLinkQuery` の単体（T-19）と所有者検証（T-13〜T-17）は後者の方が
+  Cookie の状態を作り分けやすく速い**、という見込みだけ記しておく。
+- `viewerLinkQuery()` の戻り値の形（`'?u=…'` を返すか `URLSearchParams` を返すか）。
+  **ただし呼び出し側で `?` を付け直す実装にしないこと**（§10-3 の二重化を招く）。
+
+---
+
+## 21. 将来対応
+
+1. **Admin 代理表示の `?u=` 廃止（今回対象外）**
+   代理表示の対象を Cookie またはサーバ側セッションで持ち、URL から UID を完全に消す。
+   wellfort-site 側の入口（`admin/customers.astro:438` /
+   `admin/health-age.astro:261`）の変更が必要なため、2 リポジトリ同時のリリースになる。
+   移行期間は `?u=` と新方式の併存が必要。
+2. **`api/live-token.ts` / `api/insight.ts` の uid 検証**（§15.4）。
+   `resolveViewer` を通し、body の `diagnosticUserId` を**無視する**か本人と一致検証する。
+   **今回のスコープ外だが、問題は実在する**（レビュー確定 2026-09-29）。
+   §5.3 で `/result/[id]` を閉じたあと、**同じ性質の残りの穴**として起票すること。
+3. **ページに埋め込む uid の削減**（`data-diagnostic-user-id` 等）。
+   クライアント JS が uid を持たずに済む API 設計（サーバが Cookie から解決する）へ。
+4. **`ALLOW_UID_ENTRY` の廃止**。本番で使われていないことを確認できたら、
+   緊急復旧手段を別方式（管理者による Cookie 再発行など）へ置き換えて削除する。
+5. **`Referrer-Policy` / `Content-Security-Policy` の付与**。
+   URL から UID が消えても、埋め込み値や外部リンクからの漏出は別に閉じる必要がある。
+
+---
+
+## 22. 調査した根拠
+
+- `src/lib/viewer.ts:1-285`（全体。特に `:39-41, 192-230, 242-284`）
+- `src/components/GoogleOneTap.astro:176-204`
+- `src/pages/index.astro:1-13`
+- `src/pages/dashboard.astro:38-60, 236, 280, 325-329, 352-353, 363, 381, 391, 438`
+- `src/pages/report.astro:45-50, 196-202, 253, 259, 624, 628`
+- `src/pages/trend.astro:37-42, 95, 98`
+- `src/pages/kit.astro:36-41, 108, 114, 117, 224`
+- `src/pages/scan.astro:32-33, 65, 1149, 1159`
+- `src/pages/chat.astro:15-16, 27`
+- `src/pages/coach.astro:36-37, 55`
+- `src/pages/notices.astro:19-21, 67`
+- `src/pages/result/[id].astro:14-17, 32-37, 53-59, 72, 80, 225`
+- `src/components/AppNav.astro:20-51, 71`
+- `src/components/BackToDashboard.astro:18-32`
+- `src/components/dashboard/HealthAgeCard.astro:34, 39, 169`
+- `src/components/dashboard/TestResultsSection.astro:23, 128, 139`
+- `src/components/dashboard/ProgressSection.astro:50, 91, 104, 127, 155`
+- `src/components/dashboard/KitProgressCard.astro:25, 42`
+- `src/components/dashboard/HealthInsightCard.astro:89`（死んだ経路）
+- `src/components/dashboard/TestHistoryList.astro:11, 34`（未参照）
+- `src/components/dashboard/HealthCoachPreview.astro:28`（未参照）
+- `src/scripts/chat/live-controller.ts:120, 1489`
+- `src/pages/api/live-token.ts:24-28, 44-46`
+- `src/pages/api/insight.ts:26-30, 42`
+- `src/pages/api/interview/export.ts:85, 104`
+- `src/pages/api/debug/viewer.ts:22, 99-129`
+- `src/pages/admin/index.astro:1-17`
+- `src/pages/admin/lab-results/upload.astro:10`
+- `src/lib/http-cache.ts:1-16`（`noStore` の定義）
+- `noStore()` の呼び出し 8 件: `dashboard.astro:32,37` / `report.astro:18,41` /
+  `trend.astro:13,30` / `kit.astro:17,32` / `scan.astro:13,18` / `chat.astro:6,11` /
+  `coach.astro:27,32` / `notices.astro:10,15`
+- `src/lib/result-queries.ts:14, 33, 79-89, 99-105, 110-113, 143-146, 151, 166, 190-222, 229-230, 247`
+- `scripts/spec-guard.mjs:33, 52, 128`
+- wellfort-site `src/pages/admin/customers.astro:14, 438`
+- wellfort-site `src/pages/admin/health-age.astro:261`
+- 検索して**該当 0 件**だったもの: `src/middleware.ts`（未存在）/
+  `astro.config.mjs` と `vercel.json` の `headers` /
+  `src/scripts/**` の `searchParams.get('u')` /
+  `src/pages/result/[id].astro` の `noStore`
+
+### 22.1 初版（`1f85640`）からの修正点
+
+レビュー（2026-09-29）で指摘を受け、以下を実コードに合わせて修正した。
+
+| 章 | 修正内容 |
+|---|---|
+| §1 | 目的に `/result/[id]` の所有者検証を追加（実装必須） |
+| §2.5（新設） | **`http-cache.ts` の `noStore()` が 8 ページで実装済み**である事実を追加。初版の調査誤り（ヘルパ名で grep しなかったこと）も記録 |
+| §2.6（新設） | **`loadResult()` に所有者検証が無い**ことを `file:line` つきで追加 |
+| §3 | 問題点に「`/result/[id]` は実際にアクセス制御の欠陥がある」を追加 |
+| §4.2 / §4.4 | `viewerLinkQuery()` 採用・bookmark の能動除去なしを**確定**として記述 |
+| §5.2 | 行うことを確定内容に更新（middleware 新設を削除・`result/[id]` の `noStore` と所有者検証を追加） |
+| §5.3（新設） | **所有者検証の実装仕様**（7 項目）と「やらないこと」 |
+| §10-4 | prop 名を **`linkQuery`** に確定。uid を prop で渡さないことを明記 |
+| §13 | `uidEntry` を確定事項に。**認証・admin 判定への使用禁止**を明記 |
+| §14 | **全面書き換え。** 「0 件・middleware 新設」を削除し、既存 `noStore()` の利用と `result/[id]` への適用 1 点だけに |
+| §15 | 所有者検証を要件 4 に追加、`uidEntry` の禁止を要件 7 に追加、§15.4 として別課題の記録を独立させた |
+| §16 | `src/middleware.ts` を**削除**。`result-queries.ts` を追加。`result/[id].astro` に `noStore` 追加を明記。`index.astro` を「変更しない」に |
+| §17 | 非対象に `http-cache.ts` / `live-token.ts` / `insight.ts` / `originals-storage.ts` / `src/middleware.ts`（新設禁止）を追加 |
+| §18 | リスク 6-1〜6-3 を追加（所有者検証の副作用・デモ経路・`noStore` 漏れ） |
+| §19 | T-12 を 9 ページへ拡張。T-13〜T-20 を追加。退行注入 7〜10 を追加。手動確認 5〜6 を追加 |
+| §20 | **未確定 7 件をすべて確定**（§20.1 の表）。受入条件 K〜Q を追加。実装時に選べる事項を §20.2 に分離 |
+| §21 | 将来対応 2（`live-token` / `insight`）にスコープ外であることを明記 |
+| §22 | 根拠に `http-cache.ts` / `result-queries.ts` を追加。「`Cache-Control` 0 件」の誤った記述を削除 |
+
+### 22.2 実装後の Docs 同期（`4f48b29` / `7a5aff1` → 本コミット）
+
+**実装中に判明した事実を正本へ反映したもの。仕様変更ではない。**
+コードは 1 行も変更していない（本コミットの差分は本ファイルのみ）。
+
+| 章 | 反映内容 |
+|---|---|
+| §2.4 | 見出しの「（全件）」を「**初回調査 10 件＋実装時追加発見 6 件**」に訂正。**件数の訂正と、取りこぼした原因**（`const q =` / `q()` の形だけを追った）を冒頭の注記に記録 |
+| §2.4(b) | 見出しを「初回調査 10 件」に明示 |
+| §2.4(b-2)（新設） | **実装時に追加発見した 6 件**（`scan.astro:60,188,642` / `coach.astro:92` / `notices.astro:47-49` / `report.astro:539`）を、改修前の `file:line` と**漏れた理由**つきで追加 |
+| §5.2-4 | 置き換え対象を「10 件」→「10 件 ＋ (b-2) の 6 件 = **計 16 件**」に |
+| §5.2-9,10 | デバッグ欄の admin 限定表示を「行うこと」に追加（採番を 1 つ繰り下げ） |
+| §5.4（新設） | **`/dashboard` のデバッグ欄を `{viewer.isAdmin && ( … )}` でサーバ側条件表示にする仕様**（理由 4 点・CSS 非表示が不可である理由・admin では既存機能を維持・デモ UID リンクは削除しない）と、差異 2 として報告してから取り込むまでの経緯 |
+| §11 | 「URL 以外は対象外」の**例外**としてデバッグ欄を明記 |
+| §15-8 | セキュリティ要件にデバッグ欄の非表示化を追加 |
+| §16.1 | 実装対象表に (b-2) の 6 件とデバッグ欄の `file:line` を追記 |
+| §19.1 | **T-21〜T-24 を追加**（実装済みの検査内容と一致させた）。構文検査で行う理由も明記 |
+| §19.2 | 退行注入 11〜14 を追加 |
+| §19.4 | 手動確認 7〜8（一般ユーザーの HTML にデバッグ欄が無い／admin では出る）を追加 |
+| §20 | 受入条件 **R / S / T** を追加 |
+| §20.1 | 確定事項に **8（デバッグ欄）** を追加 |
+
+> **コミットメッセージの誤記（正誤）**：`4f48b29` の本文に
+> 「仕様の §2.4 が挙げていなかったリンク **5 か所**（scan 3 / coach 1 / notices 1 / report 1）」
+> とあるが、**内訳の合計は 6 で、実際に修正したのも 6 か所**。
+> **「5 か所」は記録上の誤記**であり、正は **6 か所**（本書 §2.4(b-2) の表が正本）。
+> コミットメッセージは履歴なので書き換えない。

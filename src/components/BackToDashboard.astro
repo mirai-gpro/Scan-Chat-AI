@@ -19,13 +19,17 @@ import AppIcon from './AppIcon.astro';
  * - 高さは `min-h-touch` (44px 以上)。
  */
 interface Props {
-  /** 代理表示中の uid。渡すと `?u=` を付けて戻る。 */
-  u?: string | null;
+  /**
+   * リンクに引き継ぐクエリ文字列 (`''` か `'?u=<uid>'`)。
+   * **`viewerLinkQuery(viewer)` の値をそのまま渡すこと。**
+   * **uid そのものを受け取って中で組み立てない** (2026-09-29)。
+   */
+  linkQuery?: string;
   /** 追加クラス (配置の微調整用)。 */
   class?: string;
 }
-const { u = null, class: extra = '' } = Astro.props as Props;
-const href = u ? `/dashboard?u=${encodeURIComponent(u)}` : '/dashboard';
+const { linkQuery = '', class: extra = '' } = Astro.props as Props;
+const href = `/dashboard${linkQuery}`;
 ---
 
 <a

@@ -6,15 +6,22 @@ import { loadResult } from '../../lib/result-queries';
 import { testTypeLabel, formatJpDate } from '../../lib/dashboard-queries';
 import { renderReportMarkdown } from '../../lib/report-view';
 import { AI_PREVENTION_REPORT_LABEL } from '../../lib/display-names';
-import { resolveViewer } from '../../lib/viewer';
+import { resolveViewer, viewerLinkQuery } from '../../lib/viewer';
+import { noStore } from '../../lib/http-cache';
 
 export const prerender = false;
+
+// Cookie で個人化される SSR ページ: 共有キャッシュに保存させない
+// (他の 8 ページは既に通していて、ここだけ抜けていた・2026-09-29)
+noStore(Astro.response);
 
 const { id } = Astro.params;
 const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
 const u = viewer.uid ?? '';
+/** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
+const linkQuery = viewerLinkQuery(viewer);
 // mode = summary (a) | highlights (b) | full (c)
 const mode = url.searchParams.get('mode') ?? 'summary';
 // PDF deep link target page (a/b の [pN] クリックで mode=full&page=N に遷移してくる)
@@ -30,8 +37,7 @@ const data = hasError ? null : result;
 const tt = data ? testTypeLabel(data.artifact.test_type) : { name: '検査', icon: 'result' as const };
 
 const linkFor = (m: string) => {
-  const qs = new URLSearchParams();
-  if (u) qs.set('u', u);
+  const qs = new URLSearchParams(linkQuery.replace(/^\?/, ''));
   qs.set('mode', m);
   return `?${qs.toString()}`;
 };
@@ -51,8 +57,7 @@ function md(text: string): string {
 const siblings = data?.siblings ?? [];
 const hasPast = siblings.length > 1;
 const siblingHref = (sid: string) => {
-  const qs = new URLSearchParams();
-  if (u) qs.set('u', u);
+  const qs = new URLSearchParams(linkQuery.replace(/^\?/, ''));
   if (mode !== 'summary') qs.set('mode', mode);
   const query = qs.toString();
   return `/result/${sid}${query ? `?${query}` : ''}`;
@@ -69,7 +74,7 @@ const pdfSrcWithPage = data?.samplePdfUrl
       <AppIcon name="watch" size={32} class="text-slate-500" />
       <h1 class="text-lg font-bold">検査結果を読み込めませんでした</h1>
       <p class="text-sm text-red-700">{(result as { error: string }).error}</p>
-      <BackToDashboard u={u} class="mt-3" />
+      <BackToDashboard linkQuery={linkQuery} class="mt-3" />
     </main>
   )}
 
@@ -77,7 +82,7 @@ const pdfSrcWithPage = data?.samplePdfUrl
     <>
       <header class="hero-gradient px-5 pt-6 pb-3">
         <div class="flex items-center justify-between">
-          <BackToDashboard u={u} />
+          <BackToDashboard linkQuery={linkQuery} />
           <p class="text-xs font-medium uppercase tracking-wider text-brand-700/80">RESULT</p>
           <span class="w-10"></span>
         </div>
@@ -222,7 +227,7 @@ const pdfSrcWithPage = data?.samplePdfUrl
           この画面は検査 1 件の原本を見せる場所なので、報告書の本体は /report に置く。
         */}
         <a
-          href={u ? `/report?u=${encodeURIComponent(u)}` : '/report'}
+          href={`/report${linkQuery}`}
           class="flex min-h-touch items-center gap-3 rounded-2xl border border-brand-200 bg-brand-50 px-4 py-3 text-slate-800 transition hover:border-brand-400 hover:bg-brand-100"
         >
           <AppIcon name="report" size={24} class="shrink-0 text-brand-700" />

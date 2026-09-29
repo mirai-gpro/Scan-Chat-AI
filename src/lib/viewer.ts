@@ -227,9 +227,22 @@ export interface Viewer {
    *   剥奪は次のサインイン時に反映される。
    */
   cookieStale: boolean;
+  /**
+   * **`ALLOW_UID_ENTRY=on` で `?u=` から入場した状態か。**
+   *
+   * 【何に使うか】**リンクに `?u=` を引き継ぐかの判定だけ**に使う
+   * (`viewerLinkQuery`)。緊急入場では `impersonating` が false なので
+   * (この経路は admin を与えないため)、それだけを条件にすると**遷移した瞬間に
+   * uid を失って締め出される** = 緊急復旧という目的が果たせない。
+   *
+   * 【使ってはいけないところ】**認証・admin 判定・デモ判定・スペシャル判定には
+   * 一切使わない。** ここを緩めると「URL に uid を書くだけで何かが変わる」経路が
+   * 復活する (2026-08-30 に撤去したもの)。
+   */
+  uidEntry: boolean;
 }
 
-const ANONYMOUS: Viewer = { uid: null, selfUid: null, isAdmin: false, adminBy: null, impersonating: false, cookieStale: false, origin: 'production' };
+const ANONYMOUS: Viewer = { uid: null, selfUid: null, isAdmin: false, adminBy: null, impersonating: false, cookieStale: false, origin: 'production', uidEntry: false };
 
 /**
  * リクエストから閲覧者を解決する。**すべてのユーザー向けページはこれを通すこと。**
@@ -253,7 +266,7 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
        * その一覧は撤去した (admin の正は wellfort-site の管理者リストだけ)。
        * URL に uid を書くだけで admin になれる経路を残さない。
        */
-      return { uid: requested, selfUid: requested, isAdmin: false, adminBy: null, impersonating: false, cookieStale: false, origin: 'production' };
+      return { uid: requested, selfUid: requested, isAdmin: false, adminBy: null, impersonating: false, cookieStale: false, origin: 'production', uidEntry: true };
     }
     return ANONYMOUS;
   }
@@ -269,9 +282,31 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
   const adminBy: Viewer['adminBy'] = verified.admin ? 'cookie' : null;
   const isAdmin = adminBy !== null;
   if (isAdmin && requested && requested !== selfUid) {
-    return { uid: requested, selfUid, isAdmin, adminBy, impersonating: true, cookieStale: verified.legacy || !isAdmin, origin: verified.origin };
+    return { uid: requested, selfUid, isAdmin, adminBy, impersonating: true, cookieStale: verified.legacy || !isAdmin, origin: verified.origin, uidEntry: false };
   }
-  return { uid: selfUid, selfUid, isAdmin, adminBy, impersonating: false, cookieStale: verified.legacy || !isAdmin, origin: verified.origin };
+  return { uid: selfUid, selfUid, isAdmin, adminBy, impersonating: false, cookieStale: verified.legacy || !isAdmin, origin: verified.origin, uidEntry: false };
+}
+
+/**
+ * **リンクに引き継ぐクエリ文字列。** `''` か `'?u=<uid>'`。
+ *
+ * 【なぜ 1 か所に集約するか】以前は各ページ・各コンポーネントが `viewer.uid` から
+ * `?u=${encodeURIComponent(u)}` を組んでいた (実測 10 か所)。`viewer.uid` は
+ * **一般ユーザーでも必ず値が入る**ので、**本人の diagnostic_user_id が常時 URL に
+ * 露出していた**。組み立てを 1 本にすれば「1 か所直し忘れて漏れる」が構造的に消える。
+ *
+ *   一般ユーザー本人 → `''`   (URL に識別子を出さない)
+ *   未サインイン     → `''`
+ *   admin 代理表示   → `'?u=<対象の uid>'`
+ *   緊急 `?u=` 入場  → `'?u=<uid>'`   (`ALLOW_UID_ENTRY=on` の後方互換)
+ *
+ * **返すのは `?` から始まる文字列。** 呼び出し側で `?` を付け直さないこと
+ * (他のクエリと連結するときは `q ? `${q}&` : '?'` の既存パターンを使う)。
+ */
+export function viewerLinkQuery(v: Pick<Viewer, 'uid' | 'impersonating' | 'uidEntry'>): string {
+  if (!v.uid) return '';
+  if (!v.impersonating && !v.uidEntry) return '';
+  return `?u=${encodeURIComponent(v.uid)}`;
 }
 
 /** `?u=` の短縮形（先頭8桁）も従来どおり受ける。 */

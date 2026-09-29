@@ -14,7 +14,7 @@ import { refreshConfig, cfg } from '../lib/app-config';
 import { loadDashboard, getHealthAge, withHonorific, formatJpDate } from '../lib/dashboard-queries';
 import { AI_PREVENTION_REPORT_LABEL } from '../lib/display-names';
 import { WELLNESS_AGE_LABEL } from '../lib/wellness-age';
-import { resolveViewer } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
 import { noStore } from '../lib/http-cache';
 
 /**
@@ -193,9 +193,11 @@ const pageCss = `
 }
 `;
 
+/** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
+const linkQuery = viewerLinkQuery(viewer);
+
 const q = (extra: Record<string, string>) => {
-  const p = new URLSearchParams();
-  if (u) p.set('u', u);
+  const p = new URLSearchParams(linkQuery.replace(/^\?/, ''));
   for (const [k, v] of Object.entries(extra)) p.set(k, v);
   const s = p.toString();
   return s ? `/report?${s}` : '/report';
@@ -250,13 +252,13 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
 */}
 <BaseLayout title={`${AI_PREVENTION_REPORT_LABEL} | Welltect`} width="app">
   {!isPrint && (
-    <AppNav u={u} current="/report" unreadNotices={unreadNotices} supportContact={supportContact} />
+    <AppNav linkQuery={linkQuery} current="/report" unreadNotices={unreadNotices} supportContact={supportContact} />
   )}
 
   {/* 紙に押せないボタンを印字しないので `?print=1` では出さない (spec §4.9 と同じ扱い)。 */}
   {!isPrint && (
     <div class="px-5 pt-4">
-      <BackToDashboard u={u} />
+      <BackToDashboard linkQuery={linkQuery} />
     </div>
   )}
 
@@ -536,7 +538,7 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
         */}
         {!vm.isSample && cancerArtifact && (
           <p class="px-1 text-sm text-slate-600">
-            <a class="font-semibold text-brand-700 underline" href={`/result/${cancerArtifact.id}${u ? `?u=${u}` : ''}`}>
+            <a class="font-semibold text-brand-700 underline" href={`/result/${cancerArtifact.id}${linkQuery}`}>
               がんリスク検査の結果を見る →
             </a>
           </p>

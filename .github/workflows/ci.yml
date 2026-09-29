@@ -96,6 +96,7 @@ jobs:
       # 絞り忘れると差し替え前・取り下げ後の値が画面に混ざるが、**エラーは出ない**。
       - run: npm run verify:measurement-status
       - run: npm run verify:trend-series
+      - run: npm run verify:url-uid-privacy
       - run: npm run verify:blood-csv
       - run: npm run verify:blood-parser
       - run: npm run verify:intake-scope
