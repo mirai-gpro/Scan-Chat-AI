@@ -1,7 +1,24 @@
 # Welltect セキュア共有アクセス ／ Admin 代理表示の UID-less 化 仕様書
 
-**版**: 1.0 (2026-09-30)
+**版**: 1.1 (2026-09-30・レビュー反映)
 **状態**: **仕様のみ。実装は 1 行も行っていない。**
+
+> **v1.1 の変更（レビュー 2026-09-30・7 点）**
+> ① **§13.0 を新設** — 現行の `target="_blank"` による複数タブ運用が Cookie 1 本方式で壊れる
+> （既存機能の退行）。案 A / 案 B を比較し、**案 B（URL path の opaque view-context）を推奨**。
+> あわせて §13.1-13.3 / §23 / §24.1 / §25.1 / 付録 A-B・E を更新。
+> ② **§17.2 を確定** — `kit/self-report` / `notices/read` は **share で BLOCK**。
+> 発注者が許可した更新は AI 問診と AI スキャンだけ。`view` は閲覧のみ。**U18 を確定済みへ**。
+> ③ **§17.5 を新設** — `auth/resolve` / `auth/signout` / `auth/refresh-admin` は **share で BLOCK**。
+> 共有終了は `/share/end` が `welltect_share_v` だけを消す。
+> ④ **§19.5 を新設** — 対象者 profile metadata（`userName` / `dateOfBirth` / `sex`）の
+> サーバ解決を**未確定（旧 U7）から Phase 0 必須へ昇格**。
+> ⑤ **§27.3 を新設** — 「revoke は即時停止」を実コードに合わせて訂正。
+> **発行済みの Gemini Live token（最大 30 分）と S3 presigned PUT（15 分）は失効できない**。
+> ⑥ **§12.3 / §12.6 を統一** — 「アクセスログにも残らない形」を削除し、
+> 「custom log には絶対書かない／アクセスログには残り得る／60 秒・単一使用・no-referrer で限定」へ。
+> ⑦ **§21.4 を新設** — `resolveViewer` も `checkAdminAuth` も通っていない **未認証の AI / S3
+> コスト API 6 本**を実測で特定し、**Phase 0 必須**とした。**「UID を使っていないから安全」としない**。
 **対象リポジトリ**: `mirai-gpro/Scan-Chat-AI`（本体）/ `mirai-gpro/wellfort-site`（admin UI・入口）
 
 **調査開始時点の HEAD（`git ls-remote` による実測）**
@@ -447,7 +464,7 @@ Scan-Chat-AI   GET /admin/handoff/<raw>                     [新設]
 | 有効期間 | **60 秒**（画面を開くまでの時間だけあればよい） |
 | 単一使用 | `update … set consumed_at = now() where id = ? and consumed_at is null` の**更新行数が 1 のときだけ成立** |
 | DB 保存 | **`sha256(raw)` のみ**。raw は保存しない |
-| ログ | **raw をカスタムログへ書かない**。URL path に載るため**アクセスログにも残らない形を選ぶ**（→ §12.6） |
+| ログ | **カスタムアプリケーションログには raw を絶対に記録しない。** ただし **raw は URL path に載るので、Vercel / CDN / プロキシのアクセスログには残り得る**。これは消せないので、**60 秒・単一使用・consumed 後即失効・`Referrer-Policy: no-referrer`** でリスクを限定する（詳細は §12.6） |
 | 権限 | **handoff token を知っているだけで永続 admin 権限にはならない**。得られるのは「その 1 顧客の代理表示セッション」だけ |
 
 ### 12.4 「handoff token を知っていれば代理表示できる」ことの評価
@@ -470,44 +487,136 @@ admin がサポート目的で相手の画面を見るだけなら書き込み�
 > **未確定**: 「admin が代理で問診・スキャンを代行入力したい」という運用要望が出た場合は
 > 別途の裁定が要る（§38-U5）。
 
-### 12.6 raw token を URL path に置くことの扱い
+### 12.6 raw token を URL path に置くことの扱い（**§12.3 のログ欄と同一の記述**）
 
-`GET /admin/handoff/<raw>` は raw token が URL に乗る。
-Vercel のアクセスログ・プロキシ・Referer に残り得る。緩和:
+`GET /admin/handoff/<raw>` は raw token が URL に乗る。**この事実は消せない。**
+「アクセスログにも残らない形にする」とは書かない — **できないことを仕様に書かない**。
 
-- **60 秒・単一使用**なので、ログに残った時点では既に失効している蓋然性が高い
-- 応答は **302 で即座に別 URL へ飛ばす**（画面を描かない＝Referer を作らない）
-- `Referrer-Policy: no-referrer` を付ける（§28）
-- **代案**: `POST /admin/handoff` に raw を body で渡す（自動 POST の中間 HTML が要る）。
-  **推奨は GET + 60 秒 + 単一使用**。中間 HTML は UX を落とし、かつ**それ自体が
-  token を含む HTML になる**ので利点が薄い。
+| | 方針 |
+|---|---|
+| **カスタムアプリケーションログ** | **raw token を絶対に記録しない**（自分たちが書くログは完全に統制できる） |
+| **Vercel / CDN / プロキシのアクセスログ** | **残り得る**。URL path なので不可避。**残る前提で設計する** |
+| 緩和① | **有効期間 60 秒**。ログが読まれる時点ではまず失効している |
+| 緩和② | **単一使用**。`consumed_at` の条件付き UPDATE で、1 度使われたら 2 度目は通らない |
+| 緩和③ | **consumed 後は即失効**。正規の利用者が開いた時点で、ログに残った値は無価値になる |
+| 緩和④ | 応答は **302 で即座に別 URL へ**（画面を描かない＝Referer を作らない） |
+| 緩和⑤ | **`Referrer-Policy: no-referrer`**（§28.2） |
+| 残存リスク | **発行から 60 秒以内に、まだ誰も開いていない状態でアクセスログを読める者**は代理表示に入れる。これは受容する（そのログを読める者は通常インフラ管理者であり、別の経路をすでに持つ） |
+
+**代案の評価**: `POST /admin/handoff` に raw を body で渡す（自動 POST の中間 HTML）。
+**採らない** — UX を落とし、かつ**中間 HTML 自体が token を含む文書**になるので利点が薄い。
+**GET ＋ 60 秒 ＋ 単一使用**を推奨する。
 
 ---
 
 ## 13. Admin Impersonation Session
 
-### 13.1 Cookie
+### 13.0 【最重要・既存機能の退行になる】複数タブ問題
 
-| 項目 | 案 |
+**現行の `?u=` 方式はタブごとに対象を保持している。** リンクは
+`target="_blank"`（`wellfort-site/src/pages/admin/customers.astro:439`）で新しいタブに開き、
+**対象は URL クエリが持つ**ので、A 顧客のタブと B 顧客のタブが**独立して成立する**。
+
+**Cookie 1 本（`welltect_imp_v` / `Path=/`）に target を持たせると、これが壊れる。**
+
+```
+① A 顧客を開く      → Set-Cookie: welltect_imp_v = <session_A>   （target = A）
+② B 顧客を別タブで  → Set-Cookie: welltect_imp_v = <session_B>   （target = B・A を上書き）
+③ A のタブで「報告書」へ遷移
+   → Cookie は session_B  → **B 顧客の報告書が出る**
+```
+
+**admin が「A さんの画面だと思って B さんのデータを見る」**という、
+サポート業務として最悪の種類の事故になる。しかも**画面に UID が出なくなった後なので
+気づきにくい**（現行は URL の `?u=` で分かる）。
+
+> **これは本改修が持ち込む退行であり、許容できない。** 設計で潰す。
+
+#### 案 A — 1 ブラウザ 1 代理対象に制限する
+
+Cookie 1 本のまま。②で B を開いた時点で **A のタブは次の遷移で「代理表示が切り替わりました」と表示して止める**
+（session id をページに埋めて、遷移先で Cookie と突き合わせる）。
+
+| | |
 |---|---|
-| 名前 | `welltect_imp_v` |
-| 値 | **opaque session id**（32byte CSPRNG の base64url）。**target_uid を含めない** |
-| 属性 | `HttpOnly` / `Secure` / `SameSite=Lax` / `Path=/` |
-| 有効期間 | **60 分**（`welltect_v` の 30 日に合わせない） |
+| 利点 | 実装が最小。Cookie 1 本のまま |
+| 欠点 | **現行できていた「2 顧客を並べて見る」ができなくなる＝機能の後退**。`target="_blank"` の導線と噛み合わない（新しいタブで開く UI なのに並べられない） |
+| 誤作動時 | 「切り替わりました」を出せるので**黙って別人を見る事故にはならない**（最低限の安全は確保できる） |
 
-**`welltect_v` とは別 Cookie にする**（P3）。既存の本人セッションを消さないので、
-代理表示を終えれば admin 本人へ即座に戻れる（§22.4）。
+#### 案 B — タブ単位の opaque な view-context（**推奨**）
+
+**URL の path に「どの代理表示か」を示す opaque な ID を置く。** UID は出さない。
+
+```
+/admin-view/<opaque-context>/dashboard
+/admin-view/<opaque-context>/report
+/admin-view/<opaque-context>/trend
+/admin-view/<opaque-context>/result/<artifact_id>
+…
+```
+
+| 項目 | 内容 |
+|---|---|
+| `<opaque-context>` | **32byte CSPRNG の base64url**。**target_uid から導出しない・含まない・推測できない** |
+| 単独では使えない | **`welltect_v`（admin 本人の認証 Cookie）と組み合わせないと解決しない。** context を知っているだけの第三者は 403 |
+| 解決 | `sha256(context)` → `admin_impersonation_sessions` → `{ admin_identity, target_uid, … }`。**`admin_identity` が Cookie の admin 本人と一致することを必ず検証する** |
+| タブ分離 | **path が違えばタブごとに別 context** → A タブは A のまま、B タブは B のまま |
+| Cookie | **`welltect_imp_v` は不要になる**（context が path にあるので Cookie で持たなくてよい）。§23 の Cookie を 1 本減らせる |
+| URL への UID 露出 | **無い**（目的を維持） |
+
+**「URL に識別子を出さない」という目的との整合**: 本改修が消したかったのは
+**`diagnostic_user_id`（対象者を一意に指す、通年不変の、他システムとも突き合わせられる識別子）**であって、
+**「URL に何も書かない」ことではない**。`<opaque-context>` は
+
+- ランダムで target を推測できない
+- **admin 本人の Cookie が無ければ何の権限も生まない**（bearer ではない）
+- セッションの終了・期限切れで無効になる（通年不変ではない）
+
+ので、`?u=<uid>` とは性質が違う。**目的は維持される。**
+
+#### 判断
+
+**案 B を推奨。** 現行の `target="_blank"` による複数タブ運用を壊さず、UID も出さない。
+
+**案 B の追加コスト**: 代理表示中のページ・リンクをすべて `/admin-view/<ctx>/…` 配下で扱う必要がある。
+`viewerLinkQuery()` を置き換える形で **`viewerPathPrefix(viewer)`**（`''` か `/admin-view/<ctx>`）を
+`viewer.ts` に持ち、**リンクの組み立てを引き続き 1 か所に集約する**のが素直
+（`url_uid_privacy_spec_20260929.md` §4.2 と同じ規律）。
+
+> **未確定**: Astro のルーティングで `/admin-view/[ctx]/[...rest]` と既存ページを
+> **二重に書かずに**同居させる方法（rewrite / 共通コンポーネント化 / middleware）。
+> **middleware は §28.3 の方針で避けたい**ので、実装前に方式を 1 つ選ぶ（§38-U20）。
+
+### 13.1 セッションの持ち方（**案 B 採用時 = Cookie を使わない**）
+
+| 項目 | 案 B（推奨） | 案 A（不採用） |
+|---|---|---|
+| 置き場所 | **URL path の `<opaque-context>`** | Cookie `welltect_imp_v` |
+| 値 | 32byte CSPRNG base64url。**target_uid を含めない** | 同左 |
+| 単独での効力 | **無し**（`welltect_v` の admin 本人と一致して初めて成立） | Cookie 単体で成立 |
+| タブ分離 | **できる** | できない（§13.0） |
+| 有効期間 | **60 分**（DB の `expires_at`。`welltect_v` の 30 日に合わせない） | 同左 |
+
+**どちらの案でも `welltect_v` は消さない**（P3）。既存の本人セッションが残るので、
+代理表示を終えれば admin 本人へ即座に戻れる（§13.3）。
 
 ### 13.2 サーバ側の解決
 
 ```
-welltect_imp_v (opaque)
+URL path の <opaque-context>            （案 B）
    → sha256 → diagnosis.admin_impersonation_sessions.session_digest
    → { admin_identity, target_uid, target_origin, expires_at, revoked_at }
+   → **welltect_v の admin 本人 == admin_identity を検証**   ← ここが必須
+   → 不一致 / 期限切れ / revoked / 非 admin  ならすべて 403（理由を区別しない）
 ```
 
-**Cookie に target_uid を入れない理由**: 署名付きなら改竄はできないが、
-**Cookie の中身は本人（および端末を触れる誰か）が読める**。
+**`<opaque-context>` 単体では何の権限も生まない。** bearer token ではなく
+**「admin 本人の認証 Cookie と組み合わせて初めて解決できる参照キー」**である。
+これが handoff token（§12・bearer）との決定的な違いで、
+**URL path に置いても安全**な理由でもある。
+
+**target_uid を Cookie にも URL にも入れない理由**: 署名付きなら改竄はできないが、
+**Cookie も URL も本人（および端末を触れる誰か）が読める**。
 `welltect_v` は自分の uid なので問題にならないが、**代理表示では「他人の uid」を
 admin のブラウザに置くことになる**。URL から消した意味が薄れるので、DB 引きにする。
 
@@ -519,9 +628,13 @@ admin のブラウザに置くことになる**。URL から消した意味が�
 ### 13.3 代理表示の終了
 
 - 画面に **「代理表示を終了する」** を出す（現在そういう導線は無い＝実測）
-- `POST /api/admin/impersonation/end` → session を `revoked_at` で失効 → Cookie 削除 → `/dashboard`
+- `POST /api/admin/impersonation/end`（body に対象 context）→ その session だけを
+  `revoked_at` で失効 → `/dashboard` へ
 - **`welltect_v` は消さない**ので、admin 本人の画面へそのまま戻る
 - セッション期限切れ（60 分）でも同じ状態になる
+- **案 B では「そのタブの代理表示だけ」が終わる。** 他のタブで開いている別顧客の
+  代理表示は生き続ける（§13.0 の目的そのもの）。**「すべての代理表示を終了」も別に用意する**
+  （admin が席を離れるときに 1 操作で全部切れるようにする）
 
 ### 13.4 代理表示中であることの表示
 
@@ -653,11 +766,30 @@ https://scan-chat-ai.vercel.app/share/<opaque-token>
 
 ```ts
 type ShareScope = {
-  view: true;     // dashboard / report / trend / result / kit / notices
+  view: true;          // dashboard / report / trend / result / kit / notices の「閲覧」
   interview: boolean;  // AI 問診（既定 true）
   scan: boolean;       // AI スキャン（既定 true）
 };
 ```
+
+**`view` は閲覧だけを意味する。更新を伴う操作は `interview` / `scan` に限る。**
+
+発注者が明示的に許可した更新は **AI 問診と AI スキャンの 2 つ**であり、
+それ以外の更新は scope に含まれない。したがって
+
+| 操作 | 判定 | 理由 |
+|---|---|---|
+| `POST /api/kit/[id]/self-report`（受取済・返送済の自己申告） | **BLOCK** | **本人の配送状態**を外部共有者が変更してはいけない。キットの受け取りは対象者本人しか知り得ない事実で、外部相手が代わりに申告すると**進捗が実態と食い違い、以後の出荷・検査の段取りが狂う** |
+| `POST /api/notices/[id]/read`（既読化） | **BLOCK** | **本人の既読状態**を外部共有者が変えてはいけない。本人が未読のお知らせが勝手に既読になると、**重要な通知を見落とす** |
+
+**`/kit` と `/notices` のページ閲覧そのものは許可する**（`view`）。
+**画面は見えるが、自己申告ボタンと既読化は効かない**という形にする。
+
+> **UI 上の扱い**: share セッションでは自己申告ボタンを**描かない**
+> （押せるのに 403 が返るのは不親切）。サーバ側は描画に関わらず **403 で拒否する**
+> （UI を消しただけでは API 直叩きを防げない）。
+
+これは §25.2 の Access Matrix と一致させる。**scope に無い更新は既定 BLOCK**、が原則。
 
 | 概念上の値 | share セッション |
 |---|---|
@@ -671,7 +803,7 @@ type ShareScope = {
 
 ### 17.3 許可するもの（発注者要件・§4 原文）
 
-- Dashboard 閲覧 / 検査結果閲覧 / グラフ操作 / AI疾病予防報告書閲覧
+- Dashboard 閲覧 / 検査結果閲覧 / グラフ操作 / AI疾病予防報告書閲覧 / キット進捗の閲覧 / お知らせの閲覧
 - **AI 問診** … 開始・回答・音声入力・テキスト入力・AI 応答・完了・
   **現行 DB 更新 / 完了記録 / S3 出力 / 進捗反映を許可**
 - **AI スキャン** … ファイル選択・解析・結果確認・結果編集・完了・
@@ -684,6 +816,26 @@ type ShareScope = {
 - Wellfort Admin 画面 / Scan-Chat-AI Admin API / 顧客管理 / 管理設定変更 / 権限変更
 - share link の管理 / admin 代理表示の開始 / 他ユーザーへの切替
 - URL・body による target 変更 / 対象外ユーザーのデータ参照・保存
+- **キット受取・返送の自己申告**（`/api/kit/[id]/self-report`・§17.2）
+- **お知らせの既読化**（`/api/notices/[id]/read`・§17.2）
+- **通常本人セッションの発行・削除**（`/api/auth/resolve` / `/api/auth/signout`・§17.5）
+
+### 17.5 共有中に通常本人の認証セッションへ触らせない
+
+**share 利用中に `welltect_v` を発行・削除する必要は無い。**
+
+| API | share での扱い | 理由 |
+|---|---|---|
+| `POST /api/auth/resolve` | **BLOCK** | share セッションから叩かれても意味が無い。**通す理由が無いものは通さない** |
+| `POST /api/auth/signout` | **BLOCK** | **共有相手の操作で、その端末の持ち主（＝別人かもしれない）の本人セッションを消させない** |
+| `POST /api/auth/refresh-admin` | **BLOCK**（従来どおり） | admin フラグの再取得。share には無関係かつ危険 |
+
+**共有の終了は専用の `/share/end` が担う。**
+`/share/end` は **`welltect_share_v` だけを失効・削除し、背後の `welltect_v` には一切触れない。**
+
+> 共有相手の端末にたまたま別人の `welltect_v` が残っている状況
+> （共有オフィス PC・家族の端末）を想定している。**共有セッションの操作が
+> 本人セッションを壊さない**ことを構造で保証する。
 
 ---
 
@@ -775,10 +927,38 @@ src/scripts/chat/live-controller.ts
 
 **これで share でも self でも同じコードが走り、target だけが resolver で決まる。**
 
-> **注意**: `userName` / `dateOfBirth` / `sex` は現在 `userProfile`（クライアント）から送っている
-> （`live-controller.ts:1441-1443`）。これらは**年齢算出にしか使わず保存しない**と
-> `api/interview/export.ts:106` にあるが、**share では対象者の生年月日をクライアントが持つ**ことになる。
-> サーバ側 resolver から取り直すべき（§38-U7）。
+### 19.5 【Phase 0 必須】対象者の profile metadata もクライアントから信用しない
+
+**未確定事項から昇格（レビュー 2026-09-30）。外部共有の公開前に必須。**
+
+現在 `userName` / `dateOfBirth` / `sex` は**クライアントの `userProfile` から送られている**
+（`live-controller.ts:1441-1443` → `api/interview/export.ts:104-107`）。
+`:106` に「年齢算出のみ (保存しない)」とあるが、**これは「DB に保存しない」という意味であって、
+出力に影響しないという意味ではない**。
+
+| 値 | 流れ込む先 | 影響 |
+|---|---|---|
+| `dateOfBirth` | `buildElithInterviewJson()` の年齢算出 → **`LifestyleQuestionnaireData` の JSON 内容** | Elith の AI 診断入力が変わる |
+| `sex` | 同上 | 同上 |
+| `userName` | 同上 | 納品 JSON に載る |
+
+→ **UID だけを Target Lock しても不十分。** `clientId` / `diagnosticUserId` と同じく、
+**対象者の profile metadata を改竄すれば、対象者本人の正式な AI 入力を汚染できる。**
+
+**方針（share / self とも共通）**
+
+1. **クライアントから送られた `userName` / `dateOfBirth` / `sex` を採用しない。**
+   受け取っても捨てる（互換のため受理はしてよいが、値は使わない）。
+2. **サーバ側 target resolver が確定した target_uid から取り直す。**
+   取得元は既存の経路を使う:
+   - `customer_profiles`（`lib/elith-delivery.ts:78` が既に引いている）
+   - スペシャルアカウントの登録 DOB（`specialSubjectByUid`・CLAUDE.md「スペシャルアカウント」）
+   - `test_artifacts.age_at_test` / `sex`（`elith-delivery.ts:223`）
+3. **取れなければ「不明」として出す。クライアントの値で埋めない**（捏造ゼロ）。
+4. `chat.astro` / `live-controller.ts` から profile の埋め込みと送信を撤去する。
+
+> **`buildUserContextForChat` / `getCustomerProfile` も同じ扱い**（§11-#2）。
+> これらは PII（`customer` スキーマ）を読むので、**target がサーバ側で確定してから呼ぶ**。
 
 ---
 
@@ -863,6 +1043,46 @@ share セッションから叩かれたときに何を返すかを決める必�
 `api/kit/[id]/self-report.ts` / `api/notices/[id]/read.ts` は
 **現在 `resolveViewer` を import していない**（実測）。全部通す。
 
+### 21.4 【Phase 0 必須】**誰でも叩ける AI / S3 コスト API**（target UID とは別問題）
+
+**実測（`grep -c` で確認）**: 以下 6 本は `resolveViewer` も `checkAdminAuth` も
+`cookies` も**一切参照していない＝完全に未認証で叩ける**。
+
+| API | 未認証で起きること | コスト要因 | 既存の歯止め | 根拠 |
+|---|---|---|---|---|
+| **`POST /api/scan`** | **任意の画像を Gemini へ投げられる**（本アプリで最も高価な呼び出し。画像 1 枚 = 数十秒） | Gemini（`readScanPage`） | **無い**（body サイズは Vercel の 4.5MB だけ） | `api/scan.ts:38-54`、`resolveViewer` 0 件 |
+| **`POST /api/scan/upload-ticket`** | **S3 への presigned PUT を無制限に発行できる**（1 件 10MB まで・15 分有効） | S3 書き込み・ストレージ | `MAX_SCAN_UPLOAD_BYTES`（1 件あたりのサイズのみ。**発行回数の制限は無い**） | `scan/upload-ticket.ts:32`、`lib/scan-upload-ticket.ts:44,109` |
+| **`POST /api/interview/classify-voice`** | Gemini を叩ける | Gemini | 入力長のみ（`MAX_TRANSCRIPT=200` / `MAX_OPTIONS=40`・`:29-39`） | `interview/classify-voice.ts` |
+| **`POST /api/insight`** | Gemini を叩ける ＋ **body の uid で他人の文脈を読める**（§11-#3） | Gemini | 無い | `insight.ts:30,42,68` |
+| **`POST /api/coach/ask`** | 同上（§11-#4） | Gemini | 無い | `coach/ask.ts:83,94,114` |
+| **`POST /api/live-token`** | **Gemini Live の ephemeral token を発行できる**（30 分・§27.3）＋ 他人の文脈（§11-#2） | Gemini Live | 無い | `live-token.ts:24-46` |
+
+**「UID を使っていないから安全」とは判断しない。** `/api/scan` と
+`/api/scan/upload-ticket` は **UID を一切扱わない**が、
+**課金とストレージを他人に使わせる経路**として最も露出が大きい。
+
+#### 方針
+
+**外部共有の公開前に、この 6 本へ「正規の viewer / session のいずれかを要求する」を入れる。**
+
+```
+許可する主体 = kind ∈ { 'self', 'admin_self', 'admin_impersonation', 'share', 'uid_entry' }
+拒否         = kind === 'anonymous'  → 401
+```
+
+- **share セッションも正規の主体として通す**（共有相手はスキャン・問診を使うので）
+- `/api/scan` と `/api/scan/upload-ticket` は **target を持たない**（読むだけ・キーはサーバ採番）
+  ので、**target lock は不要。要求するのは「正規の主体であること」だけ**
+- `upload-ticket` には**追加でレート制限**（viewer あたりの発行数／時間）を検討する。
+  認証を付けても、正規利用者 1 人が無制限に発行できる状態は残る
+
+> **未確定**: 未認証を塞ぐと**サインイン前のお試し利用**が壊れないか。
+> 現状 `/scan` `/chat` `/coach` はいずれも `resolveViewer` を通し、
+> **未サインインではサインインゲートを出す**（`coach.astro:79` など）ので、
+> **正規の画面からは未認証でこれらの API を呼ばない**と読める。ただし
+> **実測で確認していない**ので、実装時に「未サインインで `/scan` を開いて
+> 撮影できてしまう経路が無いか」を確かめる（§38-U21）。
+
 ---
 
 ## 22. DB Schema（案）
@@ -942,7 +1162,7 @@ pending セッションは `consented_at is null` の行として同じ表に置
 | Cookie | 発行 | 内容 | 期限 | 目的 |
 |---|---|---|---|---|
 | `welltect_v` | `/api/auth/resolve` | 署名付き `uid.exp.admin[.s].sig` | 30 日 | **本人**（既存・変更しない） |
-| `welltect_imp_v` | `/admin/handoff/<token>` | **opaque** | 60 分 | admin 代理表示 |
+| ~~`welltect_imp_v`~~ | — | — | — | **案 B 採用により不要**（§13.0）。代理表示の状態は **URL path の `<opaque-context>`** が持つ。案 A を採る場合のみ復活する |
 | `welltect_share_pending` | `/share/<token>` | **opaque** | 10 分 | 同意前 |
 | `welltect_share_v` | `POST /share/consent` | **opaque** | link 期限以内 | 外部共有 |
 | `welltect_share_viewer` | 初回共有アクセス | ランダム ID | 長め（1 年） | **匿名 viewer の相関のみ**（§31） |
@@ -959,14 +1179,21 @@ pending セッションは `consented_at is null` の行として同じ表に置
 ### 24.1 順序（案）
 
 ```
-1. welltect_share_v   が有効        → kind='share'                  （最優先）
-2. welltect_imp_v     が有効        → kind='admin_impersonation'
+1. URL が /admin-view/<ctx>/…  かつ welltect_v が admin 本人 かつ ctx が有効
+                                    → kind='admin_impersonation'   （最優先・§13.0 案 B）
+                                       ※ ctx が無効/不一致なら **403**。他の kind へ落とさない
+2. welltect_share_v   が有効        → kind='share'
 3. welltect_v         が有効 かつ ?u= かつ isAdmin
                                     → kind='admin_impersonation'（旧方式・§30 の移行期間のみ）
 4. welltect_v         が有効        → kind='self' / 'admin_self'
 5. ALLOW_UID_ENTRY=on かつ ?u=      → kind='uid_entry'
 6. それ以外                          → kind='anonymous'
 ```
+
+**1 を 2 より先に置き、しかも「失敗したら 403」にする理由**: 代理表示は
+**URL が明示している**ので、解決に失敗したときに黙って別の主体（share や self）へ
+落とすと、**admin が「A さんの画面のつもりで自分の画面を見る」**ことになる。
+**URL が名指ししたものが出せないなら、何も出さない。**
 
 ### 24.2 share を最優先にする理由
 
@@ -978,15 +1205,49 @@ pending セッションは `consented_at is null` の行として同じ表に置
 
 ### 24.3 元のセッションを消さない
 
-`welltect_v` は**削除しない**。share / impersonation は別 Cookie なので、
+`welltect_v` は**削除しない**。share は別 Cookie、代理表示は URL path（案 B）なので、
 終了すれば元の状態へ戻る。
 
 | 操作 | 結果 |
 |---|---|
-| 共有を終了（`POST /share/end` または期限切れ） | `welltect_share_v` を失効・削除 → 4 へ落ちる |
-| 代理表示を終了 | `welltect_imp_v` を失効・削除 → 4 へ落ちる（admin 本人） |
+| 共有を終了（`POST /share/end` または期限切れ） | **`welltect_share_v` だけ**を失効・削除 → 4 へ落ちる。**`welltect_v` には触れない**（§17.5） |
+| 代理表示を終了 | その context の session を失効 → 通常の `/dashboard` へ（admin 本人） |
 
-### 24.4 admin が共有 URL を開いたら
+### 24.4 【明文化】share Cookie が残ったまま通常 `/dashboard` を開いたとき
+
+**§13.0 と同じ「混線」が share 側にも起こり得る。** 明文化しておく。
+
+想定: 共有相手が Welltect の顧客でもあり、`welltect_v` と `welltect_share_v` を
+同時に持っている状態で、**マイページ等から素の `/dashboard` を開く**。
+
+**採る挙動 — 「share が続いている」ことを見せた上で、本人へ戻る手段を必ず出す。**
+
+```
+/dashboard を開く
+  → welltect_share_v が有効 → kind='share'（§24.1 の順序 1 が勝つ）
+  → 画面上部に常設の帯:
+       「<ラベル> の共有ページを表示しています   ［ 共有を終了して自分の画面へ ］」
+  → ボタン = POST /share/end → welltect_share_v だけ失効 → /dashboard へ戻る
+       → welltect_v が残っているので **本人の画面が出る**
+```
+
+| 案 | 内容 | 判断 |
+|---|---|---|
+| **採用** | **share を勝たせる ＋ 常設の帯で状態を明示 ＋ 1 タップで終了できる** | 「URL を開くだけ」の約束を守りつつ、**黙って別人のデータを見ている状態を作らない** |
+| 不採用 | `welltect_v` を優先する | **共有 URL を開いたのに自分の画面が出る**。「URL を開くだけ」が成立しない |
+| 不採用 | 両方あるときはエラーにする | 共有相手を行き止まりにする。**UX 要件（§37）に反する** |
+| 不採用 | share 開始時に `welltect_v` を消す | **他人のセッションを勝手に壊す**（§17.5） |
+
+**帯は share セッション中の全ページに常設する**（`/dashboard` だけでなく
+`/report` `/trend` `/result` `/chat` `/scan` `/kit` `/notices` すべて）。
+代理表示の帯（§13.4）と同じ仕組みで出す。
+
+> **admin 代理表示との対称性**: 代理表示は**案 B（URL path）でタブ単位に分離**するので
+> この混線は起きない。share は Cookie なので**分離できず**、代わりに**常時の可視化と
+> 1 タップの終了**で担保する。**share を URL path 方式にしない理由**は、
+> 共有相手に渡す URL は `/share/<token>` の 1 本だけにしたい（UX 要件）ため。
+
+### 24.5 admin が共有 URL を開いたら
 
 **share が勝つ**（順序 1）。ただし `isAdmin = false` として扱うので、
 **admin 権限は共有セッション中は使えない**。admin 作業へ戻るには共有を終了する。
@@ -1011,45 +1272,55 @@ pending セッションは `consented_at is null` の行として同じ表に置
 | `/report` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 読み取りのみ | `report.astro:50` |
 | `/trend` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 読み取りのみ | `trend.astro:42` |
 | `/result/[id]` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 原本の署名 URL 発行 | `result/[id].astro:22`、所有者検証は `result-queries.ts` |
-| `/kit` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 読み取り＋自己申告ボタン | `kit.astro:41, 226` |
+| `/kit` | ALLOW | ALLOW | **ALLOW+LOCK**（**閲覧のみ。自己申告ボタンは描かない**・§17.2） | ✔ | 読み取り | `kit.astro:41, 226` |
 | `/scan` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | **DB/S3 書き込みへ繋がる** | `scan.astro:39-60` |
 | `/chat` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | **DB/S3 書き込みへ繋がる** | `chat.astro:15-16` |
 | `/coach` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 読み取り＋Gemini | `coach.astro:37` |
-| `/notices` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 既読化 | `notices.astro:21` |
-| `/share/<token>` | — | — | 入口 | — | pending 発行 | 新設 |
-| `/share/consent` | — | — | ALLOW | — | share session 発行 | 新設 |
-| `/admin/handoff/<token>` | — | 入口 | **BLOCK** | — | imp session 発行 | 新設 |
+| `/notices` | ALLOW | ALLOW | **ALLOW+LOCK**（**閲覧のみ。既読化は効かない**・§17.2） | ✔ | 読み取り | `notices.astro:21` |
+| `/share/<token>` | — | — | 入口 | — | pending 発行 | 新設・§16 |
+| `/share/consent` | — | — | ALLOW | — | share session 発行 | 新設・§17 |
+| `/share/unavailable` | — | — | ALLOW | — | 無し（理由を区別しない） | 新設・§16.3 |
+| `/admin/handoff/<token>` | — | 入口（**bearer・60 秒・単一使用**） | **BLOCK** | — | imp session 発行 → 302 | 新設・§12 |
+| **`/admin-view/<ctx>/…`** | — | **代理表示中の全ページ（案 B・§13.0）** | **BLOCK** | ✔ | 各ページと同じ。**`welltect_v` の admin 本人と `admin_identity` の一致を必ず検証** | 新設・§13.0 |
 | `/admin/**`（Scan-Chat-AI） | admin のみ | admin のみ | **BLOCK** | — | | `src/pages/admin/**` |
 
 ### 25.2 API
 
 | Route | Self | Admin 代理 | Share | Target Lock | 副作用（最終的にどこへ書くか） | 根拠 |
 |---|---|---|---|---|---|---|
-| `POST /api/auth/resolve` | ALLOW | ALLOW | ALLOW | — | `diagnosis.app_users` upsert・`welltect_v` 発行 | `auth/resolve.ts` |
+| `POST /api/auth/resolve` | ALLOW | ALLOW | **BLOCK**（§17.5） | — | `diagnosis.app_users` upsert・`welltect_v` 発行 | `auth/resolve.ts` |
 | `POST /api/auth/refresh-admin` | ALLOW | ALLOW | **BLOCK** | — | `welltect_v` 再発行 | `auth/refresh-admin.ts` |
-| `POST /api/auth/signout` | ALLOW | ALLOW | ALLOW | — | Cookie 削除 | `auth/signout.ts` |
-| `POST /api/scan` | ALLOW | ALLOW | **ALLOW** | — | **書かない**（Gemini 読み取りのみ） | `api/scan.ts:38-54` |
-| `POST /api/scan/upload-ticket` | ALLOW | ALLOW | **ALLOW** | — | S3 presigned PUT（キーはサーバ採番） | `scan/upload-ticket.ts:32` |
+| `POST /api/auth/signout` | ALLOW | ALLOW | **BLOCK**（§17.5） | — | Cookie 削除。**共有相手に本人セッションを消させない** | `auth/signout.ts` |
+| `POST /share/end` | — | — | **ALLOW** | — | `welltect_share_v` **だけ**失効。`welltect_v` に触れない | 新設・§17.5 |
+| `POST /api/scan` | **要 viewer**（§21.4） | 同左 | **ALLOW**（§21.4） | — | **書かない**（Gemini 読み取りのみ）。**現在は未認証で叩ける** | `api/scan.ts:38-54`・`resolveViewer` 0 件 |
+| `POST /api/scan/upload-ticket` | **要 viewer**（§21.4） | 同左 | **ALLOW**（§21.4） | — | S3 presigned PUT（キーはサーバ採番・15 分）。**現在は未認証で叩ける** | `scan/upload-ticket.ts:32`・`lib/scan-upload-ticket.ts:47` |
 | `POST /api/scan/save` | ALLOW | **BLOCK**(§12.5) | **ALLOW+LOCK** | ✔ | `test_artifacts` insert ＋ `measurement_values` | `scan/save.ts:36` → `scan-persist.ts:103,138` |
 | `POST /api/scan/jobs` | ALLOW | **BLOCK** | **ALLOW+LOCK** | ✔ | `scan_jobs` insert → worker が上と同じ書き込み | `scan/jobs.ts:39` |
 | `POST /api/scan/export` | ALLOW | **BLOCK** | **ALLOW+LOCK** | ✔ | S3 `{prefix}{diagnosticId}/` | `scan/export.ts:56` → `scan-export.ts:272` |
-| `POST /api/interview/classify-voice` | ALLOW | ALLOW | **ALLOW** | — | **書かない** | `interview/classify-voice.ts` |
-| `POST /api/interview/export` | ALLOW | **BLOCK** | **ALLOW+LOCK** | ✔ | `interview_completions` insert ＋ S3 `user/{client_id}/…` | `interview/export.ts:92,101` → `interview-export.ts:281` |
-| `POST /api/live-token` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 書かない。**customer(PII) を読む** | `live-token.ts:26-46` |
-| `POST /api/insight` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 書かない | `insight.ts:30,42` |
-| `POST /api/coach/ask` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 書かない | `coach/ask.ts:83,94` |
-| `POST /api/kit/[id]/self-report` | ALLOW | **BLOCK** | **ALLOW+LOCK** | ✔ | `kit_shipments` 更新 | `kit/[id]/self-report.ts:24-60` |
-| `POST /api/notices/[id]/read` | ALLOW | **BLOCK** | **ALLOW+LOCK** | ✔ | `user_notices` 更新 | `notices/[id]/read.ts:24-44` |
+| `POST /api/interview/classify-voice` | **要 viewer**（§21.4） | 同左 | **ALLOW** | — | **書かない**。**現在は未認証で叩ける** | `interview/classify-voice.ts:29-39`・`resolveViewer` 0 件 |
+| `POST /api/interview/export` | ALLOW | **BLOCK** | **ALLOW+LOCK**（scope.interview） | ✔ | `interview_completions` insert ＋ S3 `user/{client_id}/…`。**profile metadata もサーバ解決**（§19.5） | `interview/export.ts:92,101` → `interview-export.ts:281` |
+| `POST /api/live-token` | ALLOW | ALLOW | **ALLOW+LOCK**（scope.interview） | ✔ | 書かない。**customer(PII) を読む** ＋ **30 分有効の Gemini Live token を発行**（§27.3） | `live-token.ts:26-46`、TTL は `:39-40` |
+| `POST /api/insight` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 書かない。**現在は未認証で叩ける** | `insight.ts:30,42,68` |
+| `POST /api/coach/ask` | ALLOW | ALLOW | **ALLOW+LOCK** | ✔ | 書かない。**現在は未認証で叩ける** | `coach/ask.ts:83,94,114` |
+| `POST /api/kit/[id]/self-report` | ALLOW | **BLOCK** | **BLOCK**（§17.2） | — | `kit_shipments` 更新。**本人の配送状態を外部共有者が変えない** | `kit/[id]/self-report.ts:24-60` |
+| `POST /api/notices/[id]/read` | ALLOW | **BLOCK** | **BLOCK**（§17.2） | — | `user_notices` 更新。**本人の既読状態を外部共有者が変えない** | `notices/[id]/read.ts:24-44` |
 | `GET /api/debug/viewer` | token 必須 | token 必須 | **BLOCK**(要裁定 §38-U8) | — | 読み取り | `debug/viewer.ts:48` |
 | `**/api/admin/**`（28 本） | **BLOCK** | **BLOCK** | **BLOCK** | — | | `api-auth.ts checkAdminAuth` |
 | `**/api/cron/**`（3 本） | **BLOCK** | **BLOCK** | **BLOCK** | — | | `CRON_SECRET` |
 | `**/api/ops/**`（4 本） | **BLOCK** | **BLOCK** | **BLOCK** | — | | `PROBE_UPLOAD_TOKEN` |
 
 > **「一般ユーザーが使えるから Share も OK」で決めていない**箇所:
-> `auth/refresh-admin`（admin フラグの再取得なので share では意味が無く、かつ危険）、
-> `debug/viewer`（viewer 構造をそのまま返す）、
-> `scan/save` `scan/jobs` `scan/export` `interview/export` `kit/self-report` `notices/read`
-> （**副作用があるので target lock が必須**）。
+>
+> - `auth/resolve` `auth/signout` `auth/refresh-admin` … **share では BLOCK**（§17.5）。
+>   共有相手の操作で端末の持ち主の本人セッションを作らせない／消させない
+> - `debug/viewer` … viewer 構造をそのまま返すので **BLOCK**
+> - **`kit/self-report` `notices/read` … share では BLOCK**（§17.2）。
+>   発注者が許可した更新は **AI 問診と AI スキャンだけ**。
+>   ページ閲覧は許可するが、**本人の配送状態・既読状態は変えさせない**
+> - `scan/save` `scan/jobs` `scan/export` `interview/export` …
+>   **副作用があるので target lock が必須**
+> - `scan` `scan/upload-ticket` `classify-voice` …
+>   **UID を扱わないが未認証で叩ける**ので、**正規 viewer を要求する**（§21.4）
 
 ---
 
@@ -1102,12 +1373,59 @@ share session 有効
 
 | 操作 | 効果 |
 |---|---|
-| `pause` | `status='paused'`。**既存セッションも次のリクエストから不可**。`resume` で戻る |
-| `revoke` | `status='revoked'`。不可逆。既存セッションも即不可 |
+| `pause` | `status='paused'`。**Welltect サーバへの次のリクエストから不可**。`resume` で戻る |
+| `revoke` | `status='revoked'`。不可逆。**Welltect サーバへの次のリクエストから不可** |
 | `regenerate`（URL 再発行） | **新 token を発行し、旧 `token_hash` を失効。旧 token の全セッションも失効** |
 | 期限到来 | 何もしなくても不可になる |
 
-### 27.3 admin impersonation
+### 27.3 【正確な記述】revoke は「即時停止」ではない — 発行済みの第三者 credential は残る
+
+**「revoke 後は即時停止」と単純に書いてはいけない。** 実コードを見ると、
+Welltect が**第三者サービス向けに発行した credential** は、revoke しても**こちらから失効させられない**。
+
+| credential | 発行元 | 最大有効期間（実測） | revoke の効き方 | 根拠 |
+|---|---|---|---|---|
+| **Gemini Live の ephemeral token** | `POST /api/live-token` | **セッション 30 分**（`expireTime = now + 30*60*1000`）。新規セッション開始は 60 秒以内・1 回限り | **効かない。** Google 側が持つ token なので Welltect からは失効させられない | `api/live-token.ts:11, 39-40` |
+| **S3 の presigned PUT URL** | `POST /api/scan/upload-ticket` | **15 分**（`PRESIGN_EXPIRES_SEC = 900`） | **効かない。** 署名済み URL は S3 が検証するので、Welltect のセッション状態と無関係 | `lib/scan-upload-ticket.ts:47, 135` |
+
+#### 正確な仕様
+
+```
+revoke / pause / 期限到来 の効果:
+
+  ○ Welltect サーバへの次のリクエスト     → 即時に拒否される
+  ○ 以後の新しい credential の発行        → 起きない
+  ✕ 既に発行済みの Gemini Live token      → 最大 30 分、相手の手元で使える
+  ✕ 既に発行済みの S3 presigned PUT       → 最大 15 分、相手の手元で使える
+```
+
+**最大残存時間 = 30 分**（Live token）。
+
+#### 各々の実害
+
+| credential | 残存中にできること | 実害の評価 |
+|---|---|---|
+| Gemini Live token | **その Live セッションを継続できる**（会話を続けられる） | 中。**セッション開始時に渡した文脈しか持たない**ので、新しいデータは読めない。ただし **Gemini の課金は続く** |
+| S3 presigned PUT | **その 1 キーへ 1 ファイル PUT できる**（`Content-Type` と `ContentLength` が署名に固定・`scan-upload-ticket.ts:135`） | 低。**キーはサーバ採番の UUID** で `{prefix}scan-uploads/YYYY/MM/DD/<uuid>.<ext>` に限定。かつ **Welltect 側が読み出すには `/api/scan` を叩く必要があり、そちらは revoke 済みで通らない**。置かれたファイルはライフサイクルで 1 日後に消える |
+
+#### Share mode で TTL を短縮するか
+
+| 案 | 内容 | 評価 |
+|---|---|---|
+| **A（推奨）** | **share セッションでは Live token の `expireTime` を短くする**（例 10 分）。`api/live-token.ts:39` は固定値なので、viewer の kind で分岐できる | 残存 30 分 → 10 分。**問診 1 セクションは 10 分あれば終わる**見込みだが**未計測**（§38-U22） |
+| **B** | presigned PUT も share では短縮（例 300 秒） | 効果は小さい（実害が低いため）。**大きなファイルのアップロードが 5 分で切れる**リスクがあるので、**採らない**か、`bytes` から必要時間を見積もる |
+| **C** | 何もしない | 最大残存 30 分を受容し、**運用の説明に含める** |
+
+**推奨 = A のみ実施し、B は採らない。**
+そのうえで **C の説明責任を果たす**（admin 画面の revoke ボタン付近に
+「すでに開始されている AI 問診は最大 N 分継続する場合があります」と明記する）。
+
+#### 受入テストへの反映
+
+§34.1 に **S27 / S28** を追加（revoke 後に Welltect API が即拒否されること／
+発行済み credential の残存が仕様どおり最大 TTL で切れること）。
+
+### 27.4 admin impersonation
 
 - セッション **60 分**。`welltect_v` の 30 日に合わせない
 - handoff token は **60 秒・単一使用**
@@ -1218,12 +1536,19 @@ link を発行するとき（admin が顧客を選ぶとき）にしか分から
 | 6 | **share session の盗用** | `HttpOnly` / `Secure` / `SameSite=Lax`。期限を短く。**IP や UA の変化で即切らない**（モバイル回線で誤爆する）が、ログには残す |
 | 7 | **impersonation session の盗用** | 同上 ＋ 60 分 |
 | 8 | **revoke 後に既存セッションが生き残る** | **毎リクエストで link 側を見る**（§27.1）。セッション単体の期限に依存しない |
+| **8-1** | **revoke 後も発行済みの第三者 credential が使える** — Gemini Live token **最大 30 分**（`live-token.ts:39`）／S3 presigned PUT **15 分**（`scan-upload-ticket.ts:47`） | **こちらから失効できない。** share では Live token の TTL を短縮（§27.3-A）。実害は限定的（Live は既存文脈のみ・S3 は採番済み 1 キーへの PUT のみで読み出しは revoke 済み API が要る）。**最大残存 30 分を運用文言に明記する** |
+| **8-2** | **admin の複数タブで対象が混線する** — Cookie 1 本だと A タブが B 顧客に化ける | **URL path の opaque view-context でタブ単位に分離**（§13.0 案 B）。context は admin 本人の Cookie と組み合わせないと解決しない |
+| **8-3** | **share Cookie が残ったまま本人が自分の画面を開く** | share を優先しつつ**常設の帯で状態を明示し、1 タップで終了できる**（§24.4）。**黙って別人のデータを見せない** |
 | 9 | **非 admin が handoff を取得** | 発行は `verifyAdmin`（Supabase token → `admin_users` 在籍）を通った人だけ。上流は `ADMIN_API_KEY` |
 | 10 | **target UID 差し替え（`?u=`）** | share / 新 impersonation では **`?u=` を読まない**。読み取りは `viewer.ts:257` の 1 か所のみなので、そこで kind を見て無視する |
 | 11 | **target UID 差し替え（`body.diagnosticUserId`）** | 全 API を `resolveViewer` 経由へ（§21.3）。body の値は**捨てる**。差異を検知したら `target_tamper_attempt` をログ |
 | 12 | **artifact_id 直接指定** | `result-queries.ts` の所有者検証（`id` ＋ `diagnostic_user_id` の 2 条件）に `viewer.uid` = target を渡す。**share 専用の例外を作らない**（§24） |
 | 13 | **他人の Elith 納品フォルダへの書き込み** | §11-#1。`client_id` を **`viewer.writeTargetUid` から組む**。**これは現行の穴で、共有の有無に関わらず塞ぐ** |
 | 14 | **Admin API 直接呼出し** | Bearer `ADMIN_API_KEY` が必要。share Cookie では通らない（**現状で既に閉じている**） |
+| **14-1** | **未認証の AI / S3 コスト悪用** — `/api/scan`（Gemini・任意画像）／`/api/scan/upload-ticket`（S3 presigned PUT・10MB・回数無制限）／`/api/interview/classify-voice`・`/api/insight`・`/api/coach/ask`・`/api/live-token`（Gemini）が **`resolveViewer` も `checkAdminAuth` も `cookies` も参照していない＝完全に未認証**（実測） | **Phase 0 で正規 viewer を要求する**（§21.4）。`kind === 'anonymous'` を 401。`upload-ticket` には**追加でレート制限**。**「UID を使っていないから安全」と判断しない** |
+| **14-2** | **対象者 profile metadata の改竄** — `userName` / `dateOfBirth` / `sex` がクライアント送付で、Elith 納品 JSON の内容へ流れ込む | **Phase 0 でサーバ側 target resolver から取り直す**（§19.5）。**UID だけの Target Lock では不十分** |
+| **14-3** | **共有相手が本人の配送状態・既読状態を変える** | `kit/self-report` / `notices/read` を **share で BLOCK**（§17.2）。UI からも消すが、**サーバ側で 403 にする**のが本体 |
+| **14-4** | **共有相手が端末の持ち主の本人セッションを消す／作る** | `auth/resolve` / `auth/signout` / `auth/refresh-admin` を **share で BLOCK**（§17.5）。共有終了は `/share/end` が `welltect_share_v` だけを消す |
 | 15 | **raw token の logging** | DB は hash のみ。**カスタムログへ raw を書かない**。`/share/<token>` は即 302（§28.2 の `Referrer-Policy`） |
 | 16 | **cache leakage** | 全ページ `private, no-store`（§28.1） |
 | 17 | **Referer** | `Referrer-Policy: no-referrer`（最低でも token を含む 2 route） |
@@ -1320,6 +1645,10 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 | A6 | expired handoff を拒否 |
 | A7 | 代理表示を終了でき、admin 本人へ戻る |
 | A8 | `?u=<別UID>` で target が変わらない |
+| **A9** | **複数タブが混線しない**（§13.0）: A 顧客のタブと B 顧客のタブを開き、**A のタブで遷移しても A のまま**であること |
+| **A10** | **`<opaque-context>` 単体では使えない**: admin の `welltect_v` を外して同じ URL を叩くと 403。**別の admin の Cookie でも 403**（`admin_identity` 不一致） |
+| **A11** | **`/admin-view/<ctx>/…` の URL に target UID が出ない** |
+| **A12** | **1 タブだけ終了しても他タブの代理表示が生きている**／「すべて終了」で全部切れる |
 
 **External Share（S1〜S26・発注者要件）**
 
@@ -1347,6 +1676,13 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 | S24 | **raw token がカスタムログに出ない** |
 | S25 | 全ページが `private, no-store` |
 | S26 | **通常本人の Google ログインに回帰が無い** |
+| **S27** | **revoke 直後、Welltect の API が即時に拒否する**（`/api/scan/save` `/api/interview/export` `/api/live-token` ほか） |
+| **S28** | **revoke しても発行済みの Gemini Live token / S3 presigned PUT は最大 TTL まで残る**ことを**仕様として確認する**（§27.3）。share の Live token TTL が短縮されていること（§27.3-A 採用時） |
+| **S29** | **`kit/self-report` が share で 403**（UI を消しただけでなく API 直叩きでも拒否） |
+| **S30** | **`notices/read` が share で 403** |
+| **S31** | **`auth/resolve` / `auth/signout` / `auth/refresh-admin` が share で 403**。`/share/end` の後も `welltect_v` が残っている |
+| **S32** | **share セッション中の全ページに「共有ページを表示中／終了」の帯が出る**（§24.4） |
+| **S33** | **`userName` / `dateOfBirth` / `sex` を body で改竄しても、納品 JSON がサーバ解決値になる**（§19.5） |
 
 **Cross Mode（C1〜C4）**
 
@@ -1366,6 +1702,9 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 | W3 | `kind='share'` では `writeTargetUid === targetUid` |
 | W4 | **`viewer.selfUid` を直接読む書き込み API が 0 件**（ソース検査） |
 | W5 | **`body.diagnosticUserId` を認可根拠に使う箇所が 0 件**（ソース検査・§11 の 7 件が消えたこと） |
+| **W6** | **`userName` / `dateOfBirth` / `sex` をクライアントから採用している箇所が 0 件**（ソース検査・§19.5） |
+| **W7** | **`resolveViewer` を通っていない一般 API が 0 件**（ソース検査。§21.4 の 6 本を含む） |
+| **W8** | **`kind === 'anonymous'` で `/api/scan` `/api/scan/upload-ticket` `/api/interview/classify-voice` が 401**（§21.4） |
 
 ### 34.2 退行注入（検査が本当に落ちるか）
 
@@ -1378,6 +1717,13 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 7. precedence を「`welltect_v` が先」に変える → **C1 / C2 が落ちる**
 8. `writeTargetUid` を `viewer.uid` 固定にする → **W2 が落ちる**（代理表示で書けてしまう）
 9. `noStore()` を外す → **S25 が落ちる**
+10. 代理表示を **Cookie 1 本**に戻す → **A9 が落ちる**（2 タブ目が 1 タブ目を上書き）
+11. `<opaque-context>` の `admin_identity` 照合を外す → **A10 が落ちる**
+12. `kit/self-report` / `notices/read` を share で ALLOW に戻す → **S29 / S30 が落ちる**
+13. `auth/signout` を share で ALLOW に戻す → **S31 が落ちる**
+14. `userName` / `dateOfBirth` / `sex` をクライアント値に戻す → **S33 / W6 が落ちる**
+15. `/api/scan` の viewer 要求を外す → **W8 が落ちる**
+16. share の帯を消す → **S32 が落ちる**
 
 ### 34.3 既存検査の回帰（全部緑のまま）
 
@@ -1416,6 +1762,12 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 | L | **通常本人の挙動に回帰が無い** | S26, W1, §34.3 |
 | M | セッション優先順位が仕様どおり | C1〜C4 |
 | N | **書き込み先が resolver 1 か所で決まる** | W2〜W5 |
+| **O** | **admin の複数タブが混線しない**（既存機能を退行させない） | A9〜A12 |
+| **P** | **共有相手が本人の配送状態・既読状態・認証セッションを変更できない** | S29〜S31 |
+| **Q** | **対象者の profile metadata をクライアントから改竄できない** | S33, W6 |
+| **R** | **未認証で AI / S3 を消費できない** | W7, W8 |
+| **S** | **revoke の効果が正確に説明され、残存 credential の最大 TTL が仕様どおり** | S27, S28 |
+| **T** | **share 中であることが常に画面に出ており、1 タップで終了できる** | S32, §24.4 |
 
 ---
 
@@ -1423,7 +1775,7 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 
 | Phase | 内容 | 前提 |
 |---|---|---|
-| **0** | **§11 のクライアント申告 UID を全部サーバ側 resolver へ寄せる**（share と独立・先行可） | なし。**#1 は単独で優先度が高い** |
+| **0** | **Phase 0 = 外部共有の公開前に必須。share と独立して先行できる**（下表） | なし |
 | **1** | DB migration（§22 の 5 表）＋ RLS | 発注者が staging で適用 |
 | **2** | Admin handoff ＋ impersonation session（Scan-Chat-AI） | Phase 1 |
 | **3** | wellfort-site 顧客管理に新導線を追加（旧 `?u=` と並置） | Phase 2 |
@@ -1433,8 +1785,20 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 | **7** | Share での AI 問診・AI スキャン（target lock 付き） | Phase 0, 6 |
 | **8** | アクセスログ・監査画面 | Phase 6 |
 
+### 36.1 Phase 0 の中身（**外部共有の公開前に必須・3 項目**）
+
+| # | 内容 | 根拠 | share と独立に価値があるか |
+|---|---|---|---|
+| **0-a** | **クライアント申告 UID をすべてサーバ側 resolver へ寄せる**（§11 の 7 件） | `interview/export.ts:104-105` → `interview-export.ts:252,281-282` ほか | **ある。** #1 は**現在も成立する穴**で、サインイン済みなら他人の Elith 納品フォルダへ書ける |
+| **0-b** | **対象者 profile metadata（`userName` / `dateOfBirth` / `sex`）もサーバ解決にする**（§19.5） | `live-controller.ts:1441-1443` → `api/interview/export.ts:104-107` | **ある。** UID を固定しても **profile を改竄すれば AI 入力を汚染できる** |
+| **0-c** | **未認証で叩ける AI / S3 コスト API 6 本に正規 viewer を要求する**（§21.4） | `api/scan.ts` / `scan/upload-ticket.ts` / `interview/classify-voice.ts` / `insight.ts` / `coach/ask.ts` / `live-token.ts`（いずれも `resolveViewer` 0 件・実測） | **ある。** 共有の有無に関わらず**課金とストレージを他人に使わせる経路** |
+
 **Phase 0 を最初に置くのが要点。** ここが済んでいないと
-**share を出した瞬間に「共有相手が他人のデータを汚せる」**状態になる。
+**share を出した瞬間に「共有相手が他人のデータを汚せる／他人の AI 入力を書き換えられる／
+無制限に課金を発生させられる」**状態になる。
+
+**3 項目とも「共有機能のための前提」ではなく、現在成立している課題**なので、
+**share の設計が固まるのを待たずに着手してよい。**
 
 ---
 
@@ -1452,6 +1816,11 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 
 ## 38. 未確定事項（推測で確定しない）
 
+> **レビュー 2026-09-30 で 2 件が未確定を外れた。**
+> **U7**（対象者 profile metadata のサーバ解決）→ **Phase 0 必須事項へ昇格**（§19.5 / §36.1-b）。
+> **U18**（`kit/self-report` / `notices/read`）→ **BLOCK で確定**（§17.2）。
+> 代わりに **U20〜U23** を追加した。
+
 | # | 論点 | 選択肢 | 推奨 | 決める人 |
 |---|---|---|---|---|
 | **U1** | wellfort-site の **Vercel Production Branch** が `main` か | 実測では `origin/HEAD = main` だが Vercel の設定は未確認 | 実装前に確認 | 発注者 |
@@ -1460,7 +1829,6 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 | **U4** | 代理表示中の帯に**何を表示**するか | 顧客名 / 契約番号 / uid 先頭 8 桁 | 未定（`diagnosis` 側に氏名は無い） | 発注者 |
 | **U5** | **admin が代理で問診・スキャンを代行入力**したいか | 現行どおり禁止 / 許可 | **禁止**（§12.5） | 発注者 |
 | **U6** | impersonation / share で**毎リクエスト DB を引く**コスト | opaque + DB / 短命署名 Cookie | opaque + DB。**未計測** | 実装時に実測 |
-| **U7** | 問診の `userName` / `dateOfBirth` / `sex` をサーバ側で取り直すか | クライアント送付を継続 / サーバ解決 | **サーバ解決**（§19.4 注） | 実装 |
 | **U8** | `GET /api/debug/viewer` を share から叩けるか | BLOCK / token があれば ALLOW | **BLOCK**（viewer 構造をそのまま返すため） | 発注者 |
 | **U9** | `created_by`（発行した admin）に何を保存するか | email / email のハッシュ / admin_users.id | **ハッシュ**（PII を診断系に置かない） | 発注者 |
 | **U10** | admin が共有 URL を開いたとき share を勝たせるか | share 優先 / 警告して拒否 | **share 優先**（§24.4） | 発注者 |
@@ -1471,8 +1839,12 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 | **U15** | share セッションの**既定有効期間** | 1 時間 / 8 時間 / link 期限まで | 未定 | 発注者 |
 | **U16** | share の **scope 既定値**（問診・スキャンを既定で許すか） | 両方 ON / 閲覧のみ ON | 発注者要件は「使える」なので**両方 ON** | 発注者 |
 | **U17** | 共有相手による更新を**対象者本人へ通知**するか | する / しない | 未定（本人の知らないところで実データが増える） | 発注者 |
-| **U18** | `kit/self-report` / `notices/read` を share で許すか | ALLOW+LOCK / BLOCK | **ALLOW+LOCK**（一般機能なので）だが、キット受取の申告を外部相手がするのは運用上おかしい可能性 | 発注者 |
+| ~~**U18**~~ | ~~`kit/self-report` / `notices/read` を share で許すか~~ | — | **確定: BLOCK**（レビュー 2026-09-30）。発注者が明示的に許可した更新は **AI 問診と AI スキャンだけ**。ページ閲覧は許可するが、**本人の配送状態・既読状態は変えさせない**（§17.2 / §25.2） | **確定済** |
 | **U19** | レート制限（§31-#4）の実装方法 | Vercel の機能 / DB カウンタ / 見送り | 未調査 | 実装時に調査 |
+| **U20** | 案 B（`/admin-view/<ctx>/…`）を **Astro のルーティングでどう実現するか** — 既存ページを二重に書かずに同居させる方法 | rewrite / 共通コンポーネント化 / middleware | **middleware は §28.3 の方針で避けたい。** 実装前に 1 つ選ぶ（§13.0） | 実装時に調査 |
+| **U21** | §21.4 で未認証を塞ぐと**サインイン前のお試し利用**が壊れないか | 塞ぐ / 一部を残す | **塞ぐ。** `/scan` `/chat` `/coach` はいずれも `resolveViewer` を通しサインインゲートを出すので正規画面からは呼ばないと読めるが、**実測していない**。実装時に確認 | 実装時に実測 |
+| **U22** | share の **Gemini Live token TTL を短縮するか**（§27.3-A） | 30 分のまま / 10 分へ短縮 | **短縮を推奨**。ただし「問診 1 セクションが 10 分で終わるか」は**未計測** | 発注者 ＋ 実測 |
+| **U23** | share セッション中の**帯の文言と表示位置**（§24.4） | — | 未定。代理表示の帯（§13.4）と揃える | 発注者 |
 
 ---
 
@@ -1507,18 +1879,19 @@ src/scripts/scan-upload.ts:188
 src/scripts/kit-self-report.ts:15,35-49
 src/pages/api/auth/resolve.ts:20-24,30,45-69,99,120-122,162-166
 src/pages/api/auth/refresh-admin.ts:30
-src/pages/api/coach/ask.ts:4,78,83-94
-src/pages/api/insight.ts:4,26-30,42
-src/pages/api/live-token.ts:13,24-28,44-46
+src/pages/api/coach/ask.ts:4,14,78,83-94,114
+src/pages/api/insight.ts:4,11,26-30,42,68
+src/pages/api/live-token.ts:11,13,24-28,34,39-40,44-46（ephemeral token の TTL = 30 分 / newSession 60 秒）
 src/pages/api/interview/export.ts:12-13,28,36,70-107
-src/pages/api/interview/classify-voice.ts:36-39
+src/pages/api/interview/classify-voice.ts:29-39（MAX_TRANSCRIPT / MAX_OPTIONS・resolveViewer 0 件）
 src/pages/api/kit/[id]/self-report.ts:10-14,22-60
 src/pages/api/notices/[id]/read.ts:9-13,22-44
-src/pages/api/scan.ts:38-54
+src/pages/api/scan.ts:2,38-54（readScanPage → Gemini・resolveViewer 0 件）
 src/pages/api/scan/save.ts:15,31-90
 src/pages/api/scan/jobs.ts:17,38-80
 src/pages/api/scan/export.ts:8,29,42-100
-src/pages/api/scan/upload-ticket.ts:32
+src/pages/api/scan/upload-ticket.ts:13,32,41
+src/lib/scan-upload-ticket.ts:23,36,44,47(PRESIGN_EXPIRES_SEC=900),63,109,135,138
 src/pages/api/cron/scan-worker.ts:24,27,150-152,180-182
 src/pages/api/cron/elith-deliver.ts:4,13-21,36,41,56,61
 src/pages/api/debug/viewer.ts:22,48,54,99-129,163-167,507
@@ -1531,12 +1904,24 @@ supabase/migrations/20260915000010_interview_completions.sql:20-54
 
 ```
 src/pages/mypage.astro:105-114（素の URL・?u= は 9b5ed28 で撤去）
-src/pages/admin/customers.astro:14,300,432-443
+src/pages/admin/customers.astro:14,300,432-443（:439 が target="_blank" = 現行のタブ分離の根拠）
 src/pages/admin/health-age.astro:10,95,261
 src/pages/api/admin/demo-accounts.ts:12,17-21,30-55,57-70（2 層認証の正本パターン）
 src/pages/api/admin/elith-verify.ts:7,14-15,62-66
 src/pages/api/admin/elith-scan.ts:9,16-17,67-71
 src/pages/api/admin/demecal-state.ts:8,15-16,50-54
+```
+
+### 実測で「0 件」を確認したもの（§21.4 の根拠）
+
+```
+resolveViewer / checkAdminAuth / cookies の参照がいずれも 0 件:
+  src/pages/api/scan.ts
+  src/pages/api/scan/upload-ticket.ts
+  src/pages/api/interview/classify-voice.ts
+  src/pages/api/insight.ts
+  src/pages/api/coach/ask.ts
+  src/pages/api/live-token.ts
 ```
 
 ### 検索して該当 0 件だったもの
@@ -1592,9 +1977,10 @@ Scan-Chat-AI   POST /api/admin/impersonation/handoff    [ADMIN_API_KEY]
 ブラウザ  GET /admin/handoff/<raw>
    │  sha256 照合 → 未使用・未失効・期限内
    │  UPDATE … SET consumed_at=now() WHERE consumed_at IS NULL   （1 行のときだけ成立）
-   │  impersonation session 発行 → Set-Cookie: welltect_imp_v = <opaque>
+   │  impersonation session 発行（DB に session_digest / admin_identity / target_uid）
+   │  <opaque-context> を採番
    ▼
-   302 /dashboard        （URL に UID も token も無い）
+   302 /admin-view/<opaque-context>/dashboard    （URL に UID も handoff token も無い）
    │
    ▼
  以後 resolveViewer() → kind='admin_impersonation'
@@ -1654,13 +2040,24 @@ POST /share/consent
 
 ```
                       ┌──────────────── リクエスト ────────────────┐
-                      ▼                                            
-        ┌── welltect_share_v 有効? ──yes──▶ kind='share'
-        │                                   uid=target / write=target / admin=false / locked
+                      ▼
+        ┌── /admin-view/<ctx>/… ?  （§13.0 案 B・最優先）
+        │      ├─ ctx 有効 かつ welltect_v が admin本人 == admin_identity
+        │      │        ──────────────▶ kind='admin_impersonation'
+        │      │                          uid=target / write=null / admin=true / locked
+        │      └─ それ以外 ─────────────▶ **403**（他の kind へ落とさない）
         no
         │
-        ├── welltect_imp_v 有効? ────yes──▶ kind='admin_impersonation'
-        │                                   uid=target / write=null / admin=true / locked
+        ├── welltect_share_v 有効? ──yes──▶ kind='share'
+        │                                   uid=target / write=target / admin=false / locked
+        │                                   ＋ 全ページに「共有中／終了」の帯（§24.4）
+        no
+        │
+        ├── /admin-view/<ctx>/… ?
+        │      ├─ ctx 有効 かつ welltect_v が admin本人 == admin_identity
+        │      │        ──────────────▶ kind='admin_impersonation'
+        │      │                          uid=target / write=null / admin=true / locked
+        │      └─ それ以外 ─────────────▶ **403**（他の kind へ落とさない）
         no
         │
         ├── welltect_v 有効?
@@ -1694,18 +2091,22 @@ POST /share/consent
 
 | ファイル | 変更内容 |
 |---|---|
-| `src/lib/viewer.ts` | `ViewerKind` / `targetLocked` / `writeTargetUid` / `sessionExpiresAt` / `shareScope` の追加。`resolveViewer()` に precedence（§24）。**既存の self / admin / uidEntry 分岐は変えない** |
+| `src/lib/viewer.ts` | `ViewerKind` / `targetLocked` / `writeTargetUid` / `sessionExpiresAt` / `shareScope` の追加。`resolveViewer()` に precedence（§24.1）。**`viewerPathPrefix(viewer)` を足し、リンク組み立てを 1 か所に集約したまま `/admin-view/<ctx>` を扱う**（§13.0）。**既存の self / admin / uidEntry 分岐は変えない** |
 | `src/pages/api/live-token.ts` | body の uid を捨て `resolveViewer` へ |
 | `src/pages/api/insight.ts` | 同上 |
 | `src/pages/api/coach/ask.ts` | 同上 |
 | `src/pages/api/scan/export.ts` | 同上 |
 | `src/pages/api/interview/export.ts` | **S3 の `client_id` も `writeTargetUid` から** |
 | `src/pages/api/scan/save.ts` / `scan/jobs.ts` | `selfUid` → `writeTargetUid` |
-| `src/pages/api/kit/[id]/self-report.ts` / `notices/[id]/read.ts` | `resolveViewer` を通す |
+| `src/pages/api/kit/[id]/self-report.ts` / `notices/[id]/read.ts` | `resolveViewer` を通す ＋ **share は 403**（§17.2） |
+| `src/pages/api/scan.ts` / `scan/upload-ticket.ts` / `interview/classify-voice.ts` | **正規 viewer を要求**（`kind==='anonymous'` を 401）。**Phase 0**（§21.4） |
+| `src/pages/api/auth/resolve.ts` / `signout.ts` | **share セッションからは 403**（§17.5）。**それ以外の挙動は変えない** |
+| `src/components/AppNav.astro` / `BackToDashboard.astro` / `dashboard/*.astro` | `linkQuery` に加えて **`pathPrefix`** を受ける（`/admin-view/<ctx>` 配下でリンクが外へ出ないように） |
 | `src/pages/scan.astro` | `:1015` の `location.search.get('u')` 撤去・`:60` を target で判定 |
 | `src/pages/chat.astro` | `:77` の `data-diagnostic-user-id` 撤去 |
 | `src/scripts/chat/live-controller.ts` | `:1112` `:1440` の uid 送信を撤去 |
 | `src/pages/coach.astro` | `:123` の埋め込みと `:457` の送信を撤去 |
+| `src/lib/interview-export.ts` | `client_id` の決定を `writeTargetUid` 起点へ（`:252`）。**profile metadata もサーバ解決値を受ける**（§19.5） |
 | `src/lib/http-cache.ts` | `Referrer-Policy` / `X-Robots-Tag` 用の関数追加（§28.3） |
 
 ### Scan-Chat-AI — 新設
@@ -1717,8 +2118,12 @@ src/lib/access-log.ts              … §26
 src/pages/share/[token].astro      … §16
 src/pages/share/consent.astro      … §17
 src/pages/share/unavailable.astro
-src/pages/admin/handoff/[token].astro  … §12（画面は出さず 302）
-src/pages/api/share/consent.ts / end.ts
+src/pages/admin/handoff/[token].astro      … §12（画面は出さず 302）
+src/pages/admin-view/[ctx]/[...rest].astro … §13.0 案 B（方式は §38-U20 で決める）
+src/pages/api/share/consent.ts / end.ts    … /share/end は welltect_share_v だけを消す
+src/pages/api/admin/impersonation/end-all.ts … §13.3「すべての代理表示を終了」
+src/components/ShareBanner.astro           … §24.4 の常設の帯
+src/components/ImpersonationBanner.astro   … §13.4 の代理表示の帯
 src/pages/api/admin/share-links.ts                 … ADMIN_API_KEY
 src/pages/api/admin/impersonation/handoff.ts       … ADMIN_API_KEY
 src/pages/api/admin/impersonation/end.ts
