@@ -24,12 +24,18 @@ interface Props {
    * **`viewerLinkQuery(viewer)` の値をそのまま渡すこと。**
    * **uid そのものを受け取って中で組み立てない** (2026-09-29)。
    */
+  /**
+   * **代理表示の path prefix** (`''` か `/admin-view/<ctx>`)。
+   * **`viewerPathPrefix(viewer)` の値をそのまま渡すこと** (2026-09-30)。
+   * 付け忘れると、そのリンクだけ代理表示から抜けて admin 本人の画面へ戻る。
+   */
+  linkPrefix?: string;
   linkQuery?: string;
   /** 追加クラス (配置の微調整用)。 */
   class?: string;
 }
-const { linkQuery = '', class: extra = '' } = Astro.props as Props;
-const href = `/dashboard${linkQuery}`;
+const { linkQuery = '', linkPrefix = '', class: extra = '' } = Astro.props as Props;
+const href = `${linkPrefix}/dashboard${linkQuery}`;
 ---
 
 <a

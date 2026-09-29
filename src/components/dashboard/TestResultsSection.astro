@@ -24,6 +24,12 @@ interface Props {
    * リンクに引き継ぐクエリ文字列 ('' か '?u=<uid>')。
    * **`viewerLinkQuery(viewer)` の値をそのまま渡すこと** (uid を受け取らない・2026-09-29)。
    */
+  /**
+   * **代理表示の path prefix** (`''` か `/admin-view/<ctx>`)。
+   * **`viewerPathPrefix(viewer)` の値をそのまま渡すこと** (2026-09-30)。
+   * 付け忘れると、そのリンクだけ代理表示から抜けて admin 本人の画面へ戻る。
+   */
+  linkPrefix?: string;
   linkQuery?: string;
   /**
    * **出す検査種別を絞る** (単品購入の画面用・2026-09-15)。
@@ -38,7 +44,7 @@ interface Props {
    */
   onlyTypes?: readonly string[];
 }
-const { artifacts, linkQuery: q = '', onlyTypes } = Astro.props as Props;
+const { artifacts, linkQuery: q = '', linkPrefix: p = '', onlyTypes } = Astro.props as Props;
 
 /**
  * 画面に並べる検査 5 種と、その並び順。データが 1 件も無い種別も枠だけ出す
@@ -128,7 +134,7 @@ const gridCls = GRID_BY_COUNT[Math.min(cards.length, 5)] ?? GRID_BY_COUNT[5];
 
         <div class={`grid gap-2 ${c.trend ? 'grid-cols-2' : 'grid-cols-1'}`}>
           {c.newest ? (
-            <a href={`/result/${c.newest.id}${q}`} class="btn-pair btn-data">
+            <a href={`${p}/result/${c.newest.id}${q}`} class="btn-pair btn-data">
               <AppIcon name="report" size={18} />データ
             </a>
           ) : (
@@ -139,7 +145,7 @@ const gridCls = GRID_BY_COUNT[Math.min(cards.length, 5)] ?? GRID_BY_COUNT[5];
 
           {c.trend && (
             c.canGraph ? (
-              <a href={`/trend${q ? `${q}&` : '?'}type=${c.type}`} class="btn-pair btn-graph">
+              <a href={`${p}/trend${q ? `${q}&` : '?'}type=${c.type}`} class="btn-pair btn-graph">
                 <AppIcon name="trend" size={18} />グラフ
               </a>
             ) : (

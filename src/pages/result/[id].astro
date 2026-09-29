@@ -6,7 +6,7 @@ import { loadResult } from '../../lib/result-queries';
 import { testTypeLabel, formatJpDate } from '../../lib/dashboard-queries';
 import { renderReportMarkdown } from '../../lib/report-view';
 import { AI_PREVENTION_REPORT_LABEL } from '../../lib/display-names';
-import { resolveViewer, viewerLinkQuery } from '../../lib/viewer';
+import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../../lib/viewer';
 import { noStore } from '../../lib/http-cache';
 
 export const prerender = false;
@@ -22,6 +22,8 @@ const viewer = await resolveViewer(Astro);
 const u = viewer.uid ?? '';
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
 const linkQuery = viewerLinkQuery(viewer);
+// **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
+const linkPrefix = viewerPathPrefix(viewer);
 // mode = summary (a) | highlights (b) | full (c)
 const mode = url.searchParams.get('mode') ?? 'summary';
 // PDF deep link target page (a/b の [pN] クリックで mode=full&page=N に遷移してくる)
@@ -91,7 +93,7 @@ const pdfSrcWithPage = data?.samplePdfUrl
       <AppIcon name="watch" size={32} class="text-slate-500" />
       <h1 class="text-lg font-bold">検査結果を読み込めませんでした</h1>
       <p class="text-sm text-red-700">{(result as { error: string }).error}</p>
-      <BackToDashboard linkQuery={linkQuery} class="mt-3" />
+      <BackToDashboard linkQuery={linkQuery} linkPrefix={linkPrefix} class="mt-3" />
     </main>
   )}
 
@@ -99,7 +101,7 @@ const pdfSrcWithPage = data?.samplePdfUrl
     <>
       <header class="hero-gradient px-5 pt-6 pb-3">
         <div class="flex items-center justify-between">
-          <BackToDashboard linkQuery={linkQuery} />
+          <BackToDashboard linkQuery={linkQuery} linkPrefix={linkPrefix} />
           <p class="text-xs font-medium uppercase tracking-wider text-brand-700/80">RESULT</p>
           <span class="w-10"></span>
         </div>

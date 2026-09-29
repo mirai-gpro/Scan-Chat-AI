@@ -73,6 +73,20 @@ if (viewerSrc.includes('import.meta')) {
 }
 const viewerPath = emit('verify-viewer-origin-viewer.mjs', viewerSrc);
 
+/*
+ * `admin-identity.ts` も**実物を通す** (2026-09-30)。
+ * この口は `welltect_admin_v` の発行 / 削除も行うようになったので、
+ * import を差し替えないと読み込みで落ちる。**挙動はスタブにしない** —
+ * 発行が失敗して黙って通る、という形の退行を作らないため。
+ */
+let identSrc = read('src/lib/admin-identity.ts')
+  .replace(/\(import\.meta as unknown as \{ env\?: Record<string, string \| undefined> \}\)\.env/g, 'globalThis.__env')
+  .replace(/import\.meta\.env\.(\w+)/g, 'globalThis.__env.$1');
+if (identSrc.includes('import.meta')) {
+  bad('verify 自体: admin-identity.ts の import.meta を差し替えられなかった');
+}
+const identPath = emit('verify-viewer-origin-admin-identity.mjs', identSrc);
+
 // Supabase と admin 判定はスタブ。**この口は「admin フラグだけ更新」なので、
 // 差し替えても検査したい挙動 (origin の引き継ぎ) は 1 ミリも変わらない。**
 const stubPath = emit(
@@ -91,10 +105,12 @@ export async function isAdminEmailAsync(email) {
 let apiSrc = read('src/pages/api/auth/refresh-admin.ts')
   .replace(/import \{ getServerSupabase \} from '[^']*';/, `import { getServerSupabase } from ${JSON.stringify(stubPath)};`)
   .replace(/import \{ isAdminEmailAsync \} from '[^']*';/, `import { isAdminEmailAsync } from ${JSON.stringify(stubPath)};`)
-  .replace(/from '\.\.\/\.\.\/\.\.\/lib\/viewer'/, `from ${JSON.stringify(viewerPath)}`);
+  .replace(/from '\.\.\/\.\.\/\.\.\/lib\/viewer'/, `from ${JSON.stringify(viewerPath)}`)
+  .replace(/from '\.\.\/\.\.\/\.\.\/lib\/admin-identity'/, `from ${JSON.stringify(identPath)}`);
 for (const [label, needle] of [
   ['getServerSupabase', stubPath],
   ['viewer', viewerPath],
+  ['admin-identity', identPath],
 ]) {
   if (!apiSrc.includes(needle)) bad(`verify 自体: refresh-admin.ts の import (${label}) を差し替えられなかった`);
 }

@@ -56,6 +56,7 @@
     "verify:measurement-status": "node scripts/verify-measurement-status.mjs",
     "verify:trend-series": "node scripts/verify-trend-series.mjs",
     "verify:url-uid-privacy": "node scripts/verify-url-uid-privacy.mjs",
+    "verify:admin-handoff": "node scripts/verify-admin-handoff.mjs",
     "verify:scan-persist": "esbuild scripts/verify-scan-persist.ts --bundle --platform=node --format=esm --log-level=error \"--define:import.meta.env={}\" --outfile=node_modules/.cache/verify-scan-persist.mjs && node node_modules/.cache/verify-scan-persist.mjs",
     "verify:interview-cycle": "esbuild scripts/verify-interview-cycle.ts --bundle --platform=node --format=esm --log-level=error \"--define:import.meta.env={}\" --outfile=node_modules/.cache/verify-interview-cycle.mjs && node node_modules/.cache/verify-interview-cycle.mjs",
     "verify:scan-age": "esbuild scripts/verify-scan-age.ts --bundle --platform=node --format=esm --log-level=error \"--define:import.meta.env={}\" --outfile=node_modules/.cache/verify-scan-age.mjs && node node_modules/.cache/verify-scan-age.mjs",

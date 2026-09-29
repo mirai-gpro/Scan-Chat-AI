@@ -1,7 +1,27 @@
 # Welltect セキュア共有アクセス ／ Admin 代理表示の UID-less 化 仕様書
 
-**版**: 1.3 (2026-09-30・admin_identity の方式と handoff 状態遷移を確定)
-**状態**: **仕様のみ。実装は 1 行も行っていない。**
+**版**: 1.4 (2026-09-30・**Admin 代理表示を実装完了。仕様と実装を完全同期**)
+**状態**: **Admin 代理表示（§12 / §13）は実装済み。外部共有（§14〜§20）は仕様のみ。**
+
+> **v1.4 の変更（実装 2026-09-30。v1.1〜v1.3 の確定事項は 1 つも変えていない）**
+>
+> レビューの往復を止め、**設計確定 → 実装 → 自動検査まで 1 セッションで完了**させた回。
+> 仕様が実装より先に書かれている箇所は残さず、**実装した形へ同期**した。
+>
+> ① **§12.4.1 を実装に合わせて改訂 — `welltect_admin_v` の payload から uid を外した。**
+> v1.3 は `<uid>.<admin_identity>.<exp>.<sig>` としていたが、実コードを追うと
+> **`api/auth/resolve.ts:222` が uid の決まらない人を `{ linked:false }` で返す**ため、
+> **`admin_users` に居るが `diagnostic_user_id` を持たない admin が代理表示を一生使えない**。
+> handoff の本人確認の本質は「**どの admin か**」であって admin 自身の健康診断 uid ではないので、
+> payload を **`<admin_identity>.<exp>.<sig>`** にし、**発行を早期 return より前**へ置いた。
+> あわせて **HMAC の対象へ用途を焼き込む**（`admin_identity:v1:<canonical_email>`）。
+> ② **§12.7 / §12.8 を改訂 — GET では claim しない。** `POST /api/admin/handoff/claim` を新設。
+> プリフェッチ・URL スキャナが GET を踏んでも**状態が 1 ミリも変わらない**。
+> ③ **§12.8 ②③ を 1 トランザクション化** — `consume` と context の INSERT を
+> **PostgreSQL 関数 `diagnosis.consume_admin_handoff` 1 本**にまとめた。途中失敗は全部 ROLLBACK。
+> ④ **§12.8 の `pending_attempts` を 5 回で確定（U25 を閉じた）**。数え方も明記。
+> ⑤ **§13.0 案 B の実装方式を確定（U20 を閉じた）** — **`src/middleware.ts` を 1 本だけ新設**。
+> ⑥ **§22 / §23 / §25 / §31 / §34 / §35 / §36 / §38 / 付録 B を実装へ同期。**
 
 > **v1.1 の変更（レビュー 2026-09-30・7 点）**
 > ① **§13.0 を新設** — 現行の `target="_blank"` による複数タブ運用が Cookie 1 本方式で壊れる
@@ -552,8 +572,15 @@ Scan-Chat-AI   GET /admin/handoff/<raw>                     [新設]
 #### 採用 = **B：`welltect_admin_v`（admin 専用の署名付き HttpOnly Cookie）**
 
 ```
-admin_identity = base64url( HMAC-SHA256( lower(trim(email)), APP_SESSION_SECRET ) )
+canonical_email = lower(trim(email))
+admin_identity  = base64url( HMAC-SHA256( APP_SESSION_SECRET,
+                                          "admin_identity:v1:" + canonical_email ) )
 ```
+
+> **v1.4: HMAC の対象へ用途を焼き込んだ**（`admin_identity:v1:`）。同じ鍵を IP の HMAC 等
+> 別用途でも使うので、prefix が無いと**別用途で作った digest をここへ持ち込める余地**が残る。
+> 実装 `src/lib/admin-identity.ts` の `ADMIN_IDENTITY_DOMAIN`。
+> 検査 `verify:admin-handoff` の A-4（素の sha256 と一致しない）/ A-5（prefix 無しとも一致しない）。
 
 - **鍵は `viewer.ts` の `secret()` と同じ**（`APP_SESSION_SECRET` ?? `SUPABASE_SERVICE_ROLE_KEY`・`viewer.ts:52-54`）。
   **新しい env を足さない。**
@@ -568,11 +595,13 @@ admin_identity = base64url( HMAC-SHA256( lower(trim(email)), APP_SESSION_SECRET 
 | 項目 | 内容 |
 |---|---|
 | Cookie 名 | `welltect_admin_v` |
-| 値 | `<uid>.<admin_identity>.<exp>.<HMAC-SHA256(payload)>` |
-| **uid を payload に含める理由** | **別人の Cookie を移植できないようにする**。使用時に `welltect_v.uid === この Cookie の uid` を要求する |
+| 値 | **`<admin_identity>.<exp>.<HMAC-SHA256(payload)>`**（**v1.4 で uid を外した**） |
+| **uid を payload に含めない理由（v1.4 で変更）** | **`admin_users` に居るが Scan-Chat-AI 側の `diagnostic_user_id` を持たない admin が居る**。`api/auth/resolve.ts:222` はその人を `{ linked:false }` で返すので、uid を必須にすると**その admin は代理表示を一生使えない**。handoff の本人確認の本質は「**どの admin か**」であって、その admin 自身の健康診断 uid ではない |
+| **では Cookie 移植は防げるのか** | **防げる範囲は uid を含めていた頃と同じ**。`admin_identity` は payload に入り HMAC で封じてあるので**書き換えれば署名が合わない**。「自分の Cookie を別端末へ写す」ことは `welltect_v` と同様に可能だが、それは**同じ本人**であって別 admin にはならない。uid を足しても、両方の Cookie を一緒に写されれば同じなので、**uid の有無で強度は変わらない** |
+| **`welltect_v` を必須にしない**（v1.4） | 上と同じ理由。`/admin-view` の入場条件は **`welltect_admin_v` が有効であること**。`welltect_v` が admin フラグを持つならそれも見るが、**無いこと自体では落とさない** |
 | 属性 | `HttpOnly` / `Secure` / `SameSite=Lax` / `Path=/` |
 | 有効期間 | **`welltect_v` と同じ 30 日**（別々に切れると「admin なのに handoff だけ通らない」という分かりにくい状態を作る） |
-| 発行 | **`POST /api/auth/resolve`**（`:294` の `signViewer` の直後）と **`POST /api/auth/refresh-admin`**（`:60` の直後）。**どちらも既にサーバ検証済み email を持っている** |
+| 発行 | **`POST /api/auth/resolve`**（**`{ linked:false }` の早期 return より前**・v1.4）と **`POST /api/auth/refresh-admin`**（`signViewer` の直後）。**どちらも既にサーバ検証済み email を持っている**。位置は `verify:admin-handoff` の **S-8** が機械で固定する |
 | **非 admin には発行しない** | `isAdminEmailAsync(email) === false` なら**発行せず、既存があれば削除する**。一般利用者はこの Cookie を一切持たない |
 | 既存 Cookie との関係 | **`welltect_v` は 1 バイトも変えない**。`signViewer` / `verifyViewer` の既存分岐は不変 |
 | 移行 | 改修前からサインインしている admin はこの Cookie を持たないが、**`refresh-admin` を必ず 1 回叩く**（`GoogleOneTap.astro:51`）ので**次にアプリを開いた時点で自動的に付く**。`admin` フラグの自己修復と同じ仕組みに相乗りする |
@@ -596,23 +625,32 @@ Scan-Chat-AI   POST /api/admin/impersonation/handoff
 #### 消費時（`GET /admin/handoff/<raw>` / `/admin/handoff/continue`）
 
 ```
-① welltect_v      を検証 → uid / admin フラグ
-② welltect_admin_v を検証 → uid / admin_identity / exp
-③ ①の uid === ②の uid                       … 移植された Cookie を弾く
-④ ①の admin フラグ === true
-⑤ ②の admin_identity === handoff 行の admin_identity   ← **発行者本人か**
-   → 1 つでも欠ければ **403**（理由は出し分けない・self / share へ落とさない）
+① welltect_admin_v を検証 → admin_identity / exp        （無ければ Google 認証へ・§12.7）
+② ①の admin_identity === handoff 行の admin_identity     ← **発行者本人か**
+   → 欠ければ **403**（理由は出し分けない・self / share へ落とさない）
+      加えて pending_attempts を **原子的に +1**（5 回で pending 失効）
 ```
+
+> **v1.4: ③「uid の一致」は無くなった**（payload に uid が無いため）。
+> `welltect_v` の有無も消費の条件にしない — **uid を持たない admin を締め出さないため**。
+> ②の照合は **DB 側の `consume_admin_handoff` が SQL の WHERE で行う**ので、
+> アプリ側で「取ってから比べる」余地が無い（検査 S-23）。
 
 #### 毎リクエスト（`/admin-view/<ctx>/…`）
 
 ```
-① welltect_v 検証 → uid / admin フラグ（admin でなければ 403）
-② welltect_admin_v 検証 → uid 一致 / 未期限切れ（欠ければ 403）
-③ sha256(<ctx>) で admin_impersonation_sessions を引く
-④ **session.admin_identity === welltect_admin_v.admin_identity**（不一致なら 403）
-⑤ session の expires_at / revoked_at を見る
+① welltect_admin_v 検証 → admin_identity / 未期限切れ（欠ければ 403）
+② sha256(<ctx>) で admin_impersonation_sessions を引く（無ければ 403）
+③ **session.admin_identity === welltect_admin_v.admin_identity**（不一致なら 403）
+④ session の expires_at / revoked_at を見る（切れていれば 403）
+⑤ welltect_v が admin フラグを持つならその uid を `selfUid` に載せる
+   （**持っていなくても代理表示は成立する** — uid の無い admin が居るため・v1.4）
 ```
+
+**実装は `src/middleware.ts` 1 か所だけ**（§13.0 の実装方式）。ページ側では再確認しない
+（2 か所に書くと片方だけ緩む）。middleware が `locals.adminView` に載せ、
+`resolveViewer()` はそれを読むだけ。**`locals` はサーバ側にしか無い**ので、
+middleware を通っていなければ代理表示は成立しない。
 
 **④で DB の追加クエリは要らない** — ③で引いた行に入っている。
 **`isAdmin === true` の一致だけでは通さない**のが要点で、③④が無いと
@@ -668,11 +706,14 @@ admin がサポート目的で相手の画面を見るだけなら書き込み�
 新方式で **403 だけを返して行き止まりにしない。**
 
 ```
-GET /admin/handoff/<raw>
+GET /admin/handoff/<raw>       ← **状態を 1 ミリも変えない**（v1.4・下記）
+  │ ⓪ フォームを描くだけ。DB も Cookie も触らない。JS で即 submit（noscript はボタン）
+  ▼
+POST /api/admin/handoff/claim
   │ ① handoff を **pending へ交換 (claim)**  ← §12.8 の UPDATE ①（**ここで raw token は死ぬ**）
   │ ② Set-Cookie: welltect_handoff_pending = <opaque>   （10 分）
   ▼
-  302 /admin/handoff/continue          ← **raw token は URL から消える**
+  303 /admin/handoff/continue          ← **raw token は URL から消える**
   │
   │ ③ welltect_v / welltect_admin_v を見る（§12.4.1 の消費時チェック）
   │
@@ -687,6 +728,18 @@ GET /admin/handoff/<raw>
         ▼
      302 /admin-view/<ctx>/dashboard
 ```
+
+#### 【v1.4 で確定】**GET では claim しない**
+
+v1.3 は `GET /admin/handoff/<raw>` でそのまま claim していた。**これは実運用で壊れる。**
+
+| | |
+|---|---|
+| 何が起きるか | raw token は **URL path に載る**ので、**リンクのプリフェッチ・メールや chat の URL スキャナ・アンチウイルスの先読み**が GET を踏む。そこで claim すると **admin が開く前に券が焼き切れる** |
+| しかも気づけない | admin に出せるのは「もう使われています」だけ。**誰が踏んだかは分からない** |
+| 採った形 | GET は**フォームを描くだけ**。`claim` は **`POST /api/admin/handoff/claim`** のみ。JS で即 submit するので**人にとっての手数は変わらない**（プリフェッチと URL スキャナは JS を実行しない）。`<noscript>` のボタンも置く |
+| wellfort-site から直接 POST navigation する案 | **採らない**。`window.open` でしか新しいタブを開けず、POST navigation にするには**中間 HTML に token を埋めて自動 submit** することになる。結局同じ形で、しかも**中継側にも token が載る**ので利点が無い |
+| 固定 | `verify:admin-handoff` の **S-1〜S-7**（GET のページが claim / consume / Cookie / DB に触れないこと、claim の口が POST だけであること）。**退行を注入して落ちることを確認済み** |
 
 > **admin が既にサインイン済みでも同じ経路を通る。** ①②で必ず pending へ交換してから
 > ③へ進み、その場で④⑤まで一気に走る（302 が 1 回増えるだけ）。
@@ -749,24 +802,52 @@ update diagnosis.admin_impersonation_handoffs
 returning id, admin_identity, target_uid, target_origin;
 ```
 
+実装は **`diagnosis.claim_admin_handoff(p_token_hash, p_pending_digest, p_pending_ttl_sec)`**
+（`security definer` / `set search_path = ''`）。**呼ぶのは `POST /api/admin/handoff/claim` だけ**。
+
 **更新行数が 1 のときだけ成立。** 0 なら **403**（不存在 / 既に claim 済 / consumed / 期限切れを区別しない）。
 → **同じ handoff から pending は 1 つしか作れない**（`pending_digest is null` が排他）。
 → **pending 交換後に同じ raw token を使っても 0 行**＝拒否。
 
-**② consume（認証が通ってから）**
+**② consume ＋ context 発行（認証が通ってから・v1.4 で 1 トランザクション化）**
+
+**アプリ側で 2 回 DB を叩かない。** `consume` だけ成功して context の INSERT が落ちると、
+**「焼けているのに入れない」券**が残り、admin は Wellfort 側で発行し直すしかなくなる。
+→ **PostgreSQL 関数 1 本**にまとめ、途中失敗は全部 ROLLBACK させる。
 
 ```sql
-update diagnosis.admin_impersonation_handoffs
+-- diagnosis.consume_admin_handoff(p_pending_digest, p_admin_identity,
+--                                 p_session_digest, p_session_ttl_sec)
+--   security definer / set search_path = ''
+update diagnosis.admin_impersonation_handoffs h
    set consumed_at = now()
- where pending_digest    = :pending_digest
-   and consumed_at       is null       -- ★ 二重 consume を DB で止める
-   and pending_expires_at > now()      -- ★ 10 分
-returning id, admin_identity, target_uid, target_origin;
+ where h.pending_digest     = p_pending_digest
+   and h.consumed_at        is null            -- ★ 二重 consume を DB で止める
+   and h.pending_expires_at > now()            -- ★ 10 分
+   and h.admin_identity     = p_admin_identity -- ★ 発行した admin 本人か（v1.4: SQL 側で要求）
+returning h.id, h.target_uid, h.target_origin into v_id, v_target, v_origin;
+
+if v_id is null then return; end if;           -- 0 行 → 呼び出し側は 403
+
+insert into diagnosis.admin_impersonation_sessions
+  (handoff_id, session_digest, admin_identity, target_uid, target_origin, expires_at)
+values (v_id, p_session_digest, p_admin_identity, v_target, v_origin,
+        now() + make_interval(secs => p_session_ttl_sec));
 ```
 
 **更新行数が 1 のときだけ成立。** 0 なら **403**。
-`admin_identity` の一致確認は**この UPDATE の前**に行う（不一致なら UPDATE を撃たない＝
-handoff を焼かずに再試行できる）。
+**`admin_identity` の一致を WHERE に入れた**ので、不一致なら `consumed_at` が動かない
+＝**handoff を焼かずに再試行できる**（v1.3 の「UPDATE の前にアプリで比べる」と同じ性質を、
+アプリを信用せず DB で担保する形にした）。
+
+**アプリ側が作るもの**:
+
+```
+context_raw    = 32byte CSPRNG → base64url        （URL path にしか出ない）
+context_digest = sha256(context_raw)              （RPC へ渡すのはこちらだけ）
+```
+
+**`admin_impersonation_sessions` に raw context は保存しない。**
 
 **③ context は 1 handoff につき 1 つ（DB で保証）**
 
@@ -786,7 +867,41 @@ handoff_id uuid unique references diagnosis.admin_impersonation_handoffs(id)
   ここで pending を焼くと**最初からやり直し（Wellfort 側で発行し直し）**になり、
   旧 `?u=` 経路より使い勝手が落ちる。
 - **`pending_attempts` を数え、5 回で pending を失効させる**（`pending_expires_at = now()`）。
-  1 回の試行に Google のサインインが挟まるので 5 回は十分に多い。数値は運用で調整可（§38-U25）。
+  1 回の試行に Google のサインインが挟まるので 5 回は十分に多い。**5 回で確定（v1.4・U25 を閉じた）。**
+
+##### 何を 1 回と数えるか（**v1.4 で確定**）
+
+**数える**（＝有効な本人認証 credential が揃った状態で、本人照合に失敗したとき）:
+
+| # | 場面 |
+|---|---|
+| 1 | Google 認証が完了したが **非 admin**（`welltect_admin_v` が発行されない） |
+| 2 | admin だが **`admin_identity` が発行者と不一致**（別の管理者アカウント） |
+| 3 | credential は揃っているが consume が 0 行（pending 期限切れ・二重 consume を含む） |
+
+**数えない**（**ここを数えると、開こうとしただけで券が死ぬ**）:
+
+| 場面 | 理由 |
+|---|---|
+| `/admin/handoff/continue` の表示 | まだ何も試していない |
+| reload | 同上。**F5 を 5 回押したら失効、では使い物にならない** |
+| Google 認証の前 / 途中 | 本人照合をまだ行っていない |
+| Supabase セッションがまだ無い | 同上 |
+| pending Cookie の確認だけ | 札の有無を見ただけ |
+
+**実装**: `continue.astro` は **`consumeHandoff()` が 0 行を返したときだけ**
+`failPendingAttempt()` を呼ぶ。credential が無い回は**サインイン画面を描いて終わる**。
+`verify:admin-handoff` の **X-10 / X-11** が呼び出しの順序で固定する。
+
+**加算は SQL 側で原子的に行う**（`diagnosis.fail_admin_handoff_attempt`）:
+
+```sql
+set pending_attempts   = h.pending_attempts + 1,     -- ★ read → +1 → write をしない
+    pending_expires_at = case when h.pending_attempts + 1 >= p_max_attempts
+                              then now() else h.pending_expires_at end
+```
+
+**`read → +1 → write` は禁止**（並行リクエストで数え落ちる）。検査 **P-3 / P-7**。
 - **失敗も監査ログに残す**（`blocked_admin_access` / どの handoff・何回目か。**email は残さない**）。
 - **raw URL で復活させる設計にはしない。** ①で `pending_digest` が埋まっている以上、
   raw token は何度使っても 0 行。
@@ -867,9 +982,40 @@ Cookie 1 本のまま。②で B を開いた時点で **A のタブは次の遷
 `viewer.ts` に持ち、**リンクの組み立てを引き続き 1 か所に集約する**のが素直
 （`url_uid_privacy_spec_20260929.md` §4.2 と同じ規律）。
 
-> **未確定**: Astro のルーティングで `/admin-view/[ctx]/[...rest]` と既存ページを
-> **二重に書かずに**同居させる方法（rewrite / 共通コンポーネント化 / middleware）。
-> **middleware は §28.3 の方針で避けたい**ので、実装前に方式を 1 つ選ぶ（§38-U20）。
+#### 【v1.4 で確定】実装方式 = **middleware を 1 本だけ新設**（U20 を閉じた）
+
+§28.3 は「middleware を安易に新設しない」としていたが、**他の方法では成立しない**:
+
+| 案 | なぜ駄目か |
+|---|---|
+| ヘッダで ctx を渡す | **クライアントが偽装できる**。論外 |
+| 各ページで `Astro.rewrite()` | rewrite 後のページは `/admin-view/<ctx>/…` を**知れない**（URL が内側のものになる）。10 本のページに同じ解決を複製することになる |
+| `[...rest].astro` で全ページを再実装 | **紙面の二重管理**。仕様書 §4.3 と同じ轍 |
+
+**採った形（`src/middleware.ts`）**:
+
+```
+pathname が /admin-view/ で始まらない → 即 next()      ← **既存の全経路は 1 バイトも変わらない**
+始まる →
+  ① welltect_admin_v を検証（欠ければ 403）
+  ② sha256(ctx) で session を引く（欠ければ 403）
+  ③ session.admin_identity と一致するか（不一致なら 403）
+  ④ 期限内・未 revoke か（切れていれば 403）
+  ⑤ locals.adminView に載せて `next('/dashboard' 等)` へ rewrite
+```
+
+- **失敗は全部 403。`self` / `share` へ落とさない**（§24.1 順序 1）。
+  admin が「A さんの画面のつもりで自分の画面を見る」のが最悪の事故なので、
+  **URL が名指ししたものが出せないなら、何も出さない。**
+- **Cookie を書かない・認証を作らない**（`verify:url-uid-privacy` の T-12c2 が固定）。
+- **`locals` はサーバ側にしか存在しない**ので、ここを通らずに代理表示は成立しない。
+- URL は `/admin-view/<ctx>/…` のまま（リダイレクトではなく rewrite）。
+  **タブごとの分離**（§13.0 の目的）がこれで保たれる。
+
+**リンクの組み立ては `viewerPathPrefix(viewer)` に集約**（`''` か `/admin-view/<ctx>`）。
+`viewerLinkQuery()` は **代理表示中に `?u=` を返さない**ようにした（検査 L-9）。
+付け忘れたリンクは**そのタブだけ代理表示から抜ける**（他人のデータが出るのではなく、
+admin 本人の画面に戻る＝安全側）。
 
 ### 13.1 セッションの持ち方（**案 B 採用時 = Cookie を使わない**）
 
@@ -891,8 +1037,8 @@ URL path の <opaque-context>            （案 B）
    → sha256 → diagnosis.admin_impersonation_sessions.session_digest
    → { admin_identity, target_uid, target_origin, expires_at, revoked_at }
    → **welltect_admin_v.admin_identity == 行の admin_identity を検証**   ← ここが必須
-     （§12.4.1 の「毎リクエスト」。welltect_v.uid == welltect_admin_v.uid も要求）
-   → 不一致 / 期限切れ / revoked / 非 admin  ならすべて 403（理由を区別しない）
+     （§12.4.1 の「毎リクエスト」。**v1.4: uid の一致は要求しない** — payload に uid が無い）
+   → 不一致 / 期限切れ / revoked / credential 無し  ならすべて 403（理由を区別しない）
 ```
 
 **`<opaque-context>` 単体では何の権限も生まない。** bearer token ではなく
@@ -927,8 +1073,12 @@ admin のブラウザに置くことになる**。URL から消した意味が�
 UID を URL から消すと**見分けがつかなくなる**ので、
 画面上部に帯を出す（例: `代理表示中: <顧客名の頭文字> / <契約番号>` ＋ 終了ボタン）。
 
-> **未確定**: 帯に何を表示するか。**氏名は PII** なので `diagnosis` 側からは引けない。
-> 顧客の識別に何を使うかは発注者判断（§38-U4）。
+**v1.4 で実装**（`src/components/ImpersonationBanner.astro`）。出しているのは
+**対象 uid の頭 8 桁**と**自動終了の時刻**、それに「この代理表示を終了 / すべて終了」だけ。
+
+> **未確定のまま残す**: 帯に**氏名や契約番号**を出すか。**氏名は PII** で `diagnosis` 側から
+> 引けない（引くこと自体が PII 分離に反する）。頭 8 桁は Wellfort の管理画面の一覧と
+> 突き合わせられる最小限として置いたもので、**これで足りるかは発注者判断**（§38-U4）。
 
 ---
 
@@ -1427,14 +1577,19 @@ pending セッションは `consented_at is null` の行として同じ表に置
 ＋ **`pending_digest`(unique, null 可) / `pending_expires_at` / `pending_attempts`(int default 0)**
 （§12.7-12.8 の Admin ログイン待ちと状態遷移）
 
-- **`admin_identity` = `base64url(HMAC-SHA256(lower(trim(admin_email)), APP_SESSION_SECRET))`**（§12.4.1）。
+> **v1.4: 実装済み** — `supabase/migrations/20260930000010_admin_impersonation.sql`。
+> 列は上のとおり。**`status` 列は持たない**（状態は列の組み合わせで表す）。
+
+- **`admin_identity` = `base64url(HMAC-SHA256(APP_SESSION_SECRET, "admin_identity:v1:" + lower(trim(email))))`**（§12.4.1）。
   **生 email は保存しない**（受けた関数の中で即 HMAC にしてから書く）。
+  検査 **S-24** が「raw token / raw context / email の列が無い」ことを機械で見る。
 - **`pending_digest` は UNIQUE**。`is null` を条件にした原子的 UPDATE で
   **1 handoff = 1 pending** を DB が保証する（§12.8 UPDATE ①）。
 - 状態は列の組み合わせで表す（`status` 列を持たない・§12.8 の表）。
 
-- `admin_identity` = **この handoff を発行した admin**。消費時に `welltect_v` の admin 本人と
-  **一致すること**を要求する（§12.4 の②③）。一致しなければ 403。
+- `admin_identity` = **この handoff を発行した admin**。消費時に **`welltect_admin_v` の
+  admin 本人と一致すること**を要求する（§12.4 の②③）。一致しなければ 403。
+  **一致確認は `consume_admin_handoff` の WHERE 句**（アプリで比べない・検査 S-23）。
 - **pending 用の別表は作らない** — handoff 1 件に pending は 1 件で、寿命も一緒に尽きるため。
 - **`target_uid` は DB だけが持つ**。Cookie にも URL にも出さない。
 
@@ -1448,8 +1603,19 @@ pending セッションは `consented_at is null` の行として同じ表に置
 - **`handoff_id uuid unique references admin_impersonation_handoffs(id)` を持つ。**
   **UNIQUE なので 1 handoff から context は 1 つしか作れない**（§12.8 ③）。
 - `admin_identity` は handoff 行からコピーする（毎リクエストの照合をこの行だけで完結させるため・§12.4.1）。
-- 解決のたびに **`admin_identity` == `welltect_v` の admin 本人** を検証する。
-  **context 単独では何の権限も生まない。**
+- 解決のたびに **`admin_identity` == `welltect_admin_v` の admin 本人** を検証する。
+  **context 単独では何の権限も生まない。**（検査 C-2 / C-3）
+
+#### 22.5.1 RPC（**v1.4 で追加**・`security definer` / `set search_path = ''`）
+
+| 関数 | 何をするか |
+|---|---|
+| `diagnosis.claim_admin_handoff(p_token_hash, p_pending_digest, p_pending_ttl_sec)` | raw token → pending の**原子的な交換**。`pending_digest is null` が排他条件（§12.8 ①） |
+| `diagnosis.fail_admin_handoff_attempt(p_pending_digest, p_max_attempts)` | 本人照合の失敗を**原子的に +1**。上限で `pending_expires_at = now()`（§12.8） |
+| `diagnosis.consume_admin_handoff(p_pending_digest, p_admin_identity, p_session_digest, p_session_ttl_sec)` | **consume ＋ context INSERT を 1 トランザクション**（§12.8 ②）。途中失敗は全部 ROLLBACK |
+
+3 本とも **`execute` は `service_role` だけ**（`public` / `anon` / `authenticated` から revoke）。
+`set search_path = ''` は既存の流儀（`20260820000050_function_search_path.sql`）に合わせた。
 
 ### 22.6 【必須】RLS
 
@@ -1461,6 +1627,12 @@ pending セッションは `consented_at is null` の行として同じ表に置
 
 → **`service_role` 以外に `select` を出さない**。アプリは常にサーバ側（service role）から引く。
 
+> **v1.4: 代理表示の 2 表は実装済みで、最初から本番相当で閉じてある。**
+> `enable row level security` ＋ **ポリシーを 1 つも作らない** ＋
+> `revoke all … from anon, authenticated` ＋ `grant all … to service_role`。
+> 念のため同名の `dev_read_all` / `dev_authn_write` があれば `drop policy if exists` で落とす。
+> 検査 **S-16〜S-19** が固定する。**外部共有の 3 表（§22.1-22.3）は未実装。**
+
 ---
 
 ## 23. Cookie 一覧（最終形）
@@ -1468,12 +1640,17 @@ pending セッションは `consented_at is null` の行として同じ表に置
 | Cookie | 発行 | 内容 | 期限 | 目的 |
 |---|---|---|---|---|
 | `welltect_v` | `/api/auth/resolve` | 署名付き `uid.exp.admin[.s].sig` | 30 日 | **本人**（既存・変更しない） |
-| **`welltect_admin_v`** | `/api/auth/resolve` / `/api/auth/refresh-admin`（**admin のときだけ**） | 署名付き `uid.admin_identity.exp.sig`。**email そのものは入らない** | 30 日（`welltect_v` と同じ） | **「いま署名している admin が誰か」をサーバ検証済みの形で持つ**（§12.4.1）。**一般利用者は持たない** |
+| **`welltect_admin_v`** | `/api/auth/resolve` / `/api/auth/refresh-admin`（**admin のときだけ**） | 署名付き **`admin_identity.exp.sig`**（v1.4 で uid を外した）。**email そのものは入らない** | 30 日（`welltect_v` と同じ） | **「いま署名している admin が誰か」をサーバ検証済みの形で持つ**（§12.4.1）。**一般利用者は持たない**／非 admin になったら**削除する** |
 | ~~`welltect_imp_v`~~ | — | — | — | **案 B 採用により不要**（§13.0）。代理表示の状態は **URL path の `<opaque-context>`** が持つ。案 A を採る場合のみ復活する |
-| `welltect_handoff_pending` | `GET /admin/handoff/<raw>`（Admin 未認証のとき） | **opaque** | 10 分 | **Admin ログイン待ち**（§12.7）。target_uid も raw token も入れない |
+| `welltect_handoff_pending` | **`POST /api/admin/handoff/claim`**（v1.4。GET では発行しない） | **opaque**（32byte CSPRNG。DB は `sha256` だけ持つ） | 10 分 | **Admin ログイン待ちの札**（§12.7）。**target_uid も raw token も入れない**／consume したら削除する |
 | `welltect_share_pending` | `/share/<token>` | **opaque** | 10 分 | 同意前 |
 | `welltect_share_v` | `POST /share/consent` | **opaque** | link 期限以内 | 外部共有 |
 | `welltect_share_viewer` | 初回共有アクセス | ランダム ID | 長め（1 年） | **匿名 viewer の相関のみ**（§31） |
+
+> **【表現の約束・v1.4】「Cookie は一切発行しない」とは書かない。**
+> 正しくは **「代理表示の対象を保持する `welltect_imp_v` は発行しない」**。
+> 実際には上の 3 本（`welltect_v` / `welltect_admin_v` / `welltect_handoff_pending`）を使う。
+> **Admin 代理表示で実装済みなのはこの 3 本だけ**で、`welltect_share_*` は未実装（§14〜§20）。
 
 全て `HttpOnly` / `Secure` / `SameSite=Lax` / `Path=/`。
 （`welltect_share_viewer` は本人確認に使わないので `HttpOnly` でなくてもよいが、**付けて困らないので付ける**。）
@@ -1592,9 +1769,11 @@ pending セッションは `consented_at is null` の行として同じ表に置
 | `/share/<token>` | — | — | 入口 | — | pending 発行 | 新設・§16 |
 | `/share/consent` | — | — | ALLOW | — | share session 発行 | 新設・§17 |
 | `/share/unavailable` | — | — | ALLOW | — | 無し（理由を区別しない） | 新設・§16.3 |
-| `/admin/handoff/<token>` | — | 入口（**60 秒・単一使用 ＋ admin 本人の `welltect_v` が必須**） | **BLOCK** | — | context 採番 → 302 `/admin-view/<ctx>/dashboard`。**Cookie は発行しない** | 新設・§12.2 |
-| `/admin/handoff/continue` | — | **Admin ログイン待ちの続き**（§12.7） | **BLOCK** | — | 発行 admin と一致で consume → context 採番。不一致・非 admin は **403** | 新設・§12.7 |
-| **`/admin-view/<ctx>/…`** | — | **代理表示中の全ページ（案 B・§13.0）** | **BLOCK** | ✔ | 各ページと同じ。**`welltect_v` の admin 本人と `admin_identity` の一致を必ず検証** | 新設・§13.0 |
+| `/admin/handoff/<token>` | — | 入口（**60 秒・単一使用**） | **BLOCK** | — | **副作用なし（v1.4）**。フォームを描くだけで DB も Cookie も触らない | **実装済み**・§12.7 |
+| **`POST /api/admin/handoff/claim`** | — | claim（**ここで raw token が死ぬ**） | **BLOCK** | — | pending へ原子的に交換 ＋ `welltect_handoff_pending` 発行 → 303 `/admin/handoff/continue` | **実装済み（v1.4 で新設）**・§12.8 ① |
+| `/admin/handoff/continue` | — | **Admin ログイン待ちの続き**（§12.7） | **BLOCK** | — | 発行 admin と一致で **consume ＋ context を 1 トランザクション** → 302 `/admin-view/<ctx>/dashboard`。不一致・非 admin は **403**（＋ attempts +1） | **実装済み**・§12.7 |
+| **`/admin-view/<ctx>/…`** | — | **代理表示中の全ページ（案 B・§13.0）** | **BLOCK** | ✔ | 各ページと同じ。**`welltect_admin_v` と `admin_identity` の一致を毎リクエスト検証**（`src/middleware.ts`）。**書き込みは不可**（`writeTargetUid = null`） | **実装済み**・§13.0 |
+| **`POST /api/admin/impersonation/end`** | — | 代理表示の終了（1 件 / 全件） | **BLOCK** | — | 自分の `admin_identity` の session だけを `revoked_at` に落とす | **実装済み（v1.4 で新設）**・§13.3 |
 | `/admin/**`（Scan-Chat-AI） | admin のみ | admin のみ | **BLOCK** | — | | `src/pages/admin/**` |
 
 ### 25.2 API
@@ -1842,7 +2021,8 @@ link を発行するとき（admin が顧客を選ぶとき）にしか分から
 | # | 脅威 | 対策 |
 |---|---|---|
 | 1 | **share URL の漏洩**（転送・スクショ・共有 PC） | 期限 / pause / revoke / regenerate。アクセスログで異常を検知。**URL が唯一の要素であることは受容し、代わりに失効を速くする** |
-| 2 | **handoff token の漏洩** | **token 単独では何も開かない**（§12.4 の二要素）。60 秒・単一使用・使用後即失効に加え、**Scan-Chat-AI 側の `welltect_v` が発行 admin 本人であること**を要求する。URL を拾っただけの第三者は admin の Cookie を持たないので到達しない |
+| 2 | **handoff token の漏洩** | **token 単独では何も開かない**（§12.4 の二要素）。60 秒・単一使用・使用後即失効に加え、**Scan-Chat-AI 側の `welltect_admin_v` が発行 admin 本人であること**を要求する。URL を拾っただけの第三者は admin の Cookie を持たないので到達しない（検査 C-2 / C-3） |
+| **2-3** | **プリフェッチ・URL スキャナが handoff を焼く**（v1.4 で追加） | **GET では claim しない。** 状態が変わるのは `POST /api/admin/handoff/claim` だけ（§12.7）。検査 **S-1〜S-7** が固定 |
 | **2-1** | **handoff URL を別の admin が開く** | `admin_identity` 不一致で **403**。「admin なら誰でも通る」にしない（誰が開いたかを監査で追えなくなるため） |
 | **2-2** | **pending（Admin ログイン待ち）の悪用** | pending は**権限ではなく札**。`target_uid` も raw token も持たず、**発行 admin と一致して初めて** consume。10 分で失効。**handoff は認証が通るまで consume しない** |
 | 3 | **token replay** | handoff は `consumed_at` の条件付き UPDATE で単一使用。share token は replay 可能だが、それが仕様（bearer）。**セッション化して以後は token を使わない** |
@@ -1855,7 +2035,9 @@ link を発行するとき（admin が顧客を選ぶとき）にしか分から
 | **8-2** | **admin の複数タブで対象が混線する** — Cookie 1 本だと A タブが B 顧客に化ける | **URL path の opaque view-context でタブ単位に分離**（§13.0 案 B）。context は admin 本人の Cookie と組み合わせないと解決しない |
 | **8-3** | **share Cookie が残ったまま本人が自分の画面を開く** | share を優先しつつ**常設の帯で状態を明示し、1 タップで終了できる**（§24.4）。**黙って別人のデータを見せない** |
 | 9 | **非 admin が handoff を取得** | 発行は `verifyAdmin`（Supabase token → `admin_users` 在籍）を通った人だけ。上流は `ADMIN_API_KEY` |
-| **9-1** | **非 admin が handoff URL を開く** | `welltect_v` が非 admin なら **403**。**`self` / `share` へフォールバックしない**（別人の画面を自分の画面と取り違える事故を作らない） |
+| **9-1** | **非 admin が handoff URL を開く** | `welltect_admin_v` が無い（＝非 admin には発行しない）ので **403**。**`self` / `share` へフォールバックしない**（別人の画面を自分の画面と取り違える事故を作らない） |
+| **9-2** | **admin から外れた人が代理表示を続ける**（v1.4） | 次の `refresh-admin` で **`welltect_admin_v` を削除**する（検査 X-7）→ 以後 403（X-8）。**即時ではない**（最大で次のタブを開くまで）。即時に止めるなら session を `revoked_at` で落とす（§27.4） |
+| **9-3** | **試行の総当たりで別 admin が通る**（v1.4） | `admin_identity` は 256bit の HMAC なので推測できない。加えて **`pending_attempts` 5 回で pending を失効**（§12.8）。加算は SQL 側で原子的（検査 P-3 / P-7） |
 | 10 | **target UID 差し替え（`?u=`）** | share / 新 impersonation では **`?u=` を読まない**。読み取りは `viewer.ts:257` の 1 か所のみなので、そこで kind を見て無視する |
 | 11 | **target UID 差し替え（`body.diagnosticUserId`）** | 全 API を `resolveViewer` 経由へ（§21.3）。body の値は**捨てる**。差異を検知したら `target_tamper_attempt` をログ |
 | 12 | **artifact_id 直接指定** | `result-queries.ts` の所有者検証（`id` ＋ `diagnostic_user_id` の 2 条件）に `viewer.uid` = target を渡す。**share 専用の例外を作らない**（§24） |
@@ -1944,7 +2126,44 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 
 ## 34. テスト
 
-### 34.1 新設する自動検査 `npm run verify:shared-access`（CI の A 層）
+### 34.0 【v1.4・実装済み】`npm run verify:admin-handoff`（CI の A 層・**115 件 PASS**）
+
+Admin 代理表示ぶんは**実装と同時に入れた**。外部共有ぶん（§34.1 の S 系）は未実装のまま。
+
+**方式**: 実装の TS をそのまま bundle し、**`./supabase` だけ**差し替える。スタブは
+**PostgreSQL 側の条件付き UPDATE の意味論を忠実に再現**する（`pending_digest is null` /
+`consumed_at is null` / 期限 / `handoff_id` の UNIQUE）。
+**DB も鍵も要らない**ので CI の A 層で走る。紙の上でしか守れない約束は構造検査で固定する。
+
+| 群 | 件数 | 何を見るか |
+|---|---|---|
+| ① `A-1〜A-12` | 12 | `admin_identity`（正規化 / 別人は別 digest / **生 email を含まない** / **素の sha256 でない** / **domain separation** / **payload が 3 分割＝uid を含まない** / 改竄 / 期限） |
+| ② `H-1〜H-19` | 21 | handoff の状態遷移（raw を DB に持たない / **single-use** / 二重 claim 拒否 / 二重 consume 拒否 / **1 handoff = 1 context** / 別 admin 拒否 → 焼かずに再試行 / **60 秒** / **交換後は 10 分** / 10 分超過 / 実在しない uid） |
+| ③ `P-1〜P-7` | 8 | `pending_attempts`（**5 で確定** / 1 ずつ増える / 4 回目までは再試行可 / 5 回で失効 / **並行しても数え落ちない**） |
+| ④ `C-1〜C-12` | 12 | context の毎リクエスト解決（本人のみ / **別 admin は 403** / **credential 無しは 403** / 不正な字面 / 期限 / revoke / **複数タブが同時に成立** / 「すべて終了」は自分の分だけ） |
+| ⑤ `L-1〜L-11` | 11 | path の分解（`..` を弾く）とリンクの prefix（**代理表示で `?u=` を出さない**） |
+| ⑥ `V-1〜V-9` | 9 | `resolveViewer`（**`writeTargetUid = null`＝read-only** / `targetLocked` / 非 admin の Cookie では成立しない） |
+| ⑦ `S-1〜S-25` | 25 | 構造（**GET が claim/consume/Cookie/DB に触れない** / claim は POST だけ / **cred は早期 return より前** / `welltect_v` 不変 / middleware の範囲 / RLS と RPC と UNIQUE / **raw 列が無い**） |
+| ⑧ `X-1〜X-16` | 17 | 残りの受入条件（**同時 consume でも context 1 件** / **INSERT 失敗で ROLLBACK** / **uid 無し admin でも通る** / **剥奪で credential 削除** / URL に uid が出ない / **reload では数えない** / 対象保持 Cookie 0 件 / **生 email をログへ出す行が無い**） |
+
+**退行注入 12 種で名指しに落ちることを確認済み**（SQL 4 種・TS 8 種）:
+claim の排他条件を外す / consume の identity 照合を外す / attempts を `= 1` にする /
+`handoff_id` の UNIQUE を外す / `resolveImpersonationContext` の照合を外す /
+revoke の `admin_identity` 絞りを外す / 代理表示でも書けるようにする /
+代理表示でも `?u=` を出す / GET で claim する / cred を早期 return の後ろへ動かす /
+middleware が失敗時に `/dashboard` へ落とす / path の `..` を許す。
+
+**既存検査への波及（緩めずに更新した）**:
+
+| 検査 | 変更 | 理由 |
+|---|---|---|
+| `verify:url-uid-privacy` T-08b | 「3 件」→ **「4 件」** | `resolveViewer` に代理表示の return が 1 本増えた。**数を固定しているのは「どれか 1 つだけ `uidEntry` を落とす」退行を止めるため**なので、経路が増えたら数も更新する |
+| 同 T-09 | 正規表現に `${p}` を追加 | 連結の形（`q ? \`${q}&\` : '?'`）は**変えていない** |
+| 同 T-12c | 「middleware を新設していない」→ **「middleware は `/admin-view` 以外に触れない」＋ T-12c2「Cookie を書かない」** | §13.0 の実装方式が確定したため。**約束の中身を、より厳しい形へ置き換えた** |
+| `verify:special-accounts` | 早期 return の検出を前方一致に | 応答に `admin` を足しただけで**位置は同じ** |
+| `verify:viewer-origin` | `admin-identity.ts` も実物を transpile | `refresh-admin` が import するようになったため。**スタブにしない**（発行が黙って失敗する退行を作らないため） |
+
+### 34.1 新設する自動検査 `npm run verify:shared-access`（CI の A 層・**外部共有ぶん・未実装**）
 
 既存の `verify:demo-gate` / `verify:special-accounts` と同型
 （実物の TS を transpile し、DB だけスタブに差し替えて**実際に動かす**）。
@@ -2090,34 +2309,43 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 
 ## 35. 受入条件
 
-| ID | 条件 | テスト |
-|---|---|---|
-| A | Admin が UID なしで代理表示できる | A1〜A3 |
-| B | handoff は admin だけが発行でき、単一使用・短命 | A4〜A6 |
-| **B-1** | **handoff token 単独では顧客の健康情報が開かない**（admin 本人認証との二要素） | A13〜A15 |
-| **B-2** | **Admin 未認証でも Google 認証を通して代理表示へ入れる**（行き止まりにしない） | A16, A17 |
-| **B-3** | **代理表示の状態を持つ Cookie が存在しない**（URL path の opaque context だけ） | W9, A9 |
-| **B-4** | **「発行した admin 本人か」を実装可能な形で照合できる**（`isAdmin=true` の一致だけでは通さない） | A24, A25 |
-| **B-5** | **handoff / pending / context の状態遷移が DB で保証される**（1 handoff = 1 pending = 1 context） | A18〜A23 |
-| **B-6** | **生 email が診断系 DB にもログにも残らない** | W10 |
-| C | 代理表示を終了でき、admin 本人へ戻る | A7, C3 |
-| D | 外部相手が URL を開くだけで利用できる | S1〜S9 |
-| E | **同意前に健康情報を出さない** | S2 |
-| F | **共有相手が対象者として AI 問診・AI スキャンを実行でき、現行の更新処理が走る** | S10〜S13 |
-| G | **target をクライアントから変更できない**（URL / body / artifact_id） | A8, S14〜S17 |
-| H | **admin 機能に到達できない** | S18 |
-| I | 期限切れ・停止・失効・再発行が即時に効く | S19〜S23 |
-| J | **raw token が DB にもログにも残らない** | S24 |
-| K | 全ページが `private, no-store` | S25 |
-| L | **通常本人の挙動に回帰が無い** | S26, W1, §34.3 |
-| M | セッション優先順位が仕様どおり | C1〜C4 |
-| N | **書き込み先が resolver 1 か所で決まる** | W2〜W5 |
-| **O** | **admin の複数タブが混線しない**（既存機能を退行させない） | A9〜A12 |
-| **P** | **共有相手が本人の配送状態・既読状態・認証セッションを変更できない** | S29〜S31 |
-| **Q** | **対象者の profile metadata をクライアントから改竄できない** | S33, W6 |
-| **R** | **未認証で AI / S3 を消費できない** | W7, W8 |
-| **S** | **revoke の効果が正確に説明され、残存 credential の最大 TTL が仕様どおり** | S27, S28 |
-| **T** | **share 中であることが常に画面に出ており、1 タップで終了できる** | S32, §24.4 |
+**A〜C / O は v1.4 で実装済み**（テスト欄に `verify:admin-handoff` の ID を入れた）。
+**D〜N / P〜T は外部共有ぶんで未実装。**
+
+| ID | 条件 | テスト | 状態 |
+|---|---|---|---|
+| A | Admin が UID なしで代理表示できる | X-9, L-7, C-1 | **済** |
+| B | handoff は admin だけが発行でき、単一使用・短命 | H-1〜H-6, H-14, H-17 | **済** |
+| **B-1** | **handoff token 単独では顧客の健康情報が開かない**（admin 本人認証との二要素） | C-2, C-3, H-11 | **済** |
+| **B-2** | **Admin 未認証でも Google 認証を通して代理表示へ入れる**（行き止まりにしない） | X-11, H-15 | **済** |
+| **B-3** | **代理表示の状態を持つ Cookie が存在しない**（URL path の opaque context だけ） | X-12 | **済** |
+| **B-4** | **「発行した admin 本人か」を実装可能な形で照合できる**（`isAdmin=true` の一致だけでは通さない） | C-2, S-23, V-9 | **済** |
+| **B-5** | **handoff / pending / context の状態遷移が DB で保証される**（1 handoff = 1 pending = 1 context） | H-6, H-9, H-10, X-1, X-2, S-20 | **済** |
+| **B-6** | **生 email が診断系 DB にもログにも残らない** | H-3, S-24, X-13, A-3 | **済** |
+| **B-7** | **GET / prefetch / URL スキャナだけでは handoff の状態が変わらない**（v1.4） | S-1〜S-7 | **済** |
+| **B-8** | **consume と context 発行が 1 トランザクション**（途中失敗は ROLLBACK・v1.4） | X-3, X-4, S-20 | **済** |
+| **B-9** | **uid を持たない admin でも代理表示を使える**（v1.4） | A-8, X-5, X-6, S-8 | **済** |
+| **B-10** | **admin から外れたら使えなくなる**（v1.4） | X-7, X-8, S-10 | **済** |
+| **B-11** | **代理表示では書き込めない**（`writeTargetUid = null`） | V-4, V-5 | **済** |
+| **B-12** | **`welltect_v` の形式が 1 バイトも変わっていない** | S-11, `verify:viewer-origin` | **済** |
+| C | 代理表示を終了でき、admin 本人へ戻る | C-7〜C-10 | **済** |
+| D | 外部相手が URL を開くだけで利用できる | S1〜S9 | 未（外部共有） |
+| E | **同意前に健康情報を出さない** | S2 | 未（外部共有） |
+| F | **共有相手が対象者として AI 問診・AI スキャンを実行でき、現行の更新処理が走る** | S10〜S13 | 未（外部共有） |
+| G | **target をクライアントから変更できない**（URL / body / artifact_id） | A8, S14〜S17 | 未（外部共有） |
+| H | **admin 機能に到達できない** | S18 | 未（外部共有） |
+| I | 期限切れ・停止・失効・再発行が即時に効く | S19〜S23 | 未（外部共有） |
+| J | **raw token が DB にもログにも残らない** | S24 | 未（外部共有）／**Admin 側は済**（H-2, S-24, X-13） |
+| K | 全ページが `private, no-store` | S25 | 未（外部共有） |
+| L | **通常本人の挙動に回帰が無い** | S26, W1, §34.3 | 未（外部共有）／**Admin 側は済**（V-6〜V-8, S-11〜S-12, 既存 verify 15 本 PASS） |
+| M | セッション優先順位が仕様どおり | C1〜C4 | 未（外部共有） |
+| N | **書き込み先が resolver 1 か所で決まる** | W2〜W5 | 未（外部共有） |
+| **O** | **admin の複数タブが混線しない**（既存機能を退行させない） | C-9, C-10 | **済** |
+| **P** | **共有相手が本人の配送状態・既読状態・認証セッションを変更できない** | S29〜S31 | 未（外部共有） |
+| **Q** | **対象者の profile metadata をクライアントから改竄できない** | S33, W6 | 未（外部共有） |
+| **R** | **未認証で AI / S3 を消費できない** | W7, W8 | 未（外部共有） |
+| **S** | **revoke の効果が正確に説明され、残存 credential の最大 TTL が仕様どおり** | S27, S28 | 未（外部共有） |
+| **T** | **share 中であることが常に画面に出ており、1 タップで終了できる** | S32, §24.4 | 未（外部共有） |
 
 ---
 
@@ -2126,14 +2354,26 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 | Phase | 内容 | 前提 |
 |---|---|---|
 | **0** | **Phase 0 = 外部共有の公開前に必須。share と独立して先行できる**（下表） | なし |
-| **1** | DB migration（§22 の 5 表）＋ RLS | 発注者が staging で適用 |
-| **2** | Admin handoff ＋ **view-context（§13.0 案 B）** ＋ **§12.7 の Admin ログイン待ち**（Scan-Chat-AI） | Phase 1 |
-| **3** | wellfort-site 顧客管理に新導線を追加（旧 `?u=` と並置） | Phase 2 |
-| **4** | 運用確認後、旧 `?u=` を撤去 | Phase 3 |
+| **1** | DB migration ＋ RLS | **代理表示の 2 表と RPC 3 本は実装済み**（`20260930000010_admin_impersonation.sql`）。**適用は発注者**（staging → 本番）。外部共有の 3 表は未着手 |
+| **2** | Admin handoff ＋ **view-context（§13.0 案 B）** ＋ **§12.7 の Admin ログイン待ち**（Scan-Chat-AI） | **実装済み（v1.4）**。Phase 1 の適用が前提 |
+| **3** | wellfort-site 顧客管理に新導線を追加（旧 `?u=` と並置） | **実装済み（v1.4）**。`customers.astro` / `health-age.astro` に「代理表示で開く」を追加し、**旧 `?u=` は小さく残した**（`SCAN_CHAT_AI_API_KEY` 未設定の環境で行き止まりにしないため） |
+| **4** | 運用確認後、旧 `?u=` を撤去 | Phase 3 ＋ **本番での動作確認**（下記） |
 | **5** | Share link 発行 API ＋ admin 管理 UI | Phase 1 |
 | **6** | `/share/<token>` → consent → share session | Phase 5 |
 | **7** | Share での AI 問診・AI スキャン（target lock 付き） | Phase 0, 6 |
 | **8** | アクセスログ・監査画面 | Phase 6 |
+
+#### 【v1.4】Phase 1 を動かすために**発注者の操作が要る**もの
+
+| # | 操作 | 無いとどうなるか |
+|---|---|---|
+| 1 | `supabase/migrations/20260930000010_admin_impersonation.sql` を **staging → 本番** へ適用（`supabase db push`） | handoff の発行が `target_not_found` ではなく DB エラーで落ちる。**代理表示は一切動かない**（既存機能には影響しない — middleware は `/admin-view/` 以外に触れないため） |
+| 2 | wellfort-site の env **`SCAN_CHAT_AI_API_KEY`**（= Scan-Chat-AI の `ADMIN_API_KEY`）が入っていることの確認 | 「代理表示で開く」が `server_misconfig:scan_chat_ai_api_key` を返す。**旧 `?u=` は動くので行き止まりにはならない** |
+| 3 | Scan-Chat-AI の env **`APP_SESSION_SECRET`**（無ければ `SUPABASE_SERVICE_ROLE_KEY` で代用されるので**通常は不要**） | どちらも無ければ `welltect_admin_v` を発行しない（fail-closed）＝代理表示が通らない。**既存の `welltect_v` と同じ鍵**なので、サインインが動いている環境なら足りている |
+
+> **適用前でも既存機能は 1 つも壊れない。** middleware は `/admin-view/` 以外で即 `next()` し
+> （検査 S-12）、`issueAdminCred` は**例外を投げない**（失敗しても `false` を返すだけ）。
+> つまり **migration 未適用でも、サインインも一般利用者の画面も従来どおり動く。**
 
 ### 36.1 Phase 0 の中身（**外部共有の公開前に必須・3 項目**）
 
@@ -2170,15 +2410,23 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 > **U7**（対象者 profile metadata のサーバ解決）→ **Phase 0 必須事項へ昇格**（§19.5 / §36.1-b）。
 > **U18**（`kit/self-report` / `notices/read`）→ **BLOCK で確定**（§17.2）。
 > 代わりに **U20〜U23** を追加した。
+>
+> **v1.4（実装）でさらに 4 件を閉じた**: **U5**（代理表示は read-only。`writeTargetUid = null` で実装・検査 V-4）／
+> **U20**（middleware 1 本で実現・§13.0）／**U24**（`GoogleOneTap` が同じ URL を開き直すので**自動で戻る**。
+> uid を持たない admin のために `/admin/handoff/` 配下だけ `{linked:false, admin:true}` でも進める分岐を足した）／
+> **U25**（`pending_attempts` = **5** で確定。数え方も §12.8 に明記）。
+> **U26** は内容を確定（30 日 ＋ `refresh-admin` での削除）したが、**期間そのものは発注者判断として残す**。
+>
+> **v1.4 で新たに 1 件を追加**: **U27**（代理表示中のクライアント側 `fetch` が prefix を持たない件）。
 
 | # | 論点 | 選択肢 | 推奨 | 決める人 |
 |---|---|---|---|---|
 | **U1** | wellfort-site の **Vercel Production Branch** が `main` か | 実測では `origin/HEAD = main` だが Vercel の設定は未確認 | 実装前に確認 | 発注者 |
 | **U2** | 共有 URL の**再コピー**は業務必須か | hash-only / 暗号化保存 | **hash-only**（§15.3） | 発注者 |
 | **U3** | 同意画面に**対象者の氏名**を出すか | 出す / 出さない / イニシャル等 | 未定（PII を共有相手へ渡すことになる） | 発注者 |
-| **U4** | 代理表示中の帯に**何を表示**するか | 顧客名 / 契約番号 / uid 先頭 8 桁 | 未定（`diagnosis` 側に氏名は無い） | 発注者 |
-| **U5** | **admin が代理で問診・スキャンを代行入力**したいか | 現行どおり禁止 / 許可 | **禁止**（§12.5） | 発注者 |
-| **U6** | impersonation / share で**毎リクエスト DB を引く**コスト | opaque + DB / 短命署名 Cookie | opaque + DB。**未計測** | 実装時に実測 |
+| **U4** | 代理表示中の帯に**何を表示**するか | 顧客名 / 契約番号 / uid 先頭 8 桁 | **v1.4 は「uid 先頭 8 桁 ＋ 自動終了の時刻」で実装**。氏名は `diagnosis` 側に無く、引くこと自体が PII 分離に反する。**これで足りるかは発注者判断**（実装を止めない） | 発注者 |
+| ~~**U5**~~ | ~~admin が代理で問診・スキャンを代行入力したいか~~ | — | **確定: 禁止**（v1.4 で実装。`writeTargetUid = null`・検査 V-4）。**運用要望が出たら改めて裁定** | **確定済** |
+| **U6** | impersonation / share で**毎リクエスト DB を引く**コスト | opaque + DB / 短命署名 Cookie | **opaque + DB で実装済み**（`admin_impersonation_sessions` を `session_digest` の UNIQUE index で 1 行引くだけ）。**本番での実測はまだ**。許容できなければ短命署名 Cookie ＋ 失効リストへ落とす | 本番で実測 |
 | **U8** | `GET /api/debug/viewer` を share から叩けるか | BLOCK / token があれば ALLOW | **BLOCK**（viewer 構造をそのまま返すため） | 発注者 |
 | **U9** | `created_by`（発行した admin）に何を保存するか | email / email のハッシュ / admin_users.id | **ハッシュ**（PII を診断系に置かない） | 発注者 |
 | **U10** | admin が共有 URL を開いたとき share を勝たせるか | share 優先 / 警告して拒否 | **share 優先**（§24.4） | 発注者 |
@@ -2191,13 +2439,48 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 | **U17** | 共有相手による更新を**対象者本人へ通知**するか | する / しない | 未定（本人の知らないところで実データが増える） | 発注者 |
 | ~~**U18**~~ | ~~`kit/self-report` / `notices/read` を share で許すか~~ | — | **確定: BLOCK**（レビュー 2026-09-30）。発注者が明示的に許可した更新は **AI 問診と AI スキャンだけ**。ページ閲覧は許可するが、**本人の配送状態・既読状態は変えさせない**（§17.2 / §25.2） | **確定済** |
 | **U19** | レート制限（§31-#4）の実装方法 | Vercel の機能 / DB カウンタ / 見送り | 未調査 | 実装時に調査 |
-| **U20** | 案 B（`/admin-view/<ctx>/…`）を **Astro のルーティングでどう実現するか** — 既存ページを二重に書かずに同居させる方法 | rewrite / 共通コンポーネント化 / middleware | **middleware は §28.3 の方針で避けたい。** 実装前に 1 つ選ぶ（§13.0） | 実装時に調査 |
+| ~~**U20**~~ | ~~案 B を Astro のルーティングでどう実現するか~~ | — | **確定: `src/middleware.ts` を 1 本だけ新設**（§13.0）。ヘッダ渡しは偽装可能・各ページ rewrite は内側が ctx を知れない・`[...rest]` は紙面の二重管理。**`/admin-view/` 以外には触れない**ことを検査 S-12 / T-12c で固定した | **確定済** |
 | **U21** | §21.4 で未認証を塞ぐと**サインイン前のお試し利用**が壊れないか | 塞ぐ / 一部を残す | **塞ぐ。** `/scan` `/chat` `/coach` はいずれも `resolveViewer` を通しサインインゲートを出すので正規画面からは呼ばないと読めるが、**実測していない**。実装時に確認 | 実装時に実測 |
 | **U22** | share の **Gemini Live token TTL を短縮するか**（§27.3-A） | 30 分のまま / 10 分へ短縮 | **短縮を推奨**。ただし「問診 1 セクションが 10 分で終わるか」は**未計測** | 発注者 ＋ 実測 |
 | **U23** | share セッション中の**帯の文言と表示位置**（§24.4） | — | 未定。代理表示の帯（§13.4）と揃える | 発注者 |
-| **U24** | §12.7 でサインイン完了後に `/admin/handoff/continue` へ**自動で戻す**か「続ける」を 1 回押させるか | 自動 / 1 タップ | `GoogleOneTap` の現行リダイレクトの作りに依存。実装時に実コードを見て決める | 実装時に調査 |
-| **U25** | §12.8 の `pending_attempts` の上限 **5** が妥当か | 3 / 5 / 無制限 | **5**（1 回ごとに Google のサインインが挟まるので十分）。運用で調整可 | 発注者 |
-| **U26** | `welltect_admin_v` の有効期間を `welltect_v` と同じ **30 日**にするか、短くするか | 30 日 / 数時間 | **30 日**（別々に切れると「admin なのに handoff だけ通らない」という分かりにくい状態を作る）。ただし**admin 権限の剥奪が最大 30 日効かない**わけではない — `refresh-admin` が毎タブ走って削除する（§12.4.1） | 発注者 |
+| ~~**U24**~~ | ~~サインイン完了後に自動で戻すか~~ | — | **確定: 自動**。`GoogleOneTap` は `resolve` 成功後に**同じ URL を開き直す**（`:216`）ので、追加の実装なしで続きへ進む。**uid を持たない admin のために**、`/admin/handoff/` 配下でだけ `{linked:false, admin:true}` でも進める分岐を足した | **確定済** |
+| ~~**U25**~~ | ~~`pending_attempts` の上限~~ | — | **確定: 5**（v1.4）。**何を 1 回と数えるかも §12.8 に明記**（表示・reload・認証前は数えない）。変えるときは `MAX_PENDING_ATTEMPTS` 1 か所 | **確定済** |
+| **U26** | `welltect_admin_v` の有効期間を `welltect_v` と同じ **30 日**にするか、短くするか | 30 日 / 数時間 | **v1.4 は 30 日で実装**（別々に切れると「admin なのに handoff だけ通らない」という分かりにくい状態を作る）。**admin 権限の剥奪が 30 日効かないわけではない** — `refresh-admin` が毎タブ走って削除する（検査 X-7）。**短くするかは発注者判断**（実装を止めない） | 発注者 |
+| **U27**（v1.4 で追加） | **代理表示中にクライアント側 `fetch('/api/…')` が prefix を持たない** | 現状維持 / API も `/admin-view/<ctx>/api/…` へ / API 側で context を見る | **現状維持で開始。** 代理表示は read-only なので**書き込みは元々通らない**。読み取り API を素のパスで叩くと **admin 本人のデータが返る**（他人のデータが漏れるのではなく、admin 自身のものが出る＝**fail-closed**）。ページの主要な表示は SSR なので実害は限定的。**必要になったら `/admin-view/<ctx>/api/…` が middleware でそのまま通る**（rest に `/api/…` を渡すだけ）ので拡張は容易 | 本番で運用してから判断 |
+
+---
+
+## 38.1 【v1.4】実装したファイル（Admin 代理表示）
+
+**Scan-Chat-AI**
+
+| ファイル | 役割 |
+|---|---|
+| `src/lib/admin-identity.ts` | **新規**。`welltect_admin_v` の発行 / 検証・`admin_identity` の HMAC（§12.4.1） |
+| `src/lib/admin-impersonation.ts` | **新規**。handoff / pending / context の本体・RPC 呼び出し・path 分解（§12.8 / §13.2） |
+| `src/middleware.ts` | **新規**。`/admin-view/<ctx>/…` の毎リクエスト本人結合と rewrite（§13.0） |
+| `src/lib/viewer.ts` | **追加のみ**。`kind` / `targetLocked` / `writeTargetUid` / `viewCtx` / `viewerPathPrefix()`。**署名と検証は 1 バイトも変えていない** |
+| `src/pages/api/admin/impersonation/handoff.ts` | **新規**。券の発行（`ADMIN_API_KEY`） |
+| `src/pages/admin/handoff/[token].astro` | **新規**。着地点。**状態を変えない** |
+| `src/pages/api/admin/handoff/claim.ts` | **新規**。claim（POST のみ） |
+| `src/pages/admin/handoff/continue.astro` | **新規**。本人照合 → consume → context → 302 |
+| `src/pages/api/admin/impersonation/end.ts` | **新規**。代理表示の終了（1 件 / 全件） |
+| `src/components/ImpersonationBanner.astro` | **新規**。代理表示中の帯（§13.4） |
+| `src/pages/api/auth/resolve.ts` | **追加のみ**。`issueAdminCred` を**早期 return より前**で呼ぶ。応答に `admin` を足した |
+| `src/pages/api/auth/refresh-admin.ts` | **追加のみ**。`issueAdminCred`（剥奪時は削除）。`changed` に credential の増減を含めた |
+| `src/components/GoogleOneTap.astro` | **追加のみ**。`/admin/handoff/` 配下でだけ、uid の無い admin を続きへ進める |
+| `src/components/AppNav.astro` ほか 4 件 | `linkPrefix` prop を追加（リンクの組み立ては引き続き 1 か所） |
+| ユーザー向け 9 ページ | `viewerPathPrefix(viewer)` を渡すだけ |
+| `supabase/migrations/20260930000010_admin_impersonation.sql` | **新規**。2 表 ＋ RPC 3 本 ＋ RLS |
+| `scripts/verify-admin-handoff.mjs` | **新規**。115 件（§34.0） |
+
+**wellfort-site**
+
+| ファイル | 役割 |
+|---|---|
+| `src/pages/api/admin/impersonation-handoff.ts` | **新規**。既存 2 層認証（`verifyAdmin` ＋ `SCAN_CHAT_AI_API_KEY`）の中継 |
+| `src/pages/admin/customers.astro` | 「代理表示で開く」を追加。**旧 `?u=` は小さく残した**（§36 Phase 3-4） |
+| `src/pages/admin/health-age.astro` | 同上 |
 
 ---
 
@@ -2311,48 +2594,69 @@ wellfort-site: /admin/share-links（未存在）
                               302 /dashboard      （URL に UID なし）
 ```
 
-### B. Admin 代理表示（新方式）
+### B. Admin 代理表示（新方式・**v1.4 = 実装された形**）
 
 ```
-Wellfort Admin 顧客管理
-   │ 「この顧客の画面を開く」
+Wellfort Admin 顧客管理 / ウェルネス年齢
+   │ 「代理表示で開く」
    ▼
-wellfort-site  POST /api/admin/impersonation-handoff
-   │  verifyAdmin(request)                     … Supabase token → admin_users
-   │  Bearer SCAN_CHAT_AI_API_KEY で上流へ
+wellfort-site  POST /api/admin/impersonation-handoff          [新設]
+   │  verifyAdmin(request)                     … Supabase token → admin_users（service_role 不使用）
+   │  **サーバが検証した email だけ**を Bearer SCAN_CHAT_AI_API_KEY で上流へ
    ▼
-Scan-Chat-AI   POST /api/admin/impersonation/handoff    [ADMIN_API_KEY]
-   │  target_uid 実在確認
-   │  raw = CSPRNG 32byte ／ DB には sha256(raw) のみ
-   │  expires_at = now + 60s ／ consumed_at = null
-   └──▶ { url: ".../admin/handoff/<raw>" }
+Scan-Chat-AI   POST /api/admin/impersonation/handoff          [ADMIN_API_KEY]
+   │  target_uid 実在確認（diagnosis.app_users）
+   │  admin_identity = HMAC("admin_identity:v1:" + lower(trim(email)))  ← **受けた直後に digest 化**
+   │  raw = CSPRNG 32byte ／ DB には sha256(raw) のみ ／ expires_at = now + 60s
+   └──▶ { url: ".../admin/handoff/<raw>" }      → window.open
    ▼
 ブラウザ  GET /admin/handoff/<raw>
-   │  ① **claim**: UPDATE … SET pending_digest=:d, pending_expires_at=now()+10min
-   │        WHERE token_hash=:h AND consumed_at IS NULL
-   │          AND pending_digest IS NULL AND expires_at > now()   ← 60 秒はここまで
-   │        （1 行のときだけ成立。**ここで raw token は死ぬ** = 再利用も 2 個目の pending も不可）
-   │  ② Set-Cookie: welltect_handoff_pending = <opaque>（10 分）
+   │  **状態を 1 ミリも変えない。** フォームを描くだけ（JS で即 submit / noscript はボタン）
+   │  no-referrer ・ noindex ・ no-store ・ 外部リソースを読まない
    ▼
-   302 /admin/handoff/continue        ← **raw token が URL から消える**
-   │  ③ welltect_v（admin フラグ）＋ welltect_admin_v（uid 一致・admin_identity）を検証
-   │       ├ 未サインイン → Google → /api/auth/resolve → ③ へ戻る
-   │       ├ 非 admin / 別 admin → **403**（UPDATE を撃たない＝handoff を焼かず再試行可・最大 5 回）
-   │       └ 発行 admin 本人 → ④へ
-   │  ④ **consume**: UPDATE … SET consumed_at=now()
-   │        WHERE pending_digest=:d AND consumed_at IS NULL
-   │          AND pending_expires_at > now()      ← 以後は 10 分が効く（60 秒は見ない）
-   │  ⑤ <opaque-context> を採番 → admin_impersonation_sessions へ insert
-   │        （session_digest=sha256(ctx) / handoff_id **UNIQUE** / admin_identity / target_uid）
-   │  ⑥ pending Cookie を削除
+POST /api/admin/handoff/claim
+   │  ① **claim** = diagnosis.claim_admin_handoff(sha256(raw), sha256(pending), 600)
+   │        UPDATE … SET pending_digest, pending_expires_at = now()+10min, pending_attempts = 0
+   │         WHERE token_hash=? AND consumed_at IS NULL
+   │           AND pending_digest IS NULL AND expires_at > now()      ← 60 秒はここまで
+   │        （1 行のときだけ成立。**ここで raw token は死ぬ** = 再利用も 2 個目の pending も不可）
+   │  ② Set-Cookie: welltect_handoff_pending = <opaque>（10 分・HttpOnly）
+   ▼
+   303 /admin/handoff/continue        ← **raw token が URL から消える**
+   │  ③ welltect_admin_v を検証（admin_identity / exp）
+   │       ├ 無い → Google サインイン → /api/auth/resolve が welltect_admin_v を発行
+   │       │        → GoogleOneTap が同じ URL を開き直す → ③ へ戻る（attempts は増えない）
+   │       └ 在る → ④へ
+   │  ④ **consume ＋ context を 1 トランザクション**
+   │       = diagnosis.consume_admin_handoff(sha256(pending), admin_identity, sha256(ctx), 3600)
+   │         UPDATE … SET consumed_at = now()
+   │          WHERE pending_digest=? AND consumed_at IS NULL
+   │            AND pending_expires_at > now()        ← 以後は 10 分が効く（60 秒は見ない）
+   │            AND admin_identity = ?                ← **発行した admin 本人か**
+   │         INSERT admin_impersonation_sessions (handoff_id **UNIQUE**, session_digest=sha256(ctx), …)
+   │         → 途中失敗は**全部 ROLLBACK**（consumed だけ進んで context 無し、を作らない）
+   │       ├ 0 行（非 admin / 別 admin / 期限切れ / 二重）
+   │       │   → diagnosis.fail_admin_handoff_attempt(…, 5)   … **原子的に +1・5 回で失効**
+   │       │   → **403**（理由を出し分けない・self / share へ落とさない）
+   │       └ 1 行 → ⑤へ
+   │  ⑤ pending Cookie を削除
    ▼
    302 /admin-view/<opaque-context>/dashboard    （URL に UID も handoff token も無い）
-   ※ **Cookie は発行しない**（welltect_imp_v は無い）。毎リクエストで
-     **welltect_v(admin) ＋ welltect_admin_v(admin_identity) ＋ session の 3 者一致**を要求する
+   ※ **代理表示の対象を持つ Cookie は発行しない**（welltect_imp_v は存在しない）。
+     使う Cookie は welltect_v ／ welltect_admin_v ／（消費まで）welltect_handoff_pending の 3 本。
    │
    ▼
- 以後 resolveViewer() → kind='admin_impersonation'
-      uid = target_uid ／ selfUid = admin ／ writeTargetUid = null ／ targetLocked = true
+ 毎リクエスト  src/middleware.ts
+      welltect_admin_v(admin_identity) ＋ sha256(ctx) の session ＋ 一致 ＋ 期限 ＋ 未 revoke
+      → 1 つでも欠ければ **403**（他の kind へ落とさない）
+      → locals.adminView に載せて内側のページへ rewrite（URL は /admin-view/<ctx>/… のまま）
+   ▼
+ resolveViewer() → kind='admin_impersonation'
+      uid = target_uid ／ selfUid = admin（**無い場合もある**）／
+      writeTargetUid = **null**（read-only）／ targetLocked = true ／ viewCtx = <ctx>
+   ▼
+ リンクは viewerPathPrefix(viewer) = "/admin-view/<ctx>" を前に付ける（`?u=` は出さない）
+ 画面上部に ImpersonationBanner（対象 uid 先頭 8 桁 ＋ 自動終了時刻 ＋ 終了ボタン 2 つ）
 ```
 
 ### C. External Share

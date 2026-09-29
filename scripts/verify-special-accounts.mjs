@@ -115,7 +115,9 @@ console.log('\n③ サインインの橋渡し (api/auth/resolve.ts)\n');
   const r = read('src/pages/api/auth/resolve.ts');
   const iSpecial = r.indexOf('resolveSpecialUidByEmail(email');
   const iDemo = r.indexOf('resolveDemoUidByEmail(email');
-  const iBail = r.indexOf('return json({ linked: false }');
+  // 2026-09-30: 未連携の応答に `admin` を足した (uid を持たない admin を handoff で通すため)。
+  // **場所は同じ**なので、前方一致で拾う。
+  const iBail = r.indexOf('return json({ linked: false');
   const iLinked = r.indexOf('const linkedUid = await findLinkedUid(');
 
   ok('resolveSpecialUidByEmail を呼んでいる', iSpecial >= 0,

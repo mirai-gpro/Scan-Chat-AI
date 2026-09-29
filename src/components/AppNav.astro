@@ -26,6 +26,12 @@ interface Props {
    * 以前は `u`(diagnostic_user_id) を受けて `?u=…` を作っていたため、
    * 一般ユーザーの全リンクに本人の uid が出ていた。
    */
+  /**
+   * **代理表示の path prefix** (`''` か `/admin-view/<ctx>`)。
+   * **`viewerPathPrefix(viewer)` の値をそのまま渡すこと** (2026-09-30)。
+   * 付け忘れると、そのリンクだけ代理表示から抜けて admin 本人の画面へ戻る。
+   */
+  linkPrefix?: string;
   linkQuery?: string;
   /** 現在のパス (/dashboard 等)。現在地の強調に使う。 */
   current?: string;
@@ -39,6 +45,7 @@ interface Props {
 }
 const {
   linkQuery = '',
+  linkPrefix = '',
   current = '',
   unreadNotices = 0,
   supportContact = null,
@@ -47,14 +54,15 @@ const {
 } = Astro.props as Props;
 
 const q = linkQuery;
+const p = linkPrefix;
 const ITEMS: { href: string; label: string; icon: AppIconName; note?: string }[] = [
-  { href: `/dashboard${q}`, label: 'ホーム',       icon: 'home',      note: '最新の状況' },
-  { href: `/report${q}`,    label: AI_PREVENTION_REPORT_LABEL, icon: 'report', note: '報告書を読む' },
-  { href: `/scan${q}`,      label: 'AI スキャン',  icon: 'scan',      note: '検診結果を読み取る' },
-  { href: `/chat${q}`,      label: 'AI 問診',      icon: 'interview', note: '生活習慣を記録する' },
-  { href: `/kit${q}`,       label: '検査キット',   icon: 'kit',       note: '発送と返送の進捗' },
-  { href: `/coach${q}`,     label: 'AI コーチ',    icon: 'coach',     note: '結果について相談' },
-  { href: `/notices${q}`,   label: 'お知らせ',     icon: 'notice' },
+  { href: `${p}/dashboard${q}`, label: 'ホーム',       icon: 'home',      note: '最新の状況' },
+  { href: `${p}/report${q}`,    label: AI_PREVENTION_REPORT_LABEL, icon: 'report', note: '報告書を読む' },
+  { href: `${p}/scan${q}`,      label: 'AI スキャン',  icon: 'scan',      note: '検診結果を読み取る' },
+  { href: `${p}/chat${q}`,      label: 'AI 問診',      icon: 'interview', note: '生活習慣を記録する' },
+  { href: `${p}/kit${q}`,       label: '検査キット',   icon: 'kit',       note: '発送と返送の進捗' },
+  { href: `${p}/coach${q}`,     label: 'AI コーチ',    icon: 'coach',     note: '結果について相談' },
+  { href: `${p}/notices${q}`,   label: 'お知らせ',     icon: 'notice' },
 ];
 ---
 
@@ -74,7 +82,7 @@ const ITEMS: { href: string; label: string; icon: AppIconName; note?: string }[]
     <AppLogo src={logoSrc} alt={logoAlt} height={66} />
 
     <a
-      href={`/notices${q}`}
+      href={`${p}/notices${q}`}
       class="relative inline-flex min-h-touch min-w-touch flex-col items-center justify-center rounded-xl px-2 text-slate-700 transition hover:bg-slate-100"
     >
       <AppIcon name="notice" size={22} />
@@ -109,7 +117,7 @@ const ITEMS: { href: string; label: string; icon: AppIconName; note?: string }[]
   </div>
 
   {ITEMS.map((it) => {
-    const active = current === it.href.split('?')[0];
+    const active = `${p}${current}` === it.href.split('?')[0];
     return (
       <a
         href={it.href}

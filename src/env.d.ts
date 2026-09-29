@@ -18,3 +18,23 @@ interface ImportMetaEnv {
 interface ImportMeta {
   readonly env: ImportMetaEnv;
 }
+
+declare namespace App {
+  interface Locals {
+    /**
+     * **Admin 代理表示の解決結果**（`/admin-view/<ctx>/…` のときだけ入る）。
+     *
+     * **middleware しか書かない。** クライアントからは設定できないので、
+     * ここに値が在ること自体が「middleware が admin 本人と context を突き合わせて
+     * 通した」ことの証明になる（`src/middleware.ts`）。
+     */
+    adminView?: {
+      ctx: string;
+      targetUid: string;
+      targetOrigin: 'production' | 'staging';
+      adminIdentity: string;
+      adminSelfUid: string;
+      expiresAt: string;
+    };
+  }
+}

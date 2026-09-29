@@ -1,0 +1,74 @@
+---
+/**
+ * **handoff の着地点。GET では状態を 1 ミリも変えない。**
+ *
+ * 正本: `docs/specs/secure_shared_access_and_admin_impersonation_spec_20260930.md` §12.7 / §12.8。
+ *
+ * 【なぜ GET で claim しないか（2026-09-30 確定）】raw token は **URL path に載る**ので、
+ * **リンクのプリフェッチ・メールや chat の URL スキャナ・アンチウイルスの先読み**が
+ * この GET を踏む。そこで claim すると **admin が開く前に券が焼き切れる**
+ * （しかも「もう使われています」としか出せない）。
+ * → **claim は `POST /api/admin/handoff/claim` だけ**。このページは
+ *   **フォームを描くだけ**で、DB も Cookie も触らない。
+ *
+ * 【自動送信】JS で即 submit する（プリフェッチ・スキャナは JS を実行しない）。
+ * **`<noscript>` のボタンも必ず置く** — JS が動かない環境で行き止まりにしない。
+ *
+ * 【raw token をこのページから外へ出さない】
+ *   - `Referrer-Policy: no-referrer`（URL に token が載っているので Referer で漏らさない）
+ *   - `robots: noindex, nofollow`
+ *   - `Cache-Control: no-store`
+ *   - **外部リソースを 1 つも読み込まない**（この画面だけ素の HTML にしてある）
+ */
+import { OPAQUE_RE } from '../../../lib/admin-impersonation';
+
+export const prerender = false;
+
+const token = Astro.params.token ?? '';
+// 字面が合わないものはフォームすら描かない（POST 先で弾く前の入口の足切り）。
+const valid = OPAQUE_RE.test(token);
+
+Astro.response.headers.set('cache-control', 'no-store, max-age=0');
+Astro.response.headers.set('referrer-policy', 'no-referrer');
+Astro.response.headers.set('x-robots-tag', 'noindex, nofollow');
+if (!valid) Astro.response.status = 404;
+---
+<!doctype html>
+<html lang="ja">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="robots" content="noindex, nofollow" />
+    <meta name="referrer" content="no-referrer" />
+    <title>代理表示の準備 | Welltect</title>
+    <style>
+      body { margin: 0; min-height: 100vh; display: flex; align-items: center; justify-content: center;
+             font-family: system-ui, "BIZ UDGothic", "Hiragino Sans", "Noto Sans JP", sans-serif;
+             background: #F2F2F2; color: #1f2937; }
+      .box { background: #fff; border-radius: 12px; padding: 24px; max-width: 28rem; text-align: center;
+             box-shadow: 0 1px 3px rgba(0,0,0,.08); }
+      button { min-height: 44px; padding: 0 20px; border: 0; border-radius: 10px;
+               background: #287F86; color: #fff; font-size: 16px; font-weight: 700; cursor: pointer; }
+      p { line-height: 1.75; font-size: 15px; }
+    </style>
+  </head>
+  <body>
+    <div class="box">
+      {valid ? (
+        <>
+          <p>代理表示の準備をしています。</p>
+          <form id="f" method="POST" action="/api/admin/handoff/claim">
+            <input type="hidden" name="token" value={token} />
+            <button type="submit">続ける</button>
+          </form>
+          <script is:inline>
+            /* プリフェッチ・URL スキャナは JS を実行しない。人が開いたときだけ進む。 */
+            document.getElementById('f').submit();
+          </script>
+        </>
+      ) : (
+        <p>この URL は無効です。Wellfort の管理画面からもう一度開いてください。</p>
+      )}
+    </div>
+  </body>
+</html>

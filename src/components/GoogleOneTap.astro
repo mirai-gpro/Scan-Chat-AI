@@ -190,6 +190,23 @@ const buildSha = (
             notify({ text: `連携処理エラー: ${payload.error ?? `HTTP ${res.status}`}`, tone: 'error' });
             return;
           }
+          /*
+           * **uid を持たない admin を handoff の続きで行き止まりにしない** (2026-09-30)。
+           *
+           * `admin_users` に居るが Scan-Chat-AI 側の `diagnostic_user_id` を持たない人が居る。
+           * その人は `resolve` が `{ linked:false }` を返すので、従来はここで
+           * 「お客様情報が見つかりませんでした」と出て**止まっていた**。
+           * ところが `resolve` は**その前に `welltect_admin_v` を発行している**ので、
+           * **代理表示の続き (`/admin/handoff/...`) は成立する**。
+           *
+           * **`/admin/handoff/` の下でだけ**進める。ダッシュボード等でこれをやると
+           * 「サインインできたのに何も出ない」画面へ送ることになる (uid が無いので当然)。
+           */
+          if (!payload.linked && payload.admin === true && url.pathname.startsWith('/admin/handoff/')) {
+            console.log('[OneTap] admin (uid 無し) → handoff の続きへ');
+            window.location.replace(url.toString());
+            return;
+          }
           if (!payload.linked || !payload.diagnosticUserId) {
             console.warn('[OneTap] not linked');
             notify({

@@ -1,0 +1,70 @@
+---
+/**
+ * **代理表示中であることを常時示す帯**（仕様書 §13.4）。
+ *
+ * 【なぜ必須か】URL から `?u=<uid>` を消した結果、**いま誰の画面を見ているのかが
+ * 画面から分からなくなる**。admin が「自分の画面だと思って顧客の画面を見る」／
+ * 「A さんのつもりで B さんを見る」を防ぐ最後の砦。
+ *
+ * 【何を出すか】**氏名は出さない** — `diagnosis` 側に PII は無く、
+ * 引いてくること自体が PII 分離に反する。出すのは
+ * **対象 uid の頭 8 桁**（Wellfort 管理画面の一覧と突き合わせられる最小限）と
+ * **残り時間**だけ。
+ *
+ * 【終了ボタン】`POST /api/admin/impersonation/end`。
+ *   - 「この代理表示を終了」… そのタブだけ（他のタブの別顧客は生き続ける・§13.0）
+ *   - 「すべて終了」        … 席を離れるとき用
+ */
+interface Props {
+  /** `viewer.viewCtx`。null なら何も描かない。 */
+  ctx: string | null;
+  /** 代理表示の対象（`viewer.uid`）。頭 8 桁だけ出す。 */
+  targetUid: string | null;
+  /** DB の `expires_at`（ISO）。 */
+  expiresAt?: string | null;
+}
+const { ctx, targetUid, expiresAt = null } = Astro.props as Props;
+const short = (targetUid ?? '').slice(0, 8);
+---
+{ctx && (
+  <div
+    id="imp-banner"
+    data-ctx={ctx}
+    class="sticky top-0 z-50 flex flex-wrap items-center justify-between gap-2 bg-navy-800 px-4 py-2 text-white"
+  >
+    <span class="text-sm font-semibold">
+      代理表示中（対象 {short}…）
+      {expiresAt && <span class="ml-2 font-normal opacity-80">自動終了 {new Date(expiresAt).toLocaleTimeString('ja-JP', { hour: '2-digit', minute: '2-digit' })}</span>}
+    </span>
+    <span class="flex gap-2">
+      <button type="button" data-imp-end="one" class="min-h-touch rounded-lg bg-white/15 px-3 text-sm font-semibold hover:bg-white/25">
+        この代理表示を終了
+      </button>
+      <button type="button" data-imp-end="all" class="min-h-touch rounded-lg bg-white/15 px-3 text-sm font-semibold hover:bg-white/25">
+        すべて終了
+      </button>
+    </span>
+  </div>
+)}
+{ctx && (
+  <script is:inline>
+    (() => {
+      const bar = document.getElementById('imp-banner');
+      if (!bar) return;
+      bar.addEventListener('click', async (ev) => {
+        const btn = ev.target instanceof Element ? ev.target.closest('[data-imp-end]') : null;
+        if (!btn) return;
+        const all = btn.getAttribute('data-imp-end') === 'all';
+        try {
+          await fetch('/api/admin/impersonation/end', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(all ? { all: true } : { ctx: bar.dataset.ctx }),
+          });
+        } catch { /* 失敗しても本人の画面へは戻す（DB 側は期限で切れる） */ }
+        // **`welltect_v` は消していない**ので admin 本人の画面へそのまま戻る。
+        window.location.replace('/dashboard');
+      });
+    })();
+  </script>
+)}

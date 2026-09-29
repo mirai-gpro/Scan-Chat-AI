@@ -66,7 +66,13 @@ console.log('\n② Viewer.uidEntry (T-08 / T-20)');
   const returns = [...c.matchAll(/return \{[^}]*uidEntry:\s*(true|false)[^}]*\}/g)].map((m) => m[1]);
   const anon = /const ANONYMOUS: Viewer = \{[^}]*uidEntry: false/.test(c);
   ok('T-08a', 'ANONYMOUS に uidEntry: false がある', anon);
-  ok('T-08b', 'resolveViewer の全 return が uidEntry を持つ (3 件)', returns.length === 3, `${returns.length} 件`);
+  /*
+   * **4 件**。2026-09-30 に **Admin 代理表示 (`/admin-view/<ctx>/…`)** の return が 1 件増えた
+   * (`docs/specs/secure_shared_access_and_admin_impersonation_spec_20260930.md` §13.0 案 B)。
+   * 数を固定しているのは「**どれか 1 つの return だけ uidEntry を落とす**」退行を止めるため
+   * なので、経路が増えたら数も更新する (緩めない)。
+   */
+  ok('T-08b', 'resolveViewer の全 return が uidEntry を持つ (4 件)', returns.length === 4, `${returns.length} 件`);
   eq('T-08c', 'true は緊急入場の 1 件だけ', returns.filter((x) => x === 'true').length, 1);
   // 緊急入場の return は uidEntryAllowed() のブロック内にあること
   const emerg = c.slice(c.indexOf('uidEntryAllowed() && requested'), c.indexOf('return ANONYMOUS'));
@@ -184,7 +190,8 @@ console.log('\n⑥ クエリ連結 (T-09)');
 {
   // `q ? `${q}&` : '?'` の形が保たれていること (q='' で ?type=… になる)
   const joins = [
-    ['src/components/dashboard/HealthAgeCard.astro', /`\/trend\$\{q \? `\$\{q\}&` : '\?'\}type=wellness`/],
+    // `${p}` は代理表示の path prefix (一般利用者は '')。**連結の形は変わっていない**。
+    ['src/components/dashboard/HealthAgeCard.astro', /`\$\{p\}\/trend\$\{q \? `\$\{q\}&` : '\?'\}type=wellness`/],
     ['src/components/dashboard/TestResultsSection.astro', /\$\{q \? `\$\{q\}&` : '\?'\}type=/],
     ['src/pages/dashboard.astro', /\$\{q \? `\$\{q\}&` : '\?'\}trace=1/],
   ];
@@ -213,7 +220,22 @@ for (const p of PAGES) {
 }
 ok('T-12b', 'http-cache.ts は private, no-store のまま',
   /cache-control',\s*'private, no-store'/.test(read('src/lib/http-cache.ts')));
-ok('T-12c', 'src/middleware.ts を新設していない', !existsRel('src/middleware.ts'));
+/*
+ * **T-12c は 2026-09-30 に意味を変えた。**
+ *
+ * 旧: 「middleware を新設していない」(§28.3 の方針)。
+ * 新: **Admin 代理表示 (`/admin-view/<ctx>/…`) のためだけに 1 本だけ在ってよい。**
+ *     ヘッダ渡しはクライアントが偽装でき、各ページの rewrite では内側のページが
+ *     ctx を知れない (§38-U20 の結論)。**代わりに「他の経路に触れないこと」を固定する** —
+ *     ここが緩むと、全リクエストに素通しでない処理が乗って no-store 等の既存の約束が崩れる。
+ */
+if (existsRel('src/middleware.ts')) {
+  const mw = code('src/middleware.ts');
+  ok('T-12c', 'middleware は /admin-view 以外で即 next() する (既存経路に触れない)',
+    /if \(!parsed\) return next\(\);/.test(mw) && /parseAdminViewPath/.test(mw));
+  ok('T-12c2', 'middleware は Cookie を書かない・認証を作らない',
+    !/cookies\.set/.test(mw) && !/signViewer/.test(mw));
+}
 function existsRel(p) { try { statSync(resolve(ROOT, p)); return true; } catch { return false; } }
 
 // ── ⑧ loadResult の所有者検証を実際に動かす (T-13〜T-18) ─────────

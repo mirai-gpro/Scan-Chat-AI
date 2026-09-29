@@ -51,6 +51,12 @@ interface Props {
    * リンクに引き継ぐクエリ文字列 ('' か '?u=<uid>')。
    * **`viewerLinkQuery(viewer)` の値をそのまま渡すこと** (uid を受け取らない・2026-09-29)。
    */
+  /**
+   * **代理表示の path prefix** (`''` か `/admin-view/<ctx>`)。
+   * **`viewerPathPrefix(viewer)` の値をそのまま渡すこと** (2026-09-30)。
+   * 付け忘れると、そのリンクだけ代理表示から抜けて admin 本人の画面へ戻る。
+   */
+  linkPrefix?: string;
   linkQuery?: string;
 }
 const {
@@ -66,6 +72,7 @@ const {
   diagnosticUserId = '',
   detailHref = '/kit',
   linkQuery: q = '',
+  linkPrefix: p = '',
 } = Astro.props as Props;
 
 const course = mode === 'course';
@@ -91,7 +98,7 @@ const steps = [
     note: interviewDone
       ? '答え直したいときは、もう一度はじめから答えられます。'
       : '生活習慣をうかがいます。実行してください（途中でやめても続きから再開できます）。',
-    href: `/chat${q}`,
+    href: `${p}/chat${q}`,
     action: interviewDone ? 'もう一度実行する' : 'AI 問診を実行する',
   },
   {
@@ -104,7 +111,7 @@ const steps = [
     note: checkupDone
       ? '別の年度の結果も、同じ手順で追加できます。'
       : '結果票を撮影するか、PDF・画像を選んでください。実行してください。',
-    href: `/scan${q}`,
+    href: `${p}/scan${q}`,
     action: checkupDone ? '別の年度を追加する' : 'スキャンを実行する',
   },
 ];
