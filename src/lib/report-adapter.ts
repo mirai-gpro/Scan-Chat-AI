@@ -548,14 +548,28 @@ function annotateSelfReported(
   self: { height?: number | null; weight?: number | null } | null | undefined,
   anomalies: string[],
 ): void {
+  /*
+   * **今回(最新日)の実測値**を取る。
+   *
+   * 【2026-09-29 修正】以前は `arr[0]` = 配列の先頭を見ていたが、時系列で複数回ぶんが
+   * 届く検体ではそれが**一番古い回**になる。実測: 本田さんの受領ファイルは体重を
+   * 3 回分 (2024-09-03 97.3 / 2025-08-20 95.8 / 2026-08-19 95.8) 持ち、本文が今回の
+   * 95.8 を書いているのに「実測値 (97.3) と違います」という誤った監査が出ていた。
+   * 表 (`buildMeasurements`) と同じ「最新日を採る」規則にそろえる。
+   */
   const measured = (name: '身長' | '体重'): number | null => {
+    let best: { date: string; v: number } | null = null;
     for (const [key, arr] of Object.entries(checkup ?? {})) {
       // `身長 [cm]` のように単位が付く。**「標準体重」と混ざらないよう完全一致で見る。**
       if (key.replace(/\s*\[[^\]]*\]\s*$/, '').trim() !== name) continue;
-      const v = Number(arr?.[0]?.value);
-      if (Number.isFinite(v)) return v;
+      for (const e of arr ?? []) {
+        const v = Number(e?.value);
+        if (!Number.isFinite(v)) continue;
+        const date = typeof e?.date === 'string' ? e.date : '';
+        if (!best || date > best.date) best = { date, v };
+      }
     }
-    return null;
+    return best ? best.v : null;
   };
   const ref = { 身長: measured('身長'), 体重: measured('体重') };
   const said = { 身長: self?.height ?? null, 体重: self?.weight ?? null };
@@ -877,7 +891,7 @@ export function buildReportVM(input: BuildInput): ReportVM {
     name: input.name,
     issuedOn: input.issuedOn,
     sheetVersion: SHEET_VERSION,
-    testedOn: firstCheckupDate(lab.checkup),
+    testedOn: latestCheckupDate(lab.checkup),
     cycleSeq: input.cycleSeq,
     cycleTotal: CYCLE_TOTAL,
     wellnessAge,
@@ -953,15 +967,30 @@ function splitWeeks(text: string): DigestItem[] {
   return out;
 }
 
-/** 受領 `health_checkup.json` から検査日を 1 つ取る。 */
-function firstCheckupDate(
+/**
+ * 受領 `health_checkup.json` から**今回(最新日)の検査日**を取る。
+ *
+ * 【2026-09-29 修正・実障害】以前は「最初に見つかった日付」を返していた
+ * (`arr[0]?.date`)。**時系列で複数回ぶんが届く検体では、それが一番古い回**になる。
+ * 実測: 本田さんの受領ファイルは 5 回分 (2024-09-03〜2026-08-19) を含み、
+ * 表紙に **2024年9月3日** と印字されていた。本文も検査値の表も 2026-08-19 の
+ * 「今回」で書かれているので、**表紙だけ 2 年前の日付**という状態だった。
+ *
+ * → `buildMeasurements` が表で採るのと**同じ規則 (最新日)** にそろえる。
+ * 1 回分しか届かない検体では従来と同じ値になる (紙面契約は不変)。
+ */
+function latestCheckupDate(
   checkup: Record<string, { date?: string; value?: unknown }[]> | null,
 ): string | null {
+  let max = '';
   for (const arr of Object.values(checkup ?? {})) {
-    const d = Array.isArray(arr) ? arr[0]?.date : undefined;
-    if (typeof d === 'string' && d) return d;
+    if (!Array.isArray(arr)) continue;
+    for (const e of arr) {
+      const d = e?.date;
+      if (typeof d === 'string' && d > max) max = d;
+    }
   }
-  return null;
+  return max || null;
 }
 
 /** 全編の章のうち、ダイジェストに同じ内容を出したもの (章側では畳んでよい)。 */
