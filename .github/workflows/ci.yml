@@ -84,6 +84,8 @@ jobs:
       - run: npm run verify:report-render
       - run: npm run verify:scan-upload-key
       - run: npm run verify:scan-persist
+      # 原本の S3 直アップロード: 署名付き URL のキー検査が緩むと静かに壊れる
+      - run: npm run verify:originals-upload
       # コードが書く値が DB の CHECK に載っているか (2026-09-27 の実障害の固定)。
       # source='admin_batch' が CHECK に無く insert が全件 23514 で失敗していたのに、
       # 応答の dashboard.reason にしか出ず**画面は成功に見えていた**。鍵もサーバも要らない。

@@ -46,6 +46,7 @@
     "verify:ps1-order": "esbuild scripts/verify-ps1-order.ts --bundle --platform=node --format=esm --log-level=error | node --input-type=module",
     "verify:print": "node scripts/verify-print-pdf.mjs",
     "verify:scan-upload": "npm run verify:scan-upload-key && node scripts/verify-scan-upload.mjs",
+    "verify:originals-upload": "node scripts/verify-originals-upload.mjs",
     "verify:scan-upload-key": "esbuild scripts/verify-scan-upload-key.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/verify-scan-upload-key.mjs && node node_modules/.cache/verify-scan-upload-key.mjs",
     "verify:scan-pages": "node scripts/verify-scan-pages.mjs",
     "verify:db-enums": "node scripts/verify-db-enums.mjs",
