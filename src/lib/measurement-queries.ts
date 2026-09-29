@@ -231,11 +231,38 @@ export async function getLatestMeasurements(
  * 受領して canonical_name が全項目に付くようになったら、このフォールバックは外す。
  * 外す場合はここ (seriesKey) を `r.canonical_name` だけに戻せばよい。
  */
+/**
+ * **系列をまとめるためだけの完全一致エイリアス** (2026-09-29・実障害)。
+ *
+ * がんリスク検査の塩分は 4 回とも値が在るのに、`item_name` が回ごとに 3 通りに
+ * 割れていて (`塩分摂取量` / `1日の塩分摂取量` / `1日の食塩摂取量`)、しかも
+ * `canonical_name` が全て null のため、**推移グラフが 2 点しか描かなかった**
+ * (Production DB 実測: 2023-08-03 8.7 / 2024-06-10 8.4 / 2024-09-02 8.7 /
+ *  2025-01-06 7.6 g)。BMI は canonical_name が付くので 4 点出ていた。
+ *
+ * ここで吸収するのは**系列のキーだけ**。
+ *  - **DB の `item_name` / `value` は書き換えない** (原本忠実)。
+ *  - **保存経路・PDF 解析は触らない** (読み出し時の見せ方の問題なので)。
+ *  - **完全一致のみ**。fuzzy / 部分一致はしない — 部分一致にすると
+ *    「尿中塩分」等の別項目まで巻き込み、静かに別物の線が 1 本になる。
+ *  - 単位は行の値をそのまま使う (`unit: last.unit`) ので `g` のまま。
+ *
+ * **恒久策ではない**。完全マスタを受領して canonical_name が全項目に付いたら、
+ * この表ごと畳んで `seriesKey` を `r.canonical_name` だけに戻す。
+ */
+const SERIES_NAME_ALIASES: Readonly<Record<string, string>> = {
+  塩分摂取量: '1日の塩分摂取量',
+  '1日の塩分摂取量': '1日の塩分摂取量',
+  '1日の食塩摂取量': '1日の塩分摂取量',
+};
+
 function seriesKey(r: { canonical_name: string | null; item_name?: string | null }): string | null {
   const canonical = r.canonical_name?.trim();
-  if (canonical) return canonical;
   const raw = r.item_name?.trim();
-  return raw ? raw : null;
+  const key = canonical || (raw ? raw : null);
+  if (key == null) return null;
+  // 完全一致のときだけ差し替える (Object.hasOwn で prototype 汚染を拾わない)。
+  return Object.hasOwn(SERIES_NAME_ALIASES, key) ? SERIES_NAME_ALIASES[key] : key;
 }
 
 /**
