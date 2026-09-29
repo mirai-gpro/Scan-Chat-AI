@@ -32,7 +32,7 @@ import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
 import { checkNecessity } from '../../../lib/elith-necessity-check';
 import { masterItemNames } from '../../../lib/standard-master';
 import { writeHealthAgeForHc } from '../../../lib/elith-delivery';
-import { persistAdminBatchArtifact, TEST_TYPE_BY_FORMAT } from '../../../lib/scan-persist';
+import { persistAdminBatchArtifact, persistIntoExistingArtifact, TEST_TYPE_BY_FORMAT } from '../../../lib/scan-persist';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 
 export const prerender = false;
@@ -56,6 +56,12 @@ interface Body {
   requiredItems?: unknown;
   /** 不足(deficient)でも強制書出しする管理者オーバーライド。 */
   override?: unknown;
+  /**
+   * ★ **既存 artifact に測定値を補う**ときに渡す (2026-09-29)。
+   *   指定すると `test_artifacts` を**新規作成しない**。uid / 種別 / 受診日が
+   *   食い違えば 409 で止める。未指定なら従来どおり admin_batch 行を作る。
+   */
+  targetArtifactId?: unknown;
 }
 
 function str(v: unknown): string | null {
@@ -84,6 +90,8 @@ export const POST: APIRoute = async ({ request }) => {
 
   const image = typeof body.image === 'string' ? body.image : '';
   if (!image.trim()) return json({ ok: false, error: 'image is required (data URL or base64)' }, 400);
+
+  const targetArtifactId = str(body.targetArtifactId);
 
   const formatId = str(body.formatId);
   if (!isElithFormatId(formatId)) {
@@ -131,6 +139,7 @@ export const POST: APIRoute = async ({ request }) => {
       check_only: true,
       client_id: clientId,
       format_id: formatId,
+      target_artifact_id: targetArtifactId,
       test_date: bundle.testDate,
       date_source: bundle.dateSource,
       rows,
@@ -211,13 +220,46 @@ export const POST: APIRoute = async ({ request }) => {
     const testType = TEST_TYPE_BY_FORMAT[formatId];
     if (testType) {
       try {
-        dashboard = await persistAdminBatchArtifact({
-          diagnosticUserId: clientId,
-          testType,
-          markdownClean: bundle.markdown,
-          measurements,
-          testDate: bundle.testDate,
-        });
+        /*
+         * ★ `targetArtifactId` を渡したときは **既存の artifact に入れる** (2026-09-29)。
+         *
+         * 実障害: 本田さんのがんリスク 4 件は `source='wellfort_lab'` の artifact が
+         * 既に active で在るのに測定値だけ空だった。ここで普通に
+         * `persistAdminBatchArtifact` を流すと `source='admin_batch'` の別 4 行が増えて
+         * **計 8 件**になる。**新しい artifact は作らない。**
+         *
+         * PDF の解析と CancerRiskAssessmentData の生成は**この API の既存処理のまま**で、
+         * 変えるのは保存先だけ。
+         */
+        if (targetArtifactId) {
+          const r = await persistIntoExistingArtifact({
+            artifactId: targetArtifactId,
+            diagnosticUserId: clientId,
+            testType,
+            markdownClean: bundle.markdown,
+            measurements,
+            testDate: bundle.testDate,
+          });
+          if (r.mismatch) {
+            // **取り違えは止める。** S3 は書き終えているので、その旨も返す。
+            return json(
+              { ok: false, error: 'artifact_mismatch', detail: r.mismatch,
+                target_artifact_id: targetArtifactId, client_id: clientId,
+                test_type: testType, test_date: bundle.testDate,
+                note: 'S3 への書き出しは完了しています。DB には何も書いていません。' },
+              409,
+            );
+          }
+          dashboard = r;
+        } else {
+          dashboard = await persistAdminBatchArtifact({
+            diagnosticUserId: clientId,
+            testType,
+            markdownClean: bundle.markdown,
+            measurements,
+            testDate: bundle.testDate,
+          });
+        }
       } catch (e) {
         dashboard = { artifactId: null, rows: 0, reason: String(e instanceof Error ? e.message : e) };
       }
@@ -228,6 +270,7 @@ export const POST: APIRoute = async ({ request }) => {
       bucket: cfg.bucket,
       client_id: clientId,
       format_id: formatId,
+      target_artifact_id: targetArtifactId,
       test_date: bundle.testDate,
       date_source: bundle.dateSource,
       rows,
