@@ -1813,8 +1813,8 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   - **切り分け** = `GET /api/debug/viewer?k=<PROBE_UPLOAD_TOKEN>`。**`?u=` が付いていないか必ず確認する**。
   - **経緯 (ボツ・根拠にしない)**: `docs/旧版・ボツ/2026-08-30_admin判定とデモゲートの試行錯誤.md`。
 
-- **【スペシャルアカウントの追加検査登録 (遺伝子/血液/がんリスク/AI疾病予測) 2026-09-30 仕様確定・未実装】
-  正本 `docs/specs/special_account_additional_tests_spec_20260930.md`。着手前に必読。**
+- **【スペシャルアカウントの追加検査登録 (遺伝子/血液/がんリスク/AI疾病予測) 2026-09-30 実装済み】
+  正本 `docs/specs/special_account_additional_tests_spec_20260930.md`。触る前に必読。**
   目的 = **`/admin/elith-batch` へ上げて、同じ PDF を `/admin/lab-results` へもう一度上げる
   二重運用の廃止**。原本選択 1 回で 原本S3 / `test_artifacts` / `measurement_values` /
   `test_artifact_files` / Elith source JSON / Elith 本番納品 / 読戻し検証 まで通す。
@@ -1849,6 +1849,25 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     **`error` 文字列と HTTP ステータスは各 API が決める** —
     既存は **409 `file_exists`** のまま、追加検査だけ **409 `original_conflict`**。
     **`replace` は新 API に付けない** (原本を置換できる口は既存の 1 つだけに保つ)。
+  - **【実装の地図 2026-09-30】**
+    - Scan-Chat-AI: `src/lib/additional-originals.ts` (キー・検証器・原本判定) /
+      `src/lib/elith-delivery-json.ts` (source JSON・納品・**読戻し検証**・納品履歴) /
+      `src/lib/special-additional-tests.ts` (対象者・artifact 確定・原本紐付け) /
+      `src/pages/api/admin/special-additional-tests/{scan-part,original-ticket,finalize}.ts` /
+      `supabase/migrations/20260930000060_elith_delivery_items.sql`。
+    - wellfort-site: `src/pages/admin/special-additional-tests.astro` /
+      `src/pages/api/admin/special-additional-tests/[action].ts` (3 口を 1 ファイル・allow-list) /
+      **`public/admin/pdf-pages.js`** (PDF のページ展開。`elith-batch.astro` もここへ委譲した＝実装を 2 つ持たない)。
+    - **既存ファイルへの変更は `export` を足しただけ**: `elith-assemble.ts`
+      (`sanitizeDelivery` / `rewriteClientId`) と `elith-delivery.ts` (`makeSubjectResolver`)。
+      **中身は 1 行も変えていない** (そのことを `verify:special-additional-tests` が見張る)。
+  - **検証 `npm run verify:special-additional-tests` (142 件・退行注入 7 種・CI の A 層)**。
+    **K-7 だけ仕様書 §44 K の表と落ちる検査が違う** — 表は「25 (既存 register の 409)」だが、
+    `register.ts` は判定をそのまま転送していないので 25 は通る。実際に落ちるのは
+    **E28 (共通ライブラリが API のエラー名と HTTP ステータスを持たない)**。
+  - **発注者の操作が 2 つ必要**: ① migration `20260930000060_elith_delivery_items.sql` の適用
+    ② 本番での通し確認 (この環境には鍵も S3 も無いので、**Gemini 解析・S3 署名 PUT・
+    本番納品の実挙動は未確認**。検証はすべて決定論部とスタブでの実行)。
 
 - **【EC 購入を伴わない招待に実データで使わせる = スペシャルアカウント 2026-09-15 実装】
   正本 `docs/operations/スペシャルアカウント_仕様書.md`。上位 = `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md`。
@@ -2002,7 +2021,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/elith/elith_s3_data_handoff_spec.md` | **Elith S3 受け渡し仕様** (パス/命名/format_id/JSON) |
 | `docs/elith/elith_batch_centralization_design.md` | Elith バッチ**一元化設計**(キーは Vercel・役割分担・admin バッチ) |
 | `docs/elith/elith_assembly_wrapping_spec.md` | **納品セット アセンブリのラップ仕様(Elith向け説明)**。フォルダ/命名/ウェルネス年齢の時系列化(検査日毎・旧1件を撤回)・疑似データも同様に時系列生成・**LAiF AI疾病発症予測(Other/ai_prediction)のファイル仕様=Elith承諾により確定(§5・2026-08)。合成は data.items[] の発症率%/相対リスク比のみジッタ・昨年比は前年の相対リスク比を引継ぎ(実装済)**・manifest不一致の確認事項 |
-| **`docs/specs/special_account_additional_tests_spec_20260930.md`** | **【スペシャルアカウントの追加検査 (遺伝子/血液/がんリスク/AI疾病予測) の正本。着手前に必読・未実装】** 原本選択 1 回で 原本S3→DB→Dashboard→Elith 納品→読戻し検証 まで通し、**`/admin/lab-results` への二重アップロードを廃止**する。既存パイプラインの組み合わせに徹する (専用の別解析を作らない) / **重複防止は DB でなくアプリが守る** (UNIQUE に `source` が入り NULL で効かない) / 受診日必須・today fallback 禁止 / 原本キーに氏名を入れない / manifest を作らない / `elith_delivery_items` を新設 / 検証 48 項目 + 退行注入 6 種 |
+| **`docs/specs/special_account_additional_tests_spec_20260930.md`** | **【スペシャルアカウントの追加検査 (遺伝子/血液/がんリスク/AI疾病予測) の正本。触る前に必読・2026-09-30 実装済み】** 原本選択 1 回で 原本S3→DB→Dashboard→Elith 納品→読戻し検証 まで通し、**`/admin/lab-results` への二重アップロードを廃止**する。既存パイプラインの組み合わせに徹する (専用の別解析を作らない) / **重複防止は DB でなくアプリが守る** (UNIQUE に `source` が入り NULL で効かない) / 受診日必須・today fallback 禁止 / 原本キーに氏名を入れない / manifest を作らない / `elith_delivery_items` を新設 / 検証 `npm run verify:special-additional-tests` 142 件 + 退行注入 7 種 |
 | **`docs/operations/スペシャルアカウント_仕様書.md`** | **スペシャルアカウントの正本 (アプリ全体)**。EC 購入を伴わない招待で**本人の実データ**を扱う枠。**デモ枠とは目的が逆で、混ぜると本人の画面に他人名義のダミーが出る**。判定 / 登録 (メール) と判定 (uid) の分離 / 供給元の和と除外 / サインインの橋渡しの位置 / **全停止スイッチを持たない理由** / 検証 / 切り分け |
 | **`docs/operations/デモ用アカウント_仕様書.md`** | **デモ用アカウントの正本 (アプリ全体)**。目的 / 誰が見るか / 判定の順序と理由 / 3 供給元の和 / 増やし方 / 実装上の約束 / 検証 / 切り分け。**権限 (admin) の仕組みに乗せない**のが設計の要 |
 | **`docs/elith/AI疾病予防報告書_引継ぎ書.md`** | **【この機能に着手する人が最初に読む】** 新規セッション用の入口。読む順番 / 越えてはならない線 / コードの地図 / 検証コマンド / いま動いているものと残っているもの / 詰まったときの切り分け。**仕様は書かない** (仕様の正は下の仕様書) |
