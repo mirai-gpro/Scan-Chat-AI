@@ -1813,8 +1813,38 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   - **切り分け** = `GET /api/debug/viewer?k=<PROBE_UPLOAD_TOKEN>`。**`?u=` が付いていないか必ず確認する**。
   - **経緯 (ボツ・根拠にしない)**: `docs/旧版・ボツ/2026-08-30_admin判定とデモゲートの試行錯誤.md`。
 
+- **【スペシャルアカウントの追加検査登録 (遺伝子/血液/がんリスク/AI疾病予測) 2026-09-30 仕様確定・未実装】
+  正本 `docs/specs/special_account_additional_tests_spec_20260930.md`。着手前に必読。**
+  目的 = **`/admin/elith-batch` へ上げて、同じ PDF を `/admin/lab-results` へもう一度上げる
+  二重運用の廃止**。原本選択 1 回で 原本S3 / `test_artifacts` / `measurement_values` /
+  `test_artifact_files` / Elith source JSON / Elith 本番納品 / 読戻し検証 まで通す。
+  新画面 = wellfort-site `/admin/special-additional-tests` (既存 `/admin/elith-batch` は
+  技術管理画面として残す)。
+  - **既存パイプラインを組み合わせるだけ。専用の別解析を作らない。**
+    1 つの解析結果から Dashboard 用と Elith 納品 JSON の両方を作る (別々に解析しない)。
+  - **重複防止が核心。DB は守ってくれない** — `test_artifacts` の UNIQUE は
+    `(uid, source, test_type, test_date, external_test_id)` で **`source` を含み、
+    `external_test_id` が NULL のとき効かない** (`20260601000010:208`)。さらに
+    `persistAdminBatchArtifact()` は **`source='admin_batch'` の行しか置き換えない**
+    (`scan-persist.ts:306`) ので、既存 `wellfort_lab` 行がある人に呼ぶと行が増える
+    (= 本田さんの重複事故)。→ **検索は `source` を条件に入れない**・1 件なら
+    `persistIntoExistingArtifact()` で更新・**2 件以上は 409 で停止 (自動判断禁止)**。
+  - **受診日は必須入力。today へ落とさない** (`persistAdminBatchArtifact` は不正な日付を
+    `jstToday()` にする・`scan-persist.ts:295` → **渡す前に検証して 400 で止める**)。
+  - **原本キーに氏名・元ファイル名を入れない**。
+    `additional_results/{uid}/{test_type}/{YYYY_MM_DD}/{sha256}.pdf`。
+    署名は既存 `originals-upload-ticket.ts` を共用 (Object Lock の checksum ＋
+    `unhoistableHeaders` の罠を再現しない)。
+  - **`manifest.json` は作らない**。`elith_s3_data_handoff_spec.md` に Draft が残っているが
+    現行 `elith-assemble.ts:543-546` が正 (規約外ファイルを納品先へ置かない)。
+  - **`elith-delivery-promote` を自動で呼ばない** (uid 配下の全 JSON をコピーするため)。
+    納品履歴は **新表 `diagnosis.elith_delivery_items`** に持つ
+    (`elith_deliveries` は `(uid, bundle_date, delivery_prefix)` で 1 行 + `format_ids` 上書きなので流用不可)。
+  - **migration 番号は `20260930000060` 以降** (`…000010`〜`…000050` は使用済み)。
+
 - **【EC 購入を伴わない招待に実データで使わせる = スペシャルアカウント 2026-09-15 実装】
-  正本 `docs/operations/スペシャルアカウント_仕様書.md`。上位 = `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md`。**
+  正本 `docs/operations/スペシャルアカウント_仕様書.md`。上位 = `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md`。
+  追加検査の登録は上の `docs/specs/special_account_additional_tests_spec_20260930.md`。**
   **デモ枠とは目的が逆。混ぜない。** あちらは**ダミー**を見せる枠 (社外に渡す)、こちらは
   **本人の実データ**を扱う枠。仕組みが似ているので、判定・供給元・app_config キー・admin 画面を
   すべて分けてある。**共有するのは純粋関数の import だけ** (`hashEmail` / `maskEmail` /
@@ -1964,6 +1994,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/elith/elith_s3_data_handoff_spec.md` | **Elith S3 受け渡し仕様** (パス/命名/format_id/JSON) |
 | `docs/elith/elith_batch_centralization_design.md` | Elith バッチ**一元化設計**(キーは Vercel・役割分担・admin バッチ) |
 | `docs/elith/elith_assembly_wrapping_spec.md` | **納品セット アセンブリのラップ仕様(Elith向け説明)**。フォルダ/命名/ウェルネス年齢の時系列化(検査日毎・旧1件を撤回)・疑似データも同様に時系列生成・**LAiF AI疾病発症予測(Other/ai_prediction)のファイル仕様=Elith承諾により確定(§5・2026-08)。合成は data.items[] の発症率%/相対リスク比のみジッタ・昨年比は前年の相対リスク比を引継ぎ(実装済)**・manifest不一致の確認事項 |
+| **`docs/specs/special_account_additional_tests_spec_20260930.md`** | **【スペシャルアカウントの追加検査 (遺伝子/血液/がんリスク/AI疾病予測) の正本。着手前に必読・未実装】** 原本選択 1 回で 原本S3→DB→Dashboard→Elith 納品→読戻し検証 まで通し、**`/admin/lab-results` への二重アップロードを廃止**する。既存パイプラインの組み合わせに徹する (専用の別解析を作らない) / **重複防止は DB でなくアプリが守る** (UNIQUE に `source` が入り NULL で効かない) / 受診日必須・today fallback 禁止 / 原本キーに氏名を入れない / manifest を作らない / `elith_delivery_items` を新設 / 検証 48 項目 + 退行注入 6 種 |
 | **`docs/operations/スペシャルアカウント_仕様書.md`** | **スペシャルアカウントの正本 (アプリ全体)**。EC 購入を伴わない招待で**本人の実データ**を扱う枠。**デモ枠とは目的が逆で、混ぜると本人の画面に他人名義のダミーが出る**。判定 / 登録 (メール) と判定 (uid) の分離 / 供給元の和と除外 / サインインの橋渡しの位置 / **全停止スイッチを持たない理由** / 検証 / 切り分け |
 | **`docs/operations/デモ用アカウント_仕様書.md`** | **デモ用アカウントの正本 (アプリ全体)**。目的 / 誰が見るか / 判定の順序と理由 / 3 供給元の和 / 増やし方 / 実装上の約束 / 検証 / 切り分け。**権限 (admin) の仕組みに乗せない**のが設計の要 |
 | **`docs/elith/AI疾病予防報告書_引継ぎ書.md`** | **【この機能に着手する人が最初に読む】** 新規セッション用の入口。読む順番 / 越えてはならない線 / コードの地図 / 検証コマンド / いま動いているものと残っているもの / 詰まったときの切り分け。**仕様は書かない** (仕様の正は下の仕様書) |
