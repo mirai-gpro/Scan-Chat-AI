@@ -63,8 +63,13 @@ function normSexStrict(v: unknown): 'male' | 'female' | null {
   return null;
 }
 
-/** clientId(=uid) → 被験者情報 (customer_profiles)。elith-assemble.ts の resolveSubject と同旨。 */
-function makeSubjectResolver(): (uid: string) => Promise<SubjectInfo | null> {
+/**
+ * clientId(=uid) → 被験者情報 (customer_profiles)。elith-assemble.ts の resolveSubject と同旨。
+ * **2026-09-30: `export` を足しただけ。中身は 1 行も変えていない。**
+ * 追加検査 (`special-additional-tests.ts`) が**同じ解決順** (customer → スペシャル登録DOB)
+ * を使うために要る。写すと片方だけ直る。
+ */
+export function makeSubjectResolver(): (uid: string) => Promise<SubjectInfo | null> {
   const cache = new Map<string, SubjectInfo | null>();
   return async (uid: string) => {
     if (!uid) return null;

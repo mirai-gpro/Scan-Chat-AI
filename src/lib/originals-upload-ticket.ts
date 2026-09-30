@@ -44,6 +44,7 @@
 import { S3Client, PutObjectCommand, GetObjectCommand, HeadObjectCommand } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { getOriginalsS3Config, sha256Hex, type OriginalsS3Config } from './originals-storage';
+import { isAdditionalOriginalKey } from './additional-originals';
 
 /** `upload.ts` の LAB_COMPANY_TO_TEST_TYPE と同じ 4 社。キーの階層に入る。 */
 export const ORIGINAL_COMPANIES = ['rieger', 'prevent', 'genoplan', 'laif'] as const;
@@ -182,6 +183,28 @@ export async function createOriginalUploadTicket(input: {
   // サーバが組んだキーでも、署名の直前にもう一度検査する (組み立ての誤りを通さない)。
   if (!isOriginalUploadKey(key)) return { ok: false, error: 'invalid_key', detail: key };
 
+  return signOriginalPut({ cfg, key, contentType, bytes, sha256Base64: input.sha256Base64 });
+}
+
+/**
+ * **署名の本体。キーの組み立て方が違っても、署名だけはここ 1 か所を通す。**
+ *
+ * 【切り出した理由 (2026-09-30)】追加検査 (`additional-originals.ts`) は
+ * **別の形のキー**を使うが、Object Lock バケットの checksum 要件と
+ * `unhoistableHeaders` の罠は**まったく同じ**。写すと片方だけ直る事故になるので、
+ * キーを引数で受ける形にして共用する (仕様書 §17「独自実装しない」)。
+ *
+ * **中身は 1 行も変えていない** — 呼び出し側が `key` を決めるようになっただけ。
+ */
+export async function signOriginalPut(input: {
+  cfg: OriginalsS3Config;
+  /** バケット prefix を**まだ付けていない**キー。呼び出し側が検証済みであること。 */
+  key: string;
+  contentType: string;
+  bytes: number;
+  sha256Base64: string;
+}): Promise<TicketResult> {
+  const { cfg, key, contentType, bytes } = input;
   const fullKey = `${cfg.prefix}${key}`.replace(/\/{2,}/g, '/');
   /*
    * `WHEN_REQUIRED` のままにするのは、**空ボディの CRC32 を勝手に載せさせない**ため。
@@ -250,7 +273,16 @@ export type ReadResult =
 export async function readUploadedOriginal(key: unknown): Promise<ReadResult> {
   const cfg = getOriginalsS3Config();
   if (!cfg) return { ok: false, error: 'originals_s3_not_configured' };
-  if (!isOriginalUploadKey(key)) return { ok: false, error: 'invalid_key' };
+  /*
+   * **読み出しを許すキーの形は 2 つだけ**（2026-09-30 に追加検査ぶんを足した）。
+   *   ① `lab_results/<company>/YYYY/MM/<filename>`            … 既存
+   *   ② `additional_results/<uid>/<test_type>/<YYYY_MM_DD>/<sha256>.pdf` … 追加検査（§16）
+   * **どちらも完全一致**で見る。ここを緩めると admin キー 1 本で原本バケットの
+   * 任意のオブジェクト（他人の原本・納品物）を読ませる口になる。
+   */
+  if (!isOriginalUploadKey(key) && !isAdditionalOriginalKey(key)) {
+    return { ok: false, error: 'invalid_key' };
+  }
 
   const fullKey = `${cfg.prefix}${key}`.replace(/\/{2,}/g, '/');
   const c = client(cfg);
