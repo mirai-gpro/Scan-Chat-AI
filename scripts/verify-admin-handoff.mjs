@@ -41,6 +41,8 @@ const read = (p) => readFileSync(resolve(ROOT, p), 'utf8');
 /** コメント行を落とす（経緯の説明に旧コードが載っているので、そこを拾わない）。 */
 const code = (p) => read(p).split('\n').filter((ln) => !/^\s*(\*|\/\/|\/\*)/.test(ln)).join('\n');
 
+/** コメント行を落とす（文字列版）。`code()` はパス版なので、読み込み済みの文字列用に分けてある。 */
+const stripComments = (t) => t.split('\n').filter((ln) => !/^\s*(\*|\/\/|\/\*)/.test(ln)).join('\n');
 const fails = [];
 const ok = (label, cond, why) => {
   if (!cond) fails.push(`${label}${why ? ` — ${why}` : ''}`);
@@ -642,6 +644,24 @@ console.log('\n⑦ 構造（GET で claim しない・cred の発行位置・mid
   // **代理表示は書けない**（既存の規律を壊していないこと）。
   ok('S-25 Viewer に writeTargetUid が在る（読み `uid` / 書き `selfUid` の穴を塞ぐ）',
     /writeTargetUid/.test(code('src/lib/viewer.ts')));
+
+  /*
+   * **`/admin-view/…` の受け皿ルートが在ること**（2026-09-30・本番で実測した障害）。
+   *
+   * middleware だけでは **Vercel のルートが生成されない**。Astro のページが
+   * 1 つも無いと `.vercel/output/config.json` の `admin-view` が **0 件**になり、
+   * **CDN が 404 を返して SSR 関数に届かない** = middleware が動かず
+   * **代理表示が丸ごと死ぬ**（本番で `GET /admin-view/<ctx>/dashboard` が 404 だった）。
+   *
+   * **この検査は middleware を直接呼んでいたので、そこへ到達するかを見ていなかった。**
+   */
+  const FALLBACK = 'src/pages/admin-view/[ctx]/[...rest].astro';
+  let fbSrc = '';
+  try { fbSrc = read(FALLBACK); } catch { /* 無い */ }
+  ok('S-26 **/admin-view/<ctx>/… の受け皿ページが在る**（無いと CDN が 404 で middleware に届かない）',
+    fbSrc !== '', FALLBACK);
+  ok('S-27 受け皿は fail-closed（middleware を通らずに来たら 403・中身を描かない）',
+    /status:\s*403/.test(fbSrc) && !/Astro\.params\.ctx/.test(stripComments(fbSrc)), '');
 }
 
 /* ══════════════════════════════════════════════════════════════════════

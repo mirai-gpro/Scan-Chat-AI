@@ -1,0 +1,38 @@
+---
+/**
+ * **`/admin-view/<ctx>/…` の受け皿ルート。中身はほぼ空でよい。**
+ *
+ * 正本: `docs/specs/secure_shared_access_and_admin_impersonation_spec_20260930.md` §13.0。
+ *
+ * 【なぜ「中身が無いのに」要るのか（2026-09-30・本番で実測）】
+ * 代理表示の処理は `src/middleware.ts` が全部やる（本人結合 → `locals` →
+ * 内側のページへ rewrite）ので、**このページは 1 度も描かれない**。
+ * それでも**ファイルが要る** — **Vercel のルーティング表は Astro の
+ * ページから生成される**ためである。
+ *
+ * 実測: このファイルが無い状態で本番へ出したところ、
+ * `.vercel/output/config.json` に `admin-view` のルートが **0 件**しか無く、
+ * `GET /admin-view/<ctx>/dashboard` は **CDN が 404 を返して
+ * SSR 関数まで届かなかった**（middleware が 403 を返す以前の問題で、
+ * **代理表示が丸ごと動かない**）。
+ *
+ * 【なぜ検査をすり抜けたか】`verify:admin-handoff` は middleware を
+ * **直接呼んで**いるので、「そもそも middleware に到達するか」を見ていなかった。
+ * → 同検査に **S-26**（この受け皿があること）を追加した。
+ *
+ * 【ここへ到達したら異常】middleware が rewrite するので通常は来ない。
+ * 来たということは middleware が動いていない＝**認可を誰も確認していない**ので、
+ * **何も描かずに 403 を返す**（fail-closed）。
+ * 間違っても `Astro.params.ctx` を信じて中身を出さないこと。
+ */
+export const prerender = false;
+
+return new Response('403 Forbidden', {
+  status: 403,
+  headers: {
+    'content-type': 'text/plain; charset=utf-8',
+    'cache-control': 'no-store, max-age=0',
+    'referrer-policy': 'no-referrer',
+  },
+});
+---
