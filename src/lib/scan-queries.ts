@@ -22,6 +22,9 @@ export async function getUserUploads(
     .select('*')
     .eq('diagnostic_user_id', diagnosticUserId)
     .eq('source', 'user_upload')
+    // **active だけ** (2026-09-30)。差し替えた回が一覧に残ると、
+    // 同じ受診日が 2 つ並んで**重複に見える**。
+    .eq('status', 'active')
     .order('test_date', { ascending: false })
     .limit(limit);
 

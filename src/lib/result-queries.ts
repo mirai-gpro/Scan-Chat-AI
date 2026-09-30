@@ -232,13 +232,22 @@ export async function loadResult(
   // ── 原本の解決 ───────────────────────────────────────────────
   // 実データ (test_artifact_files) があれば署名 URL を発行して使う。
   // 無ければ従来のサンプル PDF にフォールバックする。
-  // 同一種別の他の回 (過去データ)。id と日付だけ引く。
+  /*
+   * 同一種別の他の回 (過去データ)。id と日付だけ引く。
+   *
+   * **`status='active'` で絞る (2026-09-30・本田さんの重複報告で発覚)。**
+   * ここだけ status を見ておらず、**差し替え前 (superseded) や取り下げ後 (withdrawn) の回も
+   * 「過去データ」に並んでいた**。同じ受診日が 2 つ出るので、利用者には「重複」に見える。
+   * ダッシュボード側 (`dashboard-queries.ts:128`) は最初から絞ってあり、**ここだけ漏れていた**。
+   * 2026-09-27 に `measurement_values` で直したのと同型の漏れ (CLAUDE.md「修正3」)。
+   */
   const { data: siblingRows } = await sb
     .schema('diagnosis')
     .from('test_artifacts')
     .select('id, test_date')
     .eq('diagnostic_user_id', artifact.diagnostic_user_id)
     .eq('test_type', artifact.test_type)
+    .eq('status', 'active')
     .order('test_date', { ascending: false })
     .limit(24);
   const siblings = (siblingRows ?? []).map((r) => ({ id: r.id, testDate: r.test_date }));

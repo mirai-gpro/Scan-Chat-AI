@@ -99,6 +99,60 @@ const uses = (mq.match(/\.in\('artifact_id', active\)/g) || []).length;
 if (uses >= 3) ok(`3 つのクエリ (直近 / 候補 / 推移) すべてに掛かっている (実測 ${uses} 箇所)`);
 else fail(`絞り込みが ${uses} 箇所しかない — 直近 / 候補 / 推移 の 3 つすべてに要る`);
 
+/*
+ * ③ **`test_artifacts` を「その人の回の一覧」として読むチェーンも status で絞ること。**
+ *
+ * 【なぜ足したか — 2026-09-30 の実障害】本田さんのダッシュボードで
+ * 「人間ドックデータが重複して表示される」報告。原因の 1 つが
+ * `result-queries.ts` の **siblings（過去データの一覧）に `status` の絞りが無かった**こと。
+ * ダッシュボード側 (`dashboard-queries.ts`) は最初から絞ってあり、**ここだけ漏れていた**。
+ * ①と**同型の漏れ**で、同じ受診日が 2 つ並ぶ。**エラーは出ない。**
+ *
+ * 【何を見るか】`.from('test_artifacts')` の select チェーンのうち、
+ * **`.eq('diagnostic_user_id', …)` を持つもの**（= 人単位の一覧・複数行が返り得る）は
+ * `.eq('status', …)` を持たなければならない。
+ * `id` 直指定の 1 件取得は対象外（どの回かは呼び出し側が決めている）。
+ */
+const ARTIFACT_ALLOW = [
+  {
+    file: 'pages/api/debug/viewer.ts',
+    must: "count: 'exact'",
+    why: '切り分け用の件数カウント。status 別の内訳を見たいので絞らない (画面には出ない)。',
+  },
+  {
+    file: 'lib/scan-persist.ts',
+    must: 'q.testDate',
+    why: '差し替え前の片付け (replaceSameDateArtifacts)。status に関わらず同日の行を全部拾う必要がある。',
+  },
+];
+console.log('\n③ test_artifacts を人単位で select しているチェーン');
+let artFound = 0;
+for (const file of walk(SRC)) {
+  const rel = relative(SRC, file);
+  const text = stripTsComments(readFileSync(file, 'utf8'));
+  const re = /\.from\(\s*['"`]test_artifacts['"`]\s*\)/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    const chain = chainSlice(text, m.index);
+    if (!/\.select\(/.test(chain)) continue;                       // insert / delete は対象外
+    if (!/\.eq\(\s*['"`]diagnostic_user_id['"`]/.test(chain)) continue; // 人単位でないものは対象外
+    // **id 直指定の 1 件取得は対象外。** どの回かは呼び出し側が決めており、一覧ではない。
+    if (/\.eq\(\s*['"`]id['"`]/.test(chain)) continue;
+    artFound++;
+    const allow = ARTIFACT_ALLOW.find((a) => rel.endsWith(a.file) && chain.includes(a.must));
+    if (/\.eq\(\s*['"`]status['"`]/.test(chain) || /\.in\(\s*['"`]status['"`]/.test(chain)) {
+      ok(`${rel} — status で絞っている`);
+    } else if (allow) {
+      ok(`${rel} — 絞らないことを許可 (${allow.why})`);
+    } else {
+      fail(`${rel} — test_artifacts を人単位で引くのに status で絞っていない。`
+        + ' 差し替え前 (superseded) や取り下げ後 (withdrawn) の回が一覧に並び、'
+        + " 利用者には**同じ受診日の重複**に見える。.eq('status', 'active') を足すか、理由つきで ARTIFACT_ALLOW へ登録すること。");
+    }
+  }
+}
+if (artFound === 0) fail('test_artifacts の select チェーンを 1 つも見つけられなかった (検出器が壊れている)');
+
 console.log(`\n${fails.length === 0 ? '✅' : '❌'} verify:measurement-status — 合格 ${pass} / 不合格 ${fails.length}`);
 if (fails.length) {
   console.log('\n落ちた項目:');
