@@ -28,7 +28,9 @@ import { VIEWER_COOKIE, verifyViewer } from './lib/viewer';
 import { ADMIN_COOKIE, verifyAdminCred } from './lib/admin-identity';
 import { parseAdminViewPath, resolveImpersonationContext } from './lib/admin-impersonation';
 import { publicOrigin } from './lib/public-url';
-import { SHARE_COOKIE, resolveShareSession, touchShareSession, logShareEvent, classifyShareFailure } from './lib/share-access';
+import {
+  SHARE_COOKIE, resolveShareSession, touchShareSession, logShareEvent, classifyShareFailure, shareEnabled,
+} from './lib/share-access';
 
 /* ══════════════════════════════════════════════════════════════════════
  * ① origin 検査（Astro 標準の置き換え・2026-09-30）
@@ -85,8 +87,16 @@ function originGuard(request: Request): Response | null {
 }
 
 /**
- * **共有セッション中に「見た」を記録するページ**（§26.1 の 17 events のうち閲覧系）。
+ * **共有セッション中に「見た」を記録するページ**（§26.1 の**閲覧系だけ**）。
  * `/result/<artifact_id>` だけは動的なので下で prefix 判定する。
+ *
+ * 【`/chat` と `/scan` を入れない】§26.1 では
+ *   `chat_use` = `/api/live-token` または `/api/interview/export`
+ *   `scan_use` = `/api/scan/save` または `/api/scan/jobs`
+ * = **実際に使ったこと**を指す。ページを開いただけで `*_use` にすると
+ * 「問診を利用した」「スキャンを利用した」の意味が変わり、
+ * **admin が記録を読み違える**（開いて閉じただけの回が「利用」に見える）。
+ * → 利用の記録は**各 API が `logShareApiEvent()` で**残す。
  */
 const SHARE_VIEW_EVENTS: Record<string, import('./lib/share-access').ShareEvent> = {
   '/dashboard': 'dashboard_view',
@@ -94,8 +104,6 @@ const SHARE_VIEW_EVENTS: Record<string, import('./lib/share-access').ShareEvent>
   '/trend': 'trend_view',
   '/kit': 'kit_view',
   '/notices': 'notices_view',
-  '/chat': 'chat_use',
-  '/scan': 'scan_use',
 };
 
 /** 理由を出し分けない（切り分けはサーバログ側）。本文も最小にする。 */
@@ -127,7 +135,32 @@ export const onRequest = defineMiddleware(async (context, next) => {
    * 代理表示（URL が対象を名指ししている）と違い、**共有は Cookie なので
    * 「名指ししたものが出せない」状態にならない**。
    */
-  const shareRaw = context.cookies.get(SHARE_COOKIE)?.value;
+  /*
+   * ②-0 **緊急停止**（§37）。`SHARE_ENABLED=off` のときだけ通る枝。
+   *
+   * **入口を塞ぐだけでは足りない。** Cookie を持っている人が `/dashboard` を
+   * 開いたときに `locals.share` を置いてしまうと、**止めたのに対象者の健康情報が出る**。
+   * → **共有セッションの解決ごと止める**（下の `if` に入らない）。
+   * 本人（`welltect_v`）と Admin 代理表示は**素通り**なので影響しない。
+   */
+  const shareOff = !shareEnabled();
+  if (shareOff) {
+    const p0 = new URL(context.request.url).pathname;
+    if (p0 === '/share' || p0.startsWith('/share/') || p0.startsWith('/api/share/')) {
+      return new Response('503 Service Unavailable', {
+        status: 503,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'cache-control': 'no-store, max-age=0',
+          'referrer-policy': 'no-referrer',
+          // 一時停止であることを機械にも伝える（恒久的な削除ではない）。
+          'retry-after': '3600',
+        },
+      });
+    }
+  }
+
+  const shareRaw = shareOff ? undefined : context.cookies.get(SHARE_COOKIE)?.value;
   if (shareRaw) {
     const sh = await resolveShareSession(shareRaw);
     if (sh) {

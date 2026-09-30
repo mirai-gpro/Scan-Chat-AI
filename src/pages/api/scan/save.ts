@@ -14,6 +14,7 @@
 import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../lib/viewer';
 import { denyReadOnlyWrite, denyUnlessShareScope } from '../../../lib/write-guard';
+import { logShareApiEvent } from '../../../lib/share-access';
 import { getServerSupabase } from '../../../lib/supabase';
 import { saveScanResult } from '../../../lib/scan-persist';
 import { isSpecialAccount } from '../../../lib/special-accounts';
@@ -54,6 +55,14 @@ export const POST: APIRoute = async (ctx) => {
    */
   const uid = viewer.writeTargetUid;
   if (!uid) return json({ ok: false, error: 'not_signed_in' }, 401);
+
+  /*
+   * **「AI スキャンを利用した」の記録はここ**（§26.1 の `scan_use`）。
+   * `/scan` を開いただけでは記録しない — **利用と閲覧は意味が違う**。
+   * 紐付けは `locals.share`（middleware しか書かない）から取るので、
+   * **クライアントから ID を受け取らない**。share 以外では何もしない。
+   */
+  await logShareApiEvent(ctx, 'scan_use', '/api/scan/save');
 
   let body: Record<string, unknown>;
   try {

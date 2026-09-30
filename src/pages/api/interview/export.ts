@@ -28,7 +28,7 @@ import { recordInterviewCompletion } from '../../../lib/interview-completion';
 import { resolveViewer } from '../../../lib/viewer';
 import { denyReadOnlyWrite, denyUnlessShareScope } from '../../../lib/write-guard';
 import { resolveTargetSubject } from '../../../lib/target-subject';
-import { logShareEvent } from '../../../lib/share-access';
+import { logShareApiEvent } from '../../../lib/share-access';
 import type { AnswerValue } from '../../../scripts/chat/interview-script';
 import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
 
@@ -104,9 +104,7 @@ export const POST: APIRoute = async (ctx) => {
    */
   const claimed = str(body.diagnosticUserId) ?? str(body.clientId);
   if (claimed && targetUid && claimed !== targetUid) {
-    await logShareEvent({
-      event: 'target_tamper_attempt', request: ctx.request, path: '/api/interview/export',
-    });
+    await logShareApiEvent(ctx, 'target_tamper_attempt', '/api/interview/export');
   }
 
   const diagnosticId = str(body.diagnosticId) ?? crypto.randomUUID();
@@ -162,9 +160,8 @@ export const POST: APIRoute = async (ctx) => {
     prefix,
   );
 
-  if (viewer.kind === 'share') {
-    await logShareEvent({ event: 'chat_use', request: ctx.request, path: '/api/interview/export' });
-  }
+  // **記録は link / session / viewer に紐付ける**（§26.1・admin の記録は link で絞るため）。
+  await logShareApiEvent(ctx, 'chat_use', '/api/interview/export');
 
   if (!isS3Configured() || !cfg) {
     return json({

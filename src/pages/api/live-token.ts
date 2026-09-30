@@ -5,6 +5,7 @@ import { refreshConfig } from '../../lib/app-config';
 import { buildUserContextForChat, getCustomerProfile, getAppliedExamLabels } from '../../lib/chat-context';
 import { resolveViewer } from '../../lib/viewer';
 import { denyAnonymous, denyUnlessShareScope } from '../../lib/write-guard';
+import { logShareApiEvent } from '../../lib/share-access';
 
 export const prerender = false;
 
@@ -34,6 +35,14 @@ export const POST: APIRoute = async (ctx) => {
    */
   const scoped = denyUnlessShareScope(viewer, 'interview');
   if (scoped) return scoped;
+
+  /*
+   * **「AI 問診を利用した」の記録はここ**（§26.1 の `chat_use`）。
+   * `/chat` を開いただけでは記録しない — **利用と閲覧は意味が違う**。
+   * 紐付けは `locals.share`（middleware しか書かない）から取るので、
+   * **クライアントから ID を受け取らない**。share 以外では何もしない。
+   */
+  await logShareApiEvent(ctx, 'chat_use', '/api/live-token');
 
   await refreshConfig(); // 運用パラメータ(app_config)を最新化してから処理
   const apiKey = import.meta.env.GEMINI_API_KEY;

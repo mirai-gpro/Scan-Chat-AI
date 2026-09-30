@@ -1,6 +1,6 @@
 # Welltect セキュア共有アクセス ／ Admin 代理表示の UID-less 化 仕様書
 
-**版**: 1.5 (2026-09-30・**External Share を実装完了。設計は 1.4a から変えていない — 状態欄と §38.2 を足しただけ**)
+**版**: 1.5.2 (2026-09-30・**External Share 実装完了 ＋ レビュー指摘 5 件の修正。設計は 1.4a から変えていない — 状態欄・§37.1・§38.2 を足しただけ**)
 **状態**: **Admin 代理表示（§12 / §13）は実装済み。外部共有（§14〜§20）は仕様のみ。**
 
 > **v1.4 の変更（実装 2026-09-30。v1.1〜v1.3 の確定事項は 1 つも変えていない）**
@@ -2461,10 +2461,37 @@ fetch の載せ替えを全画面で動かす（W-11）/
 | 状況 | 戻し方 |
 |---|---|
 | share に問題 | **全 link を `paused` にする**（DB 1 クエリ）。コードは戻さない |
-| 緊急 | `/share/**` を 503 にする env フラグ（例 `SHARE_ENABLED=off`）を**最初から入れておく** |
+| 緊急 | **`SHARE_ENABLED=off`（実装済み・v1.5.2）**。下の §37.1 参照 |
 | admin handoff に問題 | **旧 `?u=` を残してある間は**そちらへ戻すだけ（Phase 4 より前なら無停止） |
 | Phase 4 以降に問題 | `ALLOW_UID_ENTRY=on`（緊急経路・§30.3）— ただしこれは admin 権限を与えないので代理表示の代替にはならない。**Phase 4 は旧導線の復活 PR を用意してから行う** |
 | DB | 追加テーブルのみなので `drop` で戻せる。**既存テーブルを変更しない設計にする** |
+
+---
+
+### 37.1 【v1.5.2 実装済み】`SHARE_ENABLED` の効き方
+
+`src/lib/share-access.ts` の `shareEnabled()` が**毎リクエスト** env を読む
+（Vercel の環境変数を変えれば**再デプロイなしで次のリクエストから**効く）。
+
+| 値 | 挙動 |
+|---|---|
+| 未設定 / 空 / `on` | **通常動作**（既定） |
+| `off`（大文字小文字は問わない） | 外部共有を停止 |
+| それ以外（`disabled` 等） | **止めない** — 綴り違いで黙って全停止しないよう、止める側を明示的な値に寄せる |
+
+**`off` のとき何が起きるか**
+
+- `/share/**` と `/api/share/**` は **503**（`retry-after: 3600`）。
+- **middleware の共有セッション解決ごと止める。** Cookie を持ったまま `/dashboard` を
+  開いても `locals.share` が置かれないので、**対象者の健康情報は出ない**（未サインイン扱い）。
+  **入口だけ塞いで Cookie を生かすと「止めたのに見えている」になる**ので、ここが要。
+- **本人（`welltect_v`）と Admin 代理表示は止めない。** 外部共有の事故で
+  通常の利用者と admin 作業まで巻き込まない。
+- admin の `/admin/share-links` は **新規発行だけ 503**（`share_disabled`）。
+  一覧・`pause`・`revoke`・ログ閲覧は**残す** — 止めている最中こそ
+  「誰に何を配ったか」を見て失効させる作業が要る。
+
+検査は `verify:share-access` の **KS-1〜KS-16**、退行注入 **⑯ / ⑯-2**。
 
 ---
 
@@ -2582,7 +2609,8 @@ fetch の載せ替えを全画面で動かす（W-11）/
 | `supabase/migrations/20260930000020_shared_access.sql` | **新規**。3 表 ＋ RLS（service_role のみ） |
 | `supabase/migrations/20260930000030_share_consent_rpc.sql` | **新規**。`consume_share_pending`（**1 文で原子的**・§18.3 / §31 T-5）。ローカル PG16 で 5 ケース実測 |
 | `supabase/migrations/20260930000040_share_links_hidden.sql` | **新規**。論理削除の列（§33.2） |
-| `scripts/verify-share-access.mjs` | **新規**。150 件 ＋ **退行注入 8 種**（§34.1） |
+| `scripts/verify-share-access.mjs` | **新規**。**257 件** ＋ **退行注入 13 種**（うち 7 種は再 bundle して実挙動で確認・§34.1） |
+| `supabase/migrations/20260930000050_share_consent_rpc_revoked.sql` | **新規（v1.5.1）**。同意の 1 文でも `revoked_at` を見る（§27.2） |
 
 **wellfort-site**
 

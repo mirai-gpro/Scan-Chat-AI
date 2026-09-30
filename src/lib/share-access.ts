@@ -35,6 +35,25 @@ export const SHARE_VIEWER_COOKIE = 'welltect_share_viewer';
 /** token / session の字面。**base64url 以外は受けない。** */
 export const SHARE_OPAQUE_RE = /^[A-Za-z0-9_-]{32,64}$/;
 
+/**
+ * **緊急停止スイッチ**（§37）。`SHARE_ENABLED=off` で外部共有だけを止める。
+ *
+ * 【何を止めるか】`/share/**` と `/api/share/**` を 503 にし、**middleware の
+ * 共有セッション解決も止める**。Cookie を持っている人が通常ページを開いても
+ * `locals.share` が置かれないので、**対象者の健康情報は出ない**（未サインイン扱い）。
+ * 入口だけ塞いで Cookie を生かしておくと「止めたのに見えている」になる。
+ *
+ * 【何を止めないか】**本人（`welltect_v`）と Admin 代理表示は止めない。**
+ * 外部共有の事故で通常の利用者と admin 作業まで巻き込まない（§37 の狙い）。
+ *
+ * 【既定は on】未設定・空・`on` は通常動作。**`off` と書いたときだけ**止まる
+ * （綴り違いで黙って全停止しないよう、止める側を明示的な値に寄せる）。
+ * 毎回読むので、Vercel の環境変数を変えれば**再デプロイなしで次のリクエストから効く**。
+ */
+export function shareEnabled(): boolean {
+  return (env('SHARE_ENABLED') ?? 'on').trim().toLowerCase() !== 'off';
+}
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** 32 byte CSPRNG → base64url（**256bit**・§14.2）。 */
@@ -191,6 +210,37 @@ export async function logShareEvent(args: {
   } catch (e) {
     console.error('[share-access] ログ記録に失敗 (本体は継続):', e instanceof Error ? e.message : e);
   }
+}
+
+/**
+ * **API から記録するときはこれを使う**（§26.1・2026-09-30 のレビュー）。
+ *
+ * 【なぜ helper か】各 API が `logShareEvent({ event, request, path })` と書くと
+ * **`share_link_id` / `session_id` / `viewer_id` が null のまま入る**。
+ * admin のアクセス記録は `share_link_id` で絞るので、**実際の利用が
+ * 対象リンクの記録に 1 件も出てこない**（記録している気になるだけで、目的を果たさない）。
+ *
+ * → **`locals.share` から紐付ける。** あれは middleware しか書かないので、
+ * **クライアントから ID を受け取ることにはならない**。
+ *
+ * 【share でなければ何もしない】この表は「共有のアクセス記録」なので、
+ * 本人・admin の操作を link 無しの行として混ぜない（admin 画面から辿れない死に行になる）。
+ */
+export async function logShareApiEvent(
+  ctx: { request: Request; locals?: { share?: ResolvedShare } },
+  event: ShareEvent,
+  path: string,
+): Promise<void> {
+  const sh = ctx.locals?.share;
+  if (!sh) return;
+  await logShareEvent({
+    event,
+    request: ctx.request,
+    linkId: sh.linkId,
+    sessionId: sh.sessionId,
+    viewerId: sh.viewerId,
+    path,
+  });
 }
 
 /* ══════════════════════════════════════════════════════════════════════

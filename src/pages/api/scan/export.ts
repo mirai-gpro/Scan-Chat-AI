@@ -22,7 +22,7 @@ import type { APIRoute } from 'astro';
 import { putScanExport } from '../../../lib/scan-export-put';
 import { resolveViewer } from '../../../lib/viewer';
 import { denyReadOnlyWrite, denyUnlessShareScope, denyAnonymous } from '../../../lib/write-guard';
-import { logShareEvent } from '../../../lib/share-access';
+import { logShareApiEvent } from '../../../lib/share-access';
 
 export const prerender = false;
 
@@ -84,11 +84,14 @@ export const POST: APIRoute = async (ctx) => {
   const claimed = str(body.diagnosticUserId);
   if (claimed && diagnosticUserId && claimed !== diagnosticUserId) {
     // **止めない。記録するのは「食い違った」事実だけ**（申告値はログに書かない・§26.2）。
-    await logShareEvent({ event: 'target_tamper_attempt', request, path: '/api/scan/export' });
+    await logShareApiEvent(ctx, 'target_tamper_attempt', '/api/scan/export');
   }
-  if (viewer.kind === 'share') {
-    await logShareEvent({ event: 'scan_use', request, path: '/api/scan/export' });
-  }
+  /*
+   * **ここで `scan_use` を記録しない**（§26.1・2026-09-30 のレビュー）。
+   * `scan_use` = `/api/scan/save` または `/api/scan/jobs` と決まっており、
+   * 画面は 1 回の送信で `save` と `export` の**両方**を呼ぶので、
+   * ここでも記録すると**同じ操作が 2 件**になる。
+   */
   const capturedRaw = str(body.capturedAt);
   const capturedAt = capturedRaw && !Number.isNaN(Date.parse(capturedRaw)) ? new Date(capturedRaw) : undefined;
   const exportedAt = new Date();

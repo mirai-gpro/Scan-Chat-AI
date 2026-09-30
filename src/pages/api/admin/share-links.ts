@@ -34,7 +34,7 @@ import { publicOrigin } from '../../../lib/public-url';
 import { adminIdentity } from '../../../lib/admin-identity';
 import {
   createShareLink, listShareLinksWithStats, listShareLogs,
-  setShareLinkStatus, setShareLinkHidden, regenerateShareLink,
+  setShareLinkStatus, setShareLinkHidden, regenerateShareLink, shareEnabled,
 } from '../../../lib/share-access';
 
 export const prerender = false;
@@ -88,6 +88,18 @@ export const POST: APIRoute = async ({ request }) => {
 
   /* ── 発行 ─────────────────────────────────────────── */
   if (body.create && typeof body.create === 'object') {
+    /*
+     * **緊急停止中は新規発行だけを止める**（§37・安全側）。
+     * 一覧・pause・revoke・再発行の禁止・ログ閲覧は**残す** —
+     * 止めている最中こそ「誰に何を配ったか」を見て失効させる作業が要る。
+     * 発行だけ止めるのは、**開けない URL を新たに配らせない**ため。
+     */
+    if (!shareEnabled()) {
+      return json({
+        ok: false, error: 'share_disabled',
+        message: '外部共有は現在停止中です（SHARE_ENABLED=off）。新しいリンクは発行できません。',
+      }, 503);
+    }
     const c = body.create as Record<string, unknown>;
     const targetUid = String(c.target_uid ?? '');
     const expiresAt = String(c.expires_at ?? '');

@@ -20,7 +20,7 @@
 import type { APIRoute } from 'astro';
 import {
   SHARE_PENDING_COOKIE, SHARE_COOKIE, SHARE_VIEWER_COOKIE,
-  SHARE_OPAQUE_RE, randomShareToken, consumeSharePending, logShareEvent,
+  SHARE_OPAQUE_RE, randomShareToken, consumeSharePending, logShareEvent, resolveShareSession,
 } from '../../../lib/share-access';
 
 export const prerender = false;
@@ -81,8 +81,17 @@ export const POST: APIRoute = async ({ request, cookies }) => {
     httpOnly: true, secure, sameSite: 'lax', path: '/', maxAge: maxAge * 2,
   });
 
+  /*
+   * **`session_id` も紐付ける**（§26.1・2026-09-30 のレビュー）。
+   * 同意の行だけ `session_id` が null だと、admin の記録で
+   * 「どの入場の同意か」が辿れなくなる。**発行した札を引き直して**取る
+   * （RPC の戻り値を増やすより、ここで 1 回読むほうが移行が軽い）。
+   */
+  const resolved = await resolveShareSession(issued.session);
   await logShareEvent({
-    event: 'consent', request, linkId: issued.linkId, viewerId, path: '/api/share/consent',
+    event: 'consent', request,
+    linkId: issued.linkId, sessionId: resolved?.sessionId ?? null, viewerId,
+    path: '/api/share/consent',
   });
 
   return new Response(JSON.stringify({ ok: true, next: '/dashboard' }), {

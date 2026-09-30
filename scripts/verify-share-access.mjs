@@ -800,6 +800,196 @@ console.log('\n⑥-4 created_by は HMAC digest（§38-U9）\n');
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ * ⑥-5 アクセス記録（§26.1・2026-09-30 のレビュー）
+ *
+ * **`*_use` は「実際に使った」こと。ページを開いただけでは記録しない。**
+ * **API の記録は link / session / viewer に紐付ける** — 紐付かないと
+ * admin のアクセス記録（`share_link_id` で絞る）に 1 件も出てこない。
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\n⑥-5 アクセス記録（§26.1）\n');
+{
+  db.reset();
+  const A = await issue({ label: 'link A' });
+  const B = await issue({ label: 'link B' });
+  const sessA = await enter(A.token);
+  const shA = await sa.resolveShareSession(sessA, db.NOW);
+
+  /** middleware を 1 リクエストぶん通す。 */
+  const visit = async (path) => {
+    const locals = {};
+    await mw.onRequest({
+      request: new Request(`https://app.example.com${path}`),
+      cookies: { get: (n) => (n === 'welltect_share_v' ? { value: sessA } : undefined) },
+      locals,
+    }, async () => new Response('ok'));
+    return locals;
+  };
+  const count = (ev, linkId) =>
+    db.LOGS.filter((l) => l.event_type === ev && (linkId === undefined || l.share_link_id === linkId)).length;
+
+  // ★ ページを開いただけでは「利用」にしない
+  await visit('/chat');
+  ok('LG-1 /chat を開いただけでは chat_use が 0', count('chat_use') === 0);
+  await visit('/scan');
+  ok('LG-2 /scan を開いただけでは scan_use が 0', count('scan_use') === 0);
+
+  // ★ 閲覧は閲覧として残る
+  await visit('/dashboard');
+  ok('LG-3 /dashboard は dashboard_view として残る', count('dashboard_view') === 1);
+  await visit('/report');
+  ok('LG-4 /report は report_view として残る', count('report_view') === 1);
+
+  /** API の記録（`locals.share` から紐付ける）。 */
+  const apiCtx = (path) => ({
+    request: new Request(`https://app.example.com${path}`),
+    locals: { share: shA },
+  });
+
+  await sa.logShareApiEvent(apiCtx('/api/live-token'), 'chat_use', '/api/live-token');
+  ok('LG-5 live-token を呼ぶと link A の chat_use が 1', count('chat_use', A.id) === 1);
+  ok('LG-6 その記録に session_id が入っている',
+    db.LOGS.some((l) => l.event_type === 'chat_use' && l.session_id === shA.sessionId));
+  ok('LG-7 その記録に viewer_id が入っている',
+    db.LOGS.some((l) => l.event_type === 'chat_use' && l.viewer_id === shA.viewerId));
+
+  await sa.logShareApiEvent(apiCtx('/api/scan/save'), 'scan_use', '/api/scan/save');
+  ok('LG-8 scan/save を呼ぶと link A の scan_use が 1', count('scan_use', A.id) === 1);
+
+  await sa.logShareApiEvent(apiCtx('/api/interview/export'), 'target_tamper_attempt', '/api/interview/export');
+  ok('LG-9 target_tamper_attempt が link A の記録に出る', count('target_tamper_attempt', A.id) === 1);
+  ok('LG-10 link B の記録には出ない', count('target_tamper_attempt', B.id) === 0);
+
+  // ★ admin の一覧が実際にその記録を引けること（null 紐付けだと 0 件になる）
+  const logsA = await sa.listShareLogs(A.id);
+  const logsB = await sa.listShareLogs(B.id);
+  ok('LG-11 admin の記録一覧（link A）に利用ログが出る',
+    logsA.some((l) => l.event_type === 'chat_use') && logsA.some((l) => l.event_type === 'scan_use'));
+  ok('LG-12 admin の記録一覧（link B）には出ない', logsB.length === 0);
+  ok('LG-13 link_id が null の行を作っていない',
+    db.LOGS.filter((l) => l.event_type.endsWith('_use')).every((l) => !!l.share_link_id));
+
+  // ★ share でなければ何も書かない（本人・admin の操作を混ぜない）
+  const before = db.LOGS.length;
+  await sa.logShareApiEvent({ request: new Request('https://app.example.com/api/scan/save'), locals: {} },
+    'scan_use', '/api/scan/save');
+  ok('LG-14 share でなければ 1 行も書かない', db.LOGS.length === before);
+
+  // ★ 構造: middleware が `*_use` を持たない / API 側が helper を使っている
+  const mwSrc = code('src/middleware.ts');
+  ok('LG-15 middleware の閲覧表に chat_use / scan_use が無い',
+    !/'\/chat':\s*'chat_use'/.test(mwSrc) && !/'\/scan':\s*'scan_use'/.test(mwSrc));
+  for (const [f, ev] of [
+    ['src/pages/api/live-token.ts', 'chat_use'],
+    ['src/pages/api/interview/export.ts', 'chat_use'],
+    ['src/pages/api/scan/save.ts', 'scan_use'],
+    ['src/pages/api/scan/jobs.ts', 'scan_use'],
+  ]) {
+    ok(`LG-16 ${f} が logShareApiEvent(…, '${ev}', …) で記録する`,
+      new RegExp(`logShareApiEvent\\([^)]*'${ev}'`).test(code(f)));
+  }
+  ok('LG-17 scan/export は scan_use を二重に記録しない',
+    !/logShareApiEvent\([^)]*'scan_use'/.test(code('src/pages/api/scan/export.ts')));
+  // ★ ID をクライアントから受け取っていない
+  ok('LG-18 helper は locals.share からだけ紐付ける（body を見ない）',
+    /ctx\.locals\?\.share/.test(code('src/lib/share-access.ts'))
+    && !/logShareApiEvent[\s\S]{0,400}?body\./.test(code('src/lib/share-access.ts')));
+  ok('LG-19 consent の記録に session_id を入れている',
+    /sessionId:\s*resolved\?\.sessionId/.test(code('src/pages/api/share/consent.ts')));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑥-6 緊急停止 SHARE_ENABLED=off（§37）
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\n⑥-6 緊急停止 SHARE_ENABLED=off（§37）\n');
+{
+  db.reset();
+  const iss = await issue();
+  const session = await enter(iss.token);
+
+  /** middleware を 1 リクエストぶん通す（Cookie は引数で差し替える）。 */
+  const hit = async (path, cookies = {}) => {
+    const locals = {};
+    let passed = false;
+    const res = await mw.onRequest({
+      request: new Request(`https://app.example.com${path}`),
+      cookies: { get: (n) => (cookies[n] ? { value: cookies[n] } : undefined) },
+      locals,
+    }, async () => { passed = true; return new Response('ok'); });
+    return { status: res?.status ?? 200, passed, locals };
+  };
+
+  const selfCookie = await viewerMod.signViewer(UID_B, false);
+
+  // ── 既定（未設定）は通常動作 ──
+  delete process.env.SHARE_ENABLED;
+  ok('KS-1 未設定なら shareEnabled() は true', sa.shareEnabled() === true);
+  ok('KS-2 未設定なら /share/<token> は素通り', (await hit('/share/abc')).passed === true);
+  ok('KS-3 未設定なら共有セッションが解決される',
+    (await hit('/dashboard', { welltect_share_v: session })).locals.share?.targetUid === UID_A);
+
+  process.env.SHARE_ENABLED = 'on';
+  ok('KS-4 on でも通常動作', sa.shareEnabled() === true
+    && (await hit('/dashboard', { welltect_share_v: session })).locals.share?.targetUid === UID_A);
+
+  // ── off ──
+  process.env.SHARE_ENABLED = 'off';
+  ok('KS-5 off なら shareEnabled() は false', sa.shareEnabled() === false);
+
+  for (const p of ['/share/abc', '/share/consent', '/share/unavailable', '/share/end',
+                   '/api/share/consent', '/api/share/end']) {
+    const r = await hit(p);
+    ok(`KS-6 off なら ${p} は 503`, r.status === 503 && !r.passed);
+  }
+
+  // ★ ここが本命: Cookie を持ったまま通常ページを開いても share にならない
+  const d = await hit('/dashboard', { welltect_share_v: session });
+  ok('KS-7 off なら既存 share セッションでも locals.share を置かない',
+    d.passed === true && !d.locals.share);
+  const v = await viewerMod.resolveViewer({
+    request: new Request('https://app.example.com/dashboard'),
+    cookies: { get: () => undefined },
+    locals: d.locals,
+  });
+  ok('KS-8 off なら viewer が share にならない（対象者のデータを出さない）', v.kind !== 'share');
+
+  // ★ 本人と admin 代理表示は止めない
+  const selfHit = await hit('/dashboard', { welltect_v: selfCookie });
+  ok('KS-9 off でも本人の通常ページは素通り', selfHit.passed === true);
+  const vSelf = await viewerMod.resolveViewer({
+    request: new Request('https://app.example.com/dashboard'),
+    cookies: { get: (n) => (n === 'welltect_v' ? { value: selfCookie } : undefined) },
+    locals: {},
+  });
+  ok('KS-10 off でも本人は self のまま', vSelf.kind === 'self' && vSelf.uid === UID_B);
+  const vImp = await viewerMod.resolveViewer({
+    request: new Request('https://app.example.com/dashboard'),
+    cookies: { get: () => undefined },
+    locals: { adminView: { ctx: 'c1', targetUid: UID_A, targetOrigin: 'production',
+      adminIdentity: 'i', adminSelfUid: UID_B, expiresAt: inHours(1) } },
+  });
+  ok('KS-11 off でも Admin 代理表示は動く', vImp.kind === 'admin_impersonation');
+
+  // ★ off でも通常の画面・API は 503 にしない（外部共有だけを止める）
+  ok('KS-12 off でも /dashboard や /api/scan/save は素通り',
+    (await hit('/api/scan/save')).passed === true && (await hit('/report')).passed === true);
+
+  // ★ 綴り違いで黙って全停止しない
+  process.env.SHARE_ENABLED = 'Off';
+  ok('KS-13 大文字小文字を問わず off を認識する', sa.shareEnabled() === false);
+  process.env.SHARE_ENABLED = 'disabled';
+  ok('KS-14 off 以外の値では止めない（綴り違いで全停止しない）', sa.shareEnabled() === true);
+
+  delete process.env.SHARE_ENABLED;   // ★ 後続の検査に影響させない
+
+  // ★ 構造: admin API は新規発行だけ止め、一覧・停止・失効は残す
+  const api = code('src/pages/api/admin/share-links.ts');
+  ok('KS-15 admin API は発行だけ停止する（503 share_disabled）',
+    /share_disabled/.test(api) && /if \(!shareEnabled\(\)\)/.test(api));
+  ok('KS-16 pause / revoke / 一覧は停止中でも残す',
+    !/shareEnabled\(\)[\s\S]{0,200}?setShareLinkStatus/.test(api));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  * ⑦ 退行注入（検査が本当に落ちるか）
  * ════════════════════════════════════════════════════════════════════ */
 console.log('\n⑦ 退行注入（§34.2）\n');
@@ -963,10 +1153,108 @@ console.log('\n⑦-2 退行注入（再 bundle して実挙動で見る）\n');
       (await bad.regenerateShareLink(iss.id)) !== null);
   }
 
+  // ⑭ API 利用ログから link の紐付けを外す → **admin の記録一覧に出なくなる**
+  {
+    // **「紐付けを外す」= 以前の書き方（event / request / path だけ）へ戻すこと。**
+    const bad = await rebuild((t) => t.replace(
+      `    linkId: sh.linkId,
+    sessionId: sh.sessionId,
+    viewerId: sh.viewerId,
+`, ''));
+    db.reset();
+    const iss = await bad.createShareLink({ targetUid: UID_A, expiresAt: inHours(24) });
+    const st = await bad.startShareFromToken(iss.token, db.NOW);
+    const c = await bad.consumeSharePending(st.pending, 'v1');
+    const shr = await bad.resolveShareSession(c.session, db.NOW);
+    await bad.logShareApiEvent(
+      { request: new Request('https://app.example.com/api/live-token'), locals: { share: shr } },
+      'chat_use', '/api/live-token');
+    const logs = await bad.listShareLogs(iss.id);
+    ok('注入 ⑭ 紐付けを外すと利用ログが link の記録一覧から消える（= 今の実装が紐付けている）',
+      logs.every((l) => l.event_type !== 'chat_use'));
+  }
+
+  // ⑯ SHARE_ENABLED=off の判定を外す → **止めたのに共有が生き続ける**
+  {
+    const bad = await rebuild((t) => t.replace(
+      "return (env('SHARE_ENABLED') ?? 'on').trim().toLowerCase() !== 'off';", 'return true;'));
+    process.env.SHARE_ENABLED = 'off';
+    ok('注入 ⑯ 判定を外すと off でも有効のまま（= 今の実装が止めている）', bad.shareEnabled() === true);
+    delete process.env.SHARE_ENABLED;
+  }
+
   // ★ 注入したファイルが元に戻っていること（戻し忘れでリポジトリを汚さない）
   ok('注入後に share-access.ts が元へ戻っている',
     /\.in\('status',\s*STATUS_TRANSITIONS\[status\]\)/.test(code('src/lib/share-access.ts'))
-    && /!args\.createdBy\.includes\('@'\)/.test(code('src/lib/share-access.ts')));
+    && /!args\.createdBy\.includes\('@'\)/.test(code('src/lib/share-access.ts'))
+    && /ctx\.locals\?\.share/.test(code('src/lib/share-access.ts'))
+    && /!== 'off'/.test(code('src/lib/share-access.ts')));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑦-3 退行注入（middleware を再 bundle して実挙動で見る）
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\n⑦-3 退行注入（middleware・実挙動）\n');
+{
+  const mwPath = resolve(ROOT, 'src/middleware.ts');
+  const orig = readFileSync(mwPath, 'utf8');
+  const rebuildMw = async (next, tag) => {
+    const out = `${CACHE}/share-mwinj-${tag}`;
+    try {
+      writeFileSync(mwPath, next);
+      await build({
+        entryPoints: ['src/middleware.ts'],
+        bundle: true, platform: 'node', format: 'esm', logLevel: 'error',
+        define: { 'import.meta.env': '{"DEV":false}' },
+        outdir: out, outbase: 'src', outExtension: { '.js': '.mjs' },
+        plugins: [{
+          name: 'stub',
+          setup(b) {
+            b.onResolve({ filter: /(^|\/)supabase$/ }, () => ({
+              path: pathToFileURL(resolve(ROOT, CACHE, 'share-supabase-stub.mjs')).href, external: true }));
+            b.onResolve({ filter: /^astro:middleware$/ }, () => ({
+              path: pathToFileURL(resolve(ROOT, CACHE, 'share-astro-middleware-stub.mjs')).href, external: true }));
+          },
+        }],
+      });
+      return await import(`../${out}/middleware.mjs`);
+    } finally {
+      writeFileSync(mwPath, orig);
+    }
+  };
+
+  // ⑮ /chat のページ表示を chat_use へ戻す → **開いただけで「利用」になる**
+  {
+    const bad = await rebuildMw(
+      orig.replace("  '/notices': 'notices_view',", "  '/notices': 'notices_view',\n  '/chat': 'chat_use',"), 'chat');
+    db.reset();
+    const iss = await issue();
+    const session = await enter(iss.token);
+    await bad.onRequest({
+      request: new Request('https://app.example.com/chat'),
+      cookies: { get: (n) => (n === 'welltect_share_v' ? { value: session } : undefined) },
+      locals: {},
+    }, async () => new Response('ok'));
+    ok('注入 ⑮ /chat を閲覧表へ戻すと開いただけで chat_use が付く（= 今の実装は付けない）',
+      db.LOGS.filter((l) => l.event_type === 'chat_use').length === 1);
+  }
+
+  // ⑯-2 middleware の 503 を外す → **off でも /share/** が通ってしまう**
+  {
+    const bad = await rebuildMw(orig.replace('  const shareOff = !shareEnabled();', '  const shareOff = false;'), 'ks');
+    process.env.SHARE_ENABLED = 'off';
+    let passed = false;
+    const res = await bad.onRequest({
+      request: new Request('https://app.example.com/share/abc'),
+      cookies: { get: () => undefined }, locals: {},
+    }, async () => { passed = true; return new Response('ok'); });
+    ok('注入 ⑯-2 middleware の停止判定を外すと off でも /share/** が通る（= 今の実装が 503）',
+      passed === true && (res?.status ?? 200) !== 503);
+    delete process.env.SHARE_ENABLED;
+  }
+
+  ok('注入後に middleware.ts が元へ戻っている',
+    readFileSync(mwPath, 'utf8') === orig);
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
