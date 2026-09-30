@@ -39,6 +39,12 @@ const viewer = await resolveViewer(Astro);
  * **代理表示中 (`?u=` で他人を見ている) は渡さない** — 相手の実データを見せるため。
  */
 const u = viewer.uid;
+/**
+ * **共有閲覧では自己申告を出さない**（2026-09-30・仕様書 §17.2 / §25）。
+ * API (`api/kit/[id]/self-report.ts`) も 403 で止めるので**両方で閉じている**
+ * （UI だけ消して API を開けたままにしない）。
+ */
+const canSelfReport = viewer.kind !== 'share';
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
 const linkQuery = viewerLinkQuery(viewer);
 // **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
@@ -218,14 +224,13 @@ function selfReportFor(
                                     未取得 — 検査会社との自動連携が未整備のため、この段階の日時はまだ受け取れていません。
                                   </p>
                                 )}
-                                {selfReport && data && (
+                                {selfReport && data && canSelfReport && (
                                   <div class="mt-2">
                                     <button
                                       type="button"
                                       data-self-report
                                       data-shipment-id={s.id}
                                       data-action={selfReport.action}
-                                      data-diagnostic-user-id={data.diagnosticUserId}
                                       class="inline-flex min-h-touch items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-3.5 text-base font-semibold text-slate-800 transition hover:bg-brand-50 disabled:cursor-wait disabled:opacity-60"
                                     >
                                       <AppIcon name={selfReport.icon} size={18} />{selfReport.label}

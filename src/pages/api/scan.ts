@@ -1,6 +1,8 @@
 import type { APIRoute } from 'astro';
 import { readScanPage } from '../../lib/scan-read-page';
 import { fetchScanUpload } from '../../lib/scan-upload-ticket';
+import { resolveViewer } from '../../lib/viewer';
+import { denyAnonymous, denyUnlessShareScope } from '../../lib/write-guard';
 
 export const prerender = false;
 
@@ -26,7 +28,19 @@ function parseDataUrl(input: string): { mime: string; data: string } {
   return { mime: 'image/jpeg', data: input.trim() };
 }
 
-export const POST: APIRoute = async ({ request }) => {
+/**
+ * 【2026-09-30・§20.3 / §21.4】**保存はしない（読むだけ）ので target lock は不要**だが、
+ * **未認証は 401 で止める。** 本アプリで最も高価な Gemini 呼び出し（画像 1 枚で数十秒）を
+ * 誰でも叩ける状態だった（実測）。共有セッションは scope に `scan` があるときだけ通す。
+ */
+export const POST: APIRoute = async (apiCtx) => {
+  const { request } = apiCtx;
+  const viewer = await resolveViewer(apiCtx);
+  const unauth = denyAnonymous(viewer);
+  if (unauth) return unauth;
+  const scoped = denyUnlessShareScope(viewer, 'scan');
+  if (scoped) return scoped;
+
   let body: ScanRequestBody;
   try {
     body = (await request.json()) as ScanRequestBody;

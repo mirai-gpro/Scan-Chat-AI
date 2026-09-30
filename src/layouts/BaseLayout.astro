@@ -1,6 +1,7 @@
 ---
 import '../styles/global.css';
 import GoogleOneTap from '../components/GoogleOneTap.astro';
+import ShareBanner from '../components/ShareBanner.astro';
 import { LOGO } from '../lib/brand.ts';
 
 interface Props {
@@ -36,6 +37,19 @@ const WIDTH = {
   flow: 'w-full max-w-md sm:max-w-xl lg:max-w-2xl',
   full: 'w-full',
 } as const;
+
+/*
+ * **共有中の帯は 1 か所（ここ）で出す**（仕様書 §24.4）。
+ *
+ * 【なぜ BaseLayout か】帯は `/dashboard` `/report` `/trend` `/result` `/chat` `/scan`
+ * `/coach` `/kit` `/notices` の**全ページに常設**する必要がある。ページごとに置くと
+ * 必ず 1 枚漏れ、**漏れたページでは「黙って別人のデータを見ている」状態**になる。
+ * → 全ページが通る BaseLayout に 1 回だけ置く。
+ *
+ * `Astro.locals.share` は **`src/middleware.ts` しか書かない**。
+ * 未サインイン・本人・admin のときは undefined なので**何も描かない**（挙動不変）。
+ */
+const share = Astro.locals.share ?? null;
 ---
 
 <!doctype html>
@@ -134,6 +148,7 @@ const WIDTH = {
     <title>{title}</title>
   </head>
   <body class="min-h-full">
+    <ShareBanner active={share !== null} label={share?.label ?? null} />
     <div class={`mx-auto flex min-h-screen flex-col safe-top safe-bottom ${WIDTH[width]}`}>
       <slot />
     </div>

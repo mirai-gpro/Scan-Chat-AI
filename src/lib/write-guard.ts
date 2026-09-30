@@ -84,6 +84,30 @@ export function denyForShare(v: Pick<Viewer, 'kind'>): Response | null {
 }
 
 /**
+ * **未認証を止める**（§21.4 Phase 0）。
+ *
+ * 【なぜ要るか（2026-09-30 実測）】`/api/scan`・`/api/scan/upload-ticket`・
+ * `/api/interview/classify-voice`・`/api/live-token`・`/api/insight`・`/api/coach/ask` の
+ * 6 本は `resolveViewer` も `checkAdminAuth` も `cookies` も**一切参照していなかった** =
+ * **完全に未認証で叩けた**。実機で `POST /api/live-token` が 76 文字の Gemini Live token を
+ * 返すことを確認済み。**課金とストレージを他人に使わせる経路**なので、
+ * 外部共有を公開する前に閉じる。
+ *
+ * 許可 = `self` / `admin_self` / `admin_impersonation` / `admin_impersonation_legacy` /
+ *        `share` / `uid_entry`。**`anonymous` だけを 401 にする。**
+ *
+ * **target lock とは別の話**。`/api/scan` は target を持たない（読むだけ）が、
+ * 「正規の主体であること」は要求する。
+ */
+export function denyAnonymous(v: Pick<Viewer, 'kind'>): Response | null {
+  if (v.kind !== 'anonymous') return null;
+  return new Response(JSON.stringify({ error: 'unauthenticated', message: 'サインインが必要です。' }), {
+    status: 401,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
+/**
  * **scope に無い機能を止める**（§17.2）。
  *
  * 共有リンクは用途ごとに `{ interview, scan }` を切り替えて発行できる

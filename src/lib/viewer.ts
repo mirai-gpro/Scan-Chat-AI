@@ -237,6 +237,11 @@ export interface Viewer {
    * **scope に無い更新は既定 BLOCK**（キット自己申告・既読化など）。
    */
   shareScope: { view: true; interview: boolean; scan: boolean } | null;
+  /**
+   * **共有リンクのラベル**（「助成金事務局 確認用」など）。share 以外は null。
+   * **常設の帯に出すためだけ**に持つ（§24.4）。**対象者の氏名は入らない**（PII）。
+   */
+  shareLabel: string | null;
   /** 表示対象の diagnostic_user_id。未サインインなら null。 */
   uid: string | null;
   /** サインイン済み本人の uid（代理表示中でも本人のまま）。 */
@@ -291,7 +296,7 @@ export interface Viewer {
 }
 
 const ANONYMOUS: Viewer = {
-  kind: 'anonymous', targetLocked: false, writeTargetUid: null, viewCtx: null, shareScope: null,
+  kind: 'anonymous', targetLocked: false, writeTargetUid: null, viewCtx: null, shareScope: null, shareLabel: null,
   uid: null, selfUid: null, isAdmin: false, adminBy: null, impersonating: false,
   cookieStale: false, origin: 'production', uidEntry: false,
 };
@@ -329,7 +334,7 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
       targetLocked: true,
       writeTargetUid: null,            // ★ 代理表示は read-only（§12.5）
       viewCtx: av.ctx,
-      shareScope: null,
+      shareScope: null, shareLabel: null,
       uid: av.targetUid,
       /*
        * **admin 本人の uid は無いことがある**（2026-09-30）。
@@ -367,6 +372,7 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
       writeTargetUid: sh.targetUid,
       viewCtx: null,
       shareScope: sh.scope,
+      shareLabel: sh.label,
       uid: sh.targetUid,
       selfUid: null,          // ★ 共有相手は「本人」ではない
       isAdmin: false,         // ★ 固定
@@ -387,7 +393,7 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
        * URL に uid を書くだけで admin になれる経路を残さない。
        */
       return {
-        kind: 'uid_entry', targetLocked: false, writeTargetUid: requested, viewCtx: null, shareScope: null,
+        kind: 'uid_entry', targetLocked: false, writeTargetUid: requested, viewCtx: null, shareScope: null, shareLabel: null,
         uid: requested, selfUid: requested, isAdmin: false, adminBy: null, impersonating: false,
         cookieStale: false, origin: 'production', uidEntry: true,
       };
@@ -407,13 +413,13 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
   const isAdmin = adminBy !== null;
   if (isAdmin && requested && requested !== selfUid) {
     return {
-      kind: 'admin_impersonation_legacy', targetLocked: false, writeTargetUid: selfUid, viewCtx: null, shareScope: null,
+      kind: 'admin_impersonation_legacy', targetLocked: false, writeTargetUid: selfUid, viewCtx: null, shareScope: null, shareLabel: null,
       uid: requested, selfUid, isAdmin, adminBy, impersonating: true,
       cookieStale: verified.legacy || !isAdmin, origin: verified.origin, uidEntry: false,
     };
   }
   return {
-    kind: isAdmin ? 'admin_self' : 'self', targetLocked: false, writeTargetUid: selfUid, viewCtx: null, shareScope: null,
+    kind: isAdmin ? 'admin_self' : 'self', targetLocked: false, writeTargetUid: selfUid, viewCtx: null, shareScope: null, shareLabel: null,
     uid: selfUid, selfUid, isAdmin, adminBy, impersonating: false,
     cookieStale: verified.legacy || !isAdmin, origin: verified.origin, uidEntry: false,
   };

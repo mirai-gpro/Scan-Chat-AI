@@ -108,6 +108,8 @@ export interface ResolvedShare {
   targetUid: string;
   targetOrigin: BridgeOrigin;
   scope: ShareScope;
+  /** 常設の帯に出す用途ラベル（§24.4）。**対象者の氏名ではない**。 */
+  label: string | null;
   /** セッションの期限（link の期限を超えない）。 */
   expiresAt: string;
   viewerId: string | null;
@@ -138,7 +140,10 @@ interface Table {
   insert(v: unknown): { select(cols: string): Promise<{ data: Record<string, unknown>[] | null; error: DbErr }> };
   update(v: unknown): Filterable;
 }
-interface DiagnosisSchema { from(t: string): Table }
+interface DiagnosisSchema {
+  from(t: string): Table;
+  rpc(fn: string, args: Record<string, unknown>): Promise<{ data: unknown; error: DbErr }>;
+}
 function dg(sb: NonNullable<ReturnType<typeof getServerSupabase>>): DiagnosisSchema {
   return sb.schema('diagnosis') as unknown as DiagnosisSchema;
 }
@@ -369,34 +374,49 @@ export async function readSharePending(pending: string, now = Date.now()): Promi
 /**
  * 同意 → 共有セッション発行（§18.3）。
  *
- * **pending を消費して別の値へ差し替える**（同じ値を昇格させない・§31 T-5 session fixation）。
- * セッションの期限は **link の期限を超えない**（§18.1）。
+ * **DB の RPC 1 文で原子的に行う**（`consume_share_pending`・migration `20260930000030`）。
+ * アプリ側で read → update と 2 往復すると、**同じ pending で同時に 2 回 POST された時に
+ * 両方成功し得る**（どちらも「読んだ時は未同意だった」ため）。そうなると共有セッションが
+ * 2 つでき、**片方を revoke しても他方が生き残る**。Admin 代理表示の `consume_admin_handoff`
+ * と同じ規律（§7 / §31 T-5）。
+ *
+ * **pending の値を昇格させない**（session fixation）。**link の期限を超えない**（§18.1）。
+ *
+ * @returns `null` = 不存在 / 同意済 / 失効 / link 停止。**区別しない**（§16.3）。
  */
 export async function consumeSharePending(
   pending: string,
   viewerId: string | null,
-  now = Date.now(),
-): Promise<{ session: string; linkId: string } | null> {
+): Promise<{ session: string; linkId: string; targetUid: string; expiresAt: string } | null> {
   const sb = getServerSupabase();
-  const info = await readSharePending(pending, now);
-  if (!sb || !info) return null;
-
-  const { data: link } = await dg(sb).from('shared_access_links')
-    .select('expires_at').eq('id', info.linkId).maybeSingle();
-  if (!link) return null;
+  if (!sb || !SHARE_OPAQUE_RE.test(pending)) return null;
 
   const session = randomShareToken();
-  const linkExp = Date.parse(String(link.expires_at));
-  const exp = new Date(Math.min(now + SHARE_SESSION_TTL_SEC * 1000, linkExp)).toISOString();
+  const { data, error } = await dg(sb).rpc('consume_share_pending', {
+    p_pending_digest: await sha256hex(pending),
+    p_session_digest: await sha256hex(session),
+    p_viewer_id: viewerId,
+    p_session_ttl_sec: SHARE_SESSION_TTL_SEC,
+  });
+  if (error) {
+    console.error('[share-access] 同意の確定に失敗:', error.message);
+    return null;
+  }
 
-  const { error } = await dg(sb).from('shared_access_sessions').update({
-    session_digest: await sha256hex(session),   // ★ pending の値を昇格させない
-    consented_at: new Date(now).toISOString(),
-    viewer_id: viewerId,
-    expires_at: exp,
-  }).eq('id', info.sessionId).is('consented_at', null).select('id');
-  if (error) return null;
-  return { session, linkId: info.linkId };
+  /*
+   * **「ちょうど 1 行」を確かめる**（§7）。0 行 = 二重 POST の 2 本目か失効。
+   * 2 行以上は起こり得ないが、起きたら**成功として扱わない**
+   * （どれを Cookie に載せたのか分からない状態で通すほうが危険）。
+   */
+  const rows = Array.isArray(data) ? (data as Record<string, unknown>[]) : [];
+  if (rows.length !== 1) return null;
+
+  return {
+    session,
+    linkId: String(rows[0].link_id),
+    targetUid: String(rows[0].target_uid),
+    expiresAt: String(rows[0].expires_at),
+  };
 }
 
 /**
@@ -417,7 +437,7 @@ export async function resolveShareSession(sessionRaw: string, now = Date.now()):
   if (!(Date.parse(String(s.expires_at)) > now)) return null;
 
   const { data: link } = await dg(sb).from('shared_access_links')
-    .select('id, target_uid, target_origin, scope, status, starts_at, expires_at')
+    .select('id, target_uid, target_origin, scope, label, status, starts_at, expires_at')
     .eq('id', s.share_link_id).maybeSingle();
   if (!link || !linkUsable(link, now)) return null;                // ★ ここが revoke を効かせる
 
@@ -427,9 +447,42 @@ export async function resolveShareSession(sessionRaw: string, now = Date.now()):
     targetUid: String(link.target_uid),
     targetOrigin: link.target_origin === 'staging' ? 'staging' : 'production',
     scope: normalizeScope(link.scope),
+    label: link.label ? String(link.label) : null,
     expiresAt: String(s.expires_at),
     viewerId: s.viewer_id ? String(s.viewer_id) : null,
   };
+}
+
+/**
+ * **失効の理由を「ログのためだけに」判別する**（§26.1 の `expired` / `revoked` / `paused`）。
+ *
+ * **応答には絶対に出さない。** 画面は理由を区別せず `/share/unavailable` 一択（§16.3）で、
+ * 区別できる応答を返すと **URL の総当たりで「存在するが停止中」を炙り出せる**。
+ * ここで分かるのはサーバ側のログだけ。
+ */
+export async function classifyShareFailure(
+  sessionRaw: string, now = Date.now(),
+): Promise<'expired' | 'revoked' | 'paused' | null> {
+  try {
+    const sb = getServerSupabase();
+    if (!sb || !SHARE_OPAQUE_RE.test(sessionRaw)) return null;
+    const { data: s } = await dg(sb).from('shared_access_sessions')
+      .select('share_link_id, consented_at, expires_at, revoked_at')
+      .eq('session_digest', await sha256hex(sessionRaw)).maybeSingle();
+    if (!s) return null;                                  // そもそも知らない札（記録しない）
+    if (s.revoked_at) return 'revoked';
+    if (!(Date.parse(String(s.expires_at)) > now)) return 'expired';
+
+    const { data: link } = await dg(sb).from('shared_access_links')
+      .select('status, starts_at, expires_at').eq('id', s.share_link_id).maybeSingle();
+    if (!link) return 'revoked';
+    if (link.status === 'revoked') return 'revoked';
+    if (link.status === 'paused') return 'paused';
+    if (!(Date.parse(String(link.expires_at)) > now)) return 'expired';
+    return null;
+  } catch {
+    return null;   // 記録の都合で本体を止めない
+  }
 }
 
 /** 共有の終了（§17.5）。**`welltect_share_v` だけを失効させる。** */

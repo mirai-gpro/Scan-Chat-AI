@@ -114,12 +114,12 @@ export interface LiveRefs {
 
   skipBtn: HTMLButtonElement;
 
-  /**
-   * 任意。指定すると `/api/live-token` POST body に乗り、サーバが当該ユーザーの
-   * 検査文脈を返す。返って来た文脈は system instruction の先頭に prepend される。
-   * dev profile では URL `?u=<uuid>` を流用、本番では Auth 連携に置換予定。
+  /*
+   * **`diagnosticUserId` は持たない**（2026-09-30・仕様書 §19.4）。
+   * 以前はここに uid を持ち、`/api/live-token` と `/api/interview/export` の body に
+   * 載せていた。**クライアントが対象を名乗る形**なので、共有閲覧では「誰の問診を
+   * どこへ保存するか」をブラウザが決められてしまう。対象はサーバの resolver が決める。
    */
-  diagnosticUserId?: string | null;
 
   /**
    * ダッシュボードへ戻るリンクのクエリ (`''` か `'?u=<uid>'`)。
@@ -1109,7 +1109,8 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     const res = await fetch('/api/live-token', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ diagnosticUserId: refs.diagnosticUserId ?? null }),
+      // ★ 対象はサーバが Cookie / 共有セッションから決める。**uid を送らない**（§19.4）。
+      body: '{}',
     });
     if (!res.ok) {
       const body = await res.text();
@@ -1430,17 +1431,19 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
 
   /** 問診結果を S3 (Elith 連携) へ書き出す。テスト用・fire-and-forget。 */
   async function exportInterviewToS3(opts: {
-    uid: string | null;
     answers: Record<string, AnswerValue>;
     completedAt: number;
   }): Promise<void> {
     try {
+      /*
+       * **uid も profile も送らない**（2026-09-30・仕様書 §19.4 / §19.5）。
+       *
+       * 生年月日と性別は `LifestyleQuestionnaireData` の年齢・性別になり
+       * **Elith の AI 診断の入力**に効く。クライアントから送れると
+       * **対象者本人の正式な入力を汚染できる**ので、サーバが target から取り直す。
+       */
       const payload = JSON.stringify({
         diagnosticId: getOrCreateDiagnosticId(),
-        diagnosticUserId: opts.uid,
-        userName: userProfile?.name ?? null,
-        dateOfBirth: userProfile?.dateOfBirth ?? null,
-        sex: userProfile?.sex ?? null,
         answers: opts.answers,
         completedAt: opts.completedAt,
       });
@@ -1477,13 +1480,16 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     renderProgress(100, '完了');
     renderSectionDots(SECTIONS.length);
 
-    // 問診結果ファイルを生成。氏名・生年月日・性別は尋ねず、内部取得値を付与する。
-    const uid = refs.diagnosticUserId?.trim() || null;
+    /*
+     * **端末内の控え**（localStorage）。**サーバへは送らない**ので uid は持たない。
+     * 氏名・生年月日・性別は `/api/live-token` がサーバ側で解決して返した値
+     * （表示のためだけに保持している）。
+     */
     const answers = engine.getAnswers();
     const completedAt = Date.now();
     saveInterviewResult({
       id: SESSION_ID,
-      diagnosticUserId: uid,
+      diagnosticUserId: null,
       userName: userProfile?.name ?? null,
       dateOfBirth: userProfile?.dateOfBirth ?? null,
       sex: userProfile?.sex ?? null,
@@ -1493,7 +1499,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
 
     // S3 (Elith 連携) へ書き出し。スキャンと同じ diagnostic_id フォルダに同居させる。
     // テスト用途のため fire-and-forget (失敗してもUIは止めない)。
-    void exportInterviewToS3({ uid, answers, completedAt });
+    void exportInterviewToS3({ answers, completedAt });
 
     const dashUrl = `/dashboard${refs.dashboardLinkQuery ?? ''}`;
 

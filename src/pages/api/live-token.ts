@@ -3,6 +3,8 @@ import { GoogleGenAI } from '@google/genai';
 import { MODELS } from '../../lib/gemini';
 import { refreshConfig } from '../../lib/app-config';
 import { buildUserContextForChat, getCustomerProfile, getAppliedExamLabels } from '../../lib/chat-context';
+import { resolveViewer } from '../../lib/viewer';
+import { denyAnonymous } from '../../lib/write-guard';
 
 export const prerender = false;
 
@@ -10,24 +12,26 @@ export const prerender = false;
  * Live API 用 ephemeral token 発行。
  * 30 分の session 有効期間 / 60 秒以内に新規セッション開始 / 1 回限り使用。
  *
- * 任意で body `{ diagnosticUserId: "<uuid>" }` を受け、
- * その場合は当該ユーザーの検査文脈を `userContext` として返す。
- * クライアント側で system instruction の先頭に prepend する想定。
+ * 【2026-09-30・§19.4 / §21.4】**body の `diagnosticUserId` は読まない。**
+ *   - 対象は `resolveViewer` が決める（self なら本人、share なら共有リンクの対象）。
+ *     ここで返す `userContext` / `userProfile` は **`customer` スキーマ（PII）を含む**ので、
+ *     クライアント申告の uid で引くと**他人の PII を誰でも取り出せる**（実測・§11-#2）。
+ *   - **未認証を 401 で止める。** 実機で認証なしに 76 文字の Live token が返っていた
+ *     （30 分・Gemini Live の課金が乗る）。
  */
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async (ctx) => {
+  const viewer = await resolveViewer(ctx);
+  const unauth = denyAnonymous(viewer);
+  if (unauth) return unauth;
+
   await refreshConfig(); // 運用パラメータ(app_config)を最新化してから処理
   const apiKey = import.meta.env.GEMINI_API_KEY;
   if (!apiKey) {
     return json({ error: 'GEMINI_API_KEY is not configured' }, 500);
   }
 
-  let diagnosticUserId: string | null = null;
-  try {
-    const body = await request.json().catch(() => null) as { diagnosticUserId?: unknown } | null;
-    if (body && typeof body.diagnosticUserId === 'string') {
-      diagnosticUserId = body.diagnosticUserId;
-    }
-  } catch { /* body 無しは許可 */ }
+  // ★ 表示対象はサーバが決める。body は読まない（読む必要が無い）。
+  const diagnosticUserId = viewer.uid;
 
   try {
     const ai = new GoogleGenAI({ apiKey, httpOptions: { apiVersion: 'v1alpha' } });

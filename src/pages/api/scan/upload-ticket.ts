@@ -11,6 +11,8 @@
  */
 import type { APIRoute } from 'astro';
 import { createScanUploadTicket, MAX_SCAN_UPLOAD_BYTES } from '../../../lib/scan-upload-ticket';
+import { resolveViewer } from '../../../lib/viewer';
+import { denyAnonymous, denyUnlessShareScope } from '../../../lib/write-guard';
 
 export const prerender = false;
 
@@ -21,7 +23,18 @@ function json(data: unknown, status = 200): Response {
   });
 }
 
-export const POST: APIRoute = async ({ request }) => {
+/**
+ * 【2026-09-30・§21.4】**未認証を 401 で止める。** キーはサーバ採番なので target lock は
+ * 不要だが、**S3 への presigned PUT を無制限に発行できる**状態だった（1 件 10MB・15 分）。
+ */
+export const POST: APIRoute = async (apiCtx) => {
+  const { request } = apiCtx;
+  const viewer = await resolveViewer(apiCtx);
+  const unauth = denyAnonymous(viewer);
+  if (unauth) return unauth;
+  const scoped = denyUnlessShareScope(viewer, 'scan');
+  if (scoped) return scoped;
+
   let body: Record<string, unknown>;
   try {
     body = (await request.json()) as Record<string, unknown>;

@@ -6,7 +6,8 @@ import {
   resolveCustomerWithAdmin,
   resolveStagingCustomerByEmail,
 } from '../../../lib/hp-edge';
-import { VIEWER_COOKIE, signViewer, viewerCookieOptions } from '../../../lib/viewer';
+import { VIEWER_COOKIE, signViewer, viewerCookieOptions, resolveViewer } from '../../../lib/viewer';
+import { denyForShare } from '../../../lib/write-guard';
 import { isAdminEmailAsync } from '../../../lib/admin-auth';
 import { issueAdminCred } from '../../../lib/admin-identity';
 import { linkDemoEmail, resolveDemoUidByEmail } from '../../../lib/demo-accounts';
@@ -26,7 +27,17 @@ export const prerender = false;
  *
  * 旧 GoogleOneTap.astro の DEMO_EMAIL_TO_UID ハードコードを置き換える。
  */
-export const POST: APIRoute = async ({ request, cookies }) => {
+export const POST: APIRoute = async (apiCtx) => {
+  const { request, cookies } = apiCtx;
+  /*
+   * **共有閲覧からは一切叩かせない**（2026-09-30・仕様書 §17.5 / §31 T-14-4）。
+   * 端末の持ち主（共有相手とは**別人かもしれない**）の本人セッションを、
+   * 共有相手の操作で**作らせない・壊させない**。共有を終えるのは `/share/end` の役目で、
+   * あれは `welltect_share_v` だけを消す。
+   */
+  const shared = denyForShare(await resolveViewer(apiCtx));
+  if (shared) return shared;
+
   const body = (await request.json().catch(() => null)) as { accessToken?: unknown } | null;
   const accessToken = typeof body?.accessToken === 'string' ? body.accessToken : null;
   if (!accessToken) return json({ error: 'missing accessToken' }, 400);

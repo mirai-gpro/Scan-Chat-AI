@@ -40,6 +40,20 @@ const linkQuery = viewerLinkQuery(viewer);
 // **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
 const linkPrefix = viewerPathPrefix(viewer);
 
+/*
+ * **画面へ出すのは uid ではなく「戻せない鍵」**（2026-09-30・仕様書 §19.4 の趣旨）。
+ *
+ * この属性の用途は ①localStorage のキー ②「対象が居るか」の判定 の 2 つだけで、
+ * **uid そのものである必要がない**。共有閲覧では `viewer.uid` = 対象者の uid なので、
+ * そのまま出すと **外部の共有相手に対象者の識別子を渡す**ことになる
+ * （「`target_uid` を Cookie にも URL にも入れない」と同じ理由で DOM にも入れない）。
+ * sha256 の頭 16 桁なので**人ごとに一意・逆算できない**。
+ */
+const scopeKey = diagnosticUserId
+  ? Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(diagnosticUserId))))
+      .map((n) => n.toString(16).padStart(2, '0')).join('').slice(0, 16)
+  : '';
+
 const ctx = diagnosticUserId ? await buildCoachContext(diagnosticUserId).catch(() => null) : null;
 const hasContext = !!ctx;
 const displayName = ctx?.displayName ?? 'お客様';
@@ -122,7 +136,7 @@ const initialGreeting = urgentAlert
       <main
         id="coach-main"
         class="flex flex-1 flex-col gap-3 px-5 pt-3 pb-4"
-        data-diagnostic-user-id={diagnosticUserId}
+        data-scope-key={scopeKey}
         data-initial-greeting={initialGreeting}
       >
         <div
@@ -329,11 +343,12 @@ const initialGreeting = urgentAlert
     const main = $opt('coach-main');
     if (!main) return;
 
-    const diagnosticUserId = main.dataset.diagnosticUserId ?? '';
-    if (!diagnosticUserId) return;
+    // **uid ではなく戻せない鍵**（localStorage のキーと「対象が居るか」の判定だけに使う）。
+    const scopeKey = main.dataset.scopeKey ?? '';
+    if (!scopeKey) return;
     const initialGreeting = main.dataset.initialGreeting ?? '';
 
-    const storageKey = STORAGE_KEY_PREFIX + diagnosticUserId;
+    const storageKey = STORAGE_KEY_PREFIX + scopeKey;
 
     const logEl       = $('coach-log');
     const emptyEl     = $opt('coach-empty');
@@ -456,7 +471,7 @@ const initialGreeting = urgentAlert
           method: 'POST',
           headers: { 'content-type': 'application/json' },
           body: JSON.stringify({
-            diagnosticUserId,
+            // ★ uid は送らない。対象はサーバが Cookie / 共有セッションから決める (§19.4)。
             message: text,
             history: history.slice(0, -1).map((m) => ({ role: m.role, text: m.text })),
           }),

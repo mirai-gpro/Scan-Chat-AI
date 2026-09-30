@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../../lib/viewer';
-import { denyReadOnlyWrite } from '../../../../lib/write-guard';
+import { denyReadOnlyWrite, denyForShare, denyAnonymous } from '../../../../lib/write-guard';
 import { getServerSupabase } from '../../../../lib/supabase';
 
 export const prerender = false;
@@ -21,8 +21,18 @@ export const POST: APIRoute = async (ctx) => {
    * こちらも body の `diagnosticUserId` を信じるので、
    * 代理表示から押すと**対象顧客の既読状態が変わる**。
    */
-  const denied = denyReadOnlyWrite(await resolveViewer(ctx));
+  const viewer = await resolveViewer(ctx);
+  const denied = denyReadOnlyWrite(viewer);
   if (denied) return denied;
+  /*
+   * **共有閲覧からは一切叩かせない**（2026-09-30・仕様書 §17.2 / §25）。
+   * **本人の既読状態**を外部の共有相手に変えられると、
+   * **本人が重要な通知を見落とす**。**UI から消すだけでは足りない**ので API で 403。
+   */
+  const shared = denyForShare(viewer);
+  if (shared) return shared;
+  const unauth = denyAnonymous(viewer);
+  if (unauth) return unauth;
 
   const id = params.id;
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) {
@@ -32,7 +42,12 @@ export const POST: APIRoute = async (ctx) => {
   const body = (await request.json().catch(() => null)) as
     | { diagnosticUserId?: unknown; read?: unknown }
     | null;
-  const diagnosticUserId = typeof body?.diagnosticUserId === 'string' ? body.diagnosticUserId : null;
+  /*
+   * 【2026-09-30・§21.1】**body の `diagnosticUserId` を認可根拠にしない。**
+   * 以前はこの値で所有確認していたので、**他人の uid を書けばその人のお知らせを
+   * 既読にできた**。対象は resolver が決める。
+   */
+  const diagnosticUserId = viewer.writeTargetUid;
   const markRead = body?.read === undefined ? true : body?.read === true;
 
   if (!diagnosticUserId || !/^[0-9a-f-]{36}$/i.test(diagnosticUserId)) {

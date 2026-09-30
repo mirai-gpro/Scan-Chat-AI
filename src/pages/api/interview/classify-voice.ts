@@ -15,6 +15,8 @@
  */
 import type { APIRoute } from 'astro';
 import { classifyVoiceChoice } from '../../../lib/voice-choice-llm';
+import { resolveViewer } from '../../../lib/viewer';
+import { denyAnonymous } from '../../../lib/write-guard';
 
 export const prerender = false;
 
@@ -29,7 +31,15 @@ function json(data: unknown, status = 200): Response {
 const MAX_TRANSCRIPT = 200;
 const MAX_OPTIONS = 40;
 
-export const POST: APIRoute = async ({ request }) => {
+/**
+ * 【2026-09-30・§21.4】**未認証を 401 で止める。** uid は扱わないが、
+ * **Gemini の課金を他人に使わせる経路**なので「正規の主体であること」は要求する。
+ */
+export const POST: APIRoute = async (apiCtx) => {
+  const { request } = apiCtx;
+  const unauth = denyAnonymous(await resolveViewer(apiCtx));
+  if (unauth) return unauth;
+
   let body: { question?: unknown; options?: unknown; transcript?: unknown };
   try { body = await request.json(); } catch { return json({ index: null, confidence: 0 }, 400); }
 

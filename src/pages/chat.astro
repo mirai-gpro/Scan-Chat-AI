@@ -13,7 +13,12 @@ noStore(Astro.response);
 const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
-const diagnosticUserId = viewer.uid;
+/*
+ * **uid を DOM に埋めない**（2026-09-30・仕様書 §19.4）。
+ * 以前は `<main data-diagnostic-user-id>` に出しており、クライアントがそれを
+ * `/api/live-token` と `/api/interview/export` の body に載せていた。
+ * **対象はサーバの resolver が決める**ので、画面に uid は要らない。
+ */
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
 const linkQuery = viewerLinkQuery(viewer);
 // **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
@@ -76,7 +81,6 @@ const linkPrefix = viewerPathPrefix(viewer);
   <main
     id="chat-main"
     class="flex flex-1 flex-col gap-3 px-5 pt-3 pb-4"
-    data-diagnostic-user-id={diagnosticUserId ?? ''}
     data-dashboard-link-query={linkQuery}
   >
     <div
@@ -364,12 +368,10 @@ const linkPrefix = viewerPathPrefix(viewer);
 
   document.addEventListener('DOMContentLoaded', () => {
     const main = document.getElementById('chat-main');
-    const diagnosticUserId = main?.dataset.diagnosticUserId || null;
     // ダッシュボードへ戻るリンクのクエリ。**uid から組み立てない** (2026-09-29)。
     const dashboardLinkQuery = main?.dataset.dashboardLinkQuery || '';
 
     void initLiveController({
-      diagnosticUserId,
       dashboardLinkQuery,
       log: $('chat-log'),
       status: $('chat-status'),

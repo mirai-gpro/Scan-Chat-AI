@@ -59,6 +59,11 @@ const uploads = diagnosticUserId ? await getUserUploads(diagnosticUserId) : [];
  * 過去の年度を遡って入れる運用ではない (確定事項)。
  */
 await refreshConfig();
+/*
+ * **判定は「表示対象」で行う**（§20.3）。`viewer.uid` は self なら本人、
+ * 共有閲覧なら**共有リンクの対象者**なので、共有相手が操作しても
+ * **対象者の属性（複数年アップの可否）で動く**のが正しい。
+ */
 const multiYear = isSpecialAccount(diagnosticUserId);
 /** 上限 5 年分 (発注者指示 2026-09-15「1年分から最大5年分」)。 */
 const MAX_ROUNDS = 5;
@@ -1014,7 +1019,11 @@ const dashUrl = `/dashboard${linkQuery}`;
         exportStatus.textContent = '書き出す Markdown がありません。';
         return;
       }
-      const diagnosticUserId = new URLSearchParams(location.search).get('u');
+      /*
+       * **`?u=` を読まない**（2026-09-30・仕様書 §20.3）。
+       * 書き出し先はサーバが Cookie / 共有セッションから決める。クライアントが
+       * 名乗れると **他人の Elith 納品領域へ書ける**（`api/scan/export.ts` 参照）。
+       */
       // 先にアプリの DB へ (画面に出すのはこちら)。落ちても S3 書き出しは続ける。
       const saved = await saveScanToDb(markdownClean);
       /*
@@ -1040,7 +1049,6 @@ const dashUrl = `/dashboard${linkQuery}`;
           body: JSON.stringify({
             markdownClean,
             diagnosticId,
-            diagnosticUserId,
             hint: ($('scan-hint') as HTMLInputElement | null)?.value || null,
             sourceFileName: lastSourceFileName,
           }),

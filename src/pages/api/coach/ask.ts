@@ -1,7 +1,7 @@
 /**
  * AI ヘルスコーチ Q&A API。
  *
- * リクエスト: { diagnosticUserId, message, history? }
+ * リクエスト: { message, history? }  ← uid は Cookie/共有セッションから解決する
  * レスポンス: { answer, generatedAt }
  *
  * 3 種類の回答パターンを system prompt で制御:
@@ -13,6 +13,8 @@
 import type { APIRoute } from 'astro';
 import { MODELS, callGemini, extractText, type GeminiContent } from '../../../lib/gemini';
 import { buildCoachContext } from '../../../lib/coach-context';
+import { resolveViewer } from '../../../lib/viewer';
+import { denyAnonymous } from '../../../lib/write-guard';
 
 export const prerender = false;
 
@@ -70,17 +72,27 @@ interface HistoryItem {
   text: string;
 }
 
-export const POST: APIRoute = async ({ request }) => {
+/**
+ * 【2026-09-30・§19.4 / §21.4】**body の `diagnosticUserId` は読まない。**
+ *   - `buildCoachContext` は**その人の AI 疾病予防報告書**を読む。クライアント申告の uid で
+ *     引けると**他人の報告書を誰でも読める**（§11-#4）。対象は resolver が決める。
+ *   - **未認証を 401 で止める**（Gemini の課金が乗るため・§21.4）。
+ */
+export const POST: APIRoute = async (apiCtx) => {
+  const { request } = apiCtx;
+  const viewer = await resolveViewer(apiCtx);
+  const unauth = denyAnonymous(viewer);
+  if (unauth) return unauth;
+
   const apiKey = import.meta.env.GEMINI_API_KEY;
   if (!apiKey) return json({ error: 'GEMINI_API_KEY is not configured' }, 500);
 
   const body = await request.json().catch(() => null) as {
-    diagnosticUserId?: unknown;
     message?: unknown;
     history?: unknown;
   } | null;
 
-  const diagnosticUserId = typeof body?.diagnosticUserId === 'string' ? body.diagnosticUserId : null;
+  const diagnosticUserId = viewer.uid;   // ★ サーバが決める
   const message = typeof body?.message === 'string' ? body.message.trim() : '';
   const history: HistoryItem[] = Array.isArray(body?.history)
     ? (body.history as HistoryItem[]).filter(
@@ -89,7 +101,7 @@ export const POST: APIRoute = async ({ request }) => {
     : [];
 
   if (!message) return json({ error: 'message is required' }, 400);
-  if (!diagnosticUserId) return json({ error: 'diagnosticUserId is required' }, 400);
+  if (!diagnosticUserId) return json({ error: 'サインインが必要です。' }, 401);
 
   const ctx = await buildCoachContext(diagnosticUserId).catch(() => null);
   if (!ctx) {

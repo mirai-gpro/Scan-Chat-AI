@@ -19,9 +19,15 @@ import { shipmentLabel, testTypeLabel, formatJpDate, SHIPMENT_STAGES } from '../
 interface Props {
   shipments: (KitShipment & { lab_name: string | null })[];
   nextTestAt?: string | null;
-  diagnosticUserId: string;
+  /**
+   * **自己申告ボタンを出してよいか**（2026-09-30・仕様書 §17.2 / §25）。
+   * 共有閲覧では `false`。**本人の配送状態**を外部の共有相手に変えさせない。
+   * API 側 (`api/kit/[id]/self-report.ts`) も 403 で止めるので**両方で閉じている**
+   * （UI だけ消して API を開けたままにしない）。
+   */
+  canSelfReport?: boolean;
 }
-const { shipments, nextTestAt, diagnosticUserId } = Astro.props as Props;
+const { shipments, nextTestAt, canSelfReport = true } = Astro.props as Props;
 const active = shipments.filter((s) => !s.lab_completed_at).slice(0, 2);
 
 /* 横 1 行に畳むので、日付から曜日を落とす (formatJpDate は「2026年8月25日 (火)」を返す)。 */
@@ -82,25 +88,23 @@ const shortJpDate = (iso: string | null | undefined) => formatJpDate(iso).replac
             </span>
 
             {/* 自己申告ボタン */}
-            {!s.user_received_at && s.shipped_at && (
+            {canSelfReport && !s.user_received_at && s.shipped_at && (
               <button
                 type="button"
                 data-self-report
                 data-shipment-id={s.id}
                 data-action="received"
-                data-diagnostic-user-id={diagnosticUserId}
                 class="order-5 flex min-h-touch shrink-0 items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-3.5 text-base font-semibold text-slate-800 transition hover:bg-brand-50 disabled:cursor-wait disabled:opacity-60 xl:order-6"
               >
                 <AppIcon name="kit" size={18} />受け取りました
               </button>
             )}
-            {s.user_received_at && !s.user_returned_at && (
+            {canSelfReport && s.user_received_at && !s.user_returned_at && (
               <button
                 type="button"
                 data-self-report
                 data-shipment-id={s.id}
                 data-action="returned"
-                data-diagnostic-user-id={diagnosticUserId}
                 class="order-5 flex min-h-touch shrink-0 items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-3.5 text-base font-semibold text-slate-800 transition hover:bg-brand-50 disabled:cursor-wait disabled:opacity-60 xl:order-6"
               >
                 <AppIcon name="send" size={18} />返送しました

@@ -26,7 +26,9 @@ import type { APIRoute } from 'astro';
 import { buildElithInterviewBundle } from '../../../lib/interview-export';
 import { recordInterviewCompletion } from '../../../lib/interview-completion';
 import { resolveViewer } from '../../../lib/viewer';
-import { denyReadOnlyWrite } from '../../../lib/write-guard';
+import { denyReadOnlyWrite, denyUnlessShareScope } from '../../../lib/write-guard';
+import { resolveTargetSubject } from '../../../lib/target-subject';
+import { logShareEvent } from '../../../lib/share-access';
 import type { AnswerValue } from '../../../scripts/chat/interview-script';
 import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
 
@@ -66,8 +68,22 @@ export const POST: APIRoute = async (ctx) => {
    * この口は S3 の Elith 納品と `interview_completions` へ書く。
    * **body 冒頭で止める** — 読み取りも解析もしない。
    */
-  const denied = denyReadOnlyWrite(await resolveViewer(ctx));
+  const viewer = await resolveViewer(ctx);
+  const denied = denyReadOnlyWrite(viewer);
   if (denied) return denied;
+
+  /*
+   * **共有は scope に `interview` があるときだけ**（§17.2）。
+   * scope に無い更新は既定 BLOCK。share 以外では何もしない（挙動不変）。
+   */
+  const scoped = denyUnlessShareScope(viewer, 'interview');
+  if (scoped) return scoped;
+
+  /*
+   * **書き込み先はここで確定する。以後クライアントの申告を一切見ない**（§19.4）。
+   * self なら本人、share なら共有リンクの対象、代理表示は上で 403 済み。
+   */
+  const targetUid = viewer.writeTargetUid;
 
   let body: ExportBody;
   try {
@@ -79,6 +95,18 @@ export const POST: APIRoute = async (ctx) => {
   const answers = sanitizeAnswers(body.answers);
   if (Object.keys(answers).length === 0) {
     return json({ ok: false, error: 'answers is required' }, 400);
+  }
+
+  /*
+   * **クライアントが別の UID を名乗ってきたら記録する**（§26.1 `target_tamper_attempt`）。
+   * **止めはしない**（申告は元々捨てているので実害が無く、止めると旧クライアントが壊れる）。
+   * **記録するのは「食い違った」事実だけ** — 申告された UID をログに書かない（§26.2）。
+   */
+  const claimed = str(body.diagnosticUserId) ?? str(body.clientId);
+  if (claimed && targetUid && claimed !== targetUid) {
+    await logShareEvent({
+      event: 'target_tamper_attempt', request: ctx.request, path: '/api/interview/export',
+    });
   }
 
   const diagnosticId = str(body.diagnosticId) ?? crypto.randomUUID();
@@ -96,9 +124,12 @@ export const POST: APIRoute = async (ctx) => {
    * - **回答の中身は保存しない。** 設問数だけ (answers には `M-NAME` 等の医療情報が入る)
    * - **S3 の成否とは独立。** 本人が問診を終えた事実は書き出しが失敗しても変わらない
    * - **失敗しても投げない。** 記録の失敗で書き出しを 500 にしない
+   *
+   * 【2026-09-30・§19.4】`viewer.selfUid` → **`viewer.writeTargetUid`**。
+   * `selfUid` は**共有セッションでは null** なので、そのままだと共有相手が問診を
+   * 終えても**完了が 1 行も残らない**（ダッシュボードの進捗も Elith の発火条件も動かない）。
    */
-  const viewer = await resolveViewer(ctx);
-  await recordInterviewCompletion(viewer.selfUid, {
+  await recordInterviewCompletion(targetUid, {
     completedAt,
     answeredCount: Object.keys(answers).length,
     diagnosticId,
@@ -107,19 +138,33 @@ export const POST: APIRoute = async (ctx) => {
   const cfg = getS3Config();
   const prefix = cfg?.prefix ?? '';
 
+  /*
+   * **対象者の属性はサーバで取り直す**（§19.5）。
+   * `body.dateOfBirth` / `body.sex` / `body.userName` は**受け取っても使わない** —
+   * 年齢と性別は `LifestyleQuestionnaireData` に載り **Elith の AI 診断の入力**になるので、
+   * クライアントが差し替えられると**対象者本人の正式な入力を汚染できる**。
+   * 取れなければ null のまま（「不明」として出す・捏造ゼロ）。
+   */
+  const subject = await resolveTargetSubject(targetUid);
+
   const bundle = buildElithInterviewBundle(
     {
       diagnosticId,
-      diagnosticUserId: str(body.diagnosticUserId),
-      clientId: str(body.clientId),
-      dateOfBirth: str(body.dateOfBirth), // 年齢算出のみ (保存しない)
-      sex: str(body.sex),
+      // ★ body の申告は捨てる。**S3 の client_id も target で決める**（§19.4）。
+      diagnosticUserId: targetUid,
+      clientId: targetUid,
+      dateOfBirth: subject.dateOfBirth, // 年齢算出のみ (保存しない)
+      sex: subject.sex,
       answers,
       completedAt,
       exportedAt: new Date(),
     },
     prefix,
   );
+
+  if (viewer.kind === 'share') {
+    await logShareEvent({ event: 'chat_use', request: ctx.request, path: '/api/interview/export' });
+  }
 
   if (!isS3Configured() || !cfg) {
     return json({
