@@ -63,14 +63,35 @@ export const POST: APIRoute = async ({ request, cookies }) => {
     maxAge: PENDING_TTL_SEC,
   });
 
+  const NEXT = '/admin/handoff/continue';
+
+  /*
+   * **JSON で来たら JSON で返す**（2026-09-30）。
+   *
+   * 着地ページは **form ではなく `fetch` + JSON** で叩く。form (`x-www-form-urlencoded`) は
+   * **origin 検査の対象**で、実機で `Cross-site POST form submissions are forbidden` に
+   * 当たり続けた。JSON は form-like ではないので**この検査の対象外**であり、
+   * **クロスオリジンからの JSON POST はブラウザの preflight が止める**
+   * （こちらは CORS を返さない）ので、**守りは弱くならない**。
+   *
+   * 呼び出し側は `next` へ自分で遷移する（リダイレクト追跡に依存しない）。
+   */
+  if ((request.headers.get('content-type') ?? '').includes('application/json')) {
+    return new Response(JSON.stringify({ ok: true, next: NEXT }), {
+      status: 200,
+      headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+    });
+  }
+
   /*
    * **303** で GET へ落とす。ここで raw token が URL から消える。
    * ブラウザの履歴に残るのは `/admin/handoff/continue` だけになる。
+   * （JS が無い環境の form 送信用。通常は上の JSON 経路を通る。）
    */
   return new Response(null, {
     status: 303,
     headers: {
-      location: '/admin/handoff/continue',
+      location: NEXT,
       'cache-control': 'no-store',
       'referrer-policy': 'no-referrer',
     },

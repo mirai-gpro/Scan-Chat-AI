@@ -56,14 +56,58 @@ if (!valid) Astro.response.status = 404;
     <div class="box">
       {valid ? (
         <>
-          <p>代理表示の準備をしています。</p>
-          <form id="f" method="POST" action="/api/admin/handoff/claim">
-            <input type="hidden" name="token" value={token} />
-            <button type="submit">続ける</button>
-          </form>
+          <p id="msg">代理表示の準備をしています。</p>
+          <button id="go" type="button" data-token={token}>続ける</button>
+          <noscript>
+            {/*
+              JS が無い環境の逃げ道。**form は origin 検査の対象**なので、
+              プロキシの都合で拒否されることがある（実機で発生）。通常は下の fetch を通る。
+            */}
+            <form method="POST" action="/api/admin/handoff/claim">
+              <input type="hidden" name="token" value={token} />
+              <button type="submit">続ける</button>
+            </form>
+          </noscript>
           <script is:inline>
-            /* プリフェッチ・URL スキャナは JS を実行しない。人が開いたときだけ進む。 */
-            document.getElementById('f').submit();
+            /*
+             * **fetch + JSON で叩く**（2026-09-30）。
+             * form 送信 (`x-www-form-urlencoded`) は origin 検査の対象で、
+             * 実機で `Cross-site POST form submissions are forbidden` に当たり続けた。
+             * JSON は対象外（クロスオリジンは preflight が止めるので守りは弱くならない）。
+             *
+             * **プリフェッチ・URL スキャナは JS を実行しない**ので、
+             * 「GET だけでは状態が変わらない」という約束はそのまま。
+             */
+            (() => {
+              const btn = document.getElementById('go');
+              const msg = document.getElementById('msg');
+              let running = false;
+              async function go() {
+                if (running) return;
+                running = true;
+                btn.disabled = true;
+                try {
+                  const res = await fetch('/api/admin/handoff/claim', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ token: btn.dataset.token }),
+                  });
+                  if (res.ok) {
+                    const j = await res.json().catch(() => null);
+                    location.replace((j && j.next) || '/admin/handoff/continue');
+                    return;
+                  }
+                  msg.textContent = 'この URL は使えませんでした（期限切れ・使用済みなど）。'
+                    + 'Wellfort の管理画面からもう一度開いてください。（' + res.status + '）';
+                } catch (e) {
+                  msg.textContent = '通信に失敗しました。もう一度お試しください。';
+                }
+                btn.disabled = false;
+                running = false;
+              }
+              btn.addEventListener('click', go);
+              void go();
+            })();
           </script>
         </>
       ) : (

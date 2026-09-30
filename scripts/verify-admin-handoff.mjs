@@ -582,11 +582,24 @@ console.log('\n⑦ 構造（GET で claim しない・cred の発行位置・mid
 {
   // **GET のページが状態を変えない**。ここが緩むとプリフェッチに券を焼かれる。
   const landing = code('src/pages/admin/handoff/[token].astro');
+  const claimSrcEarly = code('src/pages/api/admin/handoff/claim.ts');
   ok('S-1 **GET のページは claim / consume を呼ばない**',
     !/claimHandoff|consumeHandoff|failPendingAttempt/.test(landing));
   ok('S-2 GET のページは Cookie を書かない', !/cookies\.set/.test(landing));
   ok('S-3 GET のページは DB を引かない', !/getServerSupabase|supabase/.test(landing));
-  ok('S-4 claim は POST のフォームから行く', /method="POST"/.test(landing) && /handoff\/claim/.test(landing));
+  /*
+   * **JSON の fetch で叩く**（2026-09-30 に form から変更）。
+   * form (`x-www-form-urlencoded`) は origin 検査の対象で、実機で
+   * `Cross-site POST form submissions are forbidden` に当たり続けた。
+   * JSON は対象外（クロスオリジンは preflight が止まる）。
+   * **`<noscript>` の form は残す**（JS 無効時の逃げ道）。
+   */
+  ok('S-4 claim は POST で叩く', /handoff\/claim/.test(landing));
+  ok('S-4a **JSON で叩く**（form-like を避ける）',
+    /'Content-Type': 'application\/json'/.test(landing) && /JSON\.stringify\(\{ token/.test(landing));
+  ok('S-4b noscript の form も残してある', /<noscript>/.test(landing) && /method="POST"/.test(landing));
+  ok('S-4c claim は JSON で来たら JSON を返す（遷移先を自分で持つ）',
+    /application\/json/.test(claimSrcEarly) && /next: NEXT|next: '\/admin\/handoff\/continue'/.test(claimSrcEarly));
   ok('S-5 token を URL 外へ出さない（no-referrer / noindex）',
     /referrer-policy/i.test(landing) && /noindex/.test(landing));
 
@@ -689,6 +702,8 @@ console.log('\n⑦ 構造（GET で claim しない・cred の発行位置・mid
     /originGuard/.test(mwSrc) && /publicOrigin\(request\)/.test(mwSrc));
   ok('S-33 検査は全リクエストに掛かる（代理表示の判定より前）',
     mwSrc.indexOf('originGuard(context.request)') < mwSrc.indexOf('parseAdminViewPath(new URL'));
+  ok('S-35 **拒否の文言に出所が入る**（Astro が出したのか自前かを実機で区別できる）',
+    /welltect-origin-guard/.test(mwSrc));
   ok('S-34 Astro と同じ集合を使う（緩めていない）',
     /application\/x-www-form-urlencoded/.test(mwSrc) && /multipart\/form-data/.test(mwSrc)
     && /text\/plain/.test(mwSrc) && /'GET', 'HEAD', 'OPTIONS'/.test(mwSrc));

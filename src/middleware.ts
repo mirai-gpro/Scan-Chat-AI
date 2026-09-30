@@ -69,7 +69,12 @@ function originGuard(request: Request): Response | null {
   // content-type が無い POST も Astro は同じ扱い（同一 origin を要求する）。
   if (!ct || isFormLike(ct)) {
     if (!sameOrigin) {
-      return new Response(`Cross-site ${request.method} form submissions are forbidden`, {
+      /*
+       * **Astro 標準と同じ文言にしない**（2026-09-30）。
+       * 同じ文言だと、実機でこれが出たときに **Astro が出したのか / こちらが出したのか
+       * 区別できない**（実際それで切り分けに手間取った）。末尾に出所を入れる。
+       */
+      return new Response(`Cross-site ${request.method} form submissions are forbidden [welltect-origin-guard]`, {
         status: 403,
         headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
       });
