@@ -203,6 +203,8 @@ export type ViewerKind =
   | 'admin_impersonation'
   /** 旧方式 `?u=`（移行期間・§30）。 */
   | 'admin_impersonation_legacy'
+  /** 外部共有（§14〜§18）。**URL を開くだけで入る人**。admin ではない。 */
+  | 'share'
   | 'uid_entry';
 
 export interface Viewer {
@@ -228,6 +230,13 @@ export interface Viewer {
    * リンクの prefix を組み立てるためだけに持つ（`viewerPathPrefix`）。
    */
   viewCtx: string | null;
+  /**
+   * **外部共有で許されている操作**（§17.2）。share 以外は null。
+   *
+   * `view` は**閲覧だけ**を意味する。更新を伴う操作は `interview` / `scan` に限り、
+   * **scope に無い更新は既定 BLOCK**（キット自己申告・既読化など）。
+   */
+  shareScope: { view: true; interview: boolean; scan: boolean } | null;
   /** 表示対象の diagnostic_user_id。未サインインなら null。 */
   uid: string | null;
   /** サインイン済み本人の uid（代理表示中でも本人のまま）。 */
@@ -282,7 +291,7 @@ export interface Viewer {
 }
 
 const ANONYMOUS: Viewer = {
-  kind: 'anonymous', targetLocked: false, writeTargetUid: null, viewCtx: null,
+  kind: 'anonymous', targetLocked: false, writeTargetUid: null, viewCtx: null, shareScope: null,
   uid: null, selfUid: null, isAdmin: false, adminBy: null, impersonating: false,
   cookieStale: false, origin: 'production', uidEntry: false,
 };
@@ -320,6 +329,7 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
       targetLocked: true,
       writeTargetUid: null,            // ★ 代理表示は read-only（§12.5）
       viewCtx: av.ctx,
+      shareScope: null,
       uid: av.targetUid,
       /*
        * **admin 本人の uid は無いことがある**（2026-09-30）。
@@ -337,6 +347,37 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
     };
   }
 
+  /*
+   * **順序 2: 外部共有**（§24.1）。**`self` より先**に置く（§24.2）。
+   *
+   * 共有相手が**たまたま自分の Welltect アカウントを持っている**場合
+   * （提携先の担当者が Wellfort の顧客でもある）、`welltect_v` が先に立つと
+   * **共有 URL を開いたのに自分の画面が出る**。「URL を開くだけ」という約束が崩れる。
+   * **明示的に共有 URL から入場した事実を優先する。**
+   *
+   * `locals.share` は **`src/middleware.ts` しか書かない**。あそこで毎リクエスト
+   * link 側の status / starts_at / expires_at まで見ている（§27.1）。
+   */
+  const sh = (ctx as { locals?: App.Locals }).locals?.share;
+  if (sh) {
+    return {
+      kind: 'share',
+      targetLocked: true,
+      // **scope が許す機能でだけ書ける**（§17.2）。個別の口は write-guard が scope を見る。
+      writeTargetUid: sh.targetUid,
+      viewCtx: null,
+      shareScope: sh.scope,
+      uid: sh.targetUid,
+      selfUid: null,          // ★ 共有相手は「本人」ではない
+      isAdmin: false,         // ★ 固定
+      adminBy: null,
+      impersonating: false,
+      cookieStale: false,
+      origin: sh.targetOrigin,
+      uidEntry: false,
+    };
+  }
+
   if (!verified) {
     if (uidEntryAllowed() && requested) {
       /*
@@ -346,7 +387,7 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
        * URL に uid を書くだけで admin になれる経路を残さない。
        */
       return {
-        kind: 'uid_entry', targetLocked: false, writeTargetUid: requested, viewCtx: null,
+        kind: 'uid_entry', targetLocked: false, writeTargetUid: requested, viewCtx: null, shareScope: null,
         uid: requested, selfUid: requested, isAdmin: false, adminBy: null, impersonating: false,
         cookieStale: false, origin: 'production', uidEntry: true,
       };
@@ -366,13 +407,13 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
   const isAdmin = adminBy !== null;
   if (isAdmin && requested && requested !== selfUid) {
     return {
-      kind: 'admin_impersonation_legacy', targetLocked: false, writeTargetUid: selfUid, viewCtx: null,
+      kind: 'admin_impersonation_legacy', targetLocked: false, writeTargetUid: selfUid, viewCtx: null, shareScope: null,
       uid: requested, selfUid, isAdmin, adminBy, impersonating: true,
       cookieStale: verified.legacy || !isAdmin, origin: verified.origin, uidEntry: false,
     };
   }
   return {
-    kind: isAdmin ? 'admin_self' : 'self', targetLocked: false, writeTargetUid: selfUid, viewCtx: null,
+    kind: isAdmin ? 'admin_self' : 'self', targetLocked: false, writeTargetUid: selfUid, viewCtx: null, shareScope: null,
     uid: selfUid, selfUid, isAdmin, adminBy, impersonating: false,
     cookieStale: verified.legacy || !isAdmin, origin: verified.origin, uidEntry: false,
   };

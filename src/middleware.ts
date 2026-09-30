@@ -28,6 +28,7 @@ import { VIEWER_COOKIE, verifyViewer } from './lib/viewer';
 import { ADMIN_COOKIE, verifyAdminCred } from './lib/admin-identity';
 import { parseAdminViewPath, resolveImpersonationContext } from './lib/admin-impersonation';
 import { publicOrigin } from './lib/public-url';
+import { SHARE_COOKIE, resolveShareSession, touchShareSession } from './lib/share-access';
 
 /* ══════════════════════════════════════════════════════════════════════
  * ① origin 検査（Astro 標準の置き換え・2026-09-30）
@@ -100,7 +101,28 @@ export const onRequest = defineMiddleware(async (context, next) => {
   const blocked = originGuard(context.request);
   if (blocked) return blocked;
 
-  // ② ここから先は代理表示だけ。
+  /*
+   * ② **外部共有の解決**（§18.2 / §27.1）。
+   *
+   * Cookie が無ければ**何もしない**ので、一般利用者・admin の挙動は不変。
+   * **毎リクエストで link 側の status / starts_at / expires_at まで見る**
+   * （`resolveShareSession` の中）。セッションだけ見ると **revoke が効かない**。
+   *
+   * **失効していたら `locals.share` を置かないだけ**で 403 にはしない —
+   * 各ページは未サインイン扱いになり、共有相手には通常のサインイン画面が出る。
+   * 代理表示（URL が対象を名指ししている）と違い、**共有は Cookie なので
+   * 「名指ししたものが出せない」状態にならない**。
+   */
+  const shareRaw = context.cookies.get(SHARE_COOKIE)?.value;
+  if (shareRaw) {
+    const sh = await resolveShareSession(shareRaw);
+    if (sh) {
+      context.locals.share = sh;
+      void touchShareSession(sh.sessionId);
+    }
+  }
+
+  // ③ ここから先は代理表示だけ。
   const parsed = parseAdminViewPath(new URL(context.request.url).pathname);
   if (!parsed) return next();   // ★ 既存の経路はここで終わり（挙動不変）
 

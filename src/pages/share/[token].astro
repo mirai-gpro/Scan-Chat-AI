@@ -1,0 +1,51 @@
+---
+/**
+ * **共有 URL の入口。`https://…/share/<token>` を開くだけ。**
+ * 正本: `docs/specs/secure_shared_access_and_admin_impersonation_spec_20260930.md` §16.3。
+ *
+ * 【ここでダッシュボードを出さない】理由は 2 つ（§16.1）:
+ *   ① **同意前に健康情報が表示される**のを避ける
+ *   ② **raw token を持ったまま以後の画面を歩かせない**
+ * → token を検証して **pending セッション**だけ作り、`/share/consent` へ 302。
+ *    以後 raw token は URL からも画面からも消える。
+ *
+ * 【理由を出し分けない】期限切れ / 停止 / 失効 / 不一致 / 不存在 は
+ * **すべて同じ `/share/unavailable`**（§16.3）。**不存在と不一致を区別できる応答を返さない。**
+ * 「まだ利用できません」（`starts_at` 未到達）も同じ画面へ送る。
+ *
+ * 【ログ】成功・失敗とも `token_access` を記録する（§26.1）。**raw token は書かない。**
+ */
+import {
+  SHARE_OPAQUE_RE, SHARE_PENDING_COOKIE, SHARE_PENDING_TTL_SEC,
+  startShareFromToken, logShareEvent,
+} from '../../lib/share-access';
+
+export const prerender = false;
+
+const token = Astro.params.token ?? '';
+
+Astro.response.headers.set('cache-control', 'no-store, max-age=0');
+Astro.response.headers.set('referrer-policy', 'no-referrer');
+Astro.response.headers.set('x-robots-tag', 'noindex, nofollow');
+
+const started = SHARE_OPAQUE_RE.test(token) ? await startShareFromToken(token) : null;
+
+if (!started) {
+  await logShareEvent({ event: 'not_found', request: Astro.request, path: '/share/[token]' });
+  return Astro.redirect('/share/unavailable', 302);
+}
+
+await logShareEvent({
+  event: 'token_access', request: Astro.request, linkId: started.linkId, path: '/share/[token]',
+});
+
+Astro.cookies.set(SHARE_PENDING_COOKIE, started.pending, {
+  httpOnly: true,
+  secure: import.meta.env.DEV !== true,
+  sameSite: 'lax',
+  path: '/',
+  maxAge: SHARE_PENDING_TTL_SEC,
+});
+
+return Astro.redirect('/share/consent', 302);
+---

@@ -50,3 +50,50 @@ export function denyReadOnlyWrite(v: Pick<Viewer, 'kind' | 'writeTargetUid'>): R
     { status: 403, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } },
   );
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 外部共有（§17.2 / §17.4 / §17.5）
+ * ════════════════════════════════════════════════════════════════════ */
+
+/** 403 を JSON で返す（理由は返すが対象は返さない）。 */
+function deny(error: string, message: string): Response {
+  return new Response(JSON.stringify({ error, message }), {
+    status: 403,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
+/**
+ * **共有セッションからは一切叩かせない口**（§17.4 / §17.5）。
+ *
+ * 発注者が明示的に許可した更新は **AI 問診と AI スキャンの 2 つだけ**で、
+ * それ以外の更新は scope に含まれない（§17.2）。具体的には
+ *
+ *   - `POST /api/kit/[id]/self-report` … **本人の配送状態**を外部共有者が変えてはいけない。
+ *     実態と食い違うと**以後の出荷・検査の段取りが狂う**。
+ *   - `POST /api/notices/[id]/read`     … **本人の既読状態**。勝手に既読になると
+ *     **重要な通知を見落とす**。
+ *   - `POST /api/auth/*`                … **端末の持ち主（別人かもしれない）の
+ *     本人セッションを共有相手の操作で壊させない**（§17.5）。
+ *
+ * **UI から消すだけでは足りない**（API 直叩きを防げない）ので、サーバ側で 403 にする。
+ */
+export function denyForShare(v: Pick<Viewer, 'kind'>): Response | null {
+  if (v.kind !== 'share') return null;
+  return deny('share_not_allowed', 'この操作は共有閲覧ではご利用いただけません。');
+}
+
+/**
+ * **scope に無い機能を止める**（§17.2）。
+ *
+ * 共有リンクは用途ごとに `{ interview, scan }` を切り替えて発行できる
+ * （PDF の「用途別に管理できる」）。**scope に無い更新は既定 BLOCK。**
+ */
+export function denyUnlessShareScope(
+  v: Pick<Viewer, 'kind' | 'shareScope'>,
+  need: 'interview' | 'scan',
+): Response | null {
+  if (v.kind !== 'share') return null;
+  if (v.shareScope?.[need] === true) return null;
+  return deny('share_scope', 'この共有リンクではこの機能をご利用いただけません。');
+}

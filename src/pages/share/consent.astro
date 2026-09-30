@@ -1,0 +1,130 @@
+---
+/**
+ * **同意画面。**
+ * 正本: `docs/specs/secure_shared_access_and_admin_impersonation_spec_20260930.md` §17.1。
+ *
+ * 【文言は仕様書のたたき台のまま】
+ *   - **ボタンは「同意して利用する」**。「閲覧する」だと AI 問診・AI スキャンの利用を含みにくい。
+ *   - **法的義務だと断定しない。** Welltect のアクセス管理要件として書く。
+ *   - 同意記録は `shared_access_sessions.consented_at`。
+ *
+ * 【対象者の氏名は出さない】出すと**共有相手に PII を渡す**ことになる。
+ * 業務上は「誰のデータを見るのか」を明示したいはずで、**発注者判断待ち**（§38-U3）。
+ * 決まるまでは**出さない側**に倒す（後から足すのは容易・消すのは不可逆）。
+ */
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import AppIcon from '../../components/AppIcon.astro';
+import { SHARE_PENDING_COOKIE, readSharePending } from '../../lib/share-access';
+import { noStore } from '../../lib/http-cache';
+
+export const prerender = false;
+
+noStore(Astro.response);
+Astro.response.headers.set('referrer-policy', 'no-referrer');
+Astro.response.headers.set('x-robots-tag', 'noindex, nofollow');
+
+const pending = Astro.cookies.get(SHARE_PENDING_COOKIE)?.value ?? '';
+const info = pending ? await readSharePending(pending) : null;
+
+// pending が無い / 切れた / 既に同意済み → 理由を区別せず同じ画面へ（§16.3）。
+if (!info) return Astro.redirect('/share/unavailable', 302);
+
+const canInterview = info.scope.interview;
+const canScan = info.scope.scan;
+---
+
+<BaseLayout title="共有閲覧に関する確認 | Welltect" width="flow">
+  <main class="mx-auto w-full max-w-xl px-5 py-10">
+    <h1 class="mb-5 flex items-center gap-2 text-xl font-bold text-navy-800">
+      <AppIcon name="lock" size={22} class="text-brand-700" />
+      共有閲覧に関する確認
+    </h1>
+
+    {info.label && (
+      <p class="mb-4 rounded-xl bg-mist px-4 py-3 text-base text-navy-800">
+        用途: <span class="font-bold">{info.label}</span>
+      </p>
+    )}
+
+    <div class="card">
+      <p class="text-base leading-relaxed text-slate-800">
+        本ページでは、不正利用防止およびアクセス管理のため、Cookie を使用し、
+        接続元 IP アドレス、ブラウザ情報、アクセス日時等を記録します。
+      </p>
+      <p class="mt-3 text-base leading-relaxed text-slate-800">
+        これらの情報は、本共有ページのアクセス管理およびセキュリティ確認を
+        目的として使用します。
+      </p>
+
+      {/*
+        **できることを事実として並べる。** scope は発行時に決まっているので、
+        リンクごとに表示が変わる（PDF「用途別に管理できる」）。
+      */}
+      <ul class="mt-4 space-y-1.5 text-base text-slate-800">
+        <li class="flex items-start gap-2">
+          <AppIcon name="ok" size={18} class="mt-0.5 shrink-0 text-brand-700" />
+          ダッシュボード・検査結果・グラフ・報告書の閲覧
+        </li>
+        {canInterview && (
+          <li class="flex items-start gap-2">
+            <AppIcon name="ok" size={18} class="mt-0.5 shrink-0 text-brand-700" />
+            AI 問診のご利用
+          </li>
+        )}
+        {canScan && (
+          <li class="flex items-start gap-2">
+            <AppIcon name="ok" size={18} class="mt-0.5 shrink-0 text-brand-700" />
+            AI スキャンのご利用
+          </li>
+        )}
+      </ul>
+    </div>
+
+    <div class="mt-5 flex flex-col gap-3 sm:flex-row">
+      <button
+        type="button"
+        id="share-agree"
+        class="btn-pair btn-data min-h-touch flex-1 !bg-brand-600 !text-white !border-brand-600"
+      >
+        同意して利用する
+      </button>
+      <a href="/share/unavailable" class="btn-pair btn-pair-off min-h-touch flex-1 text-center">
+        利用を中止する
+      </a>
+    </div>
+
+    <p id="share-error" class="mt-3 hidden text-sm text-status-action" role="alert"></p>
+  </main>
+</BaseLayout>
+
+<script>
+  /*
+   * **JSON で叩く。** form (`x-www-form-urlencoded`) は origin 検査の対象で、
+   * プロキシの都合で拒否され得る（2026-09-30 に実機で踏んだ）。
+   * クロスオリジンの JSON POST は preflight が止めるので守りは弱くならない。
+   */
+  const btn = document.getElementById('share-agree') as HTMLButtonElement | null;
+  const err = document.getElementById('share-error');
+  btn?.addEventListener('click', async () => {
+    btn.disabled = true;
+    try {
+      const res = await fetch('/api/share/consent', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agree: true }),
+      });
+      if (res.ok) {
+        const j = await res.json().catch(() => null);
+        window.location.replace((j && j.next) || '/dashboard');
+        return;
+      }
+      window.location.replace('/share/unavailable');
+    } catch {
+      if (err) {
+        err.textContent = '通信に失敗しました。もう一度お試しください。';
+        err.classList.remove('hidden');
+      }
+      btn.disabled = false;
+    }
+  });
+</script>
