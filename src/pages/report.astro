@@ -2,6 +2,7 @@
 import AppIcon from '../components/AppIcon.astro';
 import BackToDashboard from '../components/BackToDashboard.astro';
 import AppNav from '../components/AppNav.astro';
+import ImpersonationBanner from '../components/ImpersonationBanner.astro';
 import BaseLayout from '../layouts/BaseLayout.astro';
 import { loadReportVM, previewVM } from '../lib/elith-report-queries';
 import { loadLocalRenderInput } from '../lib/report-local-render';
@@ -14,7 +15,7 @@ import { refreshConfig, cfg } from '../lib/app-config';
 import { loadDashboard, getHealthAge, withHonorific, formatJpDate } from '../lib/dashboard-queries';
 import { AI_PREVENTION_REPORT_LABEL } from '../lib/display-names';
 import { WELLNESS_AGE_LABEL } from '../lib/wellness-age';
-import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
 import { noStore } from '../lib/http-cache';
 
 /**
@@ -195,6 +196,8 @@ const pageCss = `
 
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
 const linkQuery = viewerLinkQuery(viewer);
+// **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
+const linkPrefix = viewerPathPrefix(viewer);
 
 const q = (extra: Record<string, string>) => {
   const p = new URLSearchParams(linkQuery.replace(/^\?/, ''));
@@ -251,14 +254,18 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
   器を広げても和文 1 行が 90 字に伸びることはなく、表だけが広い幅を使える。
 */}
 <BaseLayout title={`${AI_PREVENTION_REPORT_LABEL} | Welltect`} width="app">
+  {/* 代理表示中の帯。**印刷には出さない**（紙に押せないボタンを印字しない）。 */}
   {!isPrint && (
-    <AppNav linkQuery={linkQuery} current="/report" unreadNotices={unreadNotices} supportContact={supportContact} />
+    <ImpersonationBanner ctx={viewer.viewCtx} targetUid={viewer.uid} expiresAt={Astro.locals.adminView?.expiresAt} />
+  )}
+  {!isPrint && (
+    <AppNav linkQuery={linkQuery} linkPrefix={linkPrefix} current="/report" unreadNotices={unreadNotices} supportContact={supportContact} />
   )}
 
   {/* 紙に押せないボタンを印字しないので `?print=1` では出さない (spec §4.9 と同じ扱い)。 */}
   {!isPrint && (
     <div class="px-5 pt-4">
-      <BackToDashboard linkQuery={linkQuery} />
+      <BackToDashboard linkQuery={linkQuery} linkPrefix={linkPrefix} />
     </div>
   )}
 

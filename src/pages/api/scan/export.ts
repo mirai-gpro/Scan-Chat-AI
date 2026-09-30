@@ -20,6 +20,8 @@
 
 import type { APIRoute } from 'astro';
 import { putScanExport } from '../../../lib/scan-export-put';
+import { resolveViewer } from '../../../lib/viewer';
+import { denyReadOnlyWrite } from '../../../lib/write-guard';
 
 export const prerender = false;
 
@@ -39,7 +41,16 @@ function str(v: unknown): string | null {
   return typeof v === 'string' && v.trim() ? v.trim() : null;
 }
 
-export const POST: APIRoute = async ({ request }) => {
+export const POST: APIRoute = async (ctx) => {
+  const { request } = ctx;
+  /*
+   * **代理表示中は書かせない**（2026-09-30・仕様書 §12.5 / §38-U27）。
+   * この口は S3 へ書く＝永続書き込み。**認証そのものはこれまでどおり課していない**
+   * （§21.4 の Phase 0 で別途塞ぐ）が、**代理表示からの書き込みだけはここで止める**。
+   */
+  const denied = denyReadOnlyWrite(await resolveViewer(ctx));
+  if (denied) return denied;
+
   let body: ExportBody;
   try {
     body = (await request.json()) as ExportBody;

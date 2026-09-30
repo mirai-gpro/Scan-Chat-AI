@@ -54,6 +54,82 @@ export interface SaveScanResult {
 }
 
 /**
+ * **同じ受診日の既存回を片付ける（差し替えの前処理）。**
+ *
+ * 【なぜ要るか（2026-09-30・本田さんの重複報告）】ユーザーのスキャン経路
+ * (`saveScanResult`) は**無条件 insert** だったので、**同じ回を送り直すたびに
+ * `test_artifacts` が 1 行増えていた**。複数年アップロード（スペシャルアカウント）は
+ * 受診日が読めなかった回の**再アップロードが前提**なので、ここを直さないと必ず重複する。
+ * admin バッチ側は元から冪等だったのに、**ユーザー経路にだけこの処理が無かった。**
+ *
+ * 【原本が付いている行は消さない】`test_artifact_files` は
+ * `on delete cascade`（`20260601000010_schemas_and_tables.sql:215`）なので、
+ * artifact を消すと**原本の記録ごと消える**。10 年保管・削除不可（§6.1）と正面衝突するため、
+ * **原本のある行は `superseded` に落とすだけ**にする。
+ * ユーザーのスキャンは原本を保存しないので通常は 0 件だが、
+ * **「無いはず」を前提にせず構造で防ぐ**（admin バッチ経由で後から原本が付くことはある）。
+ *
+ * 【measurement_values は道連れでよい】こちらも `on delete cascade`
+ * （`20260820000010_measurement_values.sql:33`）。消した回の測定値が残ると
+ * グラフに幽霊の点が出るので、**一緒に消えるのが正しい**。
+ *
+ * **投げない。** 片付けに失敗しても保存自体は続ける（最悪その日付が重複表示になるだけ）。
+ */
+async function replaceSameDateArtifacts(
+  /*
+   * **構造的に受ける。** `saveScanResult` は検査でスタブを差せるように
+   * 最小の形しか要求していない（`:130-138`）ので、ここで
+   * `SupabaseClient` を要求すると呼べなくなる。**実体は `any` 経由で使う**
+   * （この関数の中だけ・下の `dsb`）。
+   */
+  sb: { schema: (name: 'diagnosis') => unknown },
+  q: { diagnosticUserId: string; testType: string; testDate: string; source: string },
+): Promise<{ deleted: number; superseded: number }> {
+  const out = { deleted: 0, superseded: 0 };
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dsb = sb.schema('diagnosis') as any;
+    const { data: rows } = await dsb
+      .from('test_artifacts')
+      .select('id')
+      .eq('diagnostic_user_id', q.diagnosticUserId)
+      .eq('test_type', q.testType)
+      .eq('test_date', q.testDate)
+      .eq('source', q.source);
+    const ids: string[] = (rows ?? []).map((r: { id: string }) => r.id);
+    if (ids.length === 0) return out;
+
+    // 原本が付いている id を先に洗い出す（cascade で消さないため）。
+    const { data: fileRows } = await dsb
+      .from('test_artifact_files')
+      .select('test_artifact_id')
+      .in('test_artifact_id', ids);
+    const withFiles = new Set<string>((fileRows ?? []).map((r: { test_artifact_id: string }) => r.test_artifact_id));
+
+    const deletable = ids.filter((id) => !withFiles.has(id));
+    if (deletable.length > 0) {
+      await dsb.from('test_artifacts').delete().in('id', deletable);
+      out.deleted = deletable.length;
+    }
+    if (withFiles.size > 0) {
+      await dsb
+        .from('test_artifacts')
+        .update({ status: 'superseded' })
+        .in('id', [...withFiles]);
+      out.superseded = withFiles.size;
+      console.warn(
+        `[scan-persist] 原本のある同日回 ${withFiles.size} 件は削除せず superseded にしました` +
+        ' (原本の記録を cascade で失わないため)',
+      );
+    }
+  } catch (e) {
+    console.error('[scan-persist] 同日回の片付けに失敗 (保存は継続):',
+      e instanceof Error ? e.message : e);
+  }
+  return out;
+}
+
+/**
  * 1 回のスキャンを 1 件の test_artifacts として保存する。
  * 失敗時は例外。呼び出し側 (API) がメッセージへ変換する。
  */
@@ -98,6 +174,19 @@ export async function saveScanResult(
    * `age_at_test` / `sex` に残す。**取れないときは null** (捏造しない・NOT NULL でないので可)。
    */
   const { age: ageAtTest, sex } = extractAgeSex(md);
+
+  /*
+   * **冪等: 同じ受診日の既存回を差し替える**（2026-09-30）。
+   * admin バッチ (`saveAdminBatchScan`) と同じ規律にそろえた。
+   * **`source='user_upload'` だけを対象にする** — admin が入れた回や
+   * 検査機関由来の回を、利用者のスキャンで消してはいけない。
+   */
+  await replaceSameDateArtifacts(sb, {
+    diagnosticUserId: input.diagnosticUserId,
+    testType: 'health_checkup',
+    testDate,
+    source: 'user_upload',
+  });
 
   const { data, error } = await sb
     .schema('diagnosis')
@@ -206,19 +295,19 @@ export async function persistAdminBatchArtifact(input: {
   const testDate = /^\d{4}-\d{2}-\d{2}$/.test(input.testDate) ? input.testDate : jstToday();
   const { age: ageAtTest, sex } = extractAgeSex(md);
 
-  // 冪等: 同一 (uid, test_type, test_date, source=admin_batch) を消してから入れ直す。
-  try {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    await (sb.schema('diagnosis') as any)
-      .from('test_artifacts')
-      .delete()
-      .eq('diagnostic_user_id', input.diagnosticUserId)
-      .eq('test_type', testType)
-      .eq('test_date', testDate)
-      .eq('source', 'admin_batch');
-  } catch {
-    /* 消せなくても続行 (最悪その日付が重複表示になるだけ) */
-  }
+  /*
+   * 冪等: 同一 (uid, test_type, test_date, source=admin_batch) を消してから入れ直す。
+   * **2026-09-30 に `replaceSameDateArtifacts` へ寄せた**（実装を 2 つ持たない）。
+   * 併せて**原本のある行は消さず superseded に落とす**ようになった —
+   * 以前は `lab-results/upload` で後から原本を付けた回をバッチ再実行すると、
+   * `on delete cascade` で**原本の記録ごと消えて**いた。
+   */
+  await replaceSameDateArtifacts(sb, {
+    diagnosticUserId: input.diagnosticUserId,
+    testType,
+    testDate,
+    source: 'admin_batch',
+  });
 
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = await (sb.schema('diagnosis') as any)

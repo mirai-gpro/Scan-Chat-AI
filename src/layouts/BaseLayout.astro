@@ -41,6 +41,54 @@ const WIDTH = {
 <!doctype html>
 <html lang="ja">
   <head>
+    {/*
+      **代理表示中だけ、同一オリジンの `/api/...` を `/admin-view/<ctx>/api/...` に載せ替える。**
+      正本 `docs/specs/secure_shared_access_and_admin_impersonation_spec_20260930.md` §38-U27。
+
+      【なぜ中央でやるか】画面の JS は `fetch('/api/scan/save')` のように素のパスで書かれており
+      (実測 20 か所以上)、代理表示中はそのままだと **context がサーバへ届かない**。
+      ページごとに書き換えると必ず 1 か所漏れる (漏れると「代理表示のつもりで admin 本人に書く」)。
+      → **fetch を 1 か所で包む。** ページ側のコードは 1 行も変えない。
+
+      【いつ動くか】**`/admin-view/` を開いているときだけ。** 通常の画面では
+      このスクリプトは何も置き換えない (`fetch` も差し替えない) ので**挙動不変**。
+
+      【サーバ側の 403 と対で効く。片方だけでは足りない】
+        ・この載せ替えが**無い**と、`/api/scan/save` に context が届かず
+          サーバは **admin 本人**として扱う → `writeTargetUid` は admin 自身の uid なので
+          `denyReadOnlyWrite` は**発火せず、admin 本人の検査結果として保存される**。
+        ・この載せ替え**だけ**では、context を外した手製のリクエストを止められない。
+      → **運ぶのがここ (`BaseLayout`)、止めるのがサーバ (`src/lib/write-guard.ts`)。**
+        検査 `verify:admin-handoff` は**両方**を見る (W-1〜W-9)。
+    */}
+    <script is:inline>
+      (() => {
+        const m = /^\/admin-view\/([A-Za-z0-9_-]{32,64})(?=\/|$)/.exec(location.pathname);
+        if (!m) return;                       // ★ 通常の画面では何もしない
+        const prefix = '/admin-view/' + m[1];
+        const orig = window.fetch.bind(window);
+        window.fetch = (input, init) => {
+          try {
+            // 文字列 / URL / Request の 3 通りとも受ける。
+            const raw = typeof input === 'string' ? input
+              : input instanceof URL ? input.href
+              : input && typeof input.url === 'string' ? input.url : null;
+            if (raw) {
+              const u = new URL(raw, location.origin);
+              // **同一オリジンの /api/ だけ。** 外部 (Google・Supabase 等) には触らない。
+              if (u.origin === location.origin && u.pathname.startsWith('/api/')) {
+                u.pathname = prefix + u.pathname;
+                const next = u.pathname + u.search + u.hash;
+                return typeof input === 'string' || input instanceof URL
+                  ? orig(next, init)
+                  : orig(new Request(next, input), init);
+              }
+            }
+          } catch { /* 何かあれば素通し (通信を壊さない) */ }
+          return orig(input, init);
+        };
+      })();
+    </script>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <meta name="description" content={description} />

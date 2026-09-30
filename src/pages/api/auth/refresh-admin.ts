@@ -1,6 +1,7 @@
 import type { APIRoute } from 'astro';
 import { getServerSupabase } from '../../../lib/supabase';
 import { isAdminEmailAsync } from '../../../lib/admin-auth';
+import { ADMIN_COOKIE, issueAdminCred, verifyAdminCred } from '../../../lib/admin-identity';
 import { VIEWER_COOKIE, signViewer, verifyViewer, viewerCookieOptions } from '../../../lib/viewer';
 
 export const prerender = false;
@@ -30,9 +31,18 @@ export const POST: APIRoute = async ({ request, cookies }) => {
   const accessToken = typeof body?.accessToken === 'string' ? body.accessToken : null;
   if (!accessToken) return json({ error: 'missing accessToken' }, 400);
 
-  // 本人は Cookie が正。ここで uid をクライアントから受け取らない。
+  /*
+   * 本人は Cookie が正。ここで uid をクライアントから受け取らない。
+   *
+   * **`welltect_v` が無くても 401 にしない（2026-09-30 修正）。**
+   * `admin_users` に居るが `diagnostic_user_id` を持たない admin は
+   * **`welltect_v` を一生持てない**（`auth/resolve` が `{ linked:false }` で返るため）。
+   * ここで弾くと、その admin の **`welltect_admin_v` を削除する手段が無くなり、
+   * 管理者から外しても最大 30 日そのまま**になる（＝権限剥奪が効かない）。
+   * → **`welltect_v` の再署名は在るときだけ**行い、
+   *   **admin credential の発行 / 削除は常に行う。**
+   */
   const current = await verifyViewer(cookies.get(VIEWER_COOKIE)?.value);
-  if (!current) return json({ error: 'no viewer cookie' }, 401);
 
   const sb = getServerSupabase();
   if (!sb) return json({ error: 'supabase not configured' }, 503);
@@ -57,12 +67,35 @@ export const POST: APIRoute = async ({ request, cookies }) => {
    * → **uid と origin は `current`(検証済み Cookie) のものをそのまま引き継ぐ。**
    * 固定は `npm run verify:viewer-origin`。
    */
-  const token = await signViewer(current.uid, isAdmin, Date.now(), current.origin);
-  if (!token) return json({ error: 'cannot sign' }, 503);
-  cookies.set(VIEWER_COOKIE, token, viewerCookieOptions());
+  if (current) {
+    const token = await signViewer(current.uid, isAdmin, Date.now(), current.origin);
+    if (!token) return json({ error: 'cannot sign' }, 503);
+    cookies.set(VIEWER_COOKIE, token, viewerCookieOptions());
+  }
+
+  /*
+   * **admin 専用 credential (`welltect_admin_v`) をここでも発行 / 削除する**
+   * (2026-09-30・仕様書 §12.4.1)。
+   *
+   * 【なぜこの口が要るか】改修前からサインインしている admin は
+   * この Cookie を持たない。**この口はサインイン済みなら誰でも 1 回叩く**
+   * (`GoogleOneTap.astro:51` の `needsCookieRefresh` は `selfUid` があれば真) ので、
+   * **次にアプリを開いた時点で自動的に付く**。admin フラグの自己修復に相乗りする。
+   *
+   * 【剥奪】`isAdmin === false` なら**削除する**。管理者リストから外れた人の
+   * credential を残さない (最大で次のタブを開くまで、は受容・§12.4.1)。
+   */
+  const hadCred = !!(await verifyAdminCred(cookies.get(ADMIN_COOKIE)?.value));
+  const nowHasCred = await issueAdminCred({ cookies }, email, isAdmin);
 
   // 変わったかどうかを返す (呼び出し側は変わったときだけ再読込する)。
-  return json({ ok: true, isAdmin, changed: isAdmin !== current.admin || current.legacy });
+  return json({
+    ok: true,
+    isAdmin,
+    /** `welltect_v` を持たない admin は `linked:false` のまま。切り分け用。 */
+    linked: !!current,
+    changed: (current ? isAdmin !== current.admin || current.legacy : false) || hadCred !== nowHasCred,
+  });
 };
 
 function json(data: unknown, status = 200): Response {

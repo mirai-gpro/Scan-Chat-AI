@@ -8,6 +8,7 @@ import {
 } from '../../../lib/hp-edge';
 import { VIEWER_COOKIE, signViewer, viewerCookieOptions } from '../../../lib/viewer';
 import { isAdminEmailAsync } from '../../../lib/admin-auth';
+import { issueAdminCred } from '../../../lib/admin-identity';
 import { linkDemoEmail, resolveDemoUidByEmail } from '../../../lib/demo-accounts';
 import { linkSpecialEmail, resolveSpecialUidByEmail } from '../../../lib/special-accounts';
 
@@ -196,8 +197,29 @@ export const POST: APIRoute = async ({ request, cookies }) => {
     if (diagnosticUserId) resolvedFrom = 'demo';
   }
 
-  // 未連携 (適格性なし)
-  if (!diagnosticUserId) return json({ linked: false }, 200);
+  /*
+   * **admin 専用 credential (`welltect_admin_v`) は、uid が決まる前に発行する**
+   * (2026-09-30・仕様書 §12.4.1)。
+   *
+   * 【なぜ早期 return より前か】**`admin_users` に居るが Scan-Chat-AI 側の
+   * `diagnostic_user_id` を持たない admin が居る**。その人はこの直後の
+   * `{ linked:false }` で返ってしまうので、ここより後ろに置くと
+   * **代理表示を一生使えない**。admin 本人確認の本質は「**どの admin か**」であって、
+   * その admin 自身の健康診断 uid ではない (だから `welltect_admin_v` の payload に
+   * uid を入れていない)。
+   *
+   * **非 admin なら削除**する (この呼び出しの中で判定している・`issueAdminCred`)。
+   * **本線は変えない** — 足すのはこの Cookie の発行だけ (§12.7 約束 7)。
+   */
+  const adminForCred = isAdmin || await isAdminEmailAsync(email);
+  await issueAdminCred({ cookies }, email, adminForCred);
+
+  /*
+   * 未連携 (適格性なし)。**admin かどうかは返す** —
+   * `GoogleOneTap` が「お客様情報が見つかりませんでした」で止めるべきか、
+   * それとも admin として handoff の続きへ進ませるかを判断できるようにするため。
+   */
+  if (!diagnosticUserId) return json({ linked: false, admin: adminForCred }, 200);
 
   /*
    * **束縛の張り替え。** ここまで来て `linkedUid` と食い違う場合:
@@ -293,7 +315,7 @@ export const POST: APIRoute = async ({ request, cookies }) => {
    */
   const token = await signViewer(
     diagnosticUserId,
-    isAdmin || await isAdminEmailAsync(email),
+    adminForCred,   // ★ 上で 1 度だけ判定済み (`welltect_admin_v` と必ず同じ結論になる)
     Date.now(),
     resolvedFrom === 'staging' ? 'staging' : 'production',
   );

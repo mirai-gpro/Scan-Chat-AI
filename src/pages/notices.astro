@@ -6,7 +6,7 @@ import SignInPanel from '../components/SignInPanel.astro';
 import { loadNotices } from '../lib/notice-queries';
 import { formatJpDate, DEFAULT_USER } from '../lib/dashboard-queries';
 import { refreshConfig, cfg } from '../lib/app-config';
-import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
 import { noStore } from '../lib/http-cache';
 
 export const prerender = false;
@@ -21,6 +21,8 @@ const viewer = await resolveViewer(Astro);
 const u = viewer.uid;
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
 const linkQuery = viewerLinkQuery(viewer);
+// **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
+const linkPrefix = viewerPathPrefix(viewer);
 
 // 各セクションの展開状態 (?important=all / ?general=all / ?news=all)
 const expandImportant = url.searchParams.get('important') === 'all';
@@ -65,7 +67,7 @@ const importantTitle = data ? `${data.userName}への重要なお知らせ` : '�
 <BaseLayout title="お知らせ | Welltect" width="app">
   <header class="hero-gradient px-5 pt-6 pb-4">
     <div class="flex items-center justify-between">
-      <BackToDashboard linkQuery={linkQuery} class="!px-2.5 !text-sm" />
+      <BackToDashboard linkQuery={linkQuery} linkPrefix={linkPrefix} class="!px-2.5 !text-sm" />
       <h1 class="text-base font-semibold">お知らせ</h1>
       <span class="w-16"></span>
     </div>

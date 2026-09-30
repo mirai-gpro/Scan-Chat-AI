@@ -25,6 +25,7 @@
  *   未設定なら何もレンダリングしない (フォールバック: ?u= 直渡し)
  */
 import { resolveViewer } from '../lib/viewer';
+import { readAdminCred } from '../lib/admin-identity';
 
 const clientId = import.meta.env.PUBLIC_GOOGLE_CLIENT_ID ?? '';
 const enabled = !!clientId;
@@ -48,7 +49,15 @@ const viewer = enabled ? await resolveViewer(Astro) : null;
  * 判定を直しても届かない (実測 2026-08-30)。サインイン済みなら常に印を出す。
  * 実際に呼ぶかは `sessionStorage` が番をするので、タブあたり 1 回で済む。
  */
-const needsCookieRefresh = !!viewer?.selfUid || !!viewer?.cookieStale;
+/*
+ * **`welltect_admin_v` を持つ人も対象に入れる（2026-09-30）。**
+ *
+ * uid を持たない admin は **`welltect_v` が無い**ので `selfUid` も `cookieStale` も
+ * 立たず、**この口を一度も叩かない**＝ **admin_users から外しても credential が
+ * 30 日残る**（権限剥奪が効かない）。代理表示中も同じ理由で叩かせる。
+ */
+const hasAdminCred = enabled ? !!(await readAdminCred(Astro)) : false;
+const needsCookieRefresh = !!viewer?.selfUid || !!viewer?.cookieStale || hasAdminCred;
 
 /**
  * **番人の鍵にデプロイの版を混ぜる (2026-08-30・実測)。**
@@ -109,6 +118,7 @@ const buildSha = (
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ accessToken }),
           });
+          // **200 + linked:false**（uid を持たない admin）はここへ来ない — 401 だけが本解決へ。
           if (res.status === 401) {                      // Cookie が無い/切れている → 本解決
             const r2 = await fetch('/api/auth/resolve', {
               method: 'POST',
@@ -188,6 +198,23 @@ const buildSha = (
           if (!res.ok) {
             console.error('[OneTap] resolve error:', payload);
             notify({ text: `連携処理エラー: ${payload.error ?? `HTTP ${res.status}`}`, tone: 'error' });
+            return;
+          }
+          /*
+           * **uid を持たない admin を handoff の続きで行き止まりにしない** (2026-09-30)。
+           *
+           * `admin_users` に居るが Scan-Chat-AI 側の `diagnostic_user_id` を持たない人が居る。
+           * その人は `resolve` が `{ linked:false }` を返すので、従来はここで
+           * 「お客様情報が見つかりませんでした」と出て**止まっていた**。
+           * ところが `resolve` は**その前に `welltect_admin_v` を発行している**ので、
+           * **代理表示の続き (`/admin/handoff/...`) は成立する**。
+           *
+           * **`/admin/handoff/` の下でだけ**進める。ダッシュボード等でこれをやると
+           * 「サインインできたのに何も出ない」画面へ送ることになる (uid が無いので当然)。
+           */
+          if (!payload.linked && payload.admin === true && url.pathname.startsWith('/admin/handoff/')) {
+            console.log('[OneTap] admin (uid 無し) → handoff の続きへ');
+            window.location.replace(url.toString());
             return;
           }
           if (!payload.linked || !payload.diagnosticUserId) {

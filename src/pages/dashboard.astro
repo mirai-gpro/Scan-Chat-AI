@@ -1,6 +1,7 @@
 ---
 import AppIcon from '../components/AppIcon.astro';
 import AppNav from '../components/AppNav.astro';
+import ImpersonationBanner from '../components/ImpersonationBanner.astro';
 import SignInPanel from '../components/SignInPanel.astro';
 import BaseLayout from '../layouts/BaseLayout.astro';
 import UrgentAlertBanner from '../components/dashboard/UrgentAlertBanner.astro';
@@ -22,7 +23,7 @@ import { demoFallbackEnabled } from '../lib/demo-data';
 import { isSpecialAccount } from '../lib/special-accounts';
 import { getLatestInterviewCompletion } from '../lib/interview-completion';
 import { isBridgeConfigured } from '../lib/supabase';
-import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
 import {
   extractUrgentAlert,
   extractDailyQuests,
@@ -239,6 +240,8 @@ const logoAlt = isDemoBrand ? 'がんチェッカー' : 'Welltect';
  * **`viewer.uid` から組み立てない** — それだと本人でも必ず値が入る (2026-09-29)。
  */
 const q = viewerLinkQuery(viewer);
+// **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
+const linkPrefix = viewerPathPrefix(viewer);
 ---
 
 <BaseLayout title={data ? `${greeting} | Welltect` : 'マイページ | Welltect'} width="app">
@@ -282,7 +285,8 @@ const q = viewerLinkQuery(viewer);
 
   {!needsSignIn && !hasError && (
     <>
-      <AppNav linkQuery={q} current="/dashboard" unreadNotices={unreadNotices} logoSrc={logoSrc} logoAlt={logoAlt} supportContact={supportContact} />
+      <ImpersonationBanner ctx={viewer.viewCtx} targetUid={viewer.uid} expiresAt={Astro.locals.adminView?.expiresAt} />
+      <AppNav linkQuery={q} linkPrefix={linkPrefix} current="/dashboard" unreadNotices={unreadNotices} logoSrc={logoSrc} logoAlt={logoAlt} supportContact={supportContact} />
 
       {data?.usingDemoData && (
         <div class="border-b border-amber-200 bg-amber-50 px-4 py-2.5 text-center text-sm text-amber-800">
@@ -327,11 +331,11 @@ const q = viewerLinkQuery(viewer);
         */}
         {healthAge?.latest ? (
           <div class="grid grid-cols-1 items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_17rem]">
-            <HealthAgeCard latest={healthAge.latest} followup={healthAgeFollowup} canGraph={(healthAge.trend?.points?.length ?? 0) >= 2} linkQuery={q} />
-            <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
+            <HealthAgeCard latest={healthAge.latest} followup={healthAgeFollowup} canGraph={(healthAge.trend?.points?.length ?? 0) >= 2} linkQuery={q} linkPrefix={linkPrefix} />
+            <ReportLinkCard href={`${linkPrefix}/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
           </div>
         ) : (
-          <ReportLinkCard href={`/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
+          <ReportLinkCard href={`${linkPrefix}/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
         )}
 
         {/*
@@ -354,8 +358,9 @@ const q = viewerLinkQuery(viewer);
           shipments={data?.shipments ?? []}
           nextTestAt={data?.subscription?.next_test_at}
           diagnosticUserId={data?.diagnosticUserId ?? ''}
-          detailHref={`/kit${q}`}
+          detailHref={`${linkPrefix}/kit${q}`}
           linkQuery={q}
+          linkPrefix={linkPrefix}
         />
 
         {/* ③ 次にすること — 非表示 (本日の健康クエスト): <DailyQuests quests={quests} /> */}
@@ -365,7 +370,7 @@ const q = viewerLinkQuery(viewer);
           v1.0 で「直近の検査結果 (項目カード)」「検査値の推移」「検査履歴」をここに統合した。
           推移グラフは種別ごとに /trend へ切り出し、履歴は「データ」の遷移先 (結果ページ) に置く。
         */}
-        <TestResultsSection artifacts={data?.artifacts ?? []} linkQuery={q} onlyTypes={singlePurchaseTypes} />
+        <TestResultsSection artifacts={data?.artifacts ?? []} linkQuery={q} linkPrefix={linkPrefix} onlyTypes={singlePurchaseTypes} />
 
 
         {/*
@@ -383,7 +388,7 @@ const q = viewerLinkQuery(viewer);
             <h2 class="sr-only">主要な操作</h2>
             <div class="grid grid-cols-1 gap-3 sm:grid-cols-2">
               <a
-                href={`/scan${q}`}
+                href={`${linkPrefix}/scan${q}`}
                 class="flex min-h-touch items-center gap-3 rounded-2xl border border-brand-600 bg-brand-50 px-4 py-4 transition hover:bg-brand-100"
               >
                 <AppIcon name="scan" size={28} class="text-brand-700" />
@@ -393,7 +398,7 @@ const q = viewerLinkQuery(viewer);
                 </span>
               </a>
               <a
-                href={`/chat${q}`}
+                href={`${linkPrefix}/chat${q}`}
                 class="flex min-h-touch items-center gap-3 rounded-2xl border border-brand-600 bg-brand-50 px-4 py-4 transition hover:bg-brand-100"
               >
                 <AppIcon name="interview" size={28} class="text-brand-700" />
@@ -450,7 +455,7 @@ const q = viewerLinkQuery(viewer);
             <div class="flex justify-between gap-3">
               <dt>AI問診の観測ログ:</dt>
               <dd>
-                <a href={`/chat${q ? `${q}&` : '?'}trace=1`} class="font-semibold text-brand-700 underline">
+                <a href={`${linkPrefix}/chat${q ? `${q}&` : '?'}trace=1`} class="font-semibold text-brand-700 underline">
                   観測ログ付きで開く
                 </a>
                 <span class="ml-1 text-slate-500">（画面右下の「観測ログをコピー」で採取）</span>

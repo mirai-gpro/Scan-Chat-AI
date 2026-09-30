@@ -7,7 +7,7 @@ import { getUserUploads } from '../lib/scan-queries';
 import { testTypeLabel, formatJpDate } from '../lib/dashboard-queries';
 import { qrSvgPath } from '../lib/qr';
 import { publicUrl } from '../lib/public-url';
-import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
 import { isSpecialAccount } from '../lib/special-accounts';
 import { refreshConfig } from '../lib/app-config';
 import { noStore } from '../lib/http-cache';
@@ -40,6 +40,8 @@ const viewer = await resolveViewer(Astro);
 const diagnosticUserId = viewer.uid;
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
 const linkQuery = viewerLinkQuery(viewer);
+// **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
+const linkPrefix = viewerPathPrefix(viewer);
 const uploads = diagnosticUserId ? await getUserUploads(diagnosticUserId) : [];
 
 /*
@@ -71,7 +73,7 @@ const dashUrl = `/dashboard${linkQuery}`;
 
 <BaseLayout title="AI スキャン | Welltect" width="app">
   <header class="flex items-center justify-between px-5 pt-6 pb-3">
-    <BackToDashboard linkQuery={linkQuery} class="!px-2.5 !text-sm" />
+    <BackToDashboard linkQuery={linkQuery} linkPrefix={linkPrefix} class="!px-2.5 !text-sm" />
     <h1 class="text-base font-semibold">スキャン</h1>
     <span class="rounded-full bg-slate-100 px-2.5 py-1 text-xs font-medium text-slate-600">
       1 / 3

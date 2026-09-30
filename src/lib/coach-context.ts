@@ -66,6 +66,9 @@ export async function buildCoachContext(
       .from('test_artifacts')
       .select('test_type, test_date, lab_name')
       .eq('diagnostic_user_id', diagnosticUserId)
+      // **active だけ** (2026-09-30)。差し替え前・取り下げ後の回を混ぜると、
+      // AI コーチが**もう無い検査を「受けています」と語る**。
+      .eq('status', 'active')
       .order('test_date', { ascending: false })
       .limit(10),
   ]);

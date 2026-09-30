@@ -189,7 +189,45 @@ export function viewerCookieOptions(): {
   };
 }
 
+/**
+ * **この閲覧者が何者か**（§24.1 の順序と 1 対 1）。
+ *
+ * 追加であって置き換えではない — 既存の `isAdmin` / `impersonating` は
+ * そのまま残してある（消すと 10 本のページと 3 本の検査に波及する）。
+ */
+export type ViewerKind =
+  | 'anonymous'
+  | 'self'
+  | 'admin_self'
+  /** 新方式 `/admin-view/<ctx>/…`（§13.0 案 B）。 */
+  | 'admin_impersonation'
+  /** 旧方式 `?u=`（移行期間・§30）。 */
+  | 'admin_impersonation_legacy'
+  | 'uid_entry';
+
 export interface Viewer {
+  /** **この閲覧者の種別。** 分岐の根拠はここに寄せていく。 */
+  kind: ViewerKind;
+  /**
+   * **表示対象が URL / context で固定されているか。**
+   *
+   * 代理表示中はクライアント申告の uid を**一切**受け付けない。
+   * `?u=` で別人へ移ることも、body の `diagnosticUserId` を信じることもしない。
+   */
+  targetLocked: boolean;
+  /**
+   * **書き込み先の uid。代理表示では `null`**（§12.5）。
+   *
+   * 既存規律「読みは `uid` / 書きは `selfUid`」は**本人か代理表示かの 2 択**を前提に
+   * していて、共有・代理表示では「読めるが書けない」を表せない。
+   * **書く前にここを見る**（null なら 403）。
+   */
+  writeTargetUid: string | null;
+  /**
+   * **代理表示の view-context**（`/admin-view/<ctx>/…` の `<ctx>`）。
+   * リンクの prefix を組み立てるためだけに持つ（`viewerPathPrefix`）。
+   */
+  viewCtx: string | null;
   /** 表示対象の diagnostic_user_id。未サインインなら null。 */
   uid: string | null;
   /** サインイン済み本人の uid（代理表示中でも本人のまま）。 */
@@ -198,13 +236,14 @@ export interface Viewer {
   isAdmin: boolean;
   /**
    * **何が根拠で admin になったか**。`null` は admin でない。
-   *   `'cookie'` … サインイン時に **wellfort-site の管理者リスト**へ問い合わせて判定
+   *   `'cookie'`       … サインイン時に **wellfort-site の管理者リスト**へ問い合わせて判定
+   *   `'admin-cookie'` … **`welltect_admin_v`**（代理表示中。`welltect_v` が無い admin も居る）
    *
    * **「admin にならない」の原因切り分けのために持つ。** 判定は静かに外れるので、
    * 画面のデバッグ欄に根拠を出せないと「なぜダミーが出ないか」が誰にも分からない
    * (実測 2026-08-30: 本番で報告書が空になり、原因の特定に何往復もした)。
    */
-  adminBy: 'cookie' | null;
+  adminBy: 'cookie' | 'admin-cookie' | null;
   /** admin が `?u=` で他人を表示している状態か。 */
   impersonating: boolean;
   /**
@@ -242,7 +281,11 @@ export interface Viewer {
   uidEntry: boolean;
 }
 
-const ANONYMOUS: Viewer = { uid: null, selfUid: null, isAdmin: false, adminBy: null, impersonating: false, cookieStale: false, origin: 'production', uidEntry: false };
+const ANONYMOUS: Viewer = {
+  kind: 'anonymous', targetLocked: false, writeTargetUid: null, viewCtx: null,
+  uid: null, selfUid: null, isAdmin: false, adminBy: null, impersonating: false,
+  cookieStale: false, origin: 'production', uidEntry: false,
+};
 
 /**
  * リクエストから閲覧者を解決する。**すべてのユーザー向けページはこれを通すこと。**
@@ -258,6 +301,42 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
 
   const verified = await verifyViewer(ctx.cookies.get(VIEWER_COOKIE)?.value);
 
+  /*
+   * **順序 1: Admin 代理表示（新方式）。**
+   *
+   * `locals.adminView` は **`src/middleware.ts` しか書かない**。あそこで
+   * 「`welltect_v` が admin」「`welltect_admin_v` が有効」「context の
+   * `admin_identity` が一致」「期限内・未 revoke」を**毎リクエスト**確認している。
+   * **ここで再確認しないのは手抜きではなく、確認を 1 か所に集約しているから**
+   * （2 か所に書くと片方だけ緩む）。middleware を通らなければこの値は存在しない。
+   *
+   * **失敗したときにここへ落ちてくることは無い** — middleware が 403 を返して
+   * ページまで到達させない（§24.1「URL が名指ししたものが出せないなら、何も出さない」）。
+   */
+  const av = (ctx as { locals?: App.Locals }).locals?.adminView;
+  if (av) {
+    return {
+      kind: 'admin_impersonation',
+      targetLocked: true,
+      writeTargetUid: null,            // ★ 代理表示は read-only（§12.5）
+      viewCtx: av.ctx,
+      uid: av.targetUid,
+      /*
+       * **admin 本人の uid は無いことがある**（2026-09-30）。
+       * `admin_users` に居るが `diagnostic_user_id` を持たない admin が居るため。
+       * **ここで `verified?.admin` を要求しない** — 要求すると、その admin は
+       * middleware を通っているのに画面で本人扱いされ 403 相当になる。
+       */
+      selfUid: av.adminSelfUid,
+      isAdmin: true,
+      adminBy: 'admin-cookie',
+      impersonating: true,
+      cookieStale: false,
+      origin: av.targetOrigin,
+      uidEntry: false,
+    };
+  }
+
   if (!verified) {
     if (uidEntryAllowed() && requested) {
       /*
@@ -266,7 +345,11 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
        * その一覧は撤去した (admin の正は wellfort-site の管理者リストだけ)。
        * URL に uid を書くだけで admin になれる経路を残さない。
        */
-      return { uid: requested, selfUid: requested, isAdmin: false, adminBy: null, impersonating: false, cookieStale: false, origin: 'production', uidEntry: true };
+      return {
+        kind: 'uid_entry', targetLocked: false, writeTargetUid: requested, viewCtx: null,
+        uid: requested, selfUid: requested, isAdmin: false, adminBy: null, impersonating: false,
+        cookieStale: false, origin: 'production', uidEntry: true,
+      };
     }
     return ANONYMOUS;
   }
@@ -282,9 +365,17 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
   const adminBy: Viewer['adminBy'] = verified.admin ? 'cookie' : null;
   const isAdmin = adminBy !== null;
   if (isAdmin && requested && requested !== selfUid) {
-    return { uid: requested, selfUid, isAdmin, adminBy, impersonating: true, cookieStale: verified.legacy || !isAdmin, origin: verified.origin, uidEntry: false };
+    return {
+      kind: 'admin_impersonation_legacy', targetLocked: false, writeTargetUid: selfUid, viewCtx: null,
+      uid: requested, selfUid, isAdmin, adminBy, impersonating: true,
+      cookieStale: verified.legacy || !isAdmin, origin: verified.origin, uidEntry: false,
+    };
   }
-  return { uid: selfUid, selfUid, isAdmin, adminBy, impersonating: false, cookieStale: verified.legacy || !isAdmin, origin: verified.origin, uidEntry: false };
+  return {
+    kind: isAdmin ? 'admin_self' : 'self', targetLocked: false, writeTargetUid: selfUid, viewCtx: null,
+    uid: selfUid, selfUid, isAdmin, adminBy, impersonating: false,
+    cookieStale: verified.legacy || !isAdmin, origin: verified.origin, uidEntry: false,
+  };
 }
 
 /**
@@ -303,10 +394,30 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
  * **返すのは `?` から始まる文字列。** 呼び出し側で `?` を付け直さないこと
  * (他のクエリと連結するときは `q ? `${q}&` : '?'` の既存パターンを使う)。
  */
-export function viewerLinkQuery(v: Pick<Viewer, 'uid' | 'impersonating' | 'uidEntry'>): string {
+export function viewerLinkQuery(v: Pick<Viewer, 'uid' | 'impersonating' | 'uidEntry'> & { viewCtx?: string | null }): string {
   if (!v.uid) return '';
+  /*
+   * **新方式の代理表示では `?u=` を出さない**（2026-09-30）。
+   * 対象は URL path の `<ctx>` が持つので、ここで uid を足すと
+   * **消したはずの diagnostic_user_id が URL へ戻る**。
+   */
+  if (v.viewCtx) return '';
   if (!v.impersonating && !v.uidEntry) return '';
   return `?u=${encodeURIComponent(v.uid)}`;
+}
+
+/**
+ * **リンクに付ける path prefix。** `''` か `/admin-view/<ctx>`。
+ *
+ * 【なぜ prefix が要るか】代理表示は URL path が対象を持つ（§13.0 案 B）ので、
+ * ページ内のリンクが `/report` のような素のパスだと**そのタブだけ代理表示から
+ * 抜けて admin 本人の画面に戻る**。`viewerLinkQuery` と同じく**組み立てを 1 か所**に置く。
+ *
+ * **返すのは `/` から始まる文字列**（空文字か `/admin-view/<ctx>`）。
+ * 呼び出し側は `` `${prefix}/report${q}` `` のように前へ付けるだけ。
+ */
+export function viewerPathPrefix(v: Pick<Viewer, 'viewCtx'>): string {
+  return v.viewCtx ? `/admin-view/${v.viewCtx}` : '';
 }
 
 /** `?u=` の短縮形（先頭8桁）も従来どおり受ける。 */

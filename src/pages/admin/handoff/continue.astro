@@ -1,0 +1,80 @@
+---
+/**
+ * **handoff の最終段。ここで初めて「発行した admin 本人か」を問う。**
+ *
+ * 正本: `docs/specs/secure_shared_access_and_admin_impersonation_spec_20260930.md` §12.7。
+ *
+ *   pending Cookie（10 分の札）＋ `welltect_admin_v`（admin 本人）
+ *     → consume（DB 側で原子的に）→ context 発行 → 302 /admin-view/<ctx>/dashboard
+ *
+ * 【未サインインなら Google 認証へ通す】旧 `?u=` 経路と同じ使い勝手を保つ（§12.7）。
+ * **403 だけを返して行き止まりにしない。** サインインが済めば
+ * `GoogleOneTap` が同じ URL を開き直すので、そのまま続きへ進む。
+ *
+ * 【失敗しても handoff を焼かない】`admin_identity` が違えば DB 側の UPDATE が
+ * 0 行になる（consume しない）ので、**10 分以内なら正しい Google アカウントで
+ * やり直せる**。ただし失敗は原子的に数え、**5 回で pending を失効**させる。
+ *
+ * 【理由を出し分けない】未 admin / 別 admin / 期限切れ / 不存在 は全部同じ 403。
+ */
+import BaseLayout from '../../../layouts/BaseLayout.astro';
+import SignInPanel from '../../../components/SignInPanel.astro';
+import { ADMIN_COOKIE, verifyAdminCred } from '../../../lib/admin-identity';
+import {
+  HANDOFF_PENDING_COOKIE, OPAQUE_RE, consumeHandoff, failPendingAttempt,
+} from '../../../lib/admin-impersonation';
+import { refreshConfig, cfg } from '../../../lib/app-config';
+
+export const prerender = false;
+
+Astro.response.headers.set('cache-control', 'no-store, max-age=0');
+Astro.response.headers.set('referrer-policy', 'no-referrer');
+Astro.response.headers.set('x-robots-tag', 'noindex, nofollow');
+
+const FORBIDDEN = new Response('403 Forbidden', {
+  status: 403,
+  headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+});
+
+const pending = Astro.cookies.get(HANDOFF_PENDING_COOKIE)?.value ?? '';
+if (!OPAQUE_RE.test(pending)) return FORBIDDEN;
+
+const cred = await verifyAdminCred(Astro.cookies.get(ADMIN_COOKIE)?.value);
+
+/*
+ * **credential が無い = まだ admin として認証できていない。**
+ * サインイン画面を出す（pending Cookie は 10 分そのまま生きている）。
+ * **ここで pending を焼かない** — サインインに失敗した人が券を潰さない（§12.7 約束 3）。
+ */
+let signInView = false;
+if (!cred) {
+  signInView = true;
+} else {
+  const ctx = await consumeHandoff(pending, cred.identity);
+  if (!ctx) {
+    // 別 admin / 期限切れ / 二重 consume。**原子的に +1** して 5 回で失効させる。
+    await failPendingAttempt(pending);
+    return FORBIDDEN;
+  }
+  // 札は役目を終えた。**必ず消す**（残すと次の handoff と紛れる）。
+  Astro.cookies.delete(HANDOFF_PENDING_COOKIE, { path: '/' });
+  return Astro.redirect(`/admin-view/${ctx.ctx}/dashboard`, 302);
+}
+
+await refreshConfig();
+const supportContact = cfg('ui.support_contact');
+---
+
+<BaseLayout title="代理表示 | Welltect" width="app">
+  <main class="mx-auto w-full max-w-xl px-5 py-10">
+    <p class="mb-4 text-base text-slate-800">
+      顧客の画面を開くために、<strong>管理者の Google アカウント</strong>でサインインしてください。
+    </p>
+    {signInView && (
+      <SignInPanel
+        supportContact={supportContact}
+        desc="Wellfort 管理者としてサインインすると、対象のお客様の画面へ進みます。"
+      />
+    )}
+  </main>
+</BaseLayout>

@@ -16,6 +16,7 @@
 
 import { getServerSupabase } from './supabase';
 import { demoFallbackEnabled, demoMetricTrend } from './demo-data';
+import { ALA_PORPHYRIN_LABEL, restrictToLatestAla } from './ala-pds';
 import type { MetricTrendPoint, MetricTrendSeries } from './dashboard-queries';
 
 /** 1 項目の検査値。値・単位・基準値・判定はすべて検査票由来をそのまま持つ。 */
@@ -254,6 +255,13 @@ const SERIES_NAME_ALIASES: Readonly<Record<string, string>> = {
   塩分摂取量: '1日の塩分摂取量',
   '1日の塩分摂取量': '1日の塩分摂取量',
   '1日の食塩摂取量': '1日の塩分摂取量',
+  /*
+   * がんリスク検査 ALA-PDS の主結果。原本表記が**「の」の有無で揺れる**ので、
+   * 読み出し時だけ利用者向け表示名 (`ALA_PORPHYRIN_LABEL`) へ寄せる。
+   * **DB の item_name は書き換えない**（上のコメントと同じ規律・完全一致のみ）。
+   */
+  尿中のポルフィリン量: ALA_PORPHYRIN_LABEL,
+  尿中ポルフィリン量: ALA_PORPHYRIN_LABEL,
 };
 
 function seriesKey(r: { canonical_name: string | null; item_name?: string | null }): string | null {
@@ -293,18 +301,25 @@ export async function getTrendCandidates(
     let q = sb
       .schema('diagnosis')
       .from('measurement_values')
-      .select('canonical_name, item_name, test_type, test_date, value_num')
+      // artifact_id も引く — がんリスク検査の方式判定 (ALA-PDS) が「回」単位のため。
+      .select('artifact_id, canonical_name, item_name, test_type, test_date, value_num')
       .eq('diagnostic_user_id', diagnosticUserId)
       .in('artifact_id', active)
       .not('value_num', 'is', null)
       .limit(4000);
     if (testType) q = q.eq('test_type', testType);
     const { data, error } = await q;
-    const rows = (data ?? []) as unknown as
-      { canonical_name: string | null; item_name: string | null; test_date: string | null }[];
-    if (error || rows.length === 0) {
+    const all = (data ?? []) as unknown as
+      { artifact_id: string; canonical_name: string | null; item_name: string | null; test_date: string | null }[];
+    if (error || all.length === 0) {
       return [];
     }
+    /*
+     * **がんリスク検査だけ「ALA-PDS の最新 N 回」へ絞る** (`ala-pds.ts`・発注者指示 2026-09-30)。
+     * Noah4 の回は artifact ごと落ちるので、**Noah4 の項目 (BMI・塩分など) が
+     * 候補に出てこない**。ALA の回が 1 つも無い利用者は絞らない (従来どおり)。
+     */
+    const rows = testType === 'cancer_urine' ? restrictToLatestAla(all).rows : all;
 
     const dates = new Map<string, Set<string>>();
     for (const r of rows) {
@@ -372,8 +387,18 @@ export async function getMeasurementTrend(
 
     const want = new Set(canonicalNames as string[]);
     const all = (data ?? []) as unknown as Row[];
-    const rows = all.filter((r) => {
-      if (testType && r.test_type !== testType) return false;
+    const typed = testType ? all.filter((r) => r.test_type === testType) : all;
+    /*
+     * **がんリスク検査だけ「ALA-PDS の最新 N 回」へ絞る** (`ala-pds.ts`・発注者指示 2026-09-30)。
+     *
+     * 方式が Noah4 → ALA-PDS で変わっており、**測っている物が違う**ので 1 本の線に
+     * 混ぜない。**日付では判定せず**、ALA 固有項目 (尿中のポルフィリン量 ＋ インデックス値)
+     * を持つ回かどうかで判定する (`isAlaArtifact`)。
+     * **`testType` が 'cancer_urine' のときだけ**効かせる — 種別の指定が無い呼び出し
+     * (ダッシュボード等の横断集計) の挙動を変えないため。
+     */
+    const scoped = testType === 'cancer_urine' ? restrictToLatestAla(typed).rows : typed;
+    const rows = scoped.filter((r) => {
       const key = seriesKey(r);
       return key != null && want.has(key);
     });

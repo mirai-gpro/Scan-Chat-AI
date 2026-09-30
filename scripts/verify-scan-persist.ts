@@ -129,6 +129,123 @@ cases.push(
   ['ガード: 読めた受診日を採用 (today でない)', okDated.testDate === '2023-04-18', okDated.testDate],
 );
 
+/*
+ * ── 同じ受診日の差し替え (2026-09-30・本田さんの重複報告) ────────────────
+ *
+ * `saveScanResult` は**無条件 insert** だったので、同じ回を送り直すたびに
+ * `test_artifacts` が 1 行増えていた。複数年アップロードは
+ * **受診日が読めなかった回の再アップロードが前提**なので必ず踏む。
+ *
+ * ここで見るのは 4 つ:
+ *   ① 同日・同 source の既存行を **delete してから** insert する
+ *   ② **原本のある行は delete せず superseded に落とす**
+ *      (test_artifact_files は on delete cascade。消すと原本の記録ごと消える)
+ *   ③ **`source='user_upload'` だけ**を対象にする (admin が入れた回を消さない)
+ *   ④ **消してから入れる** 順序 (逆だと入れた直後の行を自分で消す)
+ */
+interface DedupCall { table: string; op: string; args: unknown[] }
+
+function makeDedupSb(existing: { id: string }[], withFiles: string[]) {
+  const calls: DedupCall[] = [];
+  const filters: Record<string, unknown> = {};
+  const schema = () => ({
+    from: (table: string) => ({
+      select: () => {
+        const chain = {
+          eq: (col: string, val: unknown) => { filters[`${table}.${col}`] = val; return chain; },
+          in: async () => ({
+            data: withFiles.map((id) => ({ test_artifact_id: id })), error: null,
+          }),
+          // `.eq()` を 4 つ重ねた後に await される (test_artifacts 側)
+          then: (res: (v: unknown) => unknown) => res({ data: existing, error: null }),
+        };
+        return chain;
+      },
+      insert: (rows: Record<string, unknown>[]) => {
+        calls.push({ table, op: 'insert', args: [rows[0]] });
+        return {
+          select: async () => ({ data: [{ id: 'art-new' }], error: null }),
+          then: (res: (v: { error: null }) => unknown) => res({ error: null }),
+        };
+      },
+      delete: () => ({
+        in: async (col: string, ids: string[]) => {
+          calls.push({ table, op: 'delete', args: [col, ids] });
+          return { error: null };
+        },
+        eq: async () => ({ error: null }),
+      }),
+      update: (patch: Record<string, unknown>) => ({
+        in: async (col: string, ids: string[]) => {
+          calls.push({ table, op: 'update', args: [patch, ids] });
+          return { error: null };
+        },
+        eq: async () => ({ error: null }),
+      }),
+    }),
+  });
+  return { sb: { schema }, calls, filters };
+}
+
+const datedMd = md + '\n\n受診日 2023-04-18';
+
+// (d) 同じ受診日の既存行が 2 件 → どちらも消えてから 1 件 insert される。
+{
+  const { sb: sbDup, calls, filters } = makeDedupSb([{ id: 'old-1' }, { id: 'old-2' }], []);
+  await saveScanResult(sbDup as never, {
+    diagnosticUserId: 'd0000001-0000-0000-0000-000000000000',
+    markdownClean: datedMd,
+    pageCount: 1,
+  });
+  const del = calls.find((c) => c.table === 'test_artifacts' && c.op === 'delete');
+  const ins = calls.findIndex((c) => c.table === 'test_artifacts' && c.op === 'insert');
+  const delIdx = calls.findIndex((c) => c.table === 'test_artifacts' && c.op === 'delete');
+  cases.push(
+    ['差し替え: 同日の既存行を削除する', !!del, JSON.stringify(del?.args?.[1])],
+    ['差し替え: 既存 2 件とも消す',
+      JSON.stringify(del?.args?.[1]) === JSON.stringify(['old-1', 'old-2']), ''],
+    ['差し替え: **消してから入れる**', delIdx >= 0 && ins >= 0 && delIdx < ins, `del@${delIdx} ins@${ins}`],
+    ['差し替え: 対象は user_upload だけ', filters['test_artifacts.source'] === 'user_upload',
+      String(filters['test_artifacts.source'])],
+    ['差し替え: 受診日で絞る', filters['test_artifacts.test_date'] === '2023-04-18',
+      String(filters['test_artifacts.test_date'])],
+    ['差し替え: 本人だけ', filters['test_artifacts.diagnostic_user_id'] === 'd0000001-0000-0000-0000-000000000000', ''],
+  );
+}
+
+// (e) 原本が付いている行は**消さず** superseded に落とす。
+{
+  const { sb: sbFiles, calls } = makeDedupSb([{ id: 'has-file' }, { id: 'plain' }], ['has-file']);
+  await saveScanResult(sbFiles as never, {
+    diagnosticUserId: 'd0000001-0000-0000-0000-000000000000',
+    markdownClean: datedMd,
+    pageCount: 1,
+  });
+  const del = calls.find((c) => c.table === 'test_artifacts' && c.op === 'delete');
+  const upd = calls.find((c) => c.table === 'test_artifacts' && c.op === 'update');
+  cases.push(
+    ['原本あり: 削除対象から外す',
+      JSON.stringify(del?.args?.[1]) === JSON.stringify(['plain']), JSON.stringify(del?.args?.[1])],
+    ['原本あり: superseded に落とす',
+      (upd?.args?.[0] as { status?: string })?.status === 'superseded'
+      && JSON.stringify(upd?.args?.[1]) === JSON.stringify(['has-file']), JSON.stringify(upd?.args)],
+  );
+}
+
+// (f) 既存が 0 件なら delete を撃たない (無駄な書き込みをしない)。
+{
+  const { sb: sbNone, calls } = makeDedupSb([], []);
+  await saveScanResult(sbNone as never, {
+    diagnosticUserId: 'd0000001-0000-0000-0000-000000000000',
+    markdownClean: datedMd,
+    pageCount: 1,
+  });
+  cases.push([
+    '既存が無ければ delete しない',
+    !calls.some((c) => c.op === 'delete'), '',
+  ]);
+}
+
 let failed = 0;
 for (const [name, ok, detail] of cases) {
   if (!ok) failed += 1;

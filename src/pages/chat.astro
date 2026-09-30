@@ -2,7 +2,7 @@
 import AppIcon from '../components/AppIcon.astro';
 import BackToDashboard from '../components/BackToDashboard.astro';
 import BaseLayout from '../layouts/BaseLayout.astro';
-import { resolveViewer, viewerLinkQuery } from '../lib/viewer';
+import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
 import { noStore } from '../lib/http-cache';
 
 export const prerender = false;
@@ -16,6 +16,8 @@ const viewer = await resolveViewer(Astro);
 const diagnosticUserId = viewer.uid;
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
 const linkQuery = viewerLinkQuery(viewer);
+// **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
+const linkPrefix = viewerPathPrefix(viewer);
 ---
 
 <BaseLayout title="AI 問診 | Welltect" width="flow">
@@ -26,7 +28,7 @@ const linkQuery = viewerLinkQuery(viewer);
   -->
   <header id="chat-header" class="hero-gradient sticky top-0 z-30 px-5 pt-5 pb-3">
     <div class="flex items-center justify-between">
-      <BackToDashboard linkQuery={linkQuery} class="!px-2.5 !text-sm" />
+      <BackToDashboard linkQuery={linkQuery} linkPrefix={linkPrefix} class="!px-2.5 !text-sm" />
       <div class="flex items-center gap-2">
         <span class="relative flex h-2 w-2">
           <span class="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-400 opacity-75"></span>

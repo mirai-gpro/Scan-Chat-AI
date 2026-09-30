@@ -35,11 +35,17 @@ interface Props {
    * リンクに引き継ぐクエリ文字列 ('' か '?u=<uid>')。
    * **`viewerLinkQuery(viewer)` の値をそのまま渡すこと** (uid を受け取らない・2026-09-29)。
    */
+  /**
+   * **代理表示の path prefix** (`''` か `/admin-view/<ctx>`)。
+   * **`viewerPathPrefix(viewer)` の値をそのまま渡すこと** (2026-09-30)。
+   * 付け忘れると、そのリンクだけ代理表示から抜けて admin 本人の画面へ戻る。
+   */
+  linkPrefix?: string;
   linkQuery?: string;
 }
-const { latest, followup = null, canGraph = false, linkQuery: q = '' } = Astro.props;
+const { latest, followup = null, canGraph = false, linkQuery: q = '', linkPrefix: p = '' } = Astro.props;
 // ウェルネス年齢の推移も他の検査と同じ /trend で見せる (別テーブル health_age_scores 由来)。
-const graphHref = `/trend${q ? `${q}&` : '?'}type=wellness`;
+const graphHref = `${p}/trend${q ? `${q}&` : '?'}type=wellness`;
 
 const bio = latest.biologicalAge;
 const delta = latest.delta;

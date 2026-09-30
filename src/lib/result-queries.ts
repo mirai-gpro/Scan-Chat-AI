@@ -41,6 +41,71 @@ export interface ResultData {
    * 「データ」を押した先のこのページに置く (発注者指示 2026-08)。
    */
   siblings: { id: string; testDate: string | null }[];
+  /**
+   * **検査票から読み取った測定値**（`test_artifacts.measurements` の jsonb）。
+   *
+   * 【なぜ足したか（2026-09-30・実測）】この画面は `scan_md`（アプリ内スキャンだけが書く）と
+   * 原本 PDF しか出していなかったため、**admin 取込のがんリスク検査・血液・遺伝子は
+   * 「値」が画面のどこにも出ていなかった**。DB には `measurements` が入っているのに、
+   * 読む側が無かった。
+   *
+   * 出すのは**検査票に印字されている事実だけ** — 項目名・値・単位・基準値と、
+   * **検査機関が付けた** `flag` / `assessment`。値と基準値から判定を計算しない
+   * （CLAUDE.md「表示の原則（ミッション④）」）。
+   */
+  measurements: ResultMeasurement[];
+}
+
+/** 画面に出す 1 行。`test_artifacts.measurements` の 1 要素を検証したもの。 */
+export interface ResultMeasurement {
+  name: string;
+  value: string | null;
+  unit: string | null;
+  refLow: string | null;
+  refHigh: string | null;
+  /** 検査機関が付けた印。**こちらでは計算しない。** */
+  flag: 'H' | 'L' | null;
+  /** 検査機関由来の判定コード（血液 CSV の F2/A3 等）。デコードしない。 */
+  assessment: string | null;
+}
+
+/**
+ * `test_artifacts.measurements`（jsonb・形は DB が保証しない）を画面用に検証する。
+ *
+ * - **配列でなければ空**（壊れた行でページを落とさない）
+ * - **`name` が無い要素は捨てる**（何の値か分からないものは出さない）
+ * - **値も単位も基準値も無い行は捨てる**（空行を並べない）
+ * - **並び順は配列のまま**（`persistMeasurements` が `seq` として使っている順＝原本の順）
+ */
+export function toResultMeasurements(raw: unknown): ResultMeasurement[] {
+  if (!Array.isArray(raw)) return [];
+  const out: ResultMeasurement[] = [];
+  for (const el of raw) {
+    if (!el || typeof el !== 'object') continue;
+    const m = el as Record<string, unknown>;
+    const name = typeof m.name === 'string' ? m.name.trim() : '';
+    if (!name) continue;
+    const str = (v: unknown): string | null => {
+      if (typeof v === 'string') { const t = v.trim(); return t === '' ? null : t; }
+      if (typeof v === 'number' && Number.isFinite(v)) return String(v);
+      return null;
+    };
+    const value = str(m.value);
+    const unit = str(m.unit);
+    const refLow = str(m.ref_low);
+    const refHigh = str(m.ref_high);
+    if (value == null && unit == null && refLow == null && refHigh == null) continue;
+    out.push({
+      name,
+      value,
+      unit,
+      refLow,
+      refHigh,
+      flag: m.flag === 'H' || m.flag === 'L' ? m.flag : null,
+      assessment: str(m.assessment),
+    });
+  }
+  return out;
 }
 
 /**
@@ -167,13 +232,22 @@ export async function loadResult(
   // ── 原本の解決 ───────────────────────────────────────────────
   // 実データ (test_artifact_files) があれば署名 URL を発行して使う。
   // 無ければ従来のサンプル PDF にフォールバックする。
-  // 同一種別の他の回 (過去データ)。id と日付だけ引く。
+  /*
+   * 同一種別の他の回 (過去データ)。id と日付だけ引く。
+   *
+   * **`status='active'` で絞る (2026-09-30・本田さんの重複報告で発覚)。**
+   * ここだけ status を見ておらず、**差し替え前 (superseded) や取り下げ後 (withdrawn) の回も
+   * 「過去データ」に並んでいた**。同じ受診日が 2 つ出るので、利用者には「重複」に見える。
+   * ダッシュボード側 (`dashboard-queries.ts:128`) は最初から絞ってあり、**ここだけ漏れていた**。
+   * 2026-09-27 に `measurement_values` で直したのと同型の漏れ (CLAUDE.md「修正3」)。
+   */
   const { data: siblingRows } = await sb
     .schema('diagnosis')
     .from('test_artifacts')
     .select('id, test_date')
     .eq('diagnostic_user_id', artifact.diagnostic_user_id)
     .eq('test_type', artifact.test_type)
+    .eq('status', 'active')
     .order('test_date', { ascending: false })
     .limit(24);
   const siblings = (siblingRows ?? []).map((r) => ({ id: r.id, testDate: r.test_date }));
@@ -213,6 +287,7 @@ export async function loadResult(
     samplePdfLabel: pdfLabel,
     isOriginal: original != null,
     siblings,
+    measurements: toResultMeasurements((artifact as { measurements?: unknown }).measurements),
   };
 }
 
@@ -278,5 +353,6 @@ function demoResult(artifactId: string, viewerUid?: string | null): ResultData |
     samplePdfLabel: samplePdf ? `${samplePdf.label}（サンプル）` : null,
     isOriginal: false,
     siblings,
+    measurements: toResultMeasurements((artifact as { measurements?: unknown }).measurements),
   };
 }

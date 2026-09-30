@@ -1,4 +1,6 @@
 import type { APIRoute } from 'astro';
+import { resolveViewer } from '../../../../lib/viewer';
+import { denyReadOnlyWrite } from '../../../../lib/write-guard';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { isHpEdgeConfigured, submitKitSelfReport } from '../../../../lib/hp-edge';
 
@@ -13,7 +15,17 @@ export const prerender = false;
  *
  * 本番では Supabase Auth の session から diagnostic_user_id を解決する。
  */
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async (ctx) => {
+  const { params, request } = ctx;
+  /*
+   * **代理表示中は書かせない**（2026-09-30・仕様書 §12.5 / §38-U27）。
+   * この口は **body の `diagnosticUserId` をそのまま信じる**ので、
+   * 代理表示の画面から押されると**対象顧客の配送状態が実際に変わる**。
+   * 所有者チェックは「その uid のものか」しか見ておらず、**誰が押したかは見ていない**。
+   */
+  const denied = denyReadOnlyWrite(await resolveViewer(ctx));
+  if (denied) return denied;
+
   const id = params.id;
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) {
     return json({ error: 'invalid shipment id' }, 400);

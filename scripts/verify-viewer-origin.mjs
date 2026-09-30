@@ -73,6 +73,20 @@ if (viewerSrc.includes('import.meta')) {
 }
 const viewerPath = emit('verify-viewer-origin-viewer.mjs', viewerSrc);
 
+/*
+ * `admin-identity.ts` も**実物を通す** (2026-09-30)。
+ * この口は `welltect_admin_v` の発行 / 削除も行うようになったので、
+ * import を差し替えないと読み込みで落ちる。**挙動はスタブにしない** —
+ * 発行が失敗して黙って通る、という形の退行を作らないため。
+ */
+let identSrc = read('src/lib/admin-identity.ts')
+  .replace(/\(import\.meta as unknown as \{ env\?: Record<string, string \| undefined> \}\)\.env/g, 'globalThis.__env')
+  .replace(/import\.meta\.env\.(\w+)/g, 'globalThis.__env.$1');
+if (identSrc.includes('import.meta')) {
+  bad('verify 自体: admin-identity.ts の import.meta を差し替えられなかった');
+}
+const identPath = emit('verify-viewer-origin-admin-identity.mjs', identSrc);
+
 // Supabase と admin 判定はスタブ。**この口は「admin フラグだけ更新」なので、
 // 差し替えても検査したい挙動 (origin の引き継ぎ) は 1 ミリも変わらない。**
 const stubPath = emit(
@@ -91,10 +105,12 @@ export async function isAdminEmailAsync(email) {
 let apiSrc = read('src/pages/api/auth/refresh-admin.ts')
   .replace(/import \{ getServerSupabase \} from '[^']*';/, `import { getServerSupabase } from ${JSON.stringify(stubPath)};`)
   .replace(/import \{ isAdminEmailAsync \} from '[^']*';/, `import { isAdminEmailAsync } from ${JSON.stringify(stubPath)};`)
-  .replace(/from '\.\.\/\.\.\/\.\.\/lib\/viewer'/, `from ${JSON.stringify(viewerPath)}`);
+  .replace(/from '\.\.\/\.\.\/\.\.\/lib\/viewer'/, `from ${JSON.stringify(viewerPath)}`)
+  .replace(/from '\.\.\/\.\.\/\.\.\/lib\/admin-identity'/, `from ${JSON.stringify(identPath)}`);
 for (const [label, needle] of [
   ['getServerSupabase', stubPath],
   ['viewer', viewerPath],
+  ['admin-identity', identPath],
 ]) {
   if (!apiSrc.includes(needle)) bad(`verify 自体: refresh-admin.ts の import (${label}) を差し替えられなかった`);
 }
@@ -133,7 +149,12 @@ async function callRefresh(cookieValue) {
   });
   const res = await API.POST({ request, cookies });
   const body = await res.json().catch(() => null);
-  return { status: res.status, body, cookie: cookies.store.get(VIEWER.VIEWER_COOKIE) ?? null };
+  return {
+    status: res.status, body,
+    cookie: cookies.store.get(VIEWER.VIEWER_COOKIE) ?? null,
+    // admin 専用 credential (`welltect_admin_v`)。**uid を持たない admin の唯一の証明**。
+    adminCookie: cookies.store.get('welltect_admin_v') ?? null,
+  };
 }
 
 const parts = (c) => (c === null ? -1 : c.split('.').length);
@@ -212,11 +233,45 @@ console.log('\n=== ④ uid はクライアント申告でなく Cookie が正 ==
   eq('**body の origin も無視される**', after?.origin, 'staging');
 }
 
-console.log('\n=== ⑤ Cookie が無ければ何も発行しない (fail-closed) ===');
+console.log('\n=== ⑤ welltect_v が無いとき ===');
+/*
+ * **2026-09-30 に挙動を変えた。** 以前は「Cookie が無ければ 401」だったが、
+ * **`admin_users` に居るが `diagnostic_user_id` を持たない admin は
+ * `welltect_v` を一生持てない**（`auth/resolve` が `{linked:false}` で返る）。
+ * 401 で弾くと、その admin の **`welltect_admin_v` を削除する手段が無くなり、
+ * 管理者から外しても最大 30 日そのまま**になる（＝権限剥奪が効かない）。
+ *
+ * **緩めたのではなく、守る対象を分けた**:
+ *   ・`welltect_v` は**絶対に新規発行しない**（無い人を勝手に本人にしない）
+ *   ・`welltect_admin_v` は**常に**発行 / 削除する（剥奪を効かせる）
+ */
 {
+  STUBS.__state.email = PLAIN_EMAIL;
   const r = await callRefresh(null);
-  eq('HTTP 401', r.status, 401);
-  eq('Cookie を発行しない', r.cookie, null);
+  eq('HTTP 200 (401 で弾かない)', r.status, 200);
+  eq('**welltect_v は発行しない**', r.cookie, null);
+  eq('linked:false を返す', r.body?.linked, false);
+  eq('非 admin なので admin credential も発行しない', r.adminCookie, null);
+}
+{
+  // **uid を持たない admin**: welltect_v は無いまま、admin credential だけが付く。
+  STUBS.__state.email = ADMIN_EMAIL;
+  const r = await callRefresh(null);
+  eq('HTTP 200', r.status, 200);
+  eq('**welltect_v は発行しない**', r.cookie, null);
+  eq('**welltect_admin_v は発行する (uid 無し admin の唯一の証明)**', typeof r.adminCookie, 'string');
+  eq('admin credential は 3 分割 (uid を含まない)', parts(r.adminCookie), 3);
+  eq('changed=true (付いたので描き直す)', r.body?.changed, true);
+}
+{
+  // **剥奪**: 同じ状態で admin_users から外れると credential が消える。
+  STUBS.__state.email = ADMIN_EMAIL;
+  const issued = await callRefresh(null);
+  eq('前提: credential が在る', typeof issued.adminCookie, 'string');
+  STUBS.__state.admins = [];                       // ← admin_users から外れた
+  const r = await callRefresh(null);
+  eq('**admin から外れたら credential を削除する**', r.adminCookie, null);
+  STUBS.__state.admins = [ADMIN_EMAIL];
 }
 
 console.log('\n=== ⑥ 実装が origin を渡していること (テキスト検査・二重の網) ===');
