@@ -15,6 +15,7 @@
  */
 import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../lib/viewer';
+import { denyReadOnlyWrite } from '../../../lib/write-guard';
 import { getS3Config } from '../../../lib/s3';
 import { isScanUploadKey } from '../../../lib/scan-upload-ticket';
 import { enqueueScanJob } from '../../../lib/scan-jobs';
@@ -36,6 +37,12 @@ export const POST: APIRoute = async (ctx) => {
    * 代理表示中に積むと、相手の検査結果を勝手に作ることになる。
    */
   const viewer = await resolveViewer(ctx);
+  /*
+   * **代理表示中は書かせない**（2026-09-30・仕様書 §12.5 / §38-U27）。
+   * `selfUid` を使っていても、それは **admin 本人へ書く**ということなので read-only ではない。
+   */
+  const denied = denyReadOnlyWrite(viewer);
+  if (denied) return denied;
   const uid = viewer.selfUid;
   if (!uid) return json({ ok: false, error: 'not_signed_in' }, 401);
 

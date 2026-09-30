@@ -31,9 +31,18 @@ export const POST: APIRoute = async ({ request, cookies }) => {
   const accessToken = typeof body?.accessToken === 'string' ? body.accessToken : null;
   if (!accessToken) return json({ error: 'missing accessToken' }, 400);
 
-  // 本人は Cookie が正。ここで uid をクライアントから受け取らない。
+  /*
+   * 本人は Cookie が正。ここで uid をクライアントから受け取らない。
+   *
+   * **`welltect_v` が無くても 401 にしない（2026-09-30 修正）。**
+   * `admin_users` に居るが `diagnostic_user_id` を持たない admin は
+   * **`welltect_v` を一生持てない**（`auth/resolve` が `{ linked:false }` で返るため）。
+   * ここで弾くと、その admin の **`welltect_admin_v` を削除する手段が無くなり、
+   * 管理者から外しても最大 30 日そのまま**になる（＝権限剥奪が効かない）。
+   * → **`welltect_v` の再署名は在るときだけ**行い、
+   *   **admin credential の発行 / 削除は常に行う。**
+   */
   const current = await verifyViewer(cookies.get(VIEWER_COOKIE)?.value);
-  if (!current) return json({ error: 'no viewer cookie' }, 401);
 
   const sb = getServerSupabase();
   if (!sb) return json({ error: 'supabase not configured' }, 503);
@@ -58,9 +67,11 @@ export const POST: APIRoute = async ({ request, cookies }) => {
    * → **uid と origin は `current`(検証済み Cookie) のものをそのまま引き継ぐ。**
    * 固定は `npm run verify:viewer-origin`。
    */
-  const token = await signViewer(current.uid, isAdmin, Date.now(), current.origin);
-  if (!token) return json({ error: 'cannot sign' }, 503);
-  cookies.set(VIEWER_COOKIE, token, viewerCookieOptions());
+  if (current) {
+    const token = await signViewer(current.uid, isAdmin, Date.now(), current.origin);
+    if (!token) return json({ error: 'cannot sign' }, 503);
+    cookies.set(VIEWER_COOKIE, token, viewerCookieOptions());
+  }
 
   /*
    * **admin 専用 credential (`welltect_admin_v`) をここでも発行 / 削除する**
@@ -81,7 +92,9 @@ export const POST: APIRoute = async ({ request, cookies }) => {
   return json({
     ok: true,
     isAdmin,
-    changed: isAdmin !== current.admin || current.legacy || hadCred !== nowHasCred,
+    /** `welltect_v` を持たない admin は `linked:false` のまま。切り分け用。 */
+    linked: !!current,
+    changed: (current ? isAdmin !== current.admin || current.legacy : false) || hadCred !== nowHasCred,
   });
 };
 

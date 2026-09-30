@@ -29,6 +29,7 @@ import { build } from 'esbuild';
 import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { webcrypto } from 'node:crypto';
+import { pathToFileURL } from 'node:url';
 import { execSync } from 'node:child_process';
 
 if (!globalThis.crypto) globalThis.crypto = webcrypto;
@@ -137,21 +138,34 @@ export function isBridgeConfigured() { return false; }
 `;
 writeFileSync(resolve(ROOT, CACHE, 'imp-supabase-stub.mjs'), STUB);
 
+// `astro:middleware` は Astro 実行時にしか無い。`defineMiddleware` は素通しなので同じ形で置く。
+writeFileSync(resolve(ROOT, CACHE, 'imp-astro-middleware-stub.mjs'),
+  'export const defineMiddleware = (fn) => fn;\n');
+
 await build({
-  entryPoints: ['src/lib/admin-impersonation.ts', 'src/lib/admin-identity.ts', 'src/lib/viewer.ts'],
+  entryPoints: [
+    'src/lib/admin-impersonation.ts', 'src/lib/admin-identity.ts', 'src/lib/viewer.ts',
+    'src/lib/write-guard.ts', 'src/middleware.ts',
+  ],
   bundle: true, platform: 'node', format: 'esm', logLevel: 'error',
   define: { 'import.meta.env': '{"DEV":false}' },
-  outdir: `${CACHE}/imp`, outExtension: { '.js': '.mjs' },
+  outdir: `${CACHE}/imp`, outbase: 'src', outExtension: { '.js': '.mjs' },
   plugins: [{
     name: 'stub',
     setup(b) {
-      b.onResolve({ filter: /(^|\/)supabase$/ }, () => ({ path: '../imp-supabase-stub.mjs', external: true }));
+      // **絶対パスで外に出す。** 相対だと出力の階層 (lib/ 配下か直下か) で解決先がずれる。
+      b.onResolve({ filter: /(^|\/)supabase$/ }, () => ({
+        path: pathToFileURL(resolve(ROOT, CACHE, 'imp-supabase-stub.mjs')).href, external: true }));
+      b.onResolve({ filter: /^astro:middleware$/ }, () => ({
+        path: pathToFileURL(resolve(ROOT, CACHE, 'imp-astro-middleware-stub.mjs')).href, external: true }));
     },
   }],
 });
-const imp = await import(`../${CACHE}/imp/admin-impersonation.mjs`);
-const ident = await import(`../${CACHE}/imp/admin-identity.mjs`);
-const viewerMod = await import(`../${CACHE}/imp/viewer.mjs`);
+const imp = await import(`../${CACHE}/imp/lib/admin-impersonation.mjs`);
+const ident = await import(`../${CACHE}/imp/lib/admin-identity.mjs`);
+const viewerMod = await import(`../${CACHE}/imp/lib/viewer.mjs`);
+const guard = await import(`../${CACHE}/imp/lib/write-guard.mjs`);
+const mw = await import(`../${CACHE}/imp/middleware.mjs`);
 const db = await import(`../${CACHE}/imp-supabase-stub.mjs`);
 
 const UID_A = 'aaaaaaaa-1111-4111-8111-111111111111';
@@ -403,15 +417,160 @@ console.log('\n⑥ resolveViewer（書き込み先の分離）\n');
   eq('V-6 locals が無ければ従来どおり本人', self.uid, UID_B);
   eq('V-7 本人の kind は admin_self', self.kind, 'admin_self');
   eq('V-8 本人は自分に書ける', self.writeTargetUid, UID_B);
-  // **middleware を通っていないのに locals だけ在る**ことは起こり得ないが、
-  // 「admin でない Cookie + locals」で成立しないことは固定しておく。
-  const nonAdminCookie = await viewerMod.signViewer(UID_B, false);
-  const v2 = await viewerMod.resolveViewer({
+  /*
+   * **`welltect_v` を持たない admin**（2026-09-30 修正の本体）。
+   * 以前はここで `verified?.admin` を要求していたため、**uid を持たない admin は
+   * middleware を通っているのに本人扱いされ 403 相当**になっていた。
+   */
+  const noViewer = await viewerMod.resolveViewer({
     request: new Request('https://x.test/admin-view/' + CTX + '/dashboard'),
-    cookies: { get: () => ({ value: nonAdminCookie }) },
-    locals: { adminView: { ctx: CTX, targetUid: UID_A, targetOrigin: 'production', adminIdentity: ADMIN1, adminSelfUid: UID_B, expiresAt: '' } },
+    cookies: { get: () => undefined },                     // ★ welltect_v が 1 つも無い
+    locals: { adminView: { ctx: CTX, targetUid: UID_A, targetOrigin: 'production', adminIdentity: ADMIN1, adminSelfUid: null, expiresAt: '' } },
   });
-  eq('V-9 **非 admin の Cookie では代理表示にならない**', v2.uid, UID_B);
+  eq('V-9 **welltect_v が無くても代理表示が成立する**', noViewer.kind, 'admin_impersonation');
+  eq('V-10 表示対象は対象顧客', noViewer.uid, UID_A);
+  eq('V-11 **selfUid は null**（uid を持たない admin）', noViewer.selfUid, null);
+  eq('V-12 それでも書き込みは不可', noViewer.writeTargetUid, null);
+  eq('V-13 isAdmin は true（画面の admin 表示は出す）', noViewer.isAdmin, true);
+  eq('V-14 根拠は admin-cookie', noViewer.adminBy, 'admin-cookie');
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑥-2 middleware — **認可はここ 1 か所**（cookie を入れて 403 / 通過を見る）
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\n⑥-2 middleware（/admin-view の認可）\n');
+{
+  db.reset();
+  const ctxObj = await imp.consumeHandoff(await imp.claimHandoff(await issue(UID_A, ADMIN1)), ADMIN1);
+  const CRED1 = await ident.signAdminCred(ADMIN1);
+  const CRED2 = await ident.signAdminCred(ADMIN2);
+
+  /** cookie の顔ぶれを与えて middleware を 1 回通す。 */
+  async function run(cookies, path = `/admin-view/${ctxObj.ctx}/dashboard`) {
+    const locals = {};
+    let rewroteTo = null;
+    const res = await mw.onRequest(
+      {
+        request: new Request(`https://x.test${path}`),
+        cookies: { get: (n) => (cookies[n] ? { value: cookies[n] } : undefined) },
+        locals,
+      },
+      (to) => { rewroteTo = to ?? '(next)'; return new Response('ok', { status: 200 }); },
+    );
+    return { status: res.status, locals, rewroteTo };
+  }
+
+  const okRun = await run({ [ident.ADMIN_COOKIE]: CRED1 });
+  eq('M-1 **welltect_v 無し + 有効な welltect_admin_v → 通る**', okRun.status, 200);
+  eq('M-2 locals に代理表示が載る', okRun.locals.adminView?.targetUid, UID_A);
+  eq('M-3 selfUid は null（uid を持たない admin）', okRun.locals.adminView?.adminSelfUid, null);
+  eq('M-4 内側のページへ rewrite する', okRun.rewroteTo, '/dashboard');
+
+  const withViewer = await run({
+    [ident.ADMIN_COOKIE]: CRED1,
+    [viewerMod.VIEWER_COOKIE]: await viewerMod.signViewer(UID_B, true),
+  });
+  eq('M-5 welltect_v が在れば selfUid を拾う', withViewer.locals.adminView?.adminSelfUid, UID_B);
+
+  const nonAdminViewer = await run({
+    [ident.ADMIN_COOKIE]: CRED1,
+    [viewerMod.VIEWER_COOKIE]: await viewerMod.signViewer(UID_B, false),   // admin フラグ無し
+  });
+  eq('M-6 **welltect_v が非 admin でも credential が正なら通る**（認可根拠にしない）', nonAdminViewer.status, 200);
+  eq('M-7 そのとき selfUid は載せない', nonAdminViewer.locals.adminView?.adminSelfUid, null);
+
+  eq('M-8 **credential が無ければ 403**', (await run({})).status, 403);
+  eq('M-9 **別 admin の credential では 403**', (await run({ [ident.ADMIN_COOKIE]: CRED2 })).status, 403);
+  eq('M-10 **welltect_v だけでは 403**',
+    (await run({ [viewerMod.VIEWER_COOKIE]: await viewerMod.signViewer(UID_B, true) })).status, 403);
+  eq('M-11 壊れた credential は 403', (await run({ [ident.ADMIN_COOKIE]: 'a.b.c' })).status, 403);
+  eq('M-12 存在しない context は 403',
+    (await run({ [ident.ADMIN_COOKIE]: CRED1 }, `/admin-view/${'z'.repeat(43)}/dashboard`)).status, 403);
+  eq('M-13 403 のとき locals を汚さない', (await run({})).locals.adminView, undefined);
+
+  // **/admin-view 以外には触れない**（既存の全経路が挙動不変であることの本体）
+  const plain = await run({}, '/dashboard');
+  eq('M-14 **/admin-view 以外は素通し**', plain.rewroteTo, '(next)');
+  eq('M-15 素通しのとき locals を触らない', plain.locals.adminView, undefined);
+
+  // **剥奪**: credential を削除された admin は同じ context に入れない
+  const jar2 = new Map([[ident.ADMIN_COOKIE, CRED1]]);
+  await ident.issueAdminCred(
+    { cookies: { set: (k, v) => jar2.set(k, v), delete: (k) => jar2.delete(k) } },
+    'admin.one@example.com', false);
+  eq('M-16 **admin から外れたら既存の context にも入れない**',
+    (await run(Object.fromEntries(jar2))).status, 403);
+
+  // **API も同じ経路を通る**（U27 の載せ替え先）
+  const apiRun = await run({ [ident.ADMIN_COOKIE]: CRED1 }, `/admin-view/${ctxObj.ctx}/api/scan/save`);
+  eq('M-17 **/admin-view/<ctx>/api/… も通り、内側の API へ rewrite される**', apiRun.rewroteTo, '/api/scan/save');
+  eq('M-18 そのとき locals も載る（＝API 側で代理表示と分かる）', apiRun.locals.adminView?.targetUid, UID_A);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑥-3 read-only — **代理表示からは誰にも書けない**（U27）
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\n⑥-3 read-only の保証（U27）\n');
+{
+  const imperson = { kind: 'admin_impersonation', writeTargetUid: null };
+  const self = { kind: 'self', writeTargetUid: UID_B };
+  const adminSelf = { kind: 'admin_self', writeTargetUid: UID_B };
+
+  ok('W-1 代理表示は書けない', guard.isReadOnlyViewer(imperson));
+  ok('W-2 一般利用者は書ける', !guard.isReadOnlyViewer(self));
+  ok('W-3 admin 本人（代理でない）は書ける', !guard.isReadOnlyViewer(adminSelf));
+  eq('W-4 代理表示には 403 を返す', guard.denyReadOnlyWrite(imperson)?.status, 403);
+  eq('W-5 一般利用者には null（素通し）', guard.denyReadOnlyWrite(self), null);
+  // **kind だけ / writeTargetUid だけ、のどちらでも止まる**（片方を消した退行を拾う）
+  ok('W-6 writeTargetUid が null なら kind に関わらず止める',
+    guard.isReadOnlyViewer({ kind: 'self', writeTargetUid: null }));
+  ok('W-7 kind が代理表示なら uid が入っていても止める',
+    guard.isReadOnlyViewer({ kind: 'admin_impersonation', writeTargetUid: UID_A }));
+
+  /*
+   * **書き込み API が実際に番人を通しているか。**
+   * ここを落とすと「read-only と仕様に書いてあるのに書ける」状態に戻る
+   * （2026-09-30 の実測: `scan/save` は `selfUid` を使っており **admin 本人へ書いていた**）。
+   */
+  const WRITERS = [
+    ['src/pages/api/scan/save.ts',            'スキャン結果の保存'],
+    ['src/pages/api/scan/jobs.ts',            'スキャンの非同期ジョブ'],
+    ['src/pages/api/scan/export.ts',          'スキャンの S3 書き出し'],
+    ['src/pages/api/interview/export.ts',     'AI 問診の書き出し＋完了記録'],
+    ['src/pages/api/kit/[id]/self-report.ts', 'キットの自己申告'],
+    ['src/pages/api/notices/[id]/read.ts',    'お知らせの既読化'],
+  ];
+  for (const [f, label] of WRITERS) {
+    const src = code(f);
+    ok(`W-8 ${label} が番人を通す`, /denyReadOnlyWrite\(/.test(src), f);
+  }
+  // **番人は「書く前」に居ること**（後ろだと書いてから 403 を返す）
+  for (const [f, label] of WRITERS) {
+    const src = code(f);
+    const iGuard = src.indexOf('denyReadOnlyWrite(');
+    /*
+     * **書き込みの目印。** ここに漏れがあると「番人を後ろへ動かす」退行を拾えない
+     * （実際 `scan/jobs.ts` は `.insert(` を直接書かず `enqueueScanJob()` を呼ぶだけで、
+     *  最初の版では目印 0 件 → 常に PASS になっていた）。
+     */
+    const WRITE_MARKS = [
+      '.insert(', '.update(', '.upsert(', 'putScanExport(', 'saveScanResult(',
+      'recordInterviewCompletion(', 'enqueueScanJob(', 'putOriginal(',
+    ];
+    const hits = WRITE_MARKS.map((w) => src.indexOf(w)).filter((n) => n > 0);
+    ok(`W-9a ${label} の書き込み箇所を検出できている`, hits.length > 0,
+      '目印が 0 件だとこの検査が素通しになる');
+    const iWrite = Math.min(...hits.concat([Number.MAX_SAFE_INTEGER]));
+    ok(`W-9 ${label} は書く前に止める`, iGuard > 0 && iGuard < iWrite, `guard@${iGuard} write@${iWrite}`);
+  }
+
+  // **client fetch の載せ替えが中央 1 か所に在り、通常の画面では動かないこと**
+  const layout = read('src/layouts/BaseLayout.astro');
+  ok('W-10 fetch の載せ替えが BaseLayout に 1 か所ある', /window\.fetch = /.test(layout));
+  ok('W-11 **/admin-view のときだけ動く**（通常の画面では挙動不変）',
+    /if \(!m\) return;/.test(layout) && /admin-view/.test(layout));
+  ok('W-12 **同一オリジンの /api/ だけ**載せ替える（外部 API に触れない）',
+    /u\.origin === location\.origin/.test(layout) && /startsWith\('\/api\/'\)/.test(layout));
 }
 
 /* ══════════════════════════════════════════════════════════════════════

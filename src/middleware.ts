@@ -44,21 +44,40 @@ export const onRequest = defineMiddleware(async (context, next) => {
   const parsed = parseAdminViewPath(new URL(context.request.url).pathname);
   if (!parsed) return next();   // ★ 既存の経路はここで終わり（挙動不変）
 
-  const viewer = await verifyViewer(context.cookies.get(VIEWER_COOKIE)?.value);
-  if (!viewer || !viewer.admin) return forbidden();
-
+  /*
+   * **認可の根拠は `welltect_admin_v` 一本**（2026-09-30 修正）。
+   *
+   * 【なぜ `welltect_v` を条件にしないか】**`admin_users` に居るが Scan-Chat-AI 側の
+   * `diagnostic_user_id` を持たない admin が居る**。その人は `api/auth/resolve.ts` の
+   * `{ linked:false }` で返るので **`welltect_v` を一生持てない**。
+   * ここで `welltect_v` を要求すると、v1.4 で payload から uid を外した意味が消え、
+   * **その admin は必ず 403** になる（実際そうなっていた）。
+   *
+   * `welltect_admin_v` は
+   *   ・サーバ検証済みの Google/Supabase identity からしか発行されない
+   *   ・`admin_users` の在籍確認を通った人にしか出ない
+   *   ・HMAC で封じてあるので中身を書き換えられない
+   *   ・admin から外れたら `refresh-admin` が削除する
+   * ので、**これ単体で「どの admin か」の証明として十分**。
+   */
   const cred = await verifyAdminCred(context.cookies.get(ADMIN_COOKIE)?.value);
   if (!cred) return forbidden();
 
   const session = await resolveImpersonationContext(parsed.ctx, cred.identity);
   if (!session) return forbidden();
 
+  /*
+   * `welltect_v` は**認可には使わない**。在れば admin 本人の uid を拾うだけ
+   * （画面の切り分け表示用）。**無くても代理表示は成立する。**
+   */
+  const viewer = await verifyViewer(context.cookies.get(VIEWER_COOKIE)?.value);
+
   context.locals.adminView = {
     ctx: session.ctx,
     targetUid: session.targetUid,
     targetOrigin: session.targetOrigin,
     adminIdentity: cred.identity,
-    adminSelfUid: viewer.uid,
+    adminSelfUid: viewer?.admin ? viewer.uid : null,
     expiresAt: session.expiresAt,
   };
 

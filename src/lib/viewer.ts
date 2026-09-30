@@ -236,13 +236,14 @@ export interface Viewer {
   isAdmin: boolean;
   /**
    * **何が根拠で admin になったか**。`null` は admin でない。
-   *   `'cookie'` … サインイン時に **wellfort-site の管理者リスト**へ問い合わせて判定
+   *   `'cookie'`       … サインイン時に **wellfort-site の管理者リスト**へ問い合わせて判定
+   *   `'admin-cookie'` … **`welltect_admin_v`**（代理表示中。`welltect_v` が無い admin も居る）
    *
    * **「admin にならない」の原因切り分けのために持つ。** 判定は静かに外れるので、
    * 画面のデバッグ欄に根拠を出せないと「なぜダミーが出ないか」が誰にも分からない
    * (実測 2026-08-30: 本番で報告書が空になり、原因の特定に何往復もした)。
    */
-  adminBy: 'cookie' | null;
+  adminBy: 'cookie' | 'admin-cookie' | null;
   /** admin が `?u=` で他人を表示している状態か。 */
   impersonating: boolean;
   /**
@@ -313,16 +314,22 @@ export async function resolveViewer(ctx: AstroGlobal | APIContext): Promise<View
    * ページまで到達させない（§24.1「URL が名指ししたものが出せないなら、何も出さない」）。
    */
   const av = (ctx as { locals?: App.Locals }).locals?.adminView;
-  if (av && verified?.admin) {
+  if (av) {
     return {
       kind: 'admin_impersonation',
       targetLocked: true,
       writeTargetUid: null,            // ★ 代理表示は read-only（§12.5）
       viewCtx: av.ctx,
       uid: av.targetUid,
-      selfUid: verified.uid,
+      /*
+       * **admin 本人の uid は無いことがある**（2026-09-30）。
+       * `admin_users` に居るが `diagnostic_user_id` を持たない admin が居るため。
+       * **ここで `verified?.admin` を要求しない** — 要求すると、その admin は
+       * middleware を通っているのに画面で本人扱いされ 403 相当になる。
+       */
+      selfUid: av.adminSelfUid,
       isAdmin: true,
-      adminBy: 'cookie',
+      adminBy: 'admin-cookie',
       impersonating: true,
       cookieStale: false,
       origin: av.targetOrigin,

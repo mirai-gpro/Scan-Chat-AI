@@ -26,6 +26,7 @@ import type { APIRoute } from 'astro';
 import { buildElithInterviewBundle } from '../../../lib/interview-export';
 import { recordInterviewCompletion } from '../../../lib/interview-completion';
 import { resolveViewer } from '../../../lib/viewer';
+import { denyReadOnlyWrite } from '../../../lib/write-guard';
 import type { AnswerValue } from '../../../scripts/chat/interview-script';
 import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
 
@@ -60,6 +61,14 @@ function sanitizeAnswers(raw: unknown): Record<string, AnswerValue> {
 }
 
 export const POST: APIRoute = async (ctx) => {
+  /*
+   * **代理表示中は書かせない**（2026-09-30・仕様書 §12.5 / §38-U27）。
+   * この口は S3 の Elith 納品と `interview_completions` へ書く。
+   * **body 冒頭で止める** — 読み取りも解析もしない。
+   */
+  const denied = denyReadOnlyWrite(await resolveViewer(ctx));
+  if (denied) return denied;
+
   let body: ExportBody;
   try {
     body = (await ctx.request.json()) as ExportBody;

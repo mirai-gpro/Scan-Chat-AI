@@ -1,6 +1,6 @@
 # Welltect セキュア共有アクセス ／ Admin 代理表示の UID-less 化 仕様書
 
-**版**: 1.4 (2026-09-30・**Admin 代理表示を実装完了。仕様と実装を完全同期**)
+**版**: 1.4a (2026-09-30・**Admin 代理表示を実装完了。実コードのレビュー 2 点を反映**)
 **状態**: **Admin 代理表示（§12 / §13）は実装済み。外部共有（§14〜§20）は仕様のみ。**
 
 > **v1.4 の変更（実装 2026-09-30。v1.1〜v1.3 の確定事項は 1 つも変えていない）**
@@ -22,6 +22,17 @@
 > ④ **§12.8 の `pending_attempts` を 5 回で確定（U25 を閉じた）**。数え方も明記。
 > ⑤ **§13.0 案 B の実装方式を確定（U20 を閉じた）** — **`src/middleware.ts` を 1 本だけ新設**。
 > ⑥ **§22 / §23 / §25 / §31 / §34 / §35 / §36 / §38 / 付録 B を実装へ同期。**
+>
+> **v1.4a の修正（同日・実コードのレビューで判明した 2 点）**
+> ⑦ **`welltect_v` は代理表示の必須要素ではない** — ①で payload から uid を外したのに、
+> `middleware.ts` と `resolveViewer()` が **`welltect_v` の admin フラグを要求したままだった**。
+> uid を持たない admin は `welltect_v` を持てないので、**実際には必ず 403**。
+> 認可の根拠を **`welltect_admin_v` 一本**に直した（§12.4.1 / §13.2）。
+> `refresh-admin` も `welltect_v` 無しで動くようにした（**そうでないと権限剥奪が効かない**）。
+> ⑧ **U27 を閉じた — 代理表示を本当に read-only にした。** 仕様に「read-only」と書き
+> `writeTargetUid` を null にしていたが、**書き込み API は誰もそれを見ていなかった**
+> （`scan/save` は `selfUid` を使い **admin 本人へ書いていた**）。
+> 中央の番人 `src/lib/write-guard.ts` と、`BaseLayout` の fetch 載せ替えで塞いだ（§12.5）。
 
 > **v1.1 の変更（レビュー 2026-09-30・7 点）**
 > ① **§13.0 を新設** — 現行の `target="_blank"` による複数タブ運用が Cookie 1 本方式で壊れる
@@ -598,7 +609,7 @@ admin_identity  = base64url( HMAC-SHA256( APP_SESSION_SECRET,
 | 値 | **`<admin_identity>.<exp>.<HMAC-SHA256(payload)>`**（**v1.4 で uid を外した**） |
 | **uid を payload に含めない理由（v1.4 で変更）** | **`admin_users` に居るが Scan-Chat-AI 側の `diagnostic_user_id` を持たない admin が居る**。`api/auth/resolve.ts:222` はその人を `{ linked:false }` で返すので、uid を必須にすると**その admin は代理表示を一生使えない**。handoff の本人確認の本質は「**どの admin か**」であって、その admin 自身の健康診断 uid ではない |
 | **では Cookie 移植は防げるのか** | **防げる範囲は uid を含めていた頃と同じ**。`admin_identity` は payload に入り HMAC で封じてあるので**書き換えれば署名が合わない**。「自分の Cookie を別端末へ写す」ことは `welltect_v` と同様に可能だが、それは**同じ本人**であって別 admin にはならない。uid を足しても、両方の Cookie を一緒に写されれば同じなので、**uid の有無で強度は変わらない** |
-| **`welltect_v` を必須にしない**（v1.4） | 上と同じ理由。`/admin-view` の入場条件は **`welltect_admin_v` が有効であること**。`welltect_v` が admin フラグを持つならそれも見るが、**無いこと自体では落とさない** |
+| **`welltect_v` を必須にしない**（v1.4a・**実装もこうなっている**） | 上と同じ理由。`/admin-view` の入場条件は **`welltect_admin_v` が有効であること 1 点**。`welltect_v` は**認可に使わない** — 在れば admin 本人の `selfUid` を拾うだけで、**無くても・非 admin でも代理表示は成立する**（検査 M-1 / M-6 / M-10）。v1.4 の初版は `viewer.admin` を要求しており、**uid を持たない admin が必ず 403 になっていた** |
 | 属性 | `HttpOnly` / `Secure` / `SameSite=Lax` / `Path=/` |
 | 有効期間 | **`welltect_v` と同じ 30 日**（別々に切れると「admin なのに handoff だけ通らない」という分かりにくい状態を作る） |
 | 発行 | **`POST /api/auth/resolve`**（**`{ linked:false }` の早期 return より前**・v1.4）と **`POST /api/auth/refresh-admin`**（`signViewer` の直後）。**どちらも既にサーバ検証済み email を持っている**。位置は `verify:admin-handoff` の **S-8** が機械で固定する |
@@ -644,8 +655,12 @@ Scan-Chat-AI   POST /api/admin/impersonation/handoff
 ③ **session.admin_identity === welltect_admin_v.admin_identity**（不一致なら 403）
 ④ session の expires_at / revoked_at を見る（切れていれば 403）
 ⑤ welltect_v が admin フラグを持つならその uid を `selfUid` に載せる
-   （**持っていなくても代理表示は成立する** — uid の無い admin が居るため・v1.4）
+   （**認可条件ではない。無くても・非 admin でも ①〜④ が通れば成立する**・v1.4a）
 ```
+
+> **認可に使うのは ①〜④ だけ。** `welltect_v` は「表示用の付加情報」であって
+> 入場券ではない。ここを取り違えると **uid を持たない admin が必ず 403** になる
+> （v1.4 の初版がそうだった）。機械で固定: **M-1 / M-6 / M-10 / V-9〜V-14**。
 
 **実装は `src/middleware.ts` 1 か所だけ**（§13.0 の実装方式）。ページ側では再確認しない
 （2 か所に書くと片方だけ緩む）。middleware が `locals.adminView` に載せ、
@@ -660,6 +675,15 @@ middleware を通っていなければ代理表示は成立しない。
 
 `admin_users` から外れると、**次の `refresh-admin`** で `isAdmin=false` になり
 `welltect_admin_v` は**削除される**（発行条件を満たさないため）→ 以後 ②で 403。
+
+> **v1.4a: `refresh-admin` は `welltect_v` が無くても動く。**
+> 初版は `no viewer cookie → 401` で弾いていたので、**uid を持たない admin の
+> credential を削除する手段が無く、剥奪しても最大 30 日そのまま**だった。
+> → **`welltect_v` の再署名は在るときだけ**行い、**admin credential の発行 / 削除は常に行う**。
+> `GoogleOneTap` の呼び出し条件にも **「`welltect_admin_v` を持っている」** を足した
+> （持っていない人と同じで、そうしないとこの口を一度も叩かない）。
+> 検査: `verify:viewer-origin` ⑤（**`welltect_v` は新規発行しない**／
+> credential は発行される／**admin から外れたら消える**）＋ `verify:admin-handoff` M-16。
 **即時ではない**（最大で次のタブを開くまで）ことは受容する。
 即時に止めたいときは `admin_impersonation_sessions` を `revoked_at` で落とす（§27.4）。
 
@@ -672,6 +696,34 @@ middleware を通っていなければ代理表示は成立しない。
 理由: 現行の `api/scan/save.ts:32-35` が既に「代理表示中に保存すると相手の検査結果を
 勝手に作ることになる」として明示的に禁じている。**この判断を新方式でも維持する。**
 admin がサポート目的で相手の画面を見るだけなら書き込みは要らない。
+
+#### 【v1.4a】**「read-only」を実際に強制した**（U27 を閉じた）
+
+**仕様に書いて `writeTargetUid = null` にしただけでは守れていなかった。** 実測:
+
+| 経路 | 何が起きていたか |
+|---|---|
+| `api/scan/save.ts:36` / `api/scan/jobs.ts:39` | `viewer.selfUid` を使う → **admin 本人の検査結果として保存される**（対象顧客は無事だが、admin のデータが汚れる） |
+| `api/kit/[id]/self-report.ts` / `api/notices/[id]/read.ts` | **body の `diagnosticUserId` をそのまま信じる** → **対象顧客の配送状態・既読状態が実際に変わる** |
+| `api/scan/export.ts` / `api/interview/export.ts` | S3 と `interview_completions` へ書く |
+
+**2 段で塞いだ。片方だけでは足りない。**
+
+| | 何をするか | ファイル |
+|---|---|---|
+| **運ぶ** | 代理表示中だけ、同一オリジンの `fetch('/api/…')` を **`/admin-view/<ctx>/api/…`** に載せ替える。**ページの JS は 1 行も変えない**（20 か所以上を書き換えると必ず 1 か所漏れる） | `src/layouts/BaseLayout.astro` の `<head>` |
+| **止める** | `denyReadOnlyWrite(viewer)` を**書き込みの直前**に置く。`kind === 'admin_impersonation'` か `writeTargetUid === null` なら **403** | `src/lib/write-guard.ts` ＋ 上表の 6 本 |
+
+- **載せ替えが無い**と context が届かず、サーバは admin 本人として扱う＝番人が発火しない。
+- **番人が無い**と、context 付きで届いても書けてしまう。
+- **`/admin-view/<ctx>/api/…` は middleware がそのまま通す**（`rest` に `/api/…` を渡すだけ）。
+  検査 M-17 / M-18。
+- **通常の画面では 1 バイトも挙動が変わらない** — 載せ替えは `/admin-view/` のときだけ動き
+  （検査 W-11）、番人は一般利用者に `null` を返す（W-5）。
+- **POST だから一律禁止にはしない。** 禁じるのは**永続データの変更**だけで、
+  AI への問い合わせやトークン発行のような読み取り相当の POST は通す。
+- 検査 **W-1〜W-12**（番人の判定 / 6 本すべてが通していること / **書く前に居ること** /
+  載せ替えの範囲）。**退行注入 4 種**で落ちることを確認済み。
 
 > **未確定**: 「admin が代理で問診・スキャンを代行入力したい」という運用要望が出た場合は
 > 別途の裁定が要る（§38-U5）。
@@ -1037,7 +1089,8 @@ URL path の <opaque-context>            （案 B）
    → sha256 → diagnosis.admin_impersonation_sessions.session_digest
    → { admin_identity, target_uid, target_origin, expires_at, revoked_at }
    → **welltect_admin_v.admin_identity == 行の admin_identity を検証**   ← ここが必須
-     （§12.4.1 の「毎リクエスト」。**v1.4: uid の一致は要求しない** — payload に uid が無い）
+     （§12.4.1 の「毎リクエスト」。**v1.4: uid の一致は要求しない** — payload に uid が無い。
+      **v1.4a: `welltect_v` の有無・admin フラグも認可条件にしない**）
    → 不一致 / 期限切れ / revoked / credential 無し  ならすべて 403（理由を区別しない）
 ```
 
@@ -1772,7 +1825,8 @@ pending セッションは `consented_at is null` の行として同じ表に置
 | `/admin/handoff/<token>` | — | 入口（**60 秒・単一使用**） | **BLOCK** | — | **副作用なし（v1.4）**。フォームを描くだけで DB も Cookie も触らない | **実装済み**・§12.7 |
 | **`POST /api/admin/handoff/claim`** | — | claim（**ここで raw token が死ぬ**） | **BLOCK** | — | pending へ原子的に交換 ＋ `welltect_handoff_pending` 発行 → 303 `/admin/handoff/continue` | **実装済み（v1.4 で新設）**・§12.8 ① |
 | `/admin/handoff/continue` | — | **Admin ログイン待ちの続き**（§12.7） | **BLOCK** | — | 発行 admin と一致で **consume ＋ context を 1 トランザクション** → 302 `/admin-view/<ctx>/dashboard`。不一致・非 admin は **403**（＋ attempts +1） | **実装済み**・§12.7 |
-| **`/admin-view/<ctx>/…`** | — | **代理表示中の全ページ（案 B・§13.0）** | **BLOCK** | ✔ | 各ページと同じ。**`welltect_admin_v` と `admin_identity` の一致を毎リクエスト検証**（`src/middleware.ts`）。**書き込みは不可**（`writeTargetUid = null`） | **実装済み**・§13.0 |
+| **`/admin-view/<ctx>/…`** | — | **代理表示中の全ページ（案 B・§13.0）** | **BLOCK** | ✔ | 各ページと同じ。**`welltect_admin_v` と `admin_identity` の一致を毎リクエスト検証**（`src/middleware.ts`。**`welltect_v` は認可に使わない**） | **実装済み**・§13.0 |
+| **`/admin-view/<ctx>/api/…`** | — | **代理表示中のクライアント fetch**（`BaseLayout` が載せ替える） | **BLOCK** | ✔ | 読み取りは対象顧客の文脈で通る。**永続書き込みは `denyReadOnlyWrite` が 403**（§12.5） | **実装済み（v1.4a）**・§38-U27 |
 | **`POST /api/admin/impersonation/end`** | — | 代理表示の終了（1 件 / 全件） | **BLOCK** | — | 自分の `admin_identity` の session だけを `revoked_at` に落とす | **実装済み（v1.4 で新設）**・§13.3 |
 | `/admin/**`（Scan-Chat-AI） | admin のみ | admin のみ | **BLOCK** | — | | `src/pages/admin/**` |
 
@@ -2126,7 +2180,7 @@ UI = wellfort-site / 処理 = Scan-Chat-AI の API。CLAUDE.md の分界どお�
 
 ## 34. テスト
 
-### 34.0 【v1.4・実装済み】`npm run verify:admin-handoff`（CI の A 層・**115 件 PASS**）
+### 34.0 【v1.4・実装済み】`npm run verify:admin-handoff`（CI の A 層・**160 件 PASS**）
 
 Admin 代理表示ぶんは**実装と同時に入れた**。外部共有ぶん（§34.1 の S 系）は未実装のまま。
 
@@ -2142,16 +2196,24 @@ Admin 代理表示ぶんは**実装と同時に入れた**。外部共有ぶん�
 | ③ `P-1〜P-7` | 8 | `pending_attempts`（**5 で確定** / 1 ずつ増える / 4 回目までは再試行可 / 5 回で失効 / **並行しても数え落ちない**） |
 | ④ `C-1〜C-12` | 12 | context の毎リクエスト解決（本人のみ / **別 admin は 403** / **credential 無しは 403** / 不正な字面 / 期限 / revoke / **複数タブが同時に成立** / 「すべて終了」は自分の分だけ） |
 | ⑤ `L-1〜L-11` | 11 | path の分解（`..` を弾く）とリンクの prefix（**代理表示で `?u=` を出さない**） |
-| ⑥ `V-1〜V-9` | 9 | `resolveViewer`（**`writeTargetUid = null`＝read-only** / `targetLocked` / 非 admin の Cookie では成立しない） |
+| ⑥ `V-1〜V-14` | 14 | `resolveViewer`（**`writeTargetUid = null`＝read-only** / `targetLocked` / **`welltect_v` が無くても成立する**＝uid 無し admin） |
+| ⑥-2 `M-1〜M-18` | 18 | **middleware（認可はここ 1 か所）**。Cookie を入れて 403 / 通過を実際に見る（**credential だけで通る** / **`welltect_v` だけでは 403** / 別 admin 403 / **剥奪後は既存 context にも入れない** / **`/admin-view` 以外は素通し** / `/admin-view/<ctx>/api/…` も通る） |
+| ⑥-3 `W-1〜W-12` | 21 | **read-only の保証（U27）**。番人の判定 / **書き込み 6 本すべてが通していること** / **書く前に居ること** / fetch 載せ替えの範囲 |
 | ⑦ `S-1〜S-25` | 25 | 構造（**GET が claim/consume/Cookie/DB に触れない** / claim は POST だけ / **cred は早期 return より前** / `welltect_v` 不変 / middleware の範囲 / RLS と RPC と UNIQUE / **raw 列が無い**） |
 | ⑧ `X-1〜X-16` | 17 | 残りの受入条件（**同時 consume でも context 1 件** / **INSERT 失敗で ROLLBACK** / **uid 無し admin でも通る** / **剥奪で credential 削除** / URL に uid が出ない / **reload では数えない** / 対象保持 Cookie 0 件 / **生 email をログへ出す行が無い**） |
 
-**退行注入 12 種で名指しに落ちることを確認済み**（SQL 4 種・TS 8 種）:
+**退行注入 20 種で名指しに落ちることを確認済み**（SQL 4 種・TS 16 種）:
 claim の排他条件を外す / consume の identity 照合を外す / attempts を `= 1` にする /
 `handoff_id` の UNIQUE を外す / `resolveImpersonationContext` の照合を外す /
 revoke の `admin_identity` 絞りを外す / 代理表示でも書けるようにする /
 代理表示でも `?u=` を出す / GET で claim する / cred を早期 return の後ろへ動かす /
-middleware が失敗時に `/dashboard` へ落とす / path の `..` を許す。
+middleware が失敗時に `/dashboard` へ落とす / path の `..` を許す /
+**middleware が `welltect_v` を必須に戻す**（v1.4a で直したバグそのもの・M-1〜M-3 が落ちる）/
+**`resolveViewer` が `verified?.admin` を要求する**（V-9・V-10・V-13）/
+`scan/save` の番人を外す（W-8 / W-9）/ `kit self-report` の番人を外す（同）/
+番人を書き込みの後ろへ動かす（W-9）/ `isReadOnlyViewer` が `kind` だけ見る（W-6）/
+fetch の載せ替えを全画面で動かす（W-11）/
+**`refresh-admin` を `welltect_v` 無しで 401 に戻す**（`verify:viewer-origin` ⑤ が 5 件落ちる）。
 
 **既存検査への波及（緩めずに更新した）**:
 
@@ -2161,7 +2223,7 @@ middleware が失敗時に `/dashboard` へ落とす / path の `..` を許す�
 | 同 T-09 | 正規表現に `${p}` を追加 | 連結の形（`q ? \`${q}&\` : '?'`）は**変えていない** |
 | 同 T-12c | 「middleware を新設していない」→ **「middleware は `/admin-view` 以外に触れない」＋ T-12c2「Cookie を書かない」** | §13.0 の実装方式が確定したため。**約束の中身を、より厳しい形へ置き換えた** |
 | `verify:special-accounts` | 早期 return の検出を前方一致に | 応答に `admin` を足しただけで**位置は同じ** |
-| `verify:viewer-origin` | `admin-identity.ts` も実物を transpile | `refresh-admin` が import するようになったため。**スタブにしない**（発行が黙って失敗する退行を作らないため） |
+| `verify:viewer-origin` | `admin-identity.ts` も実物を transpile。**⑤ を「Cookie が無ければ 401」から「`welltect_v` は発行しない／`welltect_admin_v` は発行・削除する」へ**（v1.4a） | `refresh-admin` が import するようになったため。**スタブにしない**（発行が黙って失敗する退行を作らない）。⑤ は**緩めたのではなく守る対象を分けた** — `welltect_v` の新規発行は**引き続き禁止**、admin credential は**常に**更新（そうでないと剥奪が効かない） |
 
 ### 34.1 新設する自動検査 `npm run verify:shared-access`（CI の A 層・**外部共有ぶん・未実装**）
 
@@ -2324,9 +2386,11 @@ middleware が失敗時に `/dashboard` へ落とす / path の `..` を許す�
 | **B-6** | **生 email が診断系 DB にもログにも残らない** | H-3, S-24, X-13, A-3 | **済** |
 | **B-7** | **GET / prefetch / URL スキャナだけでは handoff の状態が変わらない**（v1.4） | S-1〜S-7 | **済** |
 | **B-8** | **consume と context 発行が 1 トランザクション**（途中失敗は ROLLBACK・v1.4） | X-3, X-4, S-20 | **済** |
-| **B-9** | **uid を持たない admin でも代理表示を使える**（v1.4） | A-8, X-5, X-6, S-8 | **済** |
-| **B-10** | **admin から外れたら使えなくなる**（v1.4） | X-7, X-8, S-10 | **済** |
+| **B-9** | **uid を持たない admin でも代理表示を使える**（v1.4 / **v1.4a で実際に通るようにした**） | A-8, X-5, X-6, S-8, **M-1〜M-4, M-10, V-9〜V-14** | **済** |
+| **B-10** | **admin から外れたら使えなくなる**（v1.4 / **v1.4a で uid 無し admin も削除できるようにした**） | X-7, X-8, S-10, **M-16**, `verify:viewer-origin` ⑤ | **済** |
 | **B-11** | **代理表示では書き込めない**（`writeTargetUid = null`） | V-4, V-5 | **済** |
+| **B-13** | **代理表示の画面から、対象顧客にも admin 本人にも永続書き込みが発生しない**（v1.4a・U27） | **W-1〜W-12**, M-17, M-18 | **済** |
+| **B-14** | **`welltect_v` は代理表示の必須要素ではない**（認可根拠は `welltect_admin_v` 一本） | **M-1, M-6, M-10, V-9** | **済** |
 | **B-12** | **`welltect_v` の形式が 1 バイトも変わっていない** | S-11, `verify:viewer-origin` | **済** |
 | C | 代理表示を終了でき、admin 本人へ戻る | C-7〜C-10 | **済** |
 | D | 外部相手が URL を開くだけで利用できる | S1〜S9 | 未（外部共有） |
@@ -2417,7 +2481,9 @@ middleware が失敗時に `/dashboard` へ落とす / path の `..` を許す�
 > **U25**（`pending_attempts` = **5** で確定。数え方も §12.8 に明記）。
 > **U26** は内容を確定（30 日 ＋ `refresh-admin` での削除）したが、**期間そのものは発注者判断として残す**。
 >
-> **v1.4 で新たに 1 件を追加**: **U27**（代理表示中のクライアント側 `fetch` が prefix を持たない件）。
+> **v1.4 で 1 件を追加し、v1.4a で閉じた**: **U27**（代理表示中のクライアント側 `fetch` が
+> prefix を持たない件）。「read-only だから実害は限定的」という当初の判断が**実測で誤りと分かった**
+> ため、先送りせずその場で塞いだ（§12.5）。
 
 | # | 論点 | 選択肢 | 推奨 | 決める人 |
 |---|---|---|---|---|
@@ -2446,7 +2512,7 @@ middleware が失敗時に `/dashboard` へ落とす / path の `..` を許す�
 | ~~**U24**~~ | ~~サインイン完了後に自動で戻すか~~ | — | **確定: 自動**。`GoogleOneTap` は `resolve` 成功後に**同じ URL を開き直す**（`:216`）ので、追加の実装なしで続きへ進む。**uid を持たない admin のために**、`/admin/handoff/` 配下でだけ `{linked:false, admin:true}` でも進める分岐を足した | **確定済** |
 | ~~**U25**~~ | ~~`pending_attempts` の上限~~ | — | **確定: 5**（v1.4）。**何を 1 回と数えるかも §12.8 に明記**（表示・reload・認証前は数えない）。変えるときは `MAX_PENDING_ATTEMPTS` 1 か所 | **確定済** |
 | **U26** | `welltect_admin_v` の有効期間を `welltect_v` と同じ **30 日**にするか、短くするか | 30 日 / 数時間 | **v1.4 は 30 日で実装**（別々に切れると「admin なのに handoff だけ通らない」という分かりにくい状態を作る）。**admin 権限の剥奪が 30 日効かないわけではない** — `refresh-admin` が毎タブ走って削除する（検査 X-7）。**短くするかは発注者判断**（実装を止めない） | 発注者 |
-| **U27**（v1.4 で追加） | **代理表示中にクライアント側 `fetch('/api/…')` が prefix を持たない** | 現状維持 / API も `/admin-view/<ctx>/api/…` へ / API 側で context を見る | **現状維持で開始。** 代理表示は read-only なので**書き込みは元々通らない**。読み取り API を素のパスで叩くと **admin 本人のデータが返る**（他人のデータが漏れるのではなく、admin 自身のものが出る＝**fail-closed**）。ページの主要な表示は SSR なので実害は限定的。**必要になったら `/admin-view/<ctx>/api/…` が middleware でそのまま通る**（rest に `/api/…` を渡すだけ）ので拡張は容易 | 本番で運用してから判断 |
+| ~~**U27**~~（v1.4 で追加・**v1.4a で閉じた**） | ~~代理表示中にクライアント側 `fetch('/api/…')` が prefix を持たない~~ | — | **確定: 載せ替える ＋ サーバで止める。** 「代理表示は read-only なので書き込みは元々通らない」という v1.4 の判断は**誤りだった** — 実測すると `scan/save` は `selfUid` を使って **admin 本人へ書き**、`kit/self-report` と `notices/read` は **body の uid を信じて対象顧客へ書いて**いた。**中央 1 か所**で ①`BaseLayout` が `/admin-view/<ctx>/api/…` へ載せ替え ②`src/lib/write-guard.ts` が書き込み 6 本を 403 にする（§12.5） | **確定済** |
 
 ---
 
@@ -2466,6 +2532,9 @@ middleware が失敗時に `/dashboard` へ落とす / path の `..` を許す�
 | `src/pages/admin/handoff/continue.astro` | **新規**。本人照合 → consume → context → 302 |
 | `src/pages/api/admin/impersonation/end.ts` | **新規**。代理表示の終了（1 件 / 全件） |
 | `src/components/ImpersonationBanner.astro` | **新規**。代理表示中の帯（§13.4） |
+| `src/lib/write-guard.ts` | **新規（v1.4a）**。永続書き込みの番人（§12.5・U27） |
+| `src/layouts/BaseLayout.astro` | **追加のみ（v1.4a）**。代理表示中だけ `fetch('/api/…')` を載せ替える |
+| `src/pages/api/scan/{save,jobs,export}.ts` ／ `api/interview/export.ts` ／ `api/kit/[id]/self-report.ts` ／ `api/notices/[id]/read.ts` | **番人を 1 行**。後ろ 2 本は `resolveViewer` も追加（それまで**クライアント申告の uid だけ**で書いていた） |
 | `src/pages/api/auth/resolve.ts` | **追加のみ**。`issueAdminCred` を**早期 return より前**で呼ぶ。応答に `admin` を足した |
 | `src/pages/api/auth/refresh-admin.ts` | **追加のみ**。`issueAdminCred`（剥奪時は削除）。`changed` に credential の増減を含めた |
 | `src/components/GoogleOneTap.astro` | **追加のみ**。`/admin/handoff/` 配下でだけ、uid の無い admin を続きへ進める |
@@ -2657,6 +2726,13 @@ POST /api/admin/handoff/claim
    ▼
  リンクは viewerPathPrefix(viewer) = "/admin-view/<ctx>" を前に付ける（`?u=` は出さない）
  画面上部に ImpersonationBanner（対象 uid 先頭 8 桁 ＋ 自動終了時刻 ＋ 終了ボタン 2 つ）
+   ▼
+ クライアントの fetch('/api/…') は BaseLayout が /admin-view/<ctx>/api/… へ載せ替え
+   → middleware を通って locals.adminView が載る
+   → **永続書き込みの口は denyReadOnlyWrite() が 403**（対象顧客にも admin 本人にも書かない）
+
+ ※ 認可の根拠は **welltect_admin_v 一本**。welltect_v は在れば selfUid を拾うだけで、
+   **無くても・非 admin でも代理表示は成立する**（uid を持たない admin が居るため）。
 ```
 
 ### C. External Share

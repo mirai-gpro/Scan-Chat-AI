@@ -1,4 +1,6 @@
 import type { APIRoute } from 'astro';
+import { resolveViewer } from '../../../../lib/viewer';
+import { denyReadOnlyWrite } from '../../../../lib/write-guard';
 import { getServerSupabase } from '../../../../lib/supabase';
 
 export const prerender = false;
@@ -12,7 +14,16 @@ export const prerender = false;
  *
  * body: { diagnosticUserId: string, read?: boolean }  // read 省略時は true (既読化)
  */
-export const POST: APIRoute = async ({ params, request }) => {
+export const POST: APIRoute = async (ctx) => {
+  const { params, request } = ctx;
+  /*
+   * **代理表示中は書かせない**（2026-09-30・仕様書 §12.5 / §38-U27）。
+   * こちらも body の `diagnosticUserId` を信じるので、
+   * 代理表示から押すと**対象顧客の既読状態が変わる**。
+   */
+  const denied = denyReadOnlyWrite(await resolveViewer(ctx));
+  if (denied) return denied;
+
   const id = params.id;
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) {
     return json({ error: 'invalid notice id' }, 400);

@@ -33,7 +33,8 @@ declare namespace App {
       targetUid: string;
       targetOrigin: 'production' | 'staging';
       adminIdentity: string;
-      adminSelfUid: string;
+      /** admin 本人の uid。**uid を持たない admin が居るので null になり得る。** */
+      adminSelfUid: string | null;
       expiresAt: string;
     };
   }

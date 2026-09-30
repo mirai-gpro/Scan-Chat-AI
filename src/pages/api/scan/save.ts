@@ -13,6 +13,7 @@
  */
 import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../lib/viewer';
+import { denyReadOnlyWrite } from '../../../lib/write-guard';
 import { getServerSupabase } from '../../../lib/supabase';
 import { saveScanResult } from '../../../lib/scan-persist';
 import { isSpecialAccount } from '../../../lib/special-accounts';
@@ -33,6 +34,12 @@ export const POST: APIRoute = async (ctx) => {
    * `?u=` は admin の代理表示専用。**保存には使わない** — 代理表示中に保存すると
    * 相手の検査結果を勝手に作ることになる。自分の uid だけを保存先にする。
    */
+  /*
+   * **代理表示中は書かせない**（2026-09-30・仕様書 §12.5 / §38-U27）。
+   * `selfUid` を使っていても、それは **admin 本人へ書く**ということなので read-only ではない。
+   */
+  const denied = denyReadOnlyWrite(viewer);
+  if (denied) return denied;
   const uid = viewer.selfUid;
   if (!uid) return json({ ok: false, error: 'not_signed_in' }, 401);
 
