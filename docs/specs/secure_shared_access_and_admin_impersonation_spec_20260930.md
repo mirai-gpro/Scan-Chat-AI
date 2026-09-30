@@ -1,6 +1,6 @@
 # Welltect セキュア共有アクセス ／ Admin 代理表示の UID-less 化 仕様書
 
-**版**: 1.4a (2026-09-30・**Admin 代理表示を実装完了。実コードのレビュー 2 点を反映**)
+**版**: 1.5 (2026-09-30・**External Share を実装完了。設計は 1.4a から変えていない — 状態欄と §38.2 を足しただけ**)
 **状態**: **Admin 代理表示（§12 / §13）は実装済み。外部共有（§14〜§20）は仕様のみ。**
 
 > **v1.4 の変更（実装 2026-09-30。v1.1〜v1.3 の確定事項は 1 つも変えていない）**
@@ -2393,23 +2393,23 @@ fetch の載せ替えを全画面で動かす（W-11）/
 | **B-14** | **`welltect_v` は代理表示の必須要素ではない**（認可根拠は `welltect_admin_v` 一本） | **M-1, M-6, M-10, V-9** | **済** |
 | **B-12** | **`welltect_v` の形式が 1 バイトも変わっていない** | S-11, `verify:viewer-origin` | **済** |
 | C | 代理表示を終了でき、admin 本人へ戻る | C-7〜C-10 | **済** |
-| D | 外部相手が URL を開くだけで利用できる | S1〜S9 | 未（外部共有） |
-| E | **同意前に健康情報を出さない** | S2 | 未（外部共有） |
-| F | **共有相手が対象者として AI 問診・AI スキャンを実行でき、現行の更新処理が走る** | S10〜S13 | 未（外部共有） |
-| G | **target をクライアントから変更できない**（URL / body / artifact_id） | A8, S14〜S17 | 未（外部共有） |
-| H | **admin 機能に到達できない** | S18 | 未（外部共有） |
-| I | 期限切れ・停止・失効・再発行が即時に効く | S19〜S23 | 未（外部共有） |
-| J | **raw token が DB にもログにも残らない** | S24 | 未（外部共有）／**Admin 側は済**（H-2, S-24, X-13） |
-| K | 全ページが `private, no-store` | S25 | 未（外部共有） |
-| L | **通常本人の挙動に回帰が無い** | S26, W1, §34.3 | 未（外部共有）／**Admin 側は済**（V-6〜V-8, S-11〜S-12, 既存 verify 15 本 PASS） |
-| M | セッション優先順位が仕様どおり | C1〜C4 | 未（外部共有） |
-| N | **書き込み先が resolver 1 か所で決まる** | W2〜W5 | 未（外部共有） |
+| D | 外部相手が URL を開くだけで利用できる | S1〜S9 | **済**（実装 v1.5・`verify:share-access` S01〜S07。**実 DB での通し確認は §34.4 の手動確認が残る**） |
+| E | **同意前に健康情報を出さない** | S2 | **済**（S02・S02b〜S02e） |
+| F | **共有相手が対象者として AI 問診・AI スキャンを実行でき、現行の更新処理が走る** | S10〜S13 | **済**（S11・S11b・S13・W3。**実 DB での通し確認は手動確認が残る**） |
+| G | **target をクライアントから変更できない**（URL / body / artifact_id） | A8, S14〜S17 | **済**（S14・S14b・W4・W5・W6） |
+| H | **admin 機能に到達できない** | S18 | **済**（S18・S18b・S18c） |
+| I | 期限切れ・停止・失効・再発行が即時に効く | S19〜S23 | **済**（S19〜S23d） |
+| J | **raw token が DB にもログにも残らない** | S24 | **済**（S24〜S24g） |
+| K | 全ページが `private, no-store` | S25 | **済**（S25・S25b。既存ページは従来どおり `noStore()`） |
+| L | **通常本人の挙動に回帰が無い** | S26, W1, §34.3 | **済**（W1・W1b・S26 ＋ 既存 A 層 28 本・ブラウザ 4 本すべて PASS） |
+| M | セッション優先順位が仕様どおり | C1〜C4 | **済**（C1〜C4b・§24.1 の順序 3 件） |
+| N | **書き込み先が resolver 1 か所で決まる** | W2〜W5 | **済**（W2〜W5・W9） |
 | **O** | **admin の複数タブが混線しない**（既存機能を退行させない） | C-9, C-10 | **済** |
-| **P** | **共有相手が本人の配送状態・既読状態・認証セッションを変更できない** | S29〜S31 | 未（外部共有） |
-| **Q** | **対象者の profile metadata をクライアントから改竄できない** | S33, W6 | 未（外部共有） |
-| **R** | **未認証で AI / S3 を消費できない** | W7, W8 | 未（外部共有） |
-| **S** | **revoke の効果が正確に説明され、残存 credential の最大 TTL が仕様どおり** | S27, S28 | 未（外部共有） |
-| **T** | **share 中であることが常に画面に出ており、1 タップで終了できる** | S32, §24.4 | 未（外部共有） |
+| **P** | **共有相手が本人の配送状態・既読状態・認証セッションを変更できない** | S29〜S31 | **済**（S29〜S31e。API と UI の両方で閉じた） |
+| **Q** | **対象者の profile metadata をクライアントから改竄できない** | S33, W6 | **済**（S33・W6・`src/lib/target-subject.ts`） |
+| **R** | **未認証で AI / S3 を消費できない** | W7, W8 | **済**（W7・W8・実機 dev で 6 本とも 401 を実測） |
+| **S** | **revoke の効果が正確に説明され、残存 credential の最大 TTL が仕様どおり** | S27, S28 | **一部**（revoke 即時は S21・S22 で固定。**発行済み Live token / presigned PUT が TTL まで残ることの実機確認は未**） |
+| **T** | **share 中であることが常に画面に出ており、1 タップで終了できる** | S32, §24.4 | **済**（S32〜S32d・BaseLayout 1 か所） |
 
 ---
 
@@ -2550,6 +2550,51 @@ fetch の載せ替えを全画面で動かす（W-11）/
 | `src/pages/api/admin/impersonation-handoff.ts` | **新規**。既存 2 層認証（`verifyAdmin` ＋ `SCAN_CHAT_AI_API_KEY`）の中継 |
 | `src/pages/admin/customers.astro` | 「代理表示で開く」を追加。**旧 `?u=` は小さく残した**（§36 Phase 3-4） |
 | `src/pages/admin/health-age.astro` | 同上 |
+
+---
+
+## 38.2 【v1.5】実装したファイル（External Share）
+
+**設計は 1 行も変えていない。** §14〜§27 に書いてあるとおりに作った記録。
+
+**Scan-Chat-AI**
+
+| ファイル | 役割 |
+|---|---|
+| `src/lib/share-access.ts` | **新規**。link / pending / session / ログの本体。**raw token も raw session も raw IP も保存しない**（§15 / §26 / §32） |
+| `src/lib/target-subject.ts` | **新規**。対象者の生年月日・性別を**サーバ側で取り直す**（§19.5）。クライアント値は使わない |
+| `src/lib/write-guard.ts` | **追加のみ**。`denyForShare` / `denyUnlessShareScope` / `denyAnonymous`（§17.2 / §17.5 / §21.4） |
+| `src/lib/viewer.ts` | **追加のみ**。`kind='share'` の分岐を**順序 2**（代理表示の後・self の前）に置く。`shareScope` / `shareLabel` |
+| `src/middleware.ts` | **追加のみ**。共有セッションの解決 ＋ **admin / cron / ops / debug の遮断** ＋ **アクセス記録 1 か所**（§21.2 / §26.1） |
+| `src/pages/share/[token].astro` | **新規**。pending だけ作って 302。**ダッシュボードを描かない**（§16.1） |
+| `src/pages/share/consent.astro` | **新規**。同意画面（§17.1）。対象者の氏名も検査データも読まない |
+| `src/pages/share/unavailable.astro` | **新規**。**理由を出し分けない** 1 画面（§16.3） |
+| `src/pages/api/share/consent.ts` | **新規**。pending を消費して `welltect_share_v` を発行（§18.3） |
+| `src/pages/share/end.ts`（＋ `api/share/end.ts` は別名） | **新規**。**共有 Cookie だけ**を失効・削除（§17.5） |
+| `src/components/ShareBanner.astro` | **新規**。常設の帯（§24.4） |
+| `src/layouts/BaseLayout.astro` | **追加のみ**。帯を**全ページに 1 回だけ**出す |
+| `src/pages/api/{live-token,insight,coach/ask}.ts` ／ `api/interview/export.ts` | 対象を `resolveViewer` に寄せ、**body の uid と profile を使わない**（§19.4 / §19.5） |
+| `src/pages/api/scan/{save,jobs,export}.ts` | `selfUid` → **`writeTargetUid`**。export は body の uid をやめた（§20.3） |
+| `src/pages/api/{scan,scan/upload-ticket,interview/classify-voice}.ts` | **未認証を 401**（§21.4） |
+| `src/pages/api/kit/[id]/self-report.ts` ／ `api/notices/[id]/read.ts` ／ `api/auth/{resolve,signout,refresh-admin}.ts` | **share から 403**。前 2 本は body の uid も廃止（§17.2 / §21.1） |
+| `src/pages/{chat,coach,scan,kit,notices,dashboard}.astro` ほか | uid の DOM 埋め込みと `?u=` 読み取りを撤去。共有では自己申告・既読ボタンを出さない |
+| `src/pages/api/admin/share-links.ts` | **新規**。発行 / 一覧 / 停止 / 再発行 / 失効 / 論理削除 / ログ（Bearer `ADMIN_API_KEY`・§33.4） |
+| `supabase/migrations/20260930000020_shared_access.sql` | **新規**。3 表 ＋ RLS（service_role のみ） |
+| `supabase/migrations/20260930000030_share_consent_rpc.sql` | **新規**。`consume_share_pending`（**1 文で原子的**・§18.3 / §31 T-5）。ローカル PG16 で 5 ケース実測 |
+| `supabase/migrations/20260930000040_share_links_hidden.sql` | **新規**。論理削除の列（§33.2） |
+| `scripts/verify-share-access.mjs` | **新規**。150 件 ＋ **退行注入 8 種**（§34.1） |
+
+**wellfort-site**
+
+| ファイル | 役割 |
+|---|---|
+| `src/pages/api/admin/share-links.ts` | **新規**。既存 2 層認証（`verifyAdmin` ＋ `SCAN_CHAT_AI_API_KEY`）の中継。`created_by` はサーバが付ける |
+| `src/pages/admin/share-links.astro` | **新規**。顧客をカナで検索 → 発行 → **URL はその場でだけコピー** → 一覧 / 停止 / 再発行 / 失効 / 記録 |
+| `src/components/AdminLayout.astro` | **追加のみ**。「セキュア共有リンク」を「設定」へ（デモ用・スペシャルとは**別メニュー**・§33.1） |
+
+**発注者の操作が 2 つ必要**（コードだけでは動かない）:
+① `supabase/migrations/2026093000002{0}` / `…30` / `…40` の適用
+② なし（env の追加は無い。`ADMIN_API_KEY` / `SCAN_CHAT_AI_API_KEY` は既存）
 
 ---
 

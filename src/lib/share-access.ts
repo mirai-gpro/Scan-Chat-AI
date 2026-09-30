@@ -100,6 +100,8 @@ export interface ShareLinkRow {
   created_by: string | null;
   created_at: string;
   revoked_at: string | null;
+  /** 論理削除（admin 一覧から隠すだけ・§33.2）。 */
+  hidden_at: string | null;
 }
 
 export interface ResolvedShare {
@@ -242,16 +244,88 @@ export async function createShareLink(args: {
   return { id: String(data[0].id), token, expiresAt: String(data[0].expires_at) };
 }
 
+const LINK_COLS =
+  'id, target_uid, target_origin, label, purpose, starts_at, expires_at, status, scope, created_by, created_at, revoked_at, hidden_at';
+
 /** 一覧（admin 画面用）。**token は復元できない**ので出さない。 */
 export async function listShareLinks(targetUid?: string | null): Promise<ShareLinkRow[]> {
   const sb = getServerSupabase();
   if (!sb) return [];
-  let q = dg(sb).from('shared_access_links')
-    .select('id, target_uid, target_origin, label, purpose, starts_at, expires_at, status, scope, created_by, created_at, revoked_at');
+  let q = dg(sb).from('shared_access_links').select(LINK_COLS);
   if (targetUid && UUID_RE.test(targetUid)) q = q.eq('target_uid', targetUid);
-  const { data } = await q.order('created_at', { ascending: false }).limit(200).select(
-    'id, target_uid, target_origin, label, purpose, starts_at, expires_at, status, scope, created_by, created_at, revoked_at');
+  const { data } = await q.order('created_at', { ascending: false }).limit(200).select(LINK_COLS);
   return (data ?? []) as unknown as ShareLinkRow[];
+}
+
+/** 一覧 + アクセス回数 / 最終アクセス（§33.2）。**token は含まない**。 */
+export interface ShareLinkStatRow extends ShareLinkRow {
+  access_count: number;
+  last_access_at: string | null;
+}
+
+export async function listShareLinksWithStats(args?: {
+  targetUid?: string | null;
+  includeHidden?: boolean;
+}): Promise<ShareLinkStatRow[]> {
+  const rows = await listShareLinks(args?.targetUid ?? null);
+  const visible = args?.includeHidden ? rows : rows.filter((r) => !r.hidden_at);
+  if (visible.length === 0) return [];
+
+  const sb = getServerSupabase();
+  if (!sb) return visible.map((r) => ({ ...r, access_count: 0, last_access_at: null }));
+
+  /*
+   * **回数は「閲覧系のイベント」で数える**。`token_access` / `consent` まで足すと
+   * 「1 回しか開いていないのに 3」になり、admin が実態を読み違える。
+   */
+  const { data } = await dg(sb).from('shared_access_logs')
+    .select('share_link_id, event_type, created_at')
+    .in('share_link_id', visible.map((r) => r.id))
+    .order('created_at', { ascending: false })
+    .limit(5000)
+    .select('share_link_id, event_type, created_at');
+
+  const stat = new Map<string, { n: number; last: string | null }>();
+  for (const l of (data ?? [])) {
+    const id = String(l.share_link_id ?? '');
+    if (!id) continue;
+    const cur = stat.get(id) ?? { n: 0, last: null };
+    if (String(l.event_type ?? '').endsWith('_view') || String(l.event_type ?? '').endsWith('_use')) cur.n += 1;
+    const at = String(l.created_at ?? '');
+    if (at && (cur.last === null || at > cur.last)) cur.last = at;
+    stat.set(id, cur);
+  }
+  return visible.map((r) => ({
+    ...r,
+    access_count: stat.get(r.id)?.n ?? 0,
+    last_access_at: stat.get(r.id)?.last ?? null,
+  }));
+}
+
+/** link 単位のアクセスログ（§33.2）。**raw token も UID も入っていない**。 */
+export async function listShareLogs(linkId: string, limit = 200): Promise<Record<string, unknown>[]> {
+  const sb = getServerSupabase();
+  if (!sb || !UUID_RE.test(linkId)) return [];
+  const { data } = await dg(sb).from('shared_access_logs')
+    .select('id, event_type, path, user_agent, created_at')
+    .eq('share_link_id', linkId)
+    .order('created_at', { ascending: false })
+    .limit(Math.min(Math.max(limit, 1), 500))
+    .select('id, event_type, path, user_agent, created_at');
+  return data ?? [];
+}
+
+/**
+ * **論理削除 / 復帰**（§33.2）。一覧から隠すだけで**アクセス可否は変えない**。
+ * **ログは消さない** — 「誰がいつ見たか」は共有機能の売りなので残す。
+ */
+export async function setShareLinkHidden(id: string, hidden: boolean): Promise<boolean> {
+  const sb = getServerSupabase();
+  if (!sb || !UUID_RE.test(id)) return false;
+  const { error } = await dg(sb).from('shared_access_links')
+    .update({ hidden_at: hidden ? new Date().toISOString() : null, updated_at: new Date().toISOString() })
+    .eq('id', id).select('id');
+  return !error;
 }
 
 /** `pause` / `resume` / `revoke`（§27.2）。 */

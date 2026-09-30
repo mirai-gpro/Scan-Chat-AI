@@ -210,8 +210,15 @@ console.log('\n④ 問診の完了記録\n');
    * `body.diagnosticUserId` はクライアント申告なので、使うと**他人の完了を作れてしまう**
    * (`/api/scan/save` と同じ規律)。
    */
-  ok('Cookie の uid で記録している',
-    /recordInterviewCompletion\(viewer\.selfUid,/.test(ex),
+  /*
+   * **2026-09-30 更新**: `viewer.selfUid` → **サーバが解決した target**。
+   * 外部共有では `selfUid` が null なので、共有相手が問診を終えても
+   * **1 行も残らなかった**（仕様書 §19.4）。約束は「クライアント申告を使わない」ことで、
+   * そこは**緩めていない** — `writeTargetUid` も resolver が決める値。
+   */
+  ok('サーバが解決した uid で記録している（body の申告を使わない）',
+    /recordInterviewCompletion\(\s*targetUid/.test(ex)
+    && /const\s+targetUid\s*=\s*viewer\.writeTargetUid/.test(ex),
     'body の申告で記録すると他人の完了を作れてしまう');
   ok('body の申告で記録していない',
     !/recordInterviewCompletion\([^)]*body\./.test(ex));

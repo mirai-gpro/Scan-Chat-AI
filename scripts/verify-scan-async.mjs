@@ -102,8 +102,14 @@ console.log('\n② 送信したら終わり (P4)\n');
 
 console.log('\n③ ジョブの積み方 (P3)\n');
 {
-  ok('uid は Cookie から解決したものだけ',
-    /const uid = viewer\.selfUid;/.test(jobsApi) && !/body\.diagnosticUserId/.test(jobsApi),
+  /*
+   * **2026-09-30 更新**: `viewer.selfUid` → **サーバが解決した target**。
+   * 外部共有では `selfUid` が null なので、共有相手が送信しても
+   * **ジョブが 1 件も積まれなかった**（仕様書 §20.3）。約束は
+   * 「クライアント申告を使わない」ことで、そこは**緩めていない**。
+   */
+  ok('uid はサーバが解決したものだけ (body の申告を使わない)',
+    /const uid = viewer\.writeTargetUid;/.test(jobsApi) && !/body\.diagnosticUserId/.test(jobsApi),
     'body の申告で積むと他人のスキャンを作れてしまう');
   /*
    * **キーを検査しないと、同じバケットの Elith 納品 JSON をワーカーに読ませられる。**

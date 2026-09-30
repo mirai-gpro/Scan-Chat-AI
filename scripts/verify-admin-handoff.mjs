@@ -626,8 +626,16 @@ console.log('\n⑦ 構造（GET で claim しない・cred の発行位置・mid
     /parseAdminViewPath/.test(mw) && /if \(!parsed\) return next\(\);/.test(mw));
   ok('S-13 middleware が毎リクエスト本人結合する（admin フラグ + cred + context）',
     /verifyViewer/.test(mw) && /verifyAdminCred/.test(mw) && /resolveImpersonationContext/.test(mw));
+  /*
+   * **見るのは /admin-view の分岐だけ**（2026-09-30 更新）。
+   * middleware には外部共有の解決も入ったので、ファイル全体に `/dashboard` の語が
+   * 出る（share のアクセス記録の対象ページ表）。**S-14 が守りたいのは
+   * 「代理表示が失敗したときに self / share へ落ちないこと」**なので、
+   * `parseAdminViewPath` 以降に絞る。**緩めていない** — 対象を正確にしただけ。
+   */
+  const mwAdminView = mw.slice(mw.indexOf('const parsed = parseAdminViewPath('));
   ok('S-14 **失敗したら 403。self / share へ落とさない**',
-    /return forbidden\(\);/.test(mw) && !/redirect|\/dashboard/.test(mw));
+    /return forbidden\(\);/.test(mwAdminView) && !/redirect|\/dashboard/.test(mwAdminView));
   ok('S-15 locals へ載せてから rewrite する', /locals\.adminView/.test(mw) && /next\(`/.test(mw));
 
   // **DB は service_role だけ**（緩い dev RLS に載せない）。
