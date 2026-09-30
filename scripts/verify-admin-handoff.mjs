@@ -662,6 +662,21 @@ console.log('\n⑦ 構造（GET で claim しない・cred の発行位置・mid
     fbSrc !== '', FALLBACK);
   ok('S-27 受け皿は fail-closed（middleware を通らずに来たら 403・中身を描かない）',
     /status:\s*403/.test(fbSrc) && !/Astro\.params\.ctx/.test(stripComments(fbSrc)), '');
+
+  /*
+   * **受け渡し券の飛び先を `request.url` から組まないこと**（2026-09-30・実機で発覚）。
+   *
+   * 本番で **`https://localhost/admin/handoff/<token>`** が返っていた。
+   * **Vercel の SSR では `request.url` がプロキシ内側の URL になる**
+   * （2026-09-04 に QR で踏んだのと同じ罠・`src/lib/public-url.ts` 冒頭）。
+   * ここが壊れると**押しても何も開かない**ので、実機でしか気づけない。
+   */
+  const issuer = code('src/pages/api/admin/impersonation/handoff.ts');
+  ok('S-28 **`new URL(request.url).origin` を絶対 URL の基点にしない**',
+    !/new URL\(request\.url\)\.origin/.test(issuer));
+  ok('S-29 転送ヘッダを見る `publicOrigin()` を使う', /publicOrigin\(request\)/.test(issuer));
+  ok('S-30 **`path` も返す**（中継が自分の base と組めるように）',
+    /path,/.test(issuer) && /\/admin\/handoff\/\$\{issued\.token\}/.test(issuer));
 }
 
 /* ══════════════════════════════════════════════════════════════════════
