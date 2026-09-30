@@ -16,7 +16,7 @@
 import type { APIRoute } from 'astro';
 import { classifyVoiceChoice } from '../../../lib/voice-choice-llm';
 import { resolveViewer } from '../../../lib/viewer';
-import { denyAnonymous } from '../../../lib/write-guard';
+import { denyAnonymous, denyUnlessShareScope } from '../../../lib/write-guard';
 
 export const prerender = false;
 
@@ -37,8 +37,12 @@ const MAX_OPTIONS = 40;
  */
 export const POST: APIRoute = async (apiCtx) => {
   const { request } = apiCtx;
-  const unauth = denyAnonymous(await resolveViewer(apiCtx));
+  const viewer = await resolveViewer(apiCtx);
+  const unauth = denyAnonymous(viewer);
   if (unauth) return unauth;
+  // **共有は scope に `interview` があるときだけ**（§17.2）。問診の一部なので開始側と揃える。
+  const scoped = denyUnlessShareScope(viewer, 'interview');
+  if (scoped) return scoped;
 
   let body: { question?: unknown; options?: unknown; transcript?: unknown };
   try { body = await request.json(); } catch { return json({ index: null, confidence: 0 }, 400); }

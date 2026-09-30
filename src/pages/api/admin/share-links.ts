@@ -17,7 +17,9 @@
  *   GET  ?target_uid=<uuid>&include_hidden=1   → { ok, rows:[…] }
  *        ?log=<link_id>&limit=<n>              → { ok, logs:[…] }
  *   POST { create: { target_uid, expires_at, starts_at?, label?, purpose?,
- *                    scope?:{interview,scan}, target_origin? } }
+ *                    scope?:{interview,scan}, target_origin?, created_by_email? } }
+ *          ※ `created_by_email` は **DB へ入る値ではない**。`adminIdentity()` で
+ *            HMAC 化した digest だけを `created_by` に保存する（生 email を持たない）。
  *          → { ok, id, url, expires_at }   ★ url はこの応答にしか出ない
  *        { pause:<id> } / { resume:<id> } / { revoke:<id> }
  *        { regenerate:<id> }               → { ok, url }
@@ -29,6 +31,7 @@
 import type { APIRoute } from 'astro';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 import { publicOrigin } from '../../../lib/public-url';
+import { adminIdentity } from '../../../lib/admin-identity';
 import {
   createShareLink, listShareLinksWithStats, listShareLogs,
   setShareLinkStatus, setShareLinkHidden, regenerateShareLink,
@@ -109,7 +112,18 @@ export const POST: APIRoute = async ({ request }) => {
       // 目的（PDF）なので、明示的に false が来たときだけ落とす。
       scope: { interview: sc.interview !== false, scan: sc.scan !== false },
       targetOrigin: c.target_origin === 'staging' ? 'staging' : 'production',
-      createdBy: typeof c.created_by === 'string' ? c.created_by.slice(0, 200) : null,
+      /*
+       * **発行した admin は HMAC digest で残す。生 email を DB に入れない**
+       * （migration のコメントどおり・2026-09-30 のレビュー）。
+       *
+       * 中継（wellfort-site）が送ってくるのは `created_by_email`
+       * = **サーバ検証済みの admin メール**で、**その名前のまま DB へ入れない**ことを
+       * 示すために `created_by` とは別のキーにしてある。
+       * ここで `adminIdentity()`（鍵つき HMAC + domain separation）に通し、
+       * **digest だけ**を `createdBy` へ渡す。取れなければ `null`
+       * （素の値で埋めない = 生 email が混ざる余地を作らない）。
+       */
+      createdBy: await adminIdentity(typeof c.created_by_email === 'string' ? c.created_by_email : null),
     });
     // 対象 uid が実在しない / DB 未設定 は区別せず 400（存在確認の口にしない）。
     if (!issued) return json({ ok: false, error: 'create_failed' }, 400);
@@ -123,8 +137,21 @@ export const POST: APIRoute = async ({ request }) => {
     });
   }
 
-  /* ── 状態変更 ─────────────────────────────────────── */
-  const ops: [keyof typeof body, () => Promise<boolean>][] = [];
+  /*
+   * ── 状態変更 ───────────────────────────────────────
+   *
+   * 【許される遷移】`revoked` からはどこへも動かない（§27.2 = **不可逆**）。
+   *
+   *   active : pause / revoke / regenerate
+   *   paused : resume / revoke / regenerate
+   *   revoked: **何もできない**（hide / unhide / ログ閲覧だけ可）
+   *
+   * **これを強制するのは library 側の条件付き UPDATE**（`share-access.ts` の
+   * `STATUS_TRANSITIONS`）で、こちらはその失敗を**成功として返さない**のが役目。
+   * `false` / `null` が返ったら 409 にして、**admin の画面に「効かなかった」ことを見せる**
+   * （200 を返すと「押したのに変わらない」になり、原因を追えない）。
+   */
+  const ops: [string, () => Promise<boolean>][] = [];
   const idOf = (k: string): string => String((body as Record<string, unknown>)[k] ?? '');
 
   if (body.pause)   ops.push(['pause',   () => setShareLinkStatus(idOf('pause'), 'paused')]);
@@ -137,15 +164,25 @@ export const POST: APIRoute = async ({ request }) => {
     const id = idOf('regenerate');
     if (!UUID_RE.test(id)) return json({ ok: false, error: 'invalid_link_id' }, 400);
     const r = await regenerateShareLink(id);
-    if (!r) return json({ ok: false, error: 'regenerate_failed' }, 400);
+    /*
+     * **0 行 = 存在しない id か revoked。** 理由を分けないのは admin 画面向けなので
+     * 総当たりの心配が無く、**「失効したリンクは再発行できない」ことを伝えたい**ため。
+     */
+    if (!r) return json({ ok: false, error: 'not_allowed', message: '失効したリンクは再発行できません。' }, 409);
     // **旧 URL と旧セッションは失効済み**（`regenerateShareLink` の中）。
     return json({ ok: true, url: shareUrl(request, r.token) });
   }
 
   if (ops.length === 0) return json({ ok: false, error: 'no_operation' }, 400);
   for (const [k, run] of ops) {
-    if (!UUID_RE.test(idOf(String(k)))) return json({ ok: false, error: 'invalid_link_id' }, 400);
-    if (!await run()) return json({ ok: false, error: `${String(k)}_failed` }, 400);
+    if (!UUID_RE.test(idOf(k))) return json({ ok: false, error: 'invalid_link_id' }, 400);
+    if (!await run()) {
+      return json({
+        ok: false, error: 'not_allowed',
+        message: 'この操作はできません（失効したリンクは元に戻せません）。',
+        op: k,
+      }, 409);
+    }
   }
   return json({ ok: true, rows: await listShareLinksWithStats({ includeHidden: true }) });
 };

@@ -4,7 +4,7 @@ import { MODELS } from '../../lib/gemini';
 import { refreshConfig } from '../../lib/app-config';
 import { buildUserContextForChat, getCustomerProfile, getAppliedExamLabels } from '../../lib/chat-context';
 import { resolveViewer } from '../../lib/viewer';
-import { denyAnonymous } from '../../lib/write-guard';
+import { denyAnonymous, denyUnlessShareScope } from '../../lib/write-guard';
 
 export const prerender = false;
 
@@ -23,6 +23,17 @@ export const POST: APIRoute = async (ctx) => {
   const viewer = await resolveViewer(ctx);
   const unauth = denyAnonymous(viewer);
   if (unauth) return unauth;
+  /*
+   * **共有は scope に `interview` があるときだけ**（§17.2・2026-09-30 追加）。
+   *
+   * この口は **Gemini Live の ephemeral token（30 分・課金）** に加えて
+   * `userContext` / `userProfile`（**`customer` スキーマ = PII**）/ `examTypes` を返す。
+   * scope 検査が無いと、**「AI 問診の利用を許可」を外した共有リンクでも
+   * `/api/live-token` を直接叩けば問診が始められ、PII まで取れる**
+   * （`interview/export` だけを閉じても、開始側が開いていれば設定が意味を失う）。
+   */
+  const scoped = denyUnlessShareScope(viewer, 'interview');
+  if (scoped) return scoped;
 
   await refreshConfig(); // 運用パラメータ(app_config)を最新化してから処理
   const apiKey = import.meta.env.GEMINI_API_KEY;

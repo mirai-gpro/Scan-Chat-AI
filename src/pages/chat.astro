@@ -19,6 +19,17 @@ const viewer = await resolveViewer(Astro);
  * `/api/live-token` と `/api/interview/export` の body に載せていた。
  * **対象はサーバの resolver が決める**ので、画面に uid は要らない。
  */
+/*
+ * **共有リンクで「AI 問診の利用を許可」が外れているときは開始させない**
+ * （2026-09-30・仕様書 §17.2）。
+ *
+ * **通常の本人・admin は常に `true`** なので挙動不変。
+ * **UI を閉じるだけでは足りない**ので `/api/live-token` と
+ * `/api/interview/classify-voice` も `denyUnlessShareScope` で 403 にしてある
+ * （こちらは「押せるのに 403 で止まる」行き止まりを作らないためのもの）。
+ */
+const interviewAllowed = viewer.kind !== 'share' || viewer.shareScope?.interview === true;
+
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
 const linkQuery = viewerLinkQuery(viewer);
 // **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
@@ -82,7 +93,14 @@ const linkPrefix = viewerPathPrefix(viewer);
     id="chat-main"
     class="flex flex-1 flex-col gap-3 px-5 pt-3 pb-4"
     data-dashboard-link-query={linkQuery}
+    data-interview-allowed={interviewAllowed ? '1' : '0'}
   >
+    {!interviewAllowed && (
+      <div class="card border-amber-300 bg-amber-50 text-base leading-relaxed text-amber-900">
+        この共有リンクでは AI 問診をご利用いただけません。
+        ご利用が必要な場合は、共有元のご担当者へご連絡ください。
+      </div>
+    )}
     <div
       id="chat-log"
       class="card flex-1 space-y-3 overflow-y-auto"
@@ -368,6 +386,15 @@ const linkPrefix = viewerPathPrefix(viewer);
 
   document.addEventListener('DOMContentLoaded', () => {
     const main = document.getElementById('chat-main');
+    /*
+     * **scope に問診が無い共有では起動しない**（2026-09-30・仕様書 §17.2）。
+     * 起動しなければ `/api/live-token` を呼ばず、開始ボタンも出ない。
+     * 通常の本人・admin では属性が `'1'` なのでここは素通り（挙動不変）。
+     */
+    if (main?.dataset.interviewAllowed === '0') {
+      document.getElementById('answer-panel')?.setAttribute('hidden', '');
+      return;
+    }
     // ダッシュボードへ戻るリンクのクエリ。**uid から組み立てない** (2026-09-29)。
     const dashboardLinkQuery = main?.dataset.dashboardLinkQuery || '';
 

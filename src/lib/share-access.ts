@@ -212,6 +212,10 @@ export async function createShareLink(args: {
   purpose?: string | null;
   scope?: Partial<ShareScope>;
   targetOrigin?: BridgeOrigin;
+  /**
+   * 発行した admin。**`adminIdentity()` の HMAC digest だけ**を渡す。
+   * 生 email は**入れない**（`@` を含む値はここで捨てられる・§38-U9）。
+   */
   createdBy?: string | null;
 }): Promise<IssuedShareLink | null> {
   const sb = getServerSupabase();
@@ -225,6 +229,17 @@ export async function createShareLink(args: {
 
   const token = randomShareToken();
   const scope = normalizeScope({ interview: args.scope?.interview ?? true, scan: args.scope?.scan ?? true });
+
+  /*
+   * **`created_by` に生 email を入れない**（migration のコメントどおり・2026-09-30）。
+   *
+   * 呼び出し側（`api/admin/share-links.ts`）が `adminIdentity()` の HMAC digest を渡すのが
+   * 正しい使い方だが、**ここでも最後の関所を置く** — 将来別の呼び出し元が増えたときに
+   * 静かに生 email が入るのを防ぐ。`@` を含む値は**捨てる**（切り詰めない・置き換えない）。
+   */
+  const createdBy = typeof args.createdBy === 'string' && !args.createdBy.includes('@')
+    ? args.createdBy.slice(0, 200)
+    : null;
   const { data, error } = await dg(sb).from('shared_access_links').insert({
     target_uid: args.targetUid,
     target_origin: args.targetOrigin ?? 'production',
@@ -234,7 +249,7 @@ export async function createShareLink(args: {
     starts_at: args.startsAt ?? null,
     expires_at: args.expiresAt,
     scope,
-    created_by: args.createdBy ?? null,
+    created_by: createdBy,
   }).select('id, expires_at');
   if (error || !data?.[0]) {
     // **raw token を絶対にログへ出さない。**
@@ -322,20 +337,54 @@ export async function listShareLogs(linkId: string, limit = 200): Promise<Record
 export async function setShareLinkHidden(id: string, hidden: boolean): Promise<boolean> {
   const sb = getServerSupabase();
   if (!sb || !UUID_RE.test(id)) return false;
-  const { error } = await dg(sb).from('shared_access_links')
+  const { data, error } = await dg(sb).from('shared_access_links')
     .update({ hidden_at: hidden ? new Date().toISOString() : null, updated_at: new Date().toISOString() })
     .eq('id', id).select('id');
-  return !error;
+  // ★ **`revoked` でも可**（アクセス可否ではなく一覧の見え方）。ただし
+  //   存在しない id を成功として返さない（実際に 1 行動いたことを確かめる）。
+  return !error && Array.isArray(data) && data.length === 1;
 }
 
-/** `pause` / `resume` / `revoke`（§27.2）。 */
+/**
+ * **状態遷移の許可表**（§27.2）。**`revoked` からはどこへも動かない = 不可逆。**
+ *
+ * 【なぜ表で持つか】`status` を素のまま代入すると、**admin API に
+ * `{ resume: "<revoked な id>" }` を直接投げるだけで `active` に戻せる**。
+ * `linkUsable()` は `status` を見るので、**失効させた URL が再び開くようになる**
+ * （2026-09-30 のレビューで指摘）。UI でボタンを消すだけでは防げないので、
+ * **どの状態から呼ばれたかを UPDATE の WHERE 条件に入れて DB で固定する。**
+ *
+ * `hide` / `unhide` / ログ閲覧は `revoked` でも可 —
+ * あれはアクセス可否ではなく admin の一覧の見え方の話（§33.2）。
+ */
+const STATUS_TRANSITIONS: Record<'active' | 'paused' | 'revoked', ('active' | 'paused' | 'revoked')[]> = {
+  // 遷移先 → そこへ動いてよい「現在の状態」
+  active: ['paused'],              // resume は paused からだけ
+  paused: ['active'],              // pause は active からだけ
+  revoked: ['active', 'paused'],   // revoke は生きているものだけ（2 度目は 0 行）
+};
+
+/**
+ * `pause` / `resume` / `revoke`（§27.2）。
+ *
+ * **「実際に 1 行だけ更新された」ことを確かめる。** `error == null` は
+ * 「SQL が通った」だけで、**0 行でも成功に見える**（存在しない id・許されない遷移）。
+ */
 export async function setShareLinkStatus(id: string, status: 'active' | 'paused' | 'revoked'): Promise<boolean> {
   const sb = getServerSupabase();
   if (!sb || !UUID_RE.test(id)) return false;
   const patch: Record<string, unknown> = { status, updated_at: new Date().toISOString() };
   if (status === 'revoked') patch.revoked_at = new Date().toISOString();
-  const { error } = await dg(sb).from('shared_access_links').update(patch).eq('id', id).select('id');
-  if (error) return false;
+
+  const { data, error } = await dg(sb).from('shared_access_links')
+    .update(patch)
+    .eq('id', id)
+    // ★ ここが不可逆性の本体。`revoked` は許可表のどの行にも現れない。
+    .in('status', STATUS_TRANSITIONS[status])
+    .select('id, status');
+  // ★ 0 行 = 存在しない id か、許されない遷移。**成功として扱わない。**
+  if (error || !Array.isArray(data) || data.length !== 1) return false;
+
   // **revoke / pause はそのリンクの全セッションも落とす**（§27.2）。
   if (status !== 'active') await revokeSessionsOfLink(id);
   return true;
@@ -352,18 +401,27 @@ async function revokeSessionsOfLink(linkId: string): Promise<void> {
 /**
  * URL 再発行（§27.2）。**新 token を発行し、旧 token_hash を失効させ、旧セッションも全部落とす。**
  * 「さっきの URL をもう一度」に応えられないのは hash-only の帰結で、**むしろ正しい**（§15.3）。
+ *
+ * 【`revoked` からは再発行できない】ここが一番危ない口だった —
+ * `status='active'` / `revoked_at=null` を**無条件に**書いていたので、
+ * **失効させたリンクを admin API 1 回で復活させられた**（2026-09-30 のレビュー）。
+ * 生きているもの（`active` / `paused`）だけを WHERE 条件で通す。
  */
 export async function regenerateShareLink(id: string): Promise<{ token: string } | null> {
   const sb = getServerSupabase();
   if (!sb || !UUID_RE.test(id)) return null;
   const token = randomShareToken();
-  const { error } = await dg(sb).from('shared_access_links').update({
+  const { data, error } = await dg(sb).from('shared_access_links').update({
     token_hash: await sha256hex(token),
     status: 'active',
-    revoked_at: null,
     updated_at: new Date().toISOString(),
-  }).eq('id', id).select('id');
-  if (error) return null;
+    // ★ `revoked_at = null` を書かない。**失効の事実を消さない**（不可逆性の記録）。
+  })
+    .eq('id', id)
+    .in('status', ['active', 'paused'])   // ★ revoked からは再発行できない
+    .select('id, status');
+  // ★ 0 行 = 存在しない id か revoked。**成功として扱わない。**
+  if (error || !Array.isArray(data) || data.length !== 1) return null;
   await revokeSessionsOfLink(id);   // 旧 URL で入っている人を切る
   return { token };
 }
@@ -374,6 +432,13 @@ export async function regenerateShareLink(id: string): Promise<{ token: string }
 
 /** §27.1 の「毎リクエストで見るもの」のうち、link 側。 */
 function linkUsable(row: Record<string, unknown>, now: number): boolean {
+  /*
+   * **`revoked_at` も見る**（2026-09-30 のレビュー）。
+   * `status` だけを見ていると、**将来誰かが `status` を書き戻せる経路を作った瞬間に
+   * 失効が黙って解ける**。失効は `revoked_at` に残る事実なので、そこも番人にする
+   * （`setShareLinkStatus` / `regenerateShareLink` の遷移表と**二重**に閉じる）。
+   */
+  if (row.revoked_at) return false;
   if (row.status !== 'active') return false;
   const starts = row.starts_at ? Date.parse(String(row.starts_at)) : null;
   if (starts !== null && !Number.isNaN(starts) && starts > now) return false;
@@ -396,7 +461,7 @@ export async function startShareFromToken(rawToken: string, now = Date.now()): P
   if (!sb || !SHARE_OPAQUE_RE.test(rawToken)) return null;
 
   const { data: link } = await dg(sb).from('shared_access_links')
-    .select('id, expires_at, starts_at, status')
+    .select('id, expires_at, starts_at, status, revoked_at')
     .eq('token_hash', await sha256hex(rawToken))
     .maybeSingle();
   if (!link || !linkUsable(link, now)) return null;
@@ -433,7 +498,7 @@ export async function readSharePending(pending: string, now = Date.now()): Promi
   if (!(Date.parse(String(s.expires_at)) > now)) return null;
 
   const { data: link } = await dg(sb).from('shared_access_links')
-    .select('id, label, scope, status, starts_at, expires_at')
+    .select('id, label, scope, status, starts_at, expires_at, revoked_at')
     .eq('id', s.share_link_id).maybeSingle();
   if (!link || !linkUsable(link, now)) return null;
 
@@ -511,7 +576,7 @@ export async function resolveShareSession(sessionRaw: string, now = Date.now()):
   if (!(Date.parse(String(s.expires_at)) > now)) return null;
 
   const { data: link } = await dg(sb).from('shared_access_links')
-    .select('id, target_uid, target_origin, scope, label, status, starts_at, expires_at')
+    .select('id, target_uid, target_origin, scope, label, status, starts_at, expires_at, revoked_at')
     .eq('id', s.share_link_id).maybeSingle();
   if (!link || !linkUsable(link, now)) return null;                // ★ ここが revoke を効かせる
 
@@ -548,7 +613,7 @@ export async function classifyShareFailure(
     if (!(Date.parse(String(s.expires_at)) > now)) return 'expired';
 
     const { data: link } = await dg(sb).from('shared_access_links')
-      .select('status, starts_at, expires_at').eq('id', s.share_link_id).maybeSingle();
+      .select('status, starts_at, expires_at, revoked_at').eq('id', s.share_link_id).maybeSingle();
     if (!link) return 'revoked';
     if (link.status === 'revoked') return 'revoked';
     if (link.status === 'paused') return 'paused';

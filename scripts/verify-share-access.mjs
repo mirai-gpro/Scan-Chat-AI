@@ -149,7 +149,8 @@ writeFileSync(resolve(ROOT, CACHE, 'share-astro-middleware-stub.mjs'),
   'export const defineMiddleware = (fn) => fn;\n');
 
 await build({
-  entryPoints: ['src/lib/share-access.ts', 'src/lib/viewer.ts', 'src/lib/write-guard.ts', 'src/middleware.ts'],
+  entryPoints: ['src/lib/share-access.ts', 'src/lib/viewer.ts', 'src/lib/write-guard.ts',
+    'src/lib/admin-identity.ts', 'src/middleware.ts'],
   bundle: true, platform: 'node', format: 'esm', logLevel: 'error',
   define: { 'import.meta.env': '{"DEV":false}' },
   outdir: `${CACHE}/share`, outbase: 'src', outExtension: { '.js': '.mjs' },
@@ -167,6 +168,7 @@ await build({
 const sa = await import(`../${CACHE}/share/lib/share-access.mjs`);
 const viewerMod = await import(`../${CACHE}/share/lib/viewer.mjs`);
 const guard = await import(`../${CACHE}/share/lib/write-guard.mjs`);
+const ident = await import(`../${CACHE}/share/lib/admin-identity.mjs`);
 const mw = await import(`../${CACHE}/share/middleware.mjs`);
 const db = await import(`../${CACHE}/share-supabase-stub.mjs`);
 
@@ -185,6 +187,7 @@ async function issue(opts = {}) {
     startsAt: opts.startsAt ?? null,
     label: opts.label ?? '助成金事務局 確認用',
     scope: opts.scope ?? { interview: true, scan: true },
+    createdBy: opts.createdBy ?? null,
   });
 }
 
@@ -654,6 +657,149 @@ for (const f of ['src/pages/api/kit/[id]/self-report.ts', 'src/pages/api/notices
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ * ⑥-2 scope.interview の実効性（§17.2・2026-09-30 のレビュー）
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\n⑥-2 scope.interview が本当に効くか（§17.2）\n');
+{
+  /*
+   * **「AI 問診の利用を許可」を外した共有リンクで、問診が始められないこと。**
+   * `interview/export`（終わり側）だけ閉じても、**`/api/live-token`（始め側）が
+   * 開いていれば設定が意味を失う** — しかもあの口は Gemini Live token（課金）と
+   * `userProfile`（PII）まで返す。
+   */
+  const OFF = { kind: 'share', writeTargetUid: UID_A, shareScope: { view: true, interview: false, scan: true } };
+  const ON  = { kind: 'share', writeTargetUid: UID_A, shareScope: { view: true, interview: true,  scan: false } };
+  const SELF = { kind: 'self', writeTargetUid: UID_B, shareScope: null };
+  const ADMIN_SELF = { kind: 'admin_self', writeTargetUid: UID_B, shareScope: null };
+
+  ok('IV-1 interview=false は 403（番人の判定）', guard.denyUnlessShareScope(OFF, 'interview')?.status === 403);
+  ok('IV-2 interview=true は通る', guard.denyUnlessShareScope(ON, 'interview') === null);
+  ok('IV-3 self には影響しない', guard.denyUnlessShareScope(SELF, 'interview') === null);
+  ok('IV-4 admin 自己利用にも影響しない', guard.denyUnlessShareScope(ADMIN_SELF, 'interview') === null);
+
+  // ★ 3 本すべてが interview scope を通していること（1 本でも漏れると設定が破れる）
+  for (const f of ['src/pages/api/live-token.ts',
+                   'src/pages/api/interview/classify-voice.ts',
+                   'src/pages/api/interview/export.ts']) {
+    ok(`IV-5 ${f} が denyUnlessShareScope(…, 'interview') を通している`,
+      /denyUnlessShareScope\(\s*viewer,\s*'interview'\s*\)/.test(code(f)));
+  }
+  // ★ scan 側の scope と取り違えていないこと
+  ok("IV-6 live-token が 'scan' ではなく 'interview' を見ている",
+    !/denyUnlessShareScope\(\s*viewer,\s*'scan'\s*\)/.test(code('src/pages/api/live-token.ts')));
+
+  // ★ UI も閉じている（押せるのに 403、にしない）
+  const chat = code('src/pages/chat.astro');
+  ok('IV-7 chat.astro が scope.interview を見る',
+    /viewer\.shareScope\?\.interview\s*===\s*true/.test(chat));
+  ok('IV-8 chat.astro は share 以外を常に許可する（self / admin は挙動不変）',
+    /viewer\.kind\s*!==\s*'share'\s*\|\|/.test(chat));
+  ok('IV-9 許可されない回は問診を起動しない',
+    /dataset\.interviewAllowed === '0'/.test(chat) && /return;/.test(chat));
+  ok('IV-10 許可されない回は理由を画面に出す（行き止まりにしない）',
+    /この共有リンクでは AI 問診をご利用いただけません/.test(read('src/pages/chat.astro')));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑥-3 revoke は不可逆（§27.2・2026-09-30 のレビュー）
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\n⑥-3 revoke は不可逆（§27.2）\n');
+{
+  db.reset();
+  const iss = await issue();
+  const s = await enter(iss.token);
+  ok('RV-1 revoke 前は使える', (await sa.resolveShareSession(s, db.NOW)) !== null);
+
+  ok('RV-2 revoke は成功する', (await sa.setShareLinkStatus(iss.id, 'revoked')) === true);
+  ok('RV-3 revoke 後は元 token が使えない', (await sa.startShareFromToken(iss.token, db.NOW)) === null);
+
+  // ★ ここが本命: admin API へ直接 resume を投げても戻らない
+  ok('RV-4 revoked → resume は拒否される（false）', (await sa.setShareLinkStatus(iss.id, 'active')) === false);
+  ok('RV-5 拒否のあとも status は revoked のまま',
+    db.LINKS.find((l) => l.id === iss.id)?.status === 'revoked');
+  ok('RV-6 拒否のあとも元 token は使えない', (await sa.startShareFromToken(iss.token, db.NOW)) === null);
+  ok('RV-7 revoked → pause も拒否される', (await sa.setShareLinkStatus(iss.id, 'paused')) === false);
+  ok('RV-8 revoked → revoke（2 度目）も成功にしない', (await sa.setShareLinkStatus(iss.id, 'revoked')) === false);
+
+  // ★ regenerate も戻せない
+  ok('RV-9 revoked → regenerate は拒否される（null）', (await sa.regenerateShareLink(iss.id)) === null);
+  const row = db.LINKS.find((l) => l.id === iss.id);
+  ok('RV-10 拒否のあとも revoked_at が消えていない', !!row?.revoked_at);
+  ok('RV-11 拒否のあとも status は revoked のまま', row?.status === 'revoked');
+
+  // ★ hide / unhide / ログは revoked でも可（アクセス可否の話ではない）
+  ok('RV-12 revoked でも一覧から隠せる', (await sa.setShareLinkHidden(iss.id, true)) === true);
+  ok('RV-13 revoked でも一覧へ戻せる', (await sa.setShareLinkHidden(iss.id, false)) === true);
+
+  // ★ 許される遷移は通る
+  db.reset();
+  const a = await issue();
+  ok('RV-14 active → pause は通る', (await sa.setShareLinkStatus(a.id, 'paused')) === true);
+  ok('RV-15 paused → pause（2 度目）は成功にしない', (await sa.setShareLinkStatus(a.id, 'paused')) === false);
+  ok('RV-16 paused → resume は通る', (await sa.setShareLinkStatus(a.id, 'active')) === true);
+  ok('RV-17 active → resume（2 度目）は成功にしない', (await sa.setShareLinkStatus(a.id, 'active')) === false);
+  ok('RV-18 paused → regenerate は通る',
+    (await sa.setShareLinkStatus(a.id, 'paused')) === true && !!(await sa.regenerateShareLink(a.id)));
+
+  // ★ 存在しない id を成功として返さない
+  const GHOST = 'cccccccc-3333-4333-8333-333333333333';
+  ok('RV-19 存在しない id の pause は false', (await sa.setShareLinkStatus(GHOST, 'paused')) === false);
+  ok('RV-20 存在しない id の resume は false', (await sa.setShareLinkStatus(GHOST, 'active')) === false);
+  ok('RV-21 存在しない id の revoke は false', (await sa.setShareLinkStatus(GHOST, 'revoked')) === false);
+  ok('RV-22 存在しない id の regenerate は null', (await sa.regenerateShareLink(GHOST)) === null);
+  ok('RV-23 存在しない id の hide は false', (await sa.setShareLinkHidden(GHOST, true)) === false);
+
+  // ★ 構造: 遷移表と「1 行だけ更新された」の確認がコードに在ること
+  const src = code('src/lib/share-access.ts');
+  ok('RV-24 遷移を WHERE 条件で固定している（status の in 絞り）',
+    /\.in\('status',\s*STATUS_TRANSITIONS\[status\]\)/.test(src));
+  ok('RV-25 regenerate も生きている状態だけを通す',
+    /\.in\('status',\s*\['active',\s*'paused'\]\)/.test(src));
+  ok('RV-26 error == null だけで成功扱いしない（1 行を確認）',
+    (src.match(/data\.length !== 1/g) ?? []).length >= 2);
+  ok('RV-27 regenerate が revoked_at を null に戻さない', !/revoked_at:\s*null/.test(src));
+  ok('RV-28 linkUsable が revoked_at も見る', /if \(row\.revoked_at\) return false;/.test(src));
+  const rpc2 = read('supabase/migrations/20260930000050_share_consent_rpc_revoked.sql');
+  ok('RV-29 同意の 1 文でも revoked_at を見る', /l\.revoked_at\s+is null/.test(rpc2));
+  const api = code('src/pages/api/admin/share-links.ts');
+  ok('RV-30 admin API は失敗を 409 で返す（200 で黙らない）', /not_allowed/.test(api) && /409\)/.test(api));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑥-4 created_by に生 email を入れない（§38-U9・2026-09-30 のレビュー）
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\n⑥-4 created_by は HMAC digest（§38-U9）\n');
+{
+  db.reset();
+  const EMAIL = 'Admin.One@Example.com';
+  const digest = await ident.adminIdentity(EMAIL);
+  const iss = await issue({ createdBy: digest });
+  const row = db.LINKS.find((l) => l.id === iss.id);
+
+  ok('CB-1 created_by に @ が含まれない', !String(row?.created_by ?? '').includes('@'));
+  ok('CB-2 created_by が raw email と一致しない', row?.created_by !== EMAIL
+    && row?.created_by !== EMAIL.toLowerCase());
+  ok('CB-3 created_by が adminIdentity(email) と一致する', row?.created_by === digest);
+
+  // ★ 生 email を渡されても**保存しない**（最後の関所）
+  const iss2 = await issue({ createdBy: EMAIL });
+  const row2 = db.LINKS.find((l) => l.id === iss2.id);
+  ok('CB-4 生 email を渡されたら null にする（切り詰めない）', row2?.created_by === null);
+
+  // ★ 行のどこにも生 email が無い
+  ok('CB-5 link の行全体に @ を含む値が無い',
+    db.LINKS.every((l) => !Object.values(l).some((v) => typeof v === 'string' && v.includes('@'))));
+
+  // ★ 構造: admin API が HMAC に通してから渡す / 中継は created_by を送らない
+  const api = code('src/pages/api/admin/share-links.ts');
+  ok('CB-6 admin API が adminIdentity() を通してから渡す',
+    /createdBy:\s*await adminIdentity\(/.test(api));
+  ok('CB-7 admin API が body の created_by をそのまま使わない', !/c\.created_by\b(?!_email)/.test(api));
+  const lib = code('src/lib/share-access.ts');
+  ok('CB-8 createShareLink が @ を含む値を捨てる', /!args\.createdBy\.includes\('@'\)/.test(lib));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  * ⑦ 退行注入（検査が本当に落ちるか）
  * ════════════════════════════════════════════════════════════════════ */
 console.log('\n⑦ 退行注入（§34.2）\n');
@@ -695,6 +841,16 @@ console.log('\n⑦ 退行注入（§34.2）\n');
     ['⑦ consent API を消す（P0-1）', 'src/pages/api/share/consent.ts',
       'export const POST', 'const REMOVED_POST',
       () => !/export const POST/.test(read('src/pages/api/share/consent.ts'))],
+    // ── 2026-09-30 のレビューで足した 3 種 ──
+    ['⑨ live-token の interview scope を外す（IV-5）', 'src/pages/api/live-token.ts',
+      "const scoped = denyUnlessShareScope(viewer, 'interview');", 'const scoped = null;',
+      () => !/denyUnlessShareScope\(\s*viewer,\s*'interview'\s*\)/.test(code('src/pages/api/live-token.ts'))],
+    ['⑩ revoked → active を許す（RV-24）', 'src/lib/share-access.ts',
+      ".in('status', STATUS_TRANSITIONS[status])", ".in('status', ['active', 'paused', 'revoked'])",
+      () => !/\.in\('status',\s*STATUS_TRANSITIONS\[status\]\)/.test(code('src/lib/share-access.ts'))],
+    ['⑪ created_by に raw email を保存する（CB-8）', 'src/lib/share-access.ts',
+      "!args.createdBy.includes('@')", 'true',
+      () => !/!args\.createdBy\.includes\('@'\)/.test(code('src/lib/share-access.ts'))],
   ];
   for (const [label, file, from, to, probe] of cases) {
     const r = inject(file, from, to, probe);
@@ -709,6 +865,108 @@ console.log('\n⑦ 退行注入（§34.2）\n');
   await sa.setShareLinkStatus(iss.id, 'paused');
   ok('退行注入 ⑧ link 側を見ずセッションだけ見ると paused が効かない（今は効いている）',
     (await sa.resolveShareSession(s, db.NOW)) === null);
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑦-2 退行注入（**実際に動かして**落ちることを見る）
+ *
+ * テキスト検査だけだと「探し方を変えただけで通る」退行を拾えない。
+ * `share-access.ts` を書き換えて **再 bundle し、同じシナリオを走らせる**。
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\n⑦-2 退行注入（再 bundle して実挙動で見る）\n');
+{
+  let round = 0;
+  /** 注入した `share-access.ts` を別名で bundle して import する。 */
+  const rebuild = async (mutate) => {
+    const srcPath = resolve(ROOT, 'src/lib/share-access.ts');
+    const orig = readFileSync(srcPath, 'utf8');
+    const next = mutate(orig);
+    if (next === orig) return null;         // 注入点が見つからない
+    const out = `${CACHE}/share-inj-${++round}`;
+    try {
+      writeFileSync(srcPath, next);
+      await build({
+        entryPoints: ['src/lib/share-access.ts'],
+        bundle: true, platform: 'node', format: 'esm', logLevel: 'error',
+        define: { 'import.meta.env': '{"DEV":false}' },
+        outdir: out, outbase: 'src', outExtension: { '.js': '.mjs' },
+        plugins: [{
+          name: 'stub',
+          setup(b) {
+            b.onResolve({ filter: /(^|\/)supabase$/ }, () => ({
+              path: pathToFileURL(resolve(ROOT, CACHE, 'share-supabase-stub.mjs')).href, external: true }));
+          },
+        }],
+      });
+      return await import(`../${out}/lib/share-access.mjs`);
+    } finally {
+      writeFileSync(srcPath, orig);         // ★ 必ず戻す
+    }
+  };
+
+  /*
+   * 【実測で分かったこと】**不可逆性は 2 つの錠で閉じている。**
+   *   錠 1 = 遷移表（`STATUS_TRANSITIONS`）… `status` を書き戻させない
+   *   錠 2 = `linkUsable()` の `revoked_at`  … 書き戻されても token を通さない
+   * 片方を外しただけでは token は復活しない（**それが狙いどおり**）。
+   * だから **錠ごとに 1 つずつ**、外したときに何が変わるかを見る。
+   */
+
+  // ⑩ 錠 1 を外す → `status` の書き戻しが**通ってしまう**（錠 2 が最後に止める）
+  {
+    const bad = await rebuild((t) =>
+      t.replace(".in('status', STATUS_TRANSITIONS[status])", ".in('status', ['active', 'paused', 'revoked'])"));
+    db.reset();
+    const iss = await bad.createShareLink({ targetUid: UID_A, expiresAt: inHours(24) });
+    await bad.setShareLinkStatus(iss.id, 'revoked');
+    const resumed = await bad.setShareLinkStatus(iss.id, 'active');
+    ok('注入 ⑩ 錠 1（遷移表）を外すと revoked → active が通ってしまう（= 今の実装が止めている）',
+      resumed === true);
+    ok('注入 ⑩-2 それでも錠 2（revoked_at）が元 token を止める（二重に閉じている）',
+      (await bad.startShareFromToken(iss.token, db.NOW)) === null);
+  }
+
+  // ⑬ 錠 1 と錠 2 の**両方**を外す → **元 token が本当に復活する**
+  //    （= どちらの錠も飾りではないことの証明）
+  {
+    const bad = await rebuild((t) => t
+      .replace(".in('status', STATUS_TRANSITIONS[status])", ".in('status', ['active', 'paused', 'revoked'])")
+      .replace('if (row.revoked_at) return false;', ''));
+    db.reset();
+    const iss = await bad.createShareLink({ targetUid: UID_A, expiresAt: inHours(24) });
+    await bad.setShareLinkStatus(iss.id, 'revoked');
+    await bad.setShareLinkStatus(iss.id, 'active');
+    ok('注入 ⑬ 錠を両方外すと失効した URL が本当に復活する（= 2 つとも効いている）',
+      (await bad.startShareFromToken(iss.token, db.NOW)) !== null);
+  }
+
+  // ⑪ `@` の関所を外す → **生 email が DB に入ってしまう**ことを実挙動で確認
+  {
+    const bad = await rebuild((t) => t.replace("!args.createdBy.includes('@')", 'true'));
+    db.reset();
+    const iss = await bad.createShareLink({
+      targetUid: UID_A, expiresAt: inHours(24), createdBy: 'admin.one@example.com' });
+    const row = db.LINKS.find((l) => l.id === iss.id);
+    ok('注入 ⑪ 関所を外すと created_by に生 email が入る（= 今の実装が捨てている）',
+      row?.created_by === 'admin.one@example.com');
+  }
+
+  // ⑫ regenerate の絞りを外す → **失効したリンクに新 URL が発行できてしまう**
+  //    （ここも錠 2 があるので新 URL は開かないが、「再発行できた」こと自体が仕様違反）
+  {
+    const bad = await rebuild((t) =>
+      t.replace(".in('status', ['active', 'paused'])   // ★ revoked からは再発行できない", ''));
+    db.reset();
+    const iss = await bad.createShareLink({ targetUid: UID_A, expiresAt: inHours(24) });
+    await bad.setShareLinkStatus(iss.id, 'revoked');
+    ok('注入 ⑫ 絞りを外すと revoked から再発行できてしまう（= 今の実装が null を返す）',
+      (await bad.regenerateShareLink(iss.id)) !== null);
+  }
+
+  // ★ 注入したファイルが元に戻っていること（戻し忘れでリポジトリを汚さない）
+  ok('注入後に share-access.ts が元へ戻っている',
+    /\.in\('status',\s*STATUS_TRANSITIONS\[status\]\)/.test(code('src/lib/share-access.ts'))
+    && /!args\.createdBy\.includes\('@'\)/.test(code('src/lib/share-access.ts')));
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */
