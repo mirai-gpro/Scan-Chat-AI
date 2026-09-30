@@ -1,6 +1,6 @@
 # スペシャルアカウント 追加検査登録・Elith 納品 統合機能 仕様書
 
-**版**: 1.0 (2026-09-30)
+**版**: 1.1 (2026-09-30・**レビュー後の追記 2 件 §0.4.1 / §0.4.2**。設計は変えていない)
 **状態**: **仕様のみ。実装していない。**
 **対象**: `mirai-gpro/Scan-Chat-AI`（処理 API）/ `mirai-gpro/wellfort-site`（管理 UI）
 
@@ -89,6 +89,88 @@ const testDate = /^\d{4}-\d{2}-\d{2}$/.test(input.testDate) ? input.testDate : j
 
 → **§8 の「today fallback 禁止」はこの 1 行と正面から衝突する。**
 本機能は `YYYY-MM-DD` でないものを**受け付けずに 400 で止める**（呼ぶ前に検証する）。
+
+---
+
+### 0.4 実装を始める前に必ずやること（発注者指示 2026-09-30・追記）
+
+#### 0.4.1 着手前に Production `6abc310` を取り込む
+
+作業ブランチ `claude/cool-dirac-1dkyx7` は **Production
+`claude/awesome-carson-UeyUZ` (`6abc310`) と履歴上 diverge している**。
+
+**実測（`git rev-list --left-right --count` / `--is-shallow-repository`=false）**
+
+| | |
+|---|---|
+| 共通祖先 (merge-base) | `1b941aa` |
+| Production にだけ在る | **1 件** = `6abc310`（PR #285 の**マージコミットそのもの**） |
+| 作業ブランチにだけ在る | **1 件** = `d1ecee4`（本仕様書 ＋ CLAUDE.md） |
+| **ファイル差分** | **本仕様書 ＋ CLAUDE.md の 2 ファイルだけ**（`git diff --stat`） |
+
+→ **コードのファイル差分は 0。したがって設計変更は無い。**
+diverge しているのは**履歴の形**だけで、中身は `1b941aa` と同一である。
+
+**それでも取り込んでから着手する**（放置すると、実装が進んだ後で
+マージコミットを跨ぐ解決が要る・`git log` が読みにくい・
+Production からの差分が「本当に新規か」を毎回確かめ直すことになる）。
+
+```bash
+git fetch origin claude/awesome-carson-UeyUZ
+git merge origin/claude/awesome-carson-UeyUZ     # 競合は出ない（ファイル差分が本仕様書だけのため）
+```
+
+- **`--unshallow` の確認を先に行う**（CLAUDE.md「shallow のままブランチ救出の可否を判定しない」）。
+  今回は `is-shallow-repository=false` を実測済み。
+- **取り込んだら着手前に確認する**: `astro check` 0 errors / `astro build` 成功 /
+  A 層 28 本 PASS。**ここが緑でないまま新機能を足さない**（後から原因の切り分けができなくなる）。
+- Production への merge は**従来どおり発注者の操作**。こちらからは行わない。
+
+#### 0.4.2 原本競合の共通化で既存 `/admin/lab-results/register` を壊さない
+
+§19〜§21 は `register.ts` の原本検証ロジックを共通ライブラリへ切り出すが、
+**既存 API のレスポンス契約は 1 バイトも変えない。**
+
+**既存の契約（実測・`register.ts`）**
+
+| 状況 | 応答 | 実測位置 |
+|---|---|---|
+| 同じ SHA が既に在る | **200** `{ ok:true, already_registered:true, test_artifact_id, file_kind, sha256, detail }` | `:216-225` |
+| 別 SHA が在り `replace` なし | **409** `{ ok:false, **error:'file_exists'**, detail, test_artifact_id, existing:[{id,storage_url,sha256,size_bytes,created_at}] }` | `:227-237` |
+| `replace:true` | 同種別の**台帳の行だけ**消して入れ直す（**S3 のオブジェクトは消さない**） | `:238-246` |
+| 正常登録 | **200** `{ ok:true, test_artifact_id, artifact_created, diagnostic_user_id, test_type, test_date, display_mode, replaced, file_kind, storage_url, sha256, size_bytes, content_type }` | `:266-280` |
+
+**分離のしかた（必須）**
+
+```text
+共通ライブラリ（内部）           呼び出し側（外部 = API のレスポンス）
+─────────────────────────────    ─────────────────────────────────────
+'same_sha'      （同一・no-op）  → register        : 200 already_registered:true
+                                 → 追加検査 finalize: 200 already_registered:true（§20）
+
+'different_sha' （別物・競合）   → register        : 409 error:'file_exists'   ★既存のまま
+                                 → 追加検査 finalize: 409 error:'original_conflict'（§21）
+
+'none'          （未登録）       → どちらも通常登録
+```
+
+- **共通ライブラリは HTTP を組み立てない。** 判定結果（上の 3 値 ＋ 既存行の配列）を返すだけにし、
+  **`error` 文字列とステータスは各 API が自分で決める**。
+  ライブラリの中で `'file_exists'` や `'original_conflict'` を返すと、
+  **片方を直したときにもう片方が黙って変わる**。
+- **`original_conflict` は新 API だけの名前**。`register.ts` へ持ち込まない
+  （既存の呼び出し元 — wellfort-site の `/admin/lab-results` 画面 — が
+  `error === 'file_exists'` を見て文言を出しているため）。
+- **`replace` は新 API に付けない**（§21「自動差し替え禁止」）。
+  差し替えが要るときは既存 `/admin/lab-results` の `replace:true` を使う
+  = **原本を置換できる口は 1 つだけ**に保つ。
+- 検証（§44 E 群に追加）:
+  - **E-25** `register` の 409 が `error:'file_exists'` のまま（文字列を固定する）
+  - **E-26** `register` の 200 が `already_registered:true` のまま
+  - **E-27** 追加検査の 409 が `error:'original_conflict'`（`file_exists` を返さない）
+  - **E-28** 共通ライブラリのソースに `'file_exists'` / `'original_conflict'` /
+    HTTP ステータスが**現れない**（判定と表現を混ぜていないことの構造検査）
+  - **退行注入 K-7**: 共通ライブラリが `'original_conflict'` を返すようにする → **E-25 が落ちる**
 
 ---
 
@@ -604,6 +686,7 @@ HTTP 409
 redaction は未実装なので `raw_pdf_redacted` を名乗らない）。
 
 **`lab-results/register.ts` の原本検証ロジックを共通ライブラリへ切り出して利用する。**
+**切り出し方の制約は §0.4.2**（既存 API のレスポンス契約を変えない）。
 
 サーバ側で **S3 の実体を読み直して** SHA256 / ファイルサイズ / Content-Type を確定する。
 **ブラウザの自己申告値を DB へ保存してはならない**（`register.ts:8`）。
@@ -631,6 +714,7 @@ error: original_conflict
 ```
 
 で停止する。**新画面から黙って原本を置換しない。**
+**この名前は新 API だけのもの**で、既存 `register.ts` の `file_exists` とは分ける（§0.4.2）。
 原本訂正が必要なら管理者が明示的に差し替え操作を行う。
 
 > 既存 `register.ts:227-237` は同じ状況を `error:'file_exists'` / 409 で止め、
@@ -1115,6 +1199,10 @@ src/components/AdminLayout.astro                … メニュー 1 行
 | 22 | SHA 違い → `original_conflict` |
 | 23 | サーバが S3 実体から SHA を再算出 |
 | 24 | `test_artifact_files` に 1 件だけ |
+| **25** | **既存 `register` の 409 が `error:'file_exists'` のまま**（§0.4.2） |
+| **26** | **既存 `register` の 200 が `already_registered:true` のまま** |
+| **27** | **追加検査の 409 は `original_conflict`**（`file_exists` を返さない） |
+| **28** | **共通ライブラリに `error` 文字列と HTTP ステータスが現れない**（判定と表現を混ぜない） |
 
 ### F. 血液
 
@@ -1177,6 +1265,7 @@ src/components/AdminLayout.astro                … メニュー 1 行
 | K-4 | `sanitizeDelivery` を通さず納品する | 37/38 |
 | K-5 | `elith-delivery-promote` の全件コピーを呼ぶ | 39 |
 | K-6 | 生ファイル名で S3 キーを組む | 9 |
+| **K-7** | **共通ライブラリが `'original_conflict'` を返すようにする** | **25**（既存 API の契約が変わる） |
 
 ---
 

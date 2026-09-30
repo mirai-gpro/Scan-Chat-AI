@@ -1841,6 +1841,14 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     納品履歴は **新表 `diagnosis.elith_delivery_items`** に持つ
     (`elith_deliveries` は `(uid, bundle_date, delivery_prefix)` で 1 行 + `format_ids` 上書きなので流用不可)。
   - **migration 番号は `20260930000060` 以降** (`…000010`〜`…000050` は使用済み)。
+  - **着手前に Production (`6abc310`) を作業ブランチへ取り込む** (仕様書 §0.4.1)。
+    履歴は diverge しているが**コードのファイル差分は 0** なので設計変更は無い。
+    取り込んだら `astro check` / `build` / A 層 28 本が緑であることを先に確認する。
+  - **原本競合の共通化で既存 `/admin/lab-results/register` の契約を壊さない** (§0.4.2)。
+    共通ライブラリは **`'same_sha' / 'different_sha' / 'none'` の判定だけ**を返し、
+    **`error` 文字列と HTTP ステータスは各 API が決める** —
+    既存は **409 `file_exists`** のまま、追加検査だけ **409 `original_conflict`**。
+    **`replace` は新 API に付けない** (原本を置換できる口は既存の 1 つだけに保つ)。
 
 - **【EC 購入を伴わない招待に実データで使わせる = スペシャルアカウント 2026-09-15 実装】
   正本 `docs/operations/スペシャルアカウント_仕様書.md`。上位 = `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md`。
