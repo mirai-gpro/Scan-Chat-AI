@@ -21,7 +21,7 @@
 --   STEP 3  実際に片付ける（トランザクション。件数を確認して COMMIT）
 --
 -- 【安全のための約束】
---   ・**残すのは各 (uid, 検査種別, 受診日, 取込元) の最新 1 件**（`created_at` が最大）
+--   ・**残すのは各 (uid, 検査種別, 受診日, 取込元) の最新 1 件**（`imported_at` が最大）
 --   ・**原本ファイルが付いている行は消さない** — `test_artifact_files` は
 --     `on delete cascade`（`20260601000010_schemas_and_tables.sql:215`）なので、
 --     消すと**原本の記録ごと消える**（10 年保管・削除不可 §6.1 と衝突）。
@@ -30,6 +30,17 @@
 --     （`20260820000010_measurement_values.sql:33`）なので**一緒に消える**。
 --     これは正しい — 残るとグラフに幽霊の点が出る。
 --   ・**`status='active'` の行だけを対象**にする（既に superseded のものは触らない）。
+--
+-- 【この表の列名（実測・`20260601000010_schemas_and_tables.sql`）】
+--   時刻の列は **`imported_at` だけ**。**`created_at` も `updated_at` も無い**。
+--   （初版で `created_at` を書いて `42703: column a.created_at does not exist` で落ちた。
+--    他の表の癖で書くと必ず踏むので、ここに明記しておく。）
+--
+-- 【なぜ DB が重複を止めなかったか】UNIQUE は
+--   `(diagnostic_user_id, source, test_type, test_date, external_test_id)` だが、
+--   **PostgreSQL は NULL 同士を「別の値」として扱う**ので、
+--   `external_test_id` が NULL のユーザースキャンは**何行でも入る**。
+--   （だから制約ではなくアプリ側の差し替えで塞いだ。）
 -- ============================================================================
 
 
@@ -59,11 +70,11 @@ with ranked as (
     a.test_type,
     a.test_date,
     a.source,
-    a.created_at,
+    a.imported_at,
     a.scan_md is not null and length(btrim(a.scan_md)) > 0 as has_md,
     row_number() over (
       partition by a.diagnostic_user_id, a.test_type, a.test_date, a.source
-      order by a.created_at desc, a.id desc            -- ★ 最新を残す
+      order by a.imported_at desc, a.id desc            -- ★ 最新を残す
     ) as rn,
     exists (
       select 1 from diagnosis.test_artifact_files f
@@ -73,21 +84,21 @@ with ranked as (
   where a.status = 'active'
 )
 select
-  id, diagnostic_user_id, test_type, test_date, source, created_at, has_md, has_original,
+  id, diagnostic_user_id, test_type, test_date, source, imported_at, has_md, has_original,
   case when has_original then 'superseded に落とす（原本があるので消さない）'
        else '削除する' end as action
 from ranked
 where rn > 1                                            -- ★ 最新以外
-order by diagnostic_user_id, test_date desc, created_at desc;
+order by diagnostic_user_id, test_date desc, imported_at desc;
 
 
 -- 1-c. 本田さんだけ見たいとき（uid を差し替えて使う）
--- select id, test_type, test_date, source, status, created_at,
+-- select id, test_type, test_date, source, status, imported_at,
 --        length(coalesce(scan_md, '')) as md_len
 --   from diagnosis.test_artifacts
 --  where diagnostic_user_id = '5d11742f-f196-450c-800b-d9ffa89ba64b'
 --    and test_type = 'health_checkup'
---  order by test_date desc, created_at desc;
+--  order by test_date desc, imported_at desc;
 
 
 -- ============================================================================
@@ -106,7 +117,7 @@ order by diagnostic_user_id, test_date desc, created_at desc;
 --     a.id,
 --     row_number() over (
 --       partition by a.diagnostic_user_id, a.test_type, a.test_date, a.source
---       order by a.created_at desc, a.id desc
+--       order by a.imported_at desc, a.id desc
 --     ) as rn,
 --     exists (
 --       select 1 from diagnosis.test_artifact_files f
@@ -119,7 +130,7 @@ order by diagnostic_user_id, test_date desc, created_at desc;
 --
 -- -- ① 原本のある重複は消さず superseded に落とす
 -- update diagnosis.test_artifacts
---    set status = 'superseded', updated_at = now()
+--    set status = 'superseded'      -- ★ この表に updated_at は無い
 --  where id in (select id from _dup_targets where has_original);
 --
 -- -- ② 残りを削除（measurement_values は cascade で一緒に消える）
@@ -146,4 +157,27 @@ order by diagnostic_user_id, test_date desc, created_at desc;
 --   ダッシュボード → 人間ドック / 健康診断 → 「データ」→「過去データ」
 --     → **同じ受診日が 2 つ出ないこと**
 --   「グラフ」→ 同じ日付に点が 2 つ乗っていないこと
+-- ============================================================================
+
+
+-- ============================================================================
+-- 【検証済み】2026-09-30・ローカル PostgreSQL 16 で実際に流して確認した
+--
+-- 本番と同じ定義の表（`test_artifacts` / `test_artifact_files` /
+-- `measurement_values` の FK と cascade を含む）を作り、本田さん相当のデータ
+-- （重複 2 組 ＋ 原本付き重複 1 組 ＋ 既に superseded 1 件）と、
+-- **巻き込まれてはいけない別人 1 件**を入れて STEP 1 → STEP 3 を実行した。
+--
+--   BEGIN / SELECT 3 / UPDATE 1 / DELETE 2 / remaining_duplicate_groups = 0
+--
+--   ・本田さんの active 行数 4 ＝ 受診日の種類数 4（重複ゼロ）
+--   ・残ったのは各組の最新（imported_at が最大）の行
+--   ・**原本付きの行は削除されず superseded**。原本レコードも残った
+--   ・既に superseded だった行は触られていない
+--   ・**別人の行は触られていない**
+--   ・measurement_values 9 → 7（削除した 2 行分だけ cascade で消えた）
+--
+-- 【なぜこの記録を残すか】初版は `created_at` を書いて本番で
+-- `42703: column a.created_at does not exist` で落ちた。**SQL をどのテストも
+-- 実行していなかった**のが原因。この種のスクリプトは渡す前に 1 回流すこと。
 -- ============================================================================
