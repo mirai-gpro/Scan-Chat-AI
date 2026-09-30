@@ -46,6 +46,8 @@ interface Props {
   shipments?: (KitShipment & { lab_name: string | null })[];
   nextTestAt?: string | null;
   diagnosticUserId?: string;
+  /** 自己申告ボタンを出してよいか（共有閲覧では false・仕様書 §17.2）。 */
+  canSelfReport?: boolean;
   detailHref?: string;
   /**
    * リンクに引き継ぐクエリ文字列 ('' か '?u=<uid>')。
@@ -70,6 +72,7 @@ const {
   shipments = [],
   nextTestAt = null,
   diagnosticUserId = '',
+  canSelfReport = true,
   detailHref = '/kit',
   linkQuery: q = '',
   linkPrefix: p = '',
@@ -175,7 +178,7 @@ const steps = [
     {course && (
       <li class="flex flex-col gap-2.5 rounded-xl border border-slate-200 bg-white p-3">
         <span class="text-base font-bold text-navy-800">3. 検査キット</span>
-        <KitProgressRows shipments={shipments} nextTestAt={nextTestAt} diagnosticUserId={diagnosticUserId} />
+        <KitProgressRows shipments={shipments} nextTestAt={nextTestAt} canSelfReport={canSelfReport} />
       </li>
     )}
 

@@ -1,0 +1,50 @@
+---
+/**
+ * **共有 URL が使えないときの共通画面**（§16.3）。
+ *
+ * 【理由を出し分けない】
+ *   不存在 / 期限切れ / paused / revoked / `starts_at` 前 / 不正な字面
+ * を**すべてこの 1 画面**へ送る。区別できる応答を返すと、
+ * **URL の総当たりで「存在するが停止中」を炙り出せてしまう**
+ * （`result-queries.ts` の所有者検証と同じ規律）。
+ *
+ * 【ここで健康情報を 1 文字も出さない】対象者が誰かも書かない。
+ */
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import AppIcon from '../../components/AppIcon.astro';
+import { SHARE_PENDING_COOKIE, SHARE_COOKIE } from '../../lib/share-access';
+import { refreshConfig, cfg } from '../../lib/app-config';
+import { noStore } from '../../lib/http-cache';
+
+export const prerender = false;
+
+noStore(Astro.response);
+Astro.response.headers.set('referrer-policy', 'no-referrer');
+Astro.response.headers.set('x-robots-tag', 'noindex, nofollow');
+
+/*
+ * **使えない URL の Cookie を残さない。** 残すと次に別の共有 URL を開いたときに
+ * 古い pending が邪魔をする。`welltect_v` / `welltect_admin_v` には**触らない**（§17.5）。
+ */
+Astro.cookies.delete(SHARE_PENDING_COOKIE, { path: '/' });
+Astro.cookies.delete(SHARE_COOKIE, { path: '/' });
+
+await refreshConfig();
+const support = cfg('ui.support_contact');
+---
+
+<BaseLayout title="ご利用いただけません | Welltect" width="flow">
+  <main class="mx-auto flex w-full max-w-md flex-col items-center px-5 py-16 text-center">
+    <span class="mb-4 grid h-14 w-14 place-items-center rounded-2xl bg-slate-100 text-slate-600">
+      <AppIcon name="lock" size={28} />
+    </span>
+    <h1 class="mb-3 text-xl font-bold text-navy-800">このページはご利用いただけません</h1>
+    <p class="text-base leading-relaxed text-slate-700">
+      共有の期限が終了しているか、URL が正しくない可能性があります。
+      お手数ですが、共有元のご担当者へご連絡ください。
+    </p>
+    {support && (
+      <p class="mt-5 text-sm text-slate-600">お問い合わせ: {support}</p>
+    )}
+  </main>
+</BaseLayout>

@@ -1,6 +1,6 @@
 import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../../lib/viewer';
-import { denyReadOnlyWrite } from '../../../../lib/write-guard';
+import { denyReadOnlyWrite, denyForShare, denyAnonymous } from '../../../../lib/write-guard';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { isHpEdgeConfigured, submitKitSelfReport } from '../../../../lib/hp-edge';
 
@@ -23,8 +23,21 @@ export const POST: APIRoute = async (ctx) => {
    * 代理表示の画面から押されると**対象顧客の配送状態が実際に変わる**。
    * 所有者チェックは「その uid のものか」しか見ておらず、**誰が押したかは見ていない**。
    */
-  const denied = denyReadOnlyWrite(await resolveViewer(ctx));
+  const viewer = await resolveViewer(ctx);
+  const denied = denyReadOnlyWrite(viewer);
   if (denied) return denied;
+  /*
+   * **共有閲覧からは一切叩かせない**（2026-09-30・仕様書 §17.2 / §25）。
+   * 発注者が共有相手へ許可した更新は **AI 問診と AI スキャンの 2 つだけ**。
+   * **本人の配送状態**を外部の共有相手が変えると、実態と食い違って
+   * **以後の出荷・検査の段取りが狂う**。**UI から消すだけでは足りない**
+   * （API 直叩きを防げない）ので、ここで 403 にする。
+   */
+  const shared = denyForShare(viewer);
+  if (shared) return shared;
+  // **未認証も止める**（§21.1 クラス A）。
+  const unauth = denyAnonymous(viewer);
+  if (unauth) return unauth;
 
   const id = params.id;
   if (!id || !/^[0-9a-f-]{36}$/i.test(id)) {
@@ -33,7 +46,12 @@ export const POST: APIRoute = async (ctx) => {
 
   const body = await request.json().catch(() => null) as { action?: unknown; diagnosticUserId?: unknown } | null;
   const action = body?.action;
-  const diagnosticUserId = typeof body?.diagnosticUserId === 'string' ? body.diagnosticUserId : null;
+  /*
+   * 【2026-09-30・§21.1】**body の `diagnosticUserId` を認可根拠にしない。**
+   * 以前はこの値をそのまま信じて所有確認していたので、**他人の uid を書けば
+   * その人の配送状態を変えられた**。対象は resolver が決める。
+   */
+  const diagnosticUserId = viewer.writeTargetUid;
 
   if (action !== 'received' && action !== 'returned') {
     return json({ error: 'invalid action (expected received|returned)' }, 400);

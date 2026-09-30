@@ -12,7 +12,10 @@
  *   data-self-report              … このボタンが対象であることの目印
  *   data-shipment-id              … kit_shipments.id
  *   data-action                   … 'received' | 'returned'
- *   data-diagnostic-user-id       … 診断ユーザーID (PII ではない)
+ *
+ * **uid は属性で渡さない**（2026-09-30・仕様書 §21.1）。対象はサーバが
+ * Cookie / 共有セッションから決める。以前は `data-diagnostic-user-id` を body に載せており、
+ * **他人の uid を書けばその人の配送状態を変えられた**。
  *
  * `define:vars` を使わないのは、インライン script だと import できず
  * 2 ページに同じ処理を複製することになるため。ID は属性で受け渡す。
@@ -32,8 +35,7 @@ export function initKitSelfReport(): void {
 
     const shipmentId = btn.dataset.shipmentId;
     const action = btn.dataset.action;
-    const diagnosticUserId = btn.dataset.diagnosticUserId;
-    if (!shipmentId || !action || !diagnosticUserId) return;
+    if (!shipmentId || !action) return;
 
     const verb = action === 'received' ? 'お受取' : '返送';
     if (!confirm(`本当に「${verb}」を申告しますか？`)) return;
@@ -46,7 +48,7 @@ export function initKitSelfReport(): void {
       const res = await fetch(`/api/kit/${shipmentId}/self-report`, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
-        body: JSON.stringify({ action, diagnosticUserId }),
+        body: JSON.stringify({ action }),
       });
       const payload = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
       if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);

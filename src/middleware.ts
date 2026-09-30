@@ -28,6 +28,9 @@ import { VIEWER_COOKIE, verifyViewer } from './lib/viewer';
 import { ADMIN_COOKIE, verifyAdminCred } from './lib/admin-identity';
 import { parseAdminViewPath, resolveImpersonationContext } from './lib/admin-impersonation';
 import { publicOrigin } from './lib/public-url';
+import {
+  SHARE_COOKIE, resolveShareSession, touchShareSession, logShareEvent, classifyShareFailure, shareEnabled,
+} from './lib/share-access';
 
 /* ══════════════════════════════════════════════════════════════════════
  * ① origin 検査（Astro 標準の置き換え・2026-09-30）
@@ -83,6 +86,26 @@ function originGuard(request: Request): Response | null {
   return null;
 }
 
+/**
+ * **共有セッション中に「見た」を記録するページ**（§26.1 の**閲覧系だけ**）。
+ * `/result/<artifact_id>` だけは動的なので下で prefix 判定する。
+ *
+ * 【`/chat` と `/scan` を入れない】§26.1 では
+ *   `chat_use` = `/api/live-token` または `/api/interview/export`
+ *   `scan_use` = `/api/scan/save` または `/api/scan/jobs`
+ * = **実際に使ったこと**を指す。ページを開いただけで `*_use` にすると
+ * 「問診を利用した」「スキャンを利用した」の意味が変わり、
+ * **admin が記録を読み違える**（開いて閉じただけの回が「利用」に見える）。
+ * → 利用の記録は**各 API が `logShareApiEvent()` で**残す。
+ */
+const SHARE_VIEW_EVENTS: Record<string, import('./lib/share-access').ShareEvent> = {
+  '/dashboard': 'dashboard_view',
+  '/report': 'report_view',
+  '/trend': 'trend_view',
+  '/kit': 'kit_view',
+  '/notices': 'notices_view',
+};
+
 /** 理由を出し分けない（切り分けはサーバログ側）。本文も最小にする。 */
 function forbidden(): Response {
   return new Response('403 Forbidden', {
@@ -100,7 +123,100 @@ export const onRequest = defineMiddleware(async (context, next) => {
   const blocked = originGuard(context.request);
   if (blocked) return blocked;
 
-  // ② ここから先は代理表示だけ。
+  /*
+   * ② **外部共有の解決**（§18.2 / §27.1）。
+   *
+   * Cookie が無ければ**何もしない**ので、一般利用者・admin の挙動は不変。
+   * **毎リクエストで link 側の status / starts_at / expires_at まで見る**
+   * （`resolveShareSession` の中）。セッションだけ見ると **revoke が効かない**。
+   *
+   * **失効していたら `locals.share` を置かないだけ**で 403 にはしない —
+   * 各ページは未サインイン扱いになり、共有相手には通常のサインイン画面が出る。
+   * 代理表示（URL が対象を名指ししている）と違い、**共有は Cookie なので
+   * 「名指ししたものが出せない」状態にならない**。
+   */
+  /*
+   * ②-0 **緊急停止**（§37）。`SHARE_ENABLED=off` のときだけ通る枝。
+   *
+   * **入口を塞ぐだけでは足りない。** Cookie を持っている人が `/dashboard` を
+   * 開いたときに `locals.share` を置いてしまうと、**止めたのに対象者の健康情報が出る**。
+   * → **共有セッションの解決ごと止める**（下の `if` に入らない）。
+   * 本人（`welltect_v`）と Admin 代理表示は**素通り**なので影響しない。
+   */
+  const shareOff = !shareEnabled();
+  if (shareOff) {
+    const p0 = new URL(context.request.url).pathname;
+    if (p0 === '/share' || p0.startsWith('/share/') || p0.startsWith('/api/share/')) {
+      return new Response('503 Service Unavailable', {
+        status: 503,
+        headers: {
+          'content-type': 'text/plain; charset=utf-8',
+          'cache-control': 'no-store, max-age=0',
+          'referrer-policy': 'no-referrer',
+          // 一時停止であることを機械にも伝える（恒久的な削除ではない）。
+          'retry-after': '3600',
+        },
+      });
+    }
+  }
+
+  const shareRaw = shareOff ? undefined : context.cookies.get(SHARE_COOKIE)?.value;
+  if (shareRaw) {
+    const sh = await resolveShareSession(shareRaw);
+    if (sh) {
+      /*
+       * **admin / cron / ops / debug は共有セッションから触らせない**（§21.2 / §25）。
+       *
+       * B（admin API）と C（cron）は Bearer キーが要るので Cookie では通らないが、
+       * **「通らないはず」を根拠にしない** — 将来 Cookie で入れる admin 画面が増えたときに
+       * 静かに開く。`/api/debug/viewer` は **viewer をそのまま露出する**ので、
+       * 共有相手に対象者の uid を渡してしまう（§26.2 と正面から衝突する）。
+       * → **入口で 403 にする。**
+       *
+       * **「`locals.share` を置かずに素通しする」ではなく 403 にする**理由:
+       * 素通しすると、端末の持ち主が admin だった場合に**共有相手の操作で
+       * admin 画面が開ける**（§24.5「共有中は admin 権限を使えない」に反する）。
+       */
+      const p = new URL(context.request.url).pathname;
+      if (
+        p.startsWith('/admin/') || p === '/admin'
+        || p.startsWith('/api/admin/') || p.startsWith('/api/cron/')
+        || p.startsWith('/api/ops/') || p.startsWith('/api/debug/')
+      ) {
+        await logShareEvent({
+          event: 'blocked_admin_access', request: context.request,
+          linkId: sh.linkId, sessionId: sh.sessionId, viewerId: sh.viewerId, path: p,
+        });
+        return forbidden();
+      }
+
+      context.locals.share = sh;
+      void touchShareSession(sh.sessionId);
+
+      /*
+       * **アクセス記録は 1 か所で取る**（§26.1）。9 枚のページへ散らすと必ず 1 枚漏れ、
+       * **漏れたページは「見られた記録が残らない」**。PDF の「アクセス記録確認」は
+       * 「誰がいつ何を見たか」を出す機能なので、抜けがあると意味を失う。
+       * **path に UID を入れない**（`/result/<artifact_id>` は artifact_id までに留める）。
+       */
+      const ev = SHARE_VIEW_EVENTS[p] ?? (p.startsWith('/result/') ? 'result_view' : null);
+      if (ev) {
+        void logShareEvent({
+          event: ev, request: context.request,
+          linkId: sh.linkId, sessionId: sh.sessionId, viewerId: sh.viewerId, path: p,
+        });
+      }
+    } else {
+      /*
+       * **失効の理由はログにだけ残す**（§26.1）。画面は理由を区別しない（§16.3）。
+       * ここを取らないと「なぜ入れなくなったか」を後から誰も説明できない。
+       */
+      const why = await classifyShareFailure(shareRaw);
+      if (why) void logShareEvent({ event: why, request: context.request, path: new URL(context.request.url).pathname });
+    }
+  }
+
+  // ③ ここから先は代理表示だけ。
   const parsed = parseAdminViewPath(new URL(context.request.url).pathname);
   if (!parsed) return next();   // ★ 既存の経路はここで終わり（挙動不変）
 

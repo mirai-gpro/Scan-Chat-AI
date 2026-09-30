@@ -1,7 +1,7 @@
 /**
  * 問診回答 + 検査結果を統合した「今日の気付き」生成 API。
  *
- * 入力: { diagnosticUserId?: string, chatMessages: ChatMessage[] }
+ * 入力: { chatMessages: ChatMessage[] }  ← uid は Cookie/共有セッションから解決する
  * 出力: { insight: string, generatedAt: string } | { error: string }
  *
  * クライアント側: ダッシュボードの HealthInsightCard が呼び出す。
@@ -10,6 +10,8 @@
 import type { APIRoute } from 'astro';
 import { MODELS, callGemini, extractText } from '../../lib/gemini';
 import { buildUserContextForChat } from '../../lib/chat-context';
+import { resolveViewer } from '../../lib/viewer';
+import { denyAnonymous } from '../../lib/write-guard';
 
 export const prerender = false;
 
@@ -18,16 +20,26 @@ interface ChatMessageInput {
   text: string;
 }
 
-export const POST: APIRoute = async ({ request }) => {
+/**
+ * 【2026-09-30・§19.4 / §21.4】**body の `diagnosticUserId` は読まない。**
+ *   - `buildUserContextForChat` は**その人の検査結果**を読む。クライアント申告の uid で
+ *     引けると**他人の検査サマリーを誰でも取り出せる**（§11-#3）。対象は resolver が決める。
+ *   - **未認証を 401 で止める**（Gemini の課金が乗るため・§21.4）。
+ */
+export const POST: APIRoute = async (ctx) => {
+  const { request } = ctx;
+  const viewer = await resolveViewer(ctx);
+  const unauth = denyAnonymous(viewer);
+  if (unauth) return unauth;
+
   const apiKey = import.meta.env.GEMINI_API_KEY;
   if (!apiKey) return json({ error: 'GEMINI_API_KEY is not configured' }, 500);
 
   const body = await request.json().catch(() => null) as {
-    diagnosticUserId?: unknown;
     chatMessages?: unknown;
   } | null;
 
-  const diagnosticUserId = typeof body?.diagnosticUserId === 'string' ? body.diagnosticUserId : null;
+  const diagnosticUserId = viewer.uid;   // ★ サーバが決める
   const chatMessages = Array.isArray(body?.chatMessages)
     ? (body.chatMessages as ChatMessageInput[]).filter(
         (m) => m && typeof m.text === 'string' && (m.role === 'user' || m.role === 'assistant'),

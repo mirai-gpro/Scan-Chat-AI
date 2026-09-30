@@ -5,7 +5,7 @@
  *   {
  *     markdownClean: string,        // 確定 Markdown (必須)
  *     diagnosticId?: string,        // 端末発番の UUID。無ければサーバで生成
- *     diagnosticUserId?: string|null,
+ *     (diagnosticUserId は受け取っても使わない。対象は Cookie / 共有セッションから解決する)
  *     model?: string|null,
  *     hint?: string|null,
  *     capturedAt?: string           // ISO8601 (任意)
@@ -21,7 +21,8 @@
 import type { APIRoute } from 'astro';
 import { putScanExport } from '../../../lib/scan-export-put';
 import { resolveViewer } from '../../../lib/viewer';
-import { denyReadOnlyWrite } from '../../../lib/write-guard';
+import { denyReadOnlyWrite, denyUnlessShareScope, denyAnonymous } from '../../../lib/write-guard';
+import { logShareApiEvent } from '../../../lib/share-access';
 
 export const prerender = false;
 
@@ -48,8 +49,18 @@ export const POST: APIRoute = async (ctx) => {
    * この口は S3 へ書く＝永続書き込み。**認証そのものはこれまでどおり課していない**
    * （§21.4 の Phase 0 で別途塞ぐ）が、**代理表示からの書き込みだけはここで止める**。
    */
-  const denied = denyReadOnlyWrite(await resolveViewer(ctx));
+  const viewer = await resolveViewer(ctx);
+  const denied = denyReadOnlyWrite(viewer);
   if (denied) return denied;
+  // **共有は scope に `scan` があるときだけ**（§17.2）。
+  const scoped = denyUnlessShareScope(viewer, 'scan');
+  if (scoped) return scoped;
+  /*
+   * 【2026-09-30・§20.3】**未認証を止める。** この口は S3 へ書くので、
+   * 誰でも叩ける状態は納品領域を他人に使わせることになる。
+   */
+  const unauth = denyAnonymous(viewer);
+  if (unauth) return unauth;
 
   let body: ExportBody;
   try {
@@ -64,7 +75,23 @@ export const POST: APIRoute = async (ctx) => {
   }
 
   const diagnosticId = str(body.diagnosticId) ?? crypto.randomUUID();
-  const diagnosticUserId = str(body.diagnosticUserId);
+  /*
+   * 【2026-09-30・§20.3】**body の `diagnosticUserId` を使わない。**
+   * この値は S3 の納品フォルダ (`{prefix}user/{client_id}/…`) と JSON の中身に効くので、
+   * クライアントが名乗れると **他人の納品領域へ書ける**。対象は resolver が決める。
+   */
+  const diagnosticUserId = viewer.writeTargetUid;
+  const claimed = str(body.diagnosticUserId);
+  if (claimed && diagnosticUserId && claimed !== diagnosticUserId) {
+    // **止めない。記録するのは「食い違った」事実だけ**（申告値はログに書かない・§26.2）。
+    await logShareApiEvent(ctx, 'target_tamper_attempt', '/api/scan/export');
+  }
+  /*
+   * **ここで `scan_use` を記録しない**（§26.1・2026-09-30 のレビュー）。
+   * `scan_use` = `/api/scan/save` または `/api/scan/jobs` と決まっており、
+   * 画面は 1 回の送信で `save` と `export` の**両方**を呼ぶので、
+   * ここでも記録すると**同じ操作が 2 件**になる。
+   */
   const capturedRaw = str(body.capturedAt);
   const capturedAt = capturedRaw && !Number.isNaN(Date.parse(capturedRaw)) ? new Date(capturedRaw) : undefined;
   const exportedAt = new Date();

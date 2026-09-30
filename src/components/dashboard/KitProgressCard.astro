@@ -22,10 +22,12 @@ interface Props {
   nextTestAt?: string | null;
   planName?: string | null;
   diagnosticUserId: string;
+  /** 自己申告ボタンを出してよいか（共有閲覧では false・仕様書 §17.2）。 */
+  canSelfReport?: boolean;
   /** ?u= を引き継いだ詳細ページへのリンク。 */
   detailHref?: string;
 }
-const { shipments, nextTestAt, planName, diagnosticUserId, detailHref = '/kit' } = Astro.props as Props;
+const { shipments, nextTestAt, planName, canSelfReport = true, detailHref = '/kit' } = Astro.props as Props;
 ---
 
 <section class="card">
@@ -46,5 +48,5 @@ const { shipments, nextTestAt, planName, diagnosticUserId, detailHref = '/kit' }
     </div>
   </header>
 
-  <KitProgressRows shipments={shipments} nextTestAt={nextTestAt} diagnosticUserId={diagnosticUserId} />
+  <KitProgressRows shipments={shipments} nextTestAt={nextTestAt} canSelfReport={canSelfReport} />
 </section>

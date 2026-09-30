@@ -50,3 +50,74 @@ export function denyReadOnlyWrite(v: Pick<Viewer, 'kind' | 'writeTargetUid'>): R
     { status: 403, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } },
   );
 }
+
+/* ══════════════════════════════════════════════════════════════════════
+ * 外部共有（§17.2 / §17.4 / §17.5）
+ * ════════════════════════════════════════════════════════════════════ */
+
+/** 403 を JSON で返す（理由は返すが対象は返さない）。 */
+function deny(error: string, message: string): Response {
+  return new Response(JSON.stringify({ error, message }), {
+    status: 403,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
+/**
+ * **共有セッションからは一切叩かせない口**（§17.4 / §17.5）。
+ *
+ * 発注者が明示的に許可した更新は **AI 問診と AI スキャンの 2 つだけ**で、
+ * それ以外の更新は scope に含まれない（§17.2）。具体的には
+ *
+ *   - `POST /api/kit/[id]/self-report` … **本人の配送状態**を外部共有者が変えてはいけない。
+ *     実態と食い違うと**以後の出荷・検査の段取りが狂う**。
+ *   - `POST /api/notices/[id]/read`     … **本人の既読状態**。勝手に既読になると
+ *     **重要な通知を見落とす**。
+ *   - `POST /api/auth/*`                … **端末の持ち主（別人かもしれない）の
+ *     本人セッションを共有相手の操作で壊させない**（§17.5）。
+ *
+ * **UI から消すだけでは足りない**（API 直叩きを防げない）ので、サーバ側で 403 にする。
+ */
+export function denyForShare(v: Pick<Viewer, 'kind'>): Response | null {
+  if (v.kind !== 'share') return null;
+  return deny('share_not_allowed', 'この操作は共有閲覧ではご利用いただけません。');
+}
+
+/**
+ * **未認証を止める**（§21.4 Phase 0）。
+ *
+ * 【なぜ要るか（2026-09-30 実測）】`/api/scan`・`/api/scan/upload-ticket`・
+ * `/api/interview/classify-voice`・`/api/live-token`・`/api/insight`・`/api/coach/ask` の
+ * 6 本は `resolveViewer` も `checkAdminAuth` も `cookies` も**一切参照していなかった** =
+ * **完全に未認証で叩けた**。実機で `POST /api/live-token` が 76 文字の Gemini Live token を
+ * 返すことを確認済み。**課金とストレージを他人に使わせる経路**なので、
+ * 外部共有を公開する前に閉じる。
+ *
+ * 許可 = `self` / `admin_self` / `admin_impersonation` / `admin_impersonation_legacy` /
+ *        `share` / `uid_entry`。**`anonymous` だけを 401 にする。**
+ *
+ * **target lock とは別の話**。`/api/scan` は target を持たない（読むだけ）が、
+ * 「正規の主体であること」は要求する。
+ */
+export function denyAnonymous(v: Pick<Viewer, 'kind'>): Response | null {
+  if (v.kind !== 'anonymous') return null;
+  return new Response(JSON.stringify({ error: 'unauthenticated', message: 'サインインが必要です。' }), {
+    status: 401,
+    headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' },
+  });
+}
+
+/**
+ * **scope に無い機能を止める**（§17.2）。
+ *
+ * 共有リンクは用途ごとに `{ interview, scan }` を切り替えて発行できる
+ * （PDF の「用途別に管理できる」）。**scope に無い更新は既定 BLOCK。**
+ */
+export function denyUnlessShareScope(
+  v: Pick<Viewer, 'kind' | 'shareScope'>,
+  need: 'interview' | 'scan',
+): Response | null {
+  if (v.kind !== 'share') return null;
+  if (v.shareScope?.[need] === true) return null;
+  return deny('share_scope', 'この共有リンクではこの機能をご利用いただけません。');
+}

@@ -37,5 +37,22 @@ declare namespace App {
       adminSelfUid: string | null;
       expiresAt: string;
     };
+    /**
+     * **外部共有の解決結果**（`welltect_share_v` が有効なときだけ入る）。
+     *
+     * **middleware しか書かない。** あそこで毎リクエスト link 側の
+     * status / starts_at / expires_at まで確認している（仕様書 §27.1）。
+     */
+    share?: {
+      linkId: string;
+      sessionId: string;
+      targetUid: string;
+      targetOrigin: 'production' | 'staging';
+      scope: { view: true; interview: boolean; scan: boolean };
+      /** 常設の帯に出す用途ラベル。**対象者の氏名ではない**（仕様書 §24.4）。 */
+      label: string | null;
+      expiresAt: string;
+      viewerId: string | null;
+    };
   }
 }

@@ -15,7 +15,8 @@
  */
 import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../lib/viewer';
-import { denyReadOnlyWrite } from '../../../lib/write-guard';
+import { denyReadOnlyWrite, denyUnlessShareScope } from '../../../lib/write-guard';
+import { logShareApiEvent } from '../../../lib/share-access';
 import { getS3Config } from '../../../lib/s3';
 import { isScanUploadKey } from '../../../lib/scan-upload-ticket';
 import { enqueueScanJob } from '../../../lib/scan-jobs';
@@ -43,8 +44,24 @@ export const POST: APIRoute = async (ctx) => {
    */
   const denied = denyReadOnlyWrite(viewer);
   if (denied) return denied;
-  const uid = viewer.selfUid;
+  // **共有は scope に `scan` があるときだけ**（§17.2）。share 以外では何もしない。
+  const scoped = denyUnlessShareScope(viewer, 'scan');
+  if (scoped) return scoped;
+  /*
+   * 【2026-09-30・§20.3】`viewer.selfUid` → **`viewer.writeTargetUid`**。
+   * `selfUid` は**共有セッションでは null** なので、そのままだと共有相手が
+   * 送信しても **401 でジョブが 1 件も積まれない**。
+   */
+  const uid = viewer.writeTargetUid;
   if (!uid) return json({ ok: false, error: 'not_signed_in' }, 401);
+
+  /*
+   * **「AI スキャンを利用した」の記録はここ**（§26.1 の `scan_use`）。
+   * `/scan` を開いただけでは記録しない — **利用と閲覧は意味が違う**。
+   * 紐付けは `locals.share`（middleware しか書かない）から取るので、
+   * **クライアントから ID を受け取らない**。share 以外では何もしない。
+   */
+  await logShareApiEvent(ctx, 'scan_use', '/api/scan/jobs');
 
   let body: Record<string, unknown>;
   try {

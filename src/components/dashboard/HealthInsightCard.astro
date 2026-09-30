@@ -168,7 +168,7 @@ const { diagnosticUserId } = Astro.props as Props;
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            diagnosticUserId: diagnosticUserId || null,
+            // ★ uid は送らない。対象はサーバが Cookie / 共有セッションから決める (§19.4)。
             chatMessages: session.messages.map((m) => ({ role: m.role, text: m.text })),
           }),
         });

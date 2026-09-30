@@ -38,6 +38,12 @@ const supportContact = cfg('ui.support_contact');
 
 // dev profile (認証未連携) で ?u= が無い場合はダッシュボードと同じデフォルトユーザーを使う。
 const effectiveUid = u ?? (needsSignIn ? null : DEFAULT_USER);
+/**
+ * **共有閲覧では既読/未読を切り替えさせない**（2026-09-30・仕様書 §17.2 / §25）。
+ * 勝手に既読になると**本人が重要な通知を見落とす**。
+ * API (`api/notices/[id]/read.ts`) も 403 で止めるので**両方で閉じている**。
+ */
+const canMarkRead = viewer.kind !== 'share';
 
 const result = !effectiveUid
   ? null
@@ -134,7 +140,7 @@ const importantTitle = data ? `${data.userName}への重要なお知らせ` : '�
                   <p class="mt-1 whitespace-pre-wrap text-xs leading-relaxed text-slate-600">{n.body}</p>
                   <div class="mt-2 flex items-center justify-between">
                     <time class="text-xs text-slate-400">{formatJpDate(n.published_at)}</time>
-                    {unread ? (
+                    {canMarkRead && (unread ? (
                       <button
                         type="button"
                         data-mark-read
@@ -154,7 +160,7 @@ const importantTitle = data ? `${data.userName}への重要なお知らせ` : '�
                       >
                         未読に戻す
                       </button>
-                    )}
+                    ))}
                   </div>
                   {n.link_url && (
                     <a href={n.link_url} class="mt-2 inline-block text-xs font-medium text-brand-600 hover:underline">詳しく見る ›</a>
@@ -245,12 +251,12 @@ const importantTitle = data ? `${data.userName}への重要なお知らせ` : '�
   )}
 </BaseLayout>
 
-<script is:inline define:vars={{ diagnosticUserId: effectiveUid }}>
+<script is:inline>
   document.addEventListener('click', async (e) => {
     const btn = e.target?.closest?.('button[data-mark-read]');
     if (!btn) return;
     const noticeId = btn.dataset.noticeId;
-    if (!noticeId || !diagnosticUserId) return;
+    if (!noticeId) return;
     const read = btn.dataset.read !== 'false';
 
     btn.disabled = true;
@@ -261,7 +267,8 @@ const importantTitle = data ? `${data.userName}への重要なお知らせ` : '�
       const res = await fetch(`/api/notices/${noticeId}/read`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ diagnosticUserId, read }),
+        // ★ uid は送らない。対象はサーバが Cookie / 共有セッションから決める (§21.1)。
+        body: JSON.stringify({ read }),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);

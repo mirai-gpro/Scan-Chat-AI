@@ -1,0 +1,65 @@
+---
+/**
+ * **共有ページを表示中であることを常時示す帯**（仕様書 §24.4）。
+ *
+ * 【なぜ全ページに常設か】share は Cookie なので、代理表示（URL path）と違って
+ * **タブ単位に分離できない**。共有相手がたまたま Welltect の顧客でもある場合、
+ * マイページから素の `/dashboard` を開いても **share が勝つ**（§24.1 順序 2）。
+ * → **黙って別人のデータを見ている状態を作らない**ために、状態を常に見せ、
+ *   **1 タップで自分の画面へ戻れる**ようにする。
+ *
+ * 【何を出すか】**対象者の氏名も uid も出さない。** 出すのは発行時に admin が付けた
+ * 用途ラベル（「助成金事務局 確認用」など）だけ。代理表示の帯（§13.4）が uid 頭 8 桁を
+ * 出すのは admin 向けだからで、**共有相手には対象の識別子を渡さない**。
+ *
+ * 【終了ボタン】`POST /share/end`。**`welltect_share_v` だけ**を失効させ、
+ * `welltect_v` には触れない（§17.5）。本人セッションが残っていれば自分の画面へ戻る。
+ */
+interface Props {
+  /** `viewer.kind === 'share'` のときだけ true。false なら何も描かない。 */
+  active: boolean;
+  /** `viewer.shareLabel`。null なら文言から省く。 */
+  label?: string | null;
+}
+const { active, label = null } = Astro.props as Props;
+---
+{active && (
+  <div
+    id="share-banner"
+    class="sticky top-0 z-50 flex flex-wrap items-center justify-between gap-2 bg-brand-700 px-4 py-2 text-white"
+  >
+    <span class="text-sm font-semibold">
+      {label ? `${label} の共有ページを表示しています` : '共有ページを表示しています'}
+    </span>
+    <button
+      type="button"
+      id="share-end"
+      class="min-h-touch rounded-lg bg-white/15 px-3 text-sm font-semibold hover:bg-white/25"
+    >
+      共有を終了して自分の画面へ
+    </button>
+  </div>
+)}
+{active && (
+  <script is:inline>
+    (() => {
+      const btn = document.getElementById('share-end');
+      if (!btn) return;
+      btn.addEventListener('click', async () => {
+        btn.disabled = true;
+        try {
+          /*
+           * **JSON で叩く。** form (`x-www-form-urlencoded`) は origin 検査の対象で、
+           * プロキシの都合で拒否され得る（2026-09-30 に実機で踏んだ）。
+           */
+          await fetch('/share/end', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: '{}',
+          });
+        } catch { /* 失敗しても戻す（DB 側は期限で切れる） */ }
+        window.location.replace('/dashboard');
+      });
+    })();
+  </script>
+)}

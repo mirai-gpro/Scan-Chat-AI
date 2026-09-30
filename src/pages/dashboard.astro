@@ -358,6 +358,7 @@ const linkPrefix = viewerPathPrefix(viewer);
           shipments={data?.shipments ?? []}
           nextTestAt={data?.subscription?.next_test_at}
           diagnosticUserId={data?.diagnosticUserId ?? ''}
+          canSelfReport={viewer.kind !== 'share'}
           detailHref={`${linkPrefix}/kit${q}`}
           linkQuery={q}
           linkPrefix={linkPrefix}
