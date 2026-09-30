@@ -608,6 +608,7 @@ console.log('\n⑦ 構造（GET で claim しない・cred の発行位置・mid
 
   // **middleware は /admin-view 以外に触らない**。
   const mw = code('src/middleware.ts');
+  const mwSrc = code('src/middleware.ts');
   ok('S-12 middleware は /admin-view 以外で即 next()（既存経路に触れない）',
     /parseAdminViewPath/.test(mw) && /if \(!parsed\) return next\(\);/.test(mw));
   ok('S-13 middleware が毎リクエスト本人結合する（admin フラグ + cred + context）',
@@ -677,6 +678,20 @@ console.log('\n⑦ 構造（GET で claim しない・cred の発行位置・mid
   ok('S-29 転送ヘッダを見る `publicOrigin()` を使う', /publicOrigin\(request\)/.test(issuer));
   ok('S-30 **`path` も返す**（中継が自分の base と組めるように）',
     /path,/.test(issuer) && /\/admin\/handoff\/\$\{issued\.token\}/.test(issuer));
+
+  /*
+   * **origin 検査を Astro から引き取ったこと**（2026-09-30・実機で発覚）。
+   * Astro は `url.origin`（本番ではプロキシ内側の `https://localhost`）と比べるので
+   * **isSameOrigin が常に false = 検査が「常に拒否」に化けていた**。
+   */
+  ok('S-31 Astro 標準の origin 検査を切ってある', /checkOrigin:\s*false/.test(read('astro.config.mjs')));
+  ok('S-32 **代わりに middleware が publicOrigin で同じ検査をする**',
+    /originGuard/.test(mwSrc) && /publicOrigin\(request\)/.test(mwSrc));
+  ok('S-33 検査は全リクエストに掛かる（代理表示の判定より前）',
+    mwSrc.indexOf('originGuard(context.request)') < mwSrc.indexOf('parseAdminViewPath(new URL'));
+  ok('S-34 Astro と同じ集合を使う（緩めていない）',
+    /application\/x-www-form-urlencoded/.test(mwSrc) && /multipart\/form-data/.test(mwSrc)
+    && /text\/plain/.test(mwSrc) && /'GET', 'HEAD', 'OPTIONS'/.test(mwSrc));
 }
 
 /* ══════════════════════════════════════════════════════════════════════

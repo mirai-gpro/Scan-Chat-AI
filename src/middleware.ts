@@ -27,6 +27,56 @@ import { defineMiddleware } from 'astro:middleware';
 import { VIEWER_COOKIE, verifyViewer } from './lib/viewer';
 import { ADMIN_COOKIE, verifyAdminCred } from './lib/admin-identity';
 import { parseAdminViewPath, resolveImpersonationContext } from './lib/admin-impersonation';
+import { publicOrigin } from './lib/public-url';
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ① origin 検査（Astro 標準の置き換え・2026-09-30）
+ * ════════════════════════════════════════════════════════════════════ */
+
+/** Astro と同じ集合（`node_modules/astro/dist/core/app/middlewares.js`）。 */
+const FORM_CONTENT_TYPES = ['application/x-www-form-urlencoded', 'multipart/form-data', 'text/plain'];
+const SAFE_METHODS = ['GET', 'HEAD', 'OPTIONS'];
+
+function isFormLike(contentType: string | null): boolean {
+  if (!contentType) return false;
+  const ct = contentType.toLowerCase();
+  return FORM_CONTENT_TYPES.some((t) => ct.includes(t));
+}
+
+/**
+ * **クロスサイトの form POST を止める。**
+ *
+ * `astro.config.mjs` で `security.checkOrigin: false` にしたぶんをここで補う。
+ * **判定の中身は Astro と同じ**で、比べる相手だけを変えてある:
+ *
+ *   Astro : request.headers.origin === url.origin        ← プロキシ内側 = https://localhost
+ *   ここ  : request.headers.origin === publicOrigin(req) ← 転送ヘッダを見た公開 origin
+ *
+ * 【なぜ必要だったか】本番では `url.origin` が常に `https://localhost` なので
+ * **isSameOrigin が常に false**、つまり検査が「常に拒否」に化けていた。
+ * 実測で `POST /api/admin/lab-results/upload` (multipart) が 403 になっており、
+ * **admin の原本アップロードが動いていなかった**。
+ *
+ * **緩めていない** — 公開 origin と一致しない form POST は今までどおり 403。
+ * JSON (`application/json`) は form-like ではないので対象外。これも Astro と同じで、
+ * クロスオリジンの JSON POST はブラウザの preflight が止める（こちらは CORS を返さない）。
+ */
+function originGuard(request: Request): Response | null {
+  if (SAFE_METHODS.includes(request.method)) return null;
+  const origin = request.headers.get('origin');
+  const sameOrigin = origin !== null && origin === publicOrigin(request);
+  const ct = request.headers.get('content-type');
+  // content-type が無い POST も Astro は同じ扱い（同一 origin を要求する）。
+  if (!ct || isFormLike(ct)) {
+    if (!sameOrigin) {
+      return new Response(`Cross-site ${request.method} form submissions are forbidden`, {
+        status: 403,
+        headers: { 'content-type': 'text/plain; charset=utf-8', 'cache-control': 'no-store' },
+      });
+    }
+  }
+  return null;
+}
 
 /** 理由を出し分けない（切り分けはサーバログ側）。本文も最小にする。 */
 function forbidden(): Response {
@@ -41,6 +91,11 @@ function forbidden(): Response {
 }
 
 export const onRequest = defineMiddleware(async (context, next) => {
+  // ① まず origin 検査（Astro 標準の置き換え。**全リクエストが対象**）。
+  const blocked = originGuard(context.request);
+  if (blocked) return blocked;
+
+  // ② ここから先は代理表示だけ。
   const parsed = parseAdminViewPath(new URL(context.request.url).pathname);
   if (!parsed) return next();   // ★ 既存の経路はここで終わり（挙動不変）
 
