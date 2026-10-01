@@ -1912,9 +1912,38 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   **指紋からこの 2 つだけを外す** (データは外さない) / HTTP 2 往復では plan を持ち越せないので
   **2 回目も組み直して指紋が一致したときだけ書く** (中身をクライアントから送り返させない) /
   その帰結で `putVerified` の冪等は検診・ウェルネス年齢には効かない = **V-1 は最悪ケースで正しい**。
-  **検証** = `npm run verify:special-account-management` (147 件・CI の A 層) /
-  wellfort-site `verify:special-accounts-ui` (50 件) と `verify:admin-target` (34 件)。
-  **退行注入 16 種とも名指しで落ちることを確認済み。**
+  **検証** = `npm run verify:special-account-management` (179 件・CI の A 層) /
+  wellfort-site `verify:special-accounts-ui` (58 件) と `verify:admin-target` (34 件)。
+  **退行注入 23 種 (既存 16 + 新規 7) とも名指しで落ちることを確認済み。**
+  **【実装レビューの是正 2026-10-01・仕様書 §27.1.2】発注者がコードを読んで出した
+  blocker 4 件 + hardening 2 件を直した。設計は 1 つも変えていない。**
+  - **P0-1 delivery preview は read-only ではなかった。** `materializeHealthCheckups()` →
+    `elith-delivery.ts:231` が**中間 source へ PUT** し、`computeWellnessFromMeasurements()` →
+    `:288` が **`health_age_scores` を upsert** する。要件 (= 確認前に Elith 本番受取領域へ
+    書かない) は満たしているので**挙動は変えず**、仕様書・コード・API の `note`・モーダルの
+    文言を実装へ合わせた。**文言の正** =「この確認では Elith 本番受取領域には書き込みません。
+    確認用データを組み立てるため、中間 source とウェルネス年齢の算出結果は更新される場合が
+    あります」。**「S3 へ 1 バイトも書かない」と書かないこと** (検査が落とす)。
+  - **P0-2 run 差分の SHA が volatile metadata を含んでいた。** `PlannedFile` を
+    **`contentSha256`** (`stableBody()` = 生成メタを除いた指紋・**preview→confirm と run 差分は
+    こちら**) と **`deliverySha256`** (実 body・`putVerified` の読戻し検証と監査) へ分離。
+    snapshot は両方を持つ。**退行検査「同じ実データから 2 回 plan を組んでも diff.updated=0」が必須。**
+  - **P0-3 原本 SHA の衝突判定が DB mutation の後だった** (409 で止めても DB は戻らないので
+    **原本 A / ダッシュボード値 B** の不整合が起こり得た)。`preflightAdditionalOriginal()`
+    (read しかしない) を S3 原本の読み出し直後・`saveAdditionalArtifact()` の**前**へ。
+    `scan_md` / `measurements` / `measurement_values` / `test_artifact_files` が
+    **4 つとも unchanged** であることを検査で固定 (既存 E22 は原本しか見ていなかった)。
+  - **P0-4 `.order('created_at')` を削除。** `diagnosis.test_artifacts` に `created_at` は無く
+    (`20260601000010:203` は `imported_at`)、0/1/2 件以上の判定に順序は要らない。
+    **本番 DB に偶然その列が在ることを前提にしない。**
+  - **H-1 `safeTriggeredBy()` は `/^[0-9a-f]{64}$/i` の digest だけ受ける** (allow-list)。
+    「`@` が無い」は生 email を弾く条件であって PII を弾く条件ではない
+    (氏名・社員番号・`admin%40example.com` が素通りしていた)。控えは 10 年残る。
+  - **H-2 実在暦日の判定を `additional-originals.ts` の `isRealDate` 1 か所へ集約**し、
+    **署名の段 (`createAdditionalOriginalTicket`) にも適用**した。以前は署名が形式だけを見て
+    いたので、`2026-02-31` の原本が S3 へ上がったあとに DB 保存が 400 で落ち、
+    **削除不可のバケットに孤児ファイルが残り得た**。**複製を置かない** (段ごとに判定が
+    食い違うと孤児が出る)。
   **発注者の操作が 2 つ必要**: ① migration `20261001000010_elith_delivery_runs.sql` の適用
   ② 本番での通し確認 (この環境には鍵も S3 も無いので、Gemini 解析・S3 署名 PUT・
   本番納品の実挙動と V-1 の所要時間は未確認)。

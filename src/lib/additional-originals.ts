@@ -67,6 +67,21 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const SHA256_HEX_RE = /^[0-9a-f]{64}$/;
 
+/**
+ * **実在する暦日か**（形式 + カレンダー往復）。`2025-13-45` / `2026-02-31` は false。
+ *
+ * **日付判定はこの 1 か所だけ**（Hardening 2）。以前は形式だけを見る `DATE_RE` が
+ * 署名の段 (`createAdditionalOriginalTicket`) に、実在判定が保存の段
+ * (`saveAdditionalArtifact`) にあり、**`2026-02-31` の PDF が S3 へ上がったあとに
+ * DB 保存が 400 で落ちる**＝誰からも参照されない孤児ファイルが 10 年保管の
+ * バケットに残り得た（原本バケットは削除不可）。
+ */
+export function isRealDate(v: unknown): v is string {
+  if (typeof v !== 'string' || !DATE_RE.test(v)) return false;
+  const t = Date.parse(`${v}T00:00:00Z`);
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === v;
+}
+
 /** `YYYY-MM-DD` → `YYYY_MM_DD`（S3 の日付フォルダ。Elith の命名と同じ流儀）。 */
 export function dateFolder(testDate: string): string {
   return testDate.replace(/-/g, '_');
@@ -98,7 +113,7 @@ export function buildAdditionalOriginalKey(input: {
 }): string | null {
   if (!UUID_RE.test(input.uid)) return null;
   if (!isAdditionalTestType(input.testType)) return null;
-  if (!DATE_RE.test(input.testDate)) return null;
+  if (!isRealDate(input.testDate)) return null;
   if (!SHA256_HEX_RE.test(input.sha256Hex)) return null;
   return `additional_results/${input.uid.toLowerCase()}/${input.testType}/${dateFolder(input.testDate)}/${input.sha256Hex}.pdf`;
 }
@@ -147,9 +162,11 @@ export async function createAdditionalOriginalTicket(input: {
     return { ok: false, error: 'invalid_diagnostic_user_id' };
   }
   if (!isAdditionalTestType(input.testType)) return { ok: false, error: 'invalid_test_type' };
-  if (typeof input.testDate !== 'string' || !DATE_RE.test(input.testDate)) {
+  if (!isRealDate(input.testDate)) {
     // **受診日は必須**（§8）。today へ落とさない。
-    return { ok: false, error: 'invalid_test_date', detail: '受診日 (YYYY-MM-DD) が要ります' };
+    // **実在する暦日かをここで見る**（Hardening 2）。形式だけ通すと `2026-02-31` の原本が
+    // S3 へ上がったあとに DB 保存が 400 で落ち、**孤児ファイルが 10 年残る**。
+    return { ok: false, error: 'invalid_test_date', detail: '受診日 (実在する YYYY-MM-DD) が要ります' };
   }
   if (!isSha256Base64(input.sha256Base64)) {
     return {

@@ -46,7 +46,15 @@ export interface SnapshotFile {
   format_id: string;
   delivered_date: string;
   destination_key: string;
-  sha256: string;
+  /**
+   * **差分の判定に使うのはこれだけ**（P0-2）。生成メタ（`exported_at` /
+   * `diagnostic_id`）を除いた本文の sha256 なので、**中身が同じなら毎回同じ**。
+   * 実 body の sha を使うとこの 2 つが毎回変わり、
+   * **何も変えていない回が必ず「更新」になる**（実測で踏んだ）。
+   */
+  content_sha256: string;
+  /** 実際に書いた body の sha256。**監査用で、差分判定には使わない。** */
+  delivery_sha256: string;
 }
 
 export interface RunSnapshot {
@@ -64,18 +72,28 @@ export function buildSnapshot(files: readonly PlannedFile[]): RunSnapshot {
     format_id: String(f.formatId),
     delivered_date: String(f.deliveredDate),
     destination_key: String(f.destinationKey),
-    sha256: String(f.sha256),
+    content_sha256: String(f.contentSha256),
+    delivery_sha256: String(f.deliverySha256),
   }));
   const count_by_format: Record<string, number> = {};
   for (const f of out) count_by_format[f.format_id] = (count_by_format[f.format_id] ?? 0) + 1;
   return { files: out, count_by_format, dates: Array.from(new Set(out.map((f) => f.delivered_date))).sort() };
 }
 
-/** `@` を含む値は捨てる（生 email を控えへ入れない）。 */
+/**
+ * **sha256 digest（hex 64 文字）だけを受け取る**（Hardening 1）。それ以外は `null`。
+ *
+ * 以前は「`@` を含まなければ通す」だったが、それは**生 email を弾く条件であって、
+ * PII を弾く条件ではない**。氏名・社員番号・`admin%40example.com` のような
+ * エンコード済みアドレスは全部すり抜ける。控えは 10 年残るので、
+ * **形が digest であることを条件にする**（allow-list）。
+ * digest は中継側（wellfort-site）が作る（§14.3.1）。
+ */
+const DIGEST_RE = /^[0-9a-f]{64}$/i;
 export function safeTriggeredBy(v: unknown): string | null {
   const s = String(v ?? '').trim();
-  if (!s || s.includes('@')) return null;
-  return s.slice(0, 120);
+  if (!DIGEST_RE.test(s)) return null;
+  return s.toLowerCase();
 }
 
 /**
@@ -121,7 +139,7 @@ export interface RunDiff {
   previousAt: string | null;
   /** 前回に無かった納品先キー。 */
   added: SnapshotFile[];
-  /** 両方にあるが `sha256` が違う = **件数は増えていないが内容が変わった**。 */
+  /** 両方にあるが `content_sha256` が違う = **件数は増えていないが内容が変わった**。 */
   updated: SnapshotFile[];
   /** format_id ごとの「追加 + 更新」件数（画面の副文言用）。 */
   countByFormat: Record<string, number>;
@@ -138,13 +156,20 @@ export function diffAgainst(previous: RunSnapshot | null, current: readonly Plan
   if (!previous) {
     return { noPrevious: true, previousAt: null, added: [], updated: [], countByFormat: {} };
   }
-  const prev = new Map(previous.files.map((f) => [f.destination_key, f.sha256]));
+  // **`content_sha256` で比べる**（P0-2）。古い snapshot（`sha256` しか無い回）は
+  // 判定材料が無いので **`undefined` にはせず「比較できない = 変化なし扱い」**にする
+  // （`added` へ誤って入れない。キーは両方に在るので `added` でもない）。
+  const prev = new Map(previous.files.map((f) => [
+    f.destination_key,
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    f.content_sha256 ?? (f as any).sha256 ?? null,
+  ]));
   const added: SnapshotFile[] = [];
   const updated: SnapshotFile[] = [];
   for (const f of now.files) {
     const was = prev.get(f.destination_key);
     if (was === undefined) added.push(f);
-    else if (was !== f.sha256) updated.push(f);
+    else if (was !== null && was !== f.content_sha256) updated.push(f);
   }
   const countByFormat: Record<string, number> = {};
   for (const f of [...added, ...updated]) countByFormat[f.format_id] = (countByFormat[f.format_id] ?? 0) + 1;

@@ -428,8 +428,11 @@ console.log('\nE / F / K. 1 uid 手動納品 (plan → putVerified を実際に�
     [...new Set(plan.files.map((f) => f.deliveredDate))].sort(), ['2023_05_10', '2024_05_10', '2025_05_10']);
   eq('E-20 代表 1 件の指定で 3 ファイル', plan.countByFormat.BloodTestData, 3);
 
-  // ── K-46 / V-4 plan を作っても S3 を変えない ───────────────────────
-  eq('K-46 **確認モーダルを開いただけでは本番へ 1 バイトも書かない** (V-4)', prod().length, 0);
+  // ── K-46 / V-4 preview は **本番受取領域** へ PUT しない（P0-1）────────
+  // **「S3 を 1 バイトも変えない」ではない。** 中間 source（`scan-accuracy-test/user/…`）と
+  // ウェルネス年齢は確認用データを組み立てる副作用で更新され得る。
+  // 見張るのは **`user/` 直下 = Elith 本番受取領域へ書いていないこと** だけ。
+  eq('K-46 **preview では Elith 本番受取領域 (user/) へ PUT しない** (V-4)', prod().length, 0);
 
   // ── E-21 検診 5 年分 ＋ E-22 ウェルネス年齢は年ごと ─────────────────
   reset();
@@ -578,10 +581,14 @@ console.log('\nE / F / K. 1 uid 手動納品 (plan → putVerified を実際に�
   M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.4'))];
   const prev = await callApi({ diagnosticUserId: UID_A, sourcePrefix: P, deliveryPrefix: '' });
   eq('K-46 preview は mode=preview で返る', prev.json.mode, 'preview');
-  eq('K-46 **preview では S3 を 1 バイトも変えない**', prod().length, 0);
-  ok('K-47 preview に 1 ファイルごとの明細がある (format_id / delivered_date / destination_key / sha256)',
-    prev.json.plan.files.every((f) => f.format_id && f.delivered_date && f.destination_key && f.sha256));
-  ok('K-46 本番へ書くことを文言で言う', /本番/.test(prev.json.note ?? ''));
+  eq('K-46 **preview では Elith 本番受取領域 (user/) へ PUT しない**', prod().length, 0);
+  ok('K-47 preview に 1 ファイルごとの明細がある (format_id / delivered_date / destination_key / content_sha256 / delivery_sha256)',
+    prev.json.plan.files.every((f) => f.format_id && f.delivered_date && f.destination_key && f.content_sha256 && f.delivery_sha256));
+  // **P0-1**: 文言が実装を偽らないこと。「1 バイトも書かない」と言わせない。
+  ok('K-46 **note が「本番受取領域へは書かない」と言う**', /本番受取領域には書き込みません/.test(prev.json.note ?? ''));
+  ok('K-46 **note が中間 source とウェルネス年齢の更新を隠さない** (P0-1)',
+    /中間 source/.test(prev.json.note ?? '') && /ウェルネス年齢/.test(prev.json.note ?? ''));
+  ok('K-46 **「1 バイトも書かない」とは言わない** (事実と違う)', !/1 ?バイト/.test(prev.json.note ?? ''));
 
   const noFp = await callApi({ diagnosticUserId: UID_A, sourcePrefix: P, deliveryPrefix: '', confirm: true });
   eq('K-48 指紋を送らない確定は受け付けない', [noFp.status, noFp.json.error], [400, 'fingerprint_required']);
@@ -619,6 +626,57 @@ console.log('\nE / F / K. 1 uid 手動納品 (plan → putVerified を実際に�
   M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.9')), hcRow('2025-02-17', 53, hcMd('4.2'))];
   const f4 = M.manual.planFingerprint(await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' }));
   ok('K-48 年が増えても指紋が変わる', f4 !== f3);
+
+  // ── P0-2 **run 差分は生成メタで揺れない**（必須の退行検査）────────────
+  //
+  // `PlannedFile.sha256`（実 body の SHA）で差分を取ると、`exported_at` /
+  // `diagnostic_id` が毎回変わるので **何も変えていない回が必ず「更新」**になる。
+  // 指紋だけ `stableBody()` を使っても、snapshot が実 body の SHA なら
+  // **差分だけが静かに壊れる**（指紋は一致するのに「内容が変わった N 件」と出る）。
+  reset();
+  M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.4')), hcRow('2025-02-17', 53, hcMd('4.2'))];
+  const planA = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  const planB = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  ok('P0-2 plan は 2 件以上組めている (0 件だと差分検査が素通りする)', planA.files.length >= 2, String(planA.files.length));
+  ok('P0-2 **実 body は毎回変わる** (exported_at / diagnostic_id)',
+    planA.files.some((f, i) => f.deliverySha256 !== planB.files[i].deliverySha256),
+    'ここが同じなら前提が変わっている。検査の意味を見直すこと');
+  eq('P0-2 **中身の指紋 (contentSha256) は毎回同じ**',
+    planA.files.map((f) => f.contentSha256), planB.files.map((f) => f.contentSha256));
+  {
+    const snap = M.runs.buildSnapshot(planA.files);
+    ok('P0-2 snapshot が content_sha256 を持つ', snap.files.every((f) => /^[0-9a-f]{64}$/.test(f.content_sha256)));
+    ok('P0-2 snapshot が delivery_sha256 も持つ (監査用)', snap.files.every((f) => /^[0-9a-f]{64}$/.test(f.delivery_sha256)));
+    ok('P0-2 snapshot に生の sha256 キーを残さない (どちらを見ているか曖昧にしない)',
+      snap.files.every((f) => !('sha256' in f)), JSON.stringify(snap.files[0]));
+    const d = M.runs.diffAgainst(snap, planB.files);
+    eq('P0-2 **同じ実データから 2 回 plan を組んでも diff.updated = 0**', d.updated.length, 0);
+    eq('P0-2 追加も 0 (キーも同じ)', d.added.length, 0);
+  }
+  {
+    // 中身が本当に変われば、ちゃんと「更新」として出る（検知力を殺していない）。
+    const snap = M.runs.buildSnapshot(planA.files);
+    M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('9.9')), hcRow('2025-02-17', 53, hcMd('4.2'))];
+    const planC = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+    const d2 = M.runs.diffAgainst(snap, planC.files);
+    ok('P0-2 **中身が変わった回は updated で出る** (検知力を殺していない)', d2.updated.length > 0, JSON.stringify(d2.countByFormat));
+  }
+
+  // ── H-1 safeTriggeredBy は digest だけを通す ──────────────────────
+  eq('H-1 sha256 digest (hex 64) は通る',
+    M.runs.safeTriggeredBy('a'.repeat(64)), 'a'.repeat(64));
+  eq('H-1 大文字 digest は小文字へ正規化', M.runs.safeTriggeredBy('A'.repeat(64)), 'a'.repeat(64));
+  for (const bad of [
+    'admin@example.com',            // 生 email
+    'admin%40example.com',          // **エンコード済み = 旧実装はこれを通していた**
+    '浜田',                          // 氏名
+    'E12345',                       // 社員番号
+    'a'.repeat(63), 'a'.repeat(65), // 桁違い
+    'g'.repeat(64),                 // hex でない
+    '', null, undefined, 123,
+  ]) {
+    eq(`H-1 digest でない値は控えへ入れない: ${JSON.stringify(bad)}`, M.runs.safeTriggeredBy(bad), null);
+  }
 
   const other = await callApi({ diagnosticUserId: UID_B, sourcePrefix: P, deliveryPrefix: '' });
   eq('C-12 スペシャル以外は API でも拒否', other.status, 409);
@@ -733,7 +791,13 @@ console.log('\nH / K. run snapshot と前回差分\n');
   const { M, UID_A } = H;
   const R = M.runs;
   const key = (fmt, d) => `user/${UID_A}/date/${d}/${fmt}_date_${d}_user_${UID_A}.json`;
-  const pf = (fmt, d, sha) => ({ formatId: fmt, deliveredDate: d, destinationKey: key(fmt, d), sha256: sha });
+  // **差分の判定に使うのは `contentSha256`**（P0-2）。`deliverySha256` は監査用なので
+  // ここでは毎回違う値を入れ、**それだけでは「更新」にならない**ことも併せて見る。
+  let devNonce = 0;
+  const pf = (fmt, d, sha) => ({
+    formatId: fmt, deliveredDate: d, destinationKey: key(fmt, d),
+    contentSha256: sha, deliverySha256: `dev${devNonce += 1}`,
+  });
 
   // K-49 — 同日・同件数で中身だけ変わった回を「更新」として検知する
   const before = R.buildSnapshot([pf('HealthCheckupData', '2026_03_29', 'aaa'), pf('BloodTestData', '2026_05_10', 'bbb')]);
@@ -744,7 +808,7 @@ console.log('\nH / K. run snapshot と前回差分\n');
   eq('K-49 **同じ日・同じ件数でも中身が変われば「更新」として出る**',
     [d.added.length, d.updated.length, d.updated[0]?.format_id], [0, 1, 'HealthCheckupData']);
 
-  d = R.diffAgainst(before, [...before.files.map((f) => pf(f.format_id, f.delivered_date, f.sha256)), pf('GeneticTestResultData', '2024_11_01', 'ccc')]);
+  d = R.diffAgainst(before, [...before.files.map((f) => pf(f.format_id, f.delivered_date, f.content_sha256)), pf('GeneticTestResultData', '2024_11_01', 'ccc')]);
   eq('K-49 新しい納品先キーは「追加」', [d.added.length, d.updated.length], [1, 0]);
 
   d = R.diffAgainst(before, [pf('HealthCheckupData', '2026_03_29', 'aaa')]);
@@ -758,7 +822,8 @@ console.log('\nH / K. run snapshot と前回差分\n');
   {
     const snap = R.buildSnapshot([{
       formatId: 'HealthCheckupData', deliveredDate: '2026_03_29',
-      destinationKey: key('HealthCheckupData', '2026_03_29'), sha256: 'aaa',
+      destinationKey: key('HealthCheckupData', '2026_03_29'),
+      contentSha256: 'aaa', deliverySha256: 'bbb',
       // **混ぜても落ちる**こと（allow-list で 4 つだけ通す）
       name: '相川 佳之', email: 'r@example.com', birth: '1971-01-01',
       measurements: [{ item_name: 'AST', value: '22' }], sourceFileName: '250804ALAPDS結果本田大作.pdf',
@@ -766,13 +831,16 @@ console.log('\nH / K. run snapshot と前回差分\n');
     const text = JSON.stringify(snap);
     ok('K-41 snapshot に氏名・メール・生年月日・測定値・原本ファイル名が入らない (V-3)',
       !/(相川|@example|1971-01-01|item_name|ALAPDS|本田)/.test(text), text.slice(0, 300));
-    eq('K-41 明細は 4 つのキーだけ', Object.keys(snap.files[0]).sort(),
-      ['delivered_date', 'destination_key', 'format_id', 'sha256']);
-    ok('K-41 sha256 は中身ではない（指紋だけ）', snap.files[0].sha256 === 'aaa');
+    eq('K-41 明細は 5 つのキーだけ', Object.keys(snap.files[0]).sort(),
+      ['content_sha256', 'delivered_date', 'delivery_sha256', 'destination_key', 'format_id']);
+    ok('K-41 sha256 は中身ではない（指紋だけ）',
+      snap.files[0].content_sha256 === 'aaa' && snap.files[0].delivery_sha256 === 'bbb');
   }
 
   // K-42 — triggered_by に生 email を入れない
-  eq('K-42 `@` を含む値は控えへ入れない', R.safeTriggeredBy('admin@example.com'), null);
+  eq('K-42 生 email は控えへ入れない', R.safeTriggeredBy('admin@example.com'), null);
+  // **H-1**: `@` を抜いたエンコード済みアドレスも通さない（allow-list だから通らない）。
+  eq('K-42 エンコード済みアドレスも通さない', R.safeTriggeredBy('admin%40example.com'), null);
   eq('K-42 digest は通す', R.safeTriggeredBy('a'.repeat(64)), 'a'.repeat(64));
   eq('K-42 空は null', [R.safeTriggeredBy(''), R.safeTriggeredBy(null)], [null, null]);
 

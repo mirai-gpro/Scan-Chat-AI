@@ -258,6 +258,107 @@ console.log('\nE. original\n');
   ok('E22-3 register の replace 経路を呼んでいない',
     !/replace/.test(code('src/lib/special-additional-tests.ts')));
 
+  /* ────────────────────────────────────────────────────────────────
+   * **P0-3: 競合で止めたとき DB が 1 つも変わっていないこと**
+   *
+   * 以前は `saveAdditionalArtifact()`（= `scan_md` / `measurements` /
+   * `measurement_values` を更新する）を**通してから** `linkAdditionalOriginal()` で
+   * 409 を返していた。409 で止めても **DB は戻らない**ので、
+   * **原本は A のまま・ダッシュボードの値だけ B** という不整合が起こり得た。
+   *
+   * **E22-2 は原本しか見ていない**ので、これだけでは検出できない（実際に素通りした）。
+   * 4 つ全部を見る。
+   * ──────────────────────────────────────────────────────────────── */
+  resetAll();
+  await finalizeBlood();                                    // ① PDF A で登録
+  const snapBefore = {
+    artifacts: JSON.stringify(M.db.TABLES.test_artifacts ?? []),
+    files: JSON.stringify(M.db.TABLES.test_artifact_files ?? []),
+    values: JSON.stringify(M.db.TABLES.measurement_values ?? []),
+  };
+  const artBefore = (M.db.TABLES.test_artifacts ?? [])[0] ?? {};
+  const keyB = M.addOrig.buildAdditionalOriginalKey({ uid: UID_A, testType: 'blood', testDate: '2025-08-04', sha256Hex: shaHex(PDF2) });
+  putOriginal(keyB, PDF2);
+  // ② **違う PDF B ＋ 違う検査値**で同じ回へ。競合で止まるべき。
+  const rB = await call(M.finalize, {
+    ...BASE, testType: 'blood', testDate: '2025-08-04', originalKey: keyB,
+    parts: [{
+      page: 1,
+      measurements: [{ name: 'AST(GOT)', value: '999', unit: 'U/L', ref_low: '13', ref_high: '30' }],
+      notes: [], raw_markdown: '| 検査項目 | 今回 |\n|---|---|\n| AST | 999 |',
+    }],
+  });
+  eq('P0-3 違う原本は 409 original_conflict', [rB.status, rB.json.error], [409, 'original_conflict']);
+  const artAfter = (M.db.TABLES.test_artifacts ?? [])[0] ?? {};
+  eq('P0-3 **scan_md が変わっていない**', artAfter.scan_md, artBefore.scan_md);
+  ok('P0-3 **scan_md に新しい値 (999) が入っていない**',
+    !/999/.test(String(artAfter.scan_md ?? '')), String(artAfter.scan_md ?? '').slice(0, 120));
+  eq('P0-3 **measurements が変わっていない**',
+    JSON.stringify(artAfter.measurements ?? null), JSON.stringify(artBefore.measurements ?? null));
+  eq('P0-3 **test_artifacts が丸ごと unchanged**', JSON.stringify(M.db.TABLES.test_artifacts ?? []), snapBefore.artifacts);
+  eq('P0-3 **measurement_values が unchanged**', JSON.stringify(M.db.TABLES.measurement_values ?? []), snapBefore.values);
+  eq('P0-3 **test_artifact_files が unchanged**', JSON.stringify(M.db.TABLES.test_artifact_files ?? []), snapBefore.files);
+  ok('P0-3 **「保存済み」と言わない**（DB を変えていないので）',
+    !/保存済み/.test(String(rB.json.note ?? '')), String(rB.json.note ?? ''));
+  ok('P0-3 判定が DB mutation より前に置かれている',
+    code('src/pages/api/admin/special-additional-tests/finalize.ts')
+      .indexOf('preflightAdditionalOriginal') <
+    code('src/pages/api/admin/special-additional-tests/finalize.ts')
+      .indexOf('saveAdditionalArtifact({'),
+    'preflight が saveAdditionalArtifact より後ろにある');
+  ok('P0-3 preflight は read しかしない（insert / update / upsert を持たない）', (() => {
+    const src = code('src/lib/special-additional-tests.ts');
+    const i = src.indexOf('export async function preflightAdditionalOriginal');
+    const j = src.indexOf('export async function linkAdditionalOriginal');
+    const body = src.slice(i, j);
+    return i > 0 && j > i && !/\.(insert|update|upsert|delete)\(/.test(body);
+  })());
+
+  /* ────────────────────────────────────────────────────────────────
+   * **P0-4: 存在しない列で order しない**
+   * `diagnosis.test_artifacts` に `created_at` は無い（`20260601000010:203` は
+   * `imported_at`）。0 / 1 / 2 件以上の判定に順序は要らない。
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    const src = code('src/lib/special-additional-tests.ts');
+    const i = src.indexOf('export async function resolveAdditionalArtifact');
+    const j = src.indexOf('export type SaveResult');
+    const body = src.slice(i, j);
+    ok('P0-4 **resolveAdditionalArtifact が created_at で order しない**',
+      i > 0 && j > i && !/\.order\(/.test(body), body.match(/\.order\([^)]*\)/)?.[0] ?? '');
+    const ddl = read('supabase/migrations/20260601000010_schemas_and_tables.sql');
+    const t = ddl.slice(ddl.indexOf('create table diagnosis.test_artifacts'), ddl.indexOf('create table diagnosis.test_artifact_files'));
+    ok('P0-4 schema に created_at は無い（imported_at が正）',
+      !/\bcreated_at\b/.test(t) && /\bimported_at\b/.test(t));
+  }
+
+  /* ────────────────────────────────────────────────────────────────
+   * **H-2: 実在しない暦日で原本だけ S3 へ上げさせない**
+   * 原本バケットは 10 年保管・削除不可。署名の段が形式だけを見ていると
+   * `2026-02-31` の PDF が上がったあとに DB 保存が 400 で落ち、
+   * **誰からも参照されない孤児ファイル**が残る。
+   * ──────────────────────────────────────────────────────────────── */
+  for (const bad of ['2026-02-31', '2025-13-45', '2025-00-10', '2023-02-29']) {
+    const t = await M.addOrig.createAdditionalOriginalTicket({
+      uid: UID_A, testType: 'blood', testDate: bad, bytes: 1234,
+      sha256Base64: shaB64(PDF),
+    });
+    eq(`H-2 署名の段で実在しない暦日を弾く: ${bad}`, [t.ok, t.error], [false, 'invalid_test_date']);
+    eq(`H-2 キーも組ませない: ${bad}`,
+      M.addOrig.buildAdditionalOriginalKey({ uid: UID_A, testType: 'blood', testDate: bad, sha256Hex: shaHex(PDF) }), null);
+  }
+  eq('H-2 実在する閏日は通る (2024-02-29)',
+    typeof M.addOrig.buildAdditionalOriginalKey({ uid: UID_A, testType: 'blood', testDate: '2024-02-29', sha256Hex: shaHex(PDF) }), 'string');
+  ok('H-2 **日付判定の実装は 1 か所だけ**（段ごとに食い違わせない）', (() => {
+    const files = [
+      'src/lib/special-additional-tests.ts',
+      'src/pages/api/admin/special-additional-tests/finalize.ts',
+    ];
+    // 複製（自前の暦日判定）を置いていないこと。共通の `isRealDate` を import している。
+    return files.every((f) => !/function isRealDate/.test(code(f)) && /isRealDate/.test(code(f)))
+      && /export function isRealDate/.test(code('src/lib/additional-originals.ts'));
+  })());
+
   // 原本が S3 に無ければ DB へ 1 行も書かない（§28 の 3 番目）
   resetAll();
   const rNo = await call(M.finalize, {

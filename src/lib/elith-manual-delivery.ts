@@ -19,7 +19,8 @@
  * ══════════════════════════════════════════════════════════════════════
  * 【2 段構え】`plan` を見せてから書く（§7.3.1）
  * ══════════════════════════════════════════════════════════════════════
- *   `buildDeliveryPlan(uid)`   … **S3 を 1 バイトも変えない。** 書く予定のファイル一覧を返す
+ *   `buildDeliveryPlan(uid)`   … **Elith 本番受取領域（`deliveryPrefix`）へは書かない。**
+ *                                 書く予定のファイル一覧を返す
  *   `executeDeliveryPlan(...)` … その plan を **そのまま** `putVerified` へ渡す
  *
  * **確定後に assemble を作り直さない。** 作り直すと「確認した内容」と「書いた内容」が
@@ -64,8 +65,19 @@ export interface PlannedFile {
   /** 納品先の date フォルダ（YYYY_MM_DD）。 */
   deliveredDate: string;
   destinationKey: string;
-  /** 中身の指紋。**中身そのものではない**ので PII を持たない（§14.3.1.1）。 */
-  sha256: string;
+  /**
+   * **中身の指紋**（生成メタ `exported_at` / `diagnostic_id` を除いた本文の sha256）。
+   * **preview→confirm の照合と run の差分はこちらを使う**（P0-2）。
+   * 納品 JSON は呼ばれるたび作り直され、この 2 つだけ毎回変わるので、
+   * 実 body の sha では「中身が同じでも毎回 updated」になる。
+   * 指紋であって中身ではないので PII を持たない（§14.3.1.1）。
+   */
+  contentSha256: string;
+  /**
+   * **実際に S3 へ書く body そのものの sha256**。
+   * `putVerified` の読戻し検証はこちらを使う（監査用に snapshot にも残す）。
+   */
+  deliverySha256: string;
 }
 
 export interface DeliveryPlan {
@@ -89,11 +101,22 @@ export interface DeliveryPlan {
 const EMPTY_COUNTS = (): Record<string, number> => ({});
 
 /**
- * **書く予定のファイル一覧を作る。S3 へは 1 バイトも書かない。**
+ * **書く予定のファイル一覧を作る。Elith 本番受取領域（`deliveryPrefix`）へは書かない。**
  *
- * 中間 source（`{prefix}user/…`）への HealthCheckupData / HealthAgeData の
- * materialize は**監査層の生成**であって納品ではない（§16.3 で恒久的に残すと決めた層）。
- * 本番 `user/…` には触れない。
+ * ══════════════════════════════════════════════════════════════════════
+ * **「何も書かない」ではない**（P0-1）
+ * ══════════════════════════════════════════════════════════════════════
+ * 確認用データを組み立てるために既存パイプラインを通すので、副作用として
+ *
+ *   - **中間 source** … `materializeHealthCheckups()` → `elith-delivery.ts:231` の
+ *     `putFiles()` が `{sourcePrefix}user/…` へ HealthCheckupData を書く
+ *   - **ウェルネス年齢** … `computeWellnessFromMeasurements()` → `elith-delivery.ts:288` の
+ *     `health_age_scores` upsert
+ *
+ * が**更新される場合がある**。中間 source は §16.3 で恒久的に残すと決めた監査層で、
+ * ウェルネス年齢は同じ入力から同じ値が出る算出結果なので、どちらも
+ * **納品ではない**。**書かないのは本番受取領域だけ**という約束で、
+ * 大規模な in-memory 化はしない（§7.3.1）。
  */
 export async function buildDeliveryPlan(opts: {
   uid: string;
@@ -169,7 +192,9 @@ export async function buildDeliveryPlan(opts: {
       formatId: (meta?.formatId ?? guessFormatFromKey(f.key)) as ElithFormatId | 'HealthAgeData',
       deliveredDate: meta?.deliveredDate ?? dateFromKey(f.key),
       destinationKey: f.key,
-      sha256: sha256Hex(typeof f.body === 'string' ? new TextEncoder().encode(f.body) : f.body),
+      // **2 本に分ける**（P0-2）。content = 生成メタを除いた指紋 / delivery = 実 body。
+      contentSha256: sha256Hex(new TextEncoder().encode(stableBody(f.body))),
+      deliverySha256: sha256Hex(typeof f.body === 'string' ? new TextEncoder().encode(f.body) : f.body),
     };
   });
 
@@ -237,10 +262,10 @@ export function stableBody(body: string | Uint8Array): string {
  * sha256 は指紋であって中身ではないので、これ自体は PII を持たない。
  */
 export function planFingerprint(plan: DeliveryPlan): string {
-  const bodies = new Map<string, string>();
-  for (const f of plan.internal?.files ?? []) bodies.set(f.key, sha256Hex(new TextEncoder().encode(stableBody(f.body))));
+  // `PlannedFile.contentSha256` が既に `stableBody()` 由来なので、ここで取り直さない
+  // （2 か所で別々に計算すると、片方だけ直したときに静かに食い違う）。
   const lines = plan.files
-    .map((f) => `${f.destinationKey}\t${bodies.get(f.destinationKey) ?? f.sha256}`)
+    .map((f) => `${f.destinationKey}\t${f.contentSha256}`)
     .sort()
     .join('\n');
   return sha256Hex(new TextEncoder().encode(`${plan.uid}\n${lines}`));

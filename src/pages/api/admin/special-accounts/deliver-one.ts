@@ -7,11 +7,18 @@
  * 正本: `docs/specs/special_account_management_spec_20261001.md` §9 / §7.3 / §7.3.1 / §10.2。
  *
  * ══════════════════════════════════════════════════════════════════════
- * **2 回叩く。1 回目は S3 を 1 バイトも変えない。**
+ * **2 回叩く。1 回目は Elith 本番受取領域（`deliveryPrefix`）へ書かない。**
  * ══════════════════════════════════════════════════════════════════════
  *   `confirm` 無し … **delivery preview**（書く予定のファイル一覧 = `plan`）を返すだけ。
  *                     確認モーダルの件数は**これ**であって、一覧の DB 件数ではない（§7.3.1）。
  *   `confirm:true` … 同じ条件で plan を作り直し、**そのまま** `putVerified` で書く。
+ *
+ * **「何も書かない」ではない**（P0-1）。preview は確認用データを組み立てるために
+ * 既存パイプラインを通すので、その副作用として
+ *   - **中間 source**（`sourcePrefix` 配下の HealthCheckupData）… `elith-delivery.ts:231`
+ *   - **ウェルネス年齢**（`diagnosis.health_age_scores`）… `elith-delivery.ts:288`
+ * が更新される場合がある。**書かないのは本番受取領域だけ。**
+ * 大規模な in-memory 化はしない（§7.3.1）。
  *
  * **なぜ DB 件数をそのまま出さないか**: 受診日が読めない回は保存されない /
  * `materializeHealthCheckups` は date フォルダで dedup する / ウェルネス年齢は
@@ -66,12 +73,15 @@ function publicPlan(plan: Awaited<ReturnType<typeof buildDeliveryPlan>>) {
     count_by_format: plan.countByFormat,
     wellness_years: plan.wellnessYears,
     ...(plan.wellnessReason ? { wellness_reason: plan.wellnessReason } : {}),
-    // 1 ファイルごとの明細。**中身は返さない**（`sha256` は指紋であって中身ではない）。
+    // 1 ファイルごとの明細。**中身は返さない**（sha256 は指紋であって中身ではない）。
     files: plan.files.map((f) => ({
       format_id: f.formatId,
       delivered_date: f.deliveredDate,
       destination_key: f.destinationKey,
-      sha256: f.sha256,
+      // 差分の判定に使うのはこちら（生成メタを除いた指紋・P0-2）。
+      content_sha256: f.contentSha256,
+      // 実際に書く body の指紋。**監査用**で、差分判定には使わない。
+      delivery_sha256: f.deliverySha256,
     })),
     // 年（date フォルダ）ごとの内訳。**「5年分」が何を指すか**を画面で言えるように。
     dates: Array.from(new Set(plan.files.map((f) => f.deliveredDate))).sort(),
@@ -105,7 +115,7 @@ export const POST: APIRoute = async ({ request }) => {
     return json({ ok: false, error: 'plan_failed', detail: String((e as { message?: string })?.message ?? e) }, 502);
   }
 
-  // ── 1 回目: 確認用の preview を返すだけ。**S3 は変えない。** ───────────
+  // ── 1 回目: 確認用の preview を返すだけ。**本番受取領域へは書かない。** ───
   if (body.confirm !== true) {
     /*
      * 前回の**手動**納品 run の控えと比べる（D-7・§14.3）。
@@ -135,7 +145,7 @@ export const POST: APIRoute = async ({ request }) => {
           count_by_format: diff.countByFormat,
         },
       } : {}),
-      note: '本番の Elith 受け取り位置へ書き出します。この応答では S3 へ 1 バイトも書いていません。',
+      note: 'この確認では Elith 本番受取領域には書き込みません。確認用データを組み立てるため、中間 source とウェルネス年齢の算出結果は更新される場合があります。',
     }, plan.ok ? 200 : 409);
   }
 

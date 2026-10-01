@@ -48,18 +48,13 @@ import { readUploadedOriginal } from './originals-upload-ticket';
 import {
   decideOriginalRegistration, isAdditionalTestType,
   type AdditionalTestType, type ExistingOriginalRow,
+  isRealDate,
 } from './additional-originals';
 import type { ElithFormatId } from './elith-export';
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
-
-/** 実在する暦日か (形式 + カレンダー往復)。`2025-13-45` / `2026-02-31` は false。 */
-function isRealDate(v: unknown): v is string {
-  if (typeof v !== 'string' || !DATE_RE.test(v)) return false;
-  const t = Date.parse(`${v}T00:00:00Z`);
-  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === v;
-}
+// **日付判定は `additional-originals.ts` の `isRealDate` だけ**（Hardening 2）。
+// ここに複製を置かない — 署名の段と保存の段で判定が食い違うと孤児原本が出る。
 
 // supabase-js の型を引き回さずに使うための最小形（`register.ts:64` と同じ）。
 type Db = { from: (t: string) => any }; // eslint-disable-line @typescript-eslint/no-explicit-any
@@ -155,7 +150,7 @@ export async function resolveAdditionalArtifact(input: {
 }): Promise<ArtifactResolution> {
   const sb = getServerSupabase();
   if (!sb) return { kind: 'error', detail: 'supabase_not_configured' };
-  if (!DATE_RE.test(input.testDate)) return { kind: 'error', detail: 'invalid_test_date' };
+  if (!isRealDate(input.testDate)) return { kind: 'error', detail: 'invalid_test_date' };
 
   const { data, error } = await db(sb)
     .from('test_artifacts')
@@ -163,8 +158,10 @@ export async function resolveAdditionalArtifact(input: {
     .eq('diagnostic_user_id', input.uid)
     .eq('test_type', input.testType)
     .eq('test_date', input.testDate)
-    .eq('status', 'active')
-    .order('created_at', { ascending: false });
+    .eq('status', 'active');
+  // **`.order()` を置かない**（P0-4）。`diagnosis.test_artifacts` に `created_at` は無く
+  // （`20260601000010:203` は `imported_at`）、0 / 1 / 2 件以上の判定に順序は要らない。
+  // 本番 DB に偶然その列が在ることを前提にしない。
   if (error) return { kind: 'error', detail: error.message };
 
   const rows = ((data ?? []) as Array<Record<string, unknown>>).map((r): ArtifactCandidate => ({
@@ -278,6 +275,59 @@ export async function readAdditionalOriginal(key: string): Promise<ReadOriginal 
  *   **黙って差し替えない。** 既存 `register.ts` の `replace` 経路は呼ばない。
  *   `redaction` は未実装なので `raw_pdf_redacted` を名乗らない（§19）。
  */
+export type OriginalPreflight =
+  | { kind: 'ok' }
+  | { kind: 'conflict'; artifactId: string; detail: string; existing: ExistingOriginalRow[] }
+  | { kind: 'error'; error: 'supabase_not_configured' | 'db_error'; detail: string | null };
+
+/**
+ * **DB を 1 行も変えずに**、原本の SHA256 が既存 artifact と衝突しないかだけを先に見る（P0-3）。
+ *
+ * 以前は `saveAdditionalArtifact()`（= `scan_md` / `measurements` /
+ * `measurement_values` を更新する）を**通してから** `linkAdditionalOriginal()` で
+ * `original_conflict` を返していた。そのため**別の PDF B を上げると、原本は A のまま
+ * ダッシュボードの値だけ B になる**という不整合が起こり得た（409 で止まっても DB は戻らない）。
+ *
+ * ここは **read しかしない**。衝突したら呼び出し側が DB mutation の前に止める。
+ * 既存 artifact が無い (`none`) / 複数ある (`ambiguous`) ときは判定材料が無いので
+ * `ok` を返し、後段の `saveAdditionalArtifact()` の判断（新規作成 / `artifact_ambiguous`）に委ねる。
+ */
+export async function preflightAdditionalOriginal(input: {
+  uid: string;
+  testType: AdditionalTestType;
+  testDate: string;
+  sha256: string;
+}): Promise<OriginalPreflight> {
+  const sb = getServerSupabase();
+  if (!sb) return { kind: 'error', error: 'supabase_not_configured', detail: null };
+
+  const found = await resolveAdditionalArtifact({
+    uid: input.uid, testType: input.testType, testDate: input.testDate,
+  });
+  if (found.kind === 'error') return { kind: 'error', error: 'db_error', detail: found.detail };
+  // 新規 / 曖昧はここでは判定しない（後段が決める）。
+  if (found.kind !== 'one') return { kind: 'ok' };
+
+  const { data: existing, error: exErr } = await db(sb)
+    .from('test_artifact_files')
+    .select('id, file_kind, storage_url, sha256, size_bytes, created_at')
+    .eq('test_artifact_id', found.artifactId)
+    .eq('file_kind', 'raw_pdf');
+  if (exErr) return { kind: 'error', error: 'db_error', detail: exErr.message };
+
+  const prior = (existing ?? []) as ExistingOriginalRow[];
+  const { decision } = decideOriginalRegistration(prior, input.sha256);
+  if (decision === 'different_sha') {
+    return {
+      kind: 'conflict',
+      artifactId: found.artifactId,
+      detail: `この検査には別の内容の原本が既に ${prior.length} 件あります。差し替えは管理者が明示的に行ってください。`,
+      existing: prior,
+    };
+  }
+  return { kind: 'ok' };
+}
+
 export async function linkAdditionalOriginal(input: {
   artifactId: string;
   original: ReadOriginal;

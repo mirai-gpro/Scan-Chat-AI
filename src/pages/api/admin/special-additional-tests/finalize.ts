@@ -42,10 +42,11 @@ import { normalizeCancerRisk } from '../../../../lib/cancer-risk-fix';
 import { consolidateAiPredictionItems } from '../../../../lib/ai-prediction-consolidate';
 import { getS3Config, isS3Configured, putFiles } from '../../../../lib/s3';
 import { makeSubjectResolver } from '../../../../lib/elith-delivery';
-import { isAdditionalTestType, type AdditionalTestType } from '../../../../lib/additional-originals';
+import { isAdditionalTestType, isRealDate, type AdditionalTestType } from '../../../../lib/additional-originals';
 import {
   checkAdditionalTarget, isItemsFormat, FORMAT_BY_TEST_TYPE,
   saveAdditionalArtifact, readAdditionalOriginal, linkAdditionalOriginal,
+  preflightAdditionalOriginal,
   type AdditionalPageLike,
 } from '../../../../lib/special-additional-tests';
 import {
@@ -56,8 +57,6 @@ import {
 export const prerender = false;
 /** S3 の原本を読み直してハッシュを取る + 納品と読戻し。既定の 60s では足りないことがある。 */
 export const config = { maxDuration: 300 };
-
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -99,10 +98,11 @@ export const POST: APIRoute = async ({ request }) => {
 
   // **受診日は必須。実行日で代用しない**（§8 / §47）。
   const testDate = str(body.testDate);
-  if (!testDate || !DATE_RE.test(testDate)) {
+  // **実在する暦日かまで見る**（Hardening 2）。判定は `additional-originals.ts` の 1 か所。
+  if (!isRealDate(testDate)) {
     return json({
       ok: false, error: 'invalid_test_date',
-      detail: '受診日 (YYYY-MM-DD) が要ります。実行日で代用しません（複数年が同じ日付に畳まれると片方が消えます）。',
+      detail: '受診日 (実在する YYYY-MM-DD) が要ります。実行日で代用しません（複数年が同じ日付に畳まれると片方が消えます）。',
     }, 400);
   }
 
@@ -169,6 +169,25 @@ export const POST: APIRoute = async ({ request }) => {
     return json({ ok: false, error: original.error, detail: original.detail, key: originalKey }, status);
   }
 
+  // ── 3.5: 原本の衝突を **DB を変える前に** 見る（P0-3）──────────────────
+  // 以前は 4〜5（`saveAdditionalArtifact`）を通してから 6 で `original_conflict` を
+  // 返していたため、**別の PDF を上げると原本は旧いまま scan_md / measurements /
+  // measurement_values だけ新しくなる**不整合が起こり得た。ここは read しかしない。
+  const pre = await preflightAdditionalOriginal({
+    uid, testType, testDate, sha256: original.sha256,
+  });
+  if (pre.kind === 'error') {
+    return json({ ok: false, error: pre.error, detail: pre.detail }, pre.error === 'supabase_not_configured' ? 503 : 500);
+  }
+  if (pre.kind === 'conflict') {
+    return json({
+      ok: false, error: 'original_conflict', detail: pre.detail,
+      test_artifact_id: pre.artifactId,
+      existing: pre.existing.map((e) => ({ id: e.id, sha256: e.sha256, size_bytes: e.size_bytes, created_at: e.created_at })),
+      note: 'DB は 1 行も変えていません。原本の差し替えは管理者が明示的に行ってください。',
+    }, 409);
+  }
+
   // ── 4〜5: artifact と測定値。**2 件以上あれば止める**（§18）─────────────
   const markdownClean = markdowns.join('\n\n');
   const saved = await saveAdditionalArtifact({
@@ -197,7 +216,7 @@ export const POST: APIRoute = async ({ request }) => {
         ok: false, error: 'original_conflict', detail: linked.detail,
         test_artifact_id: saved.artifactId,
         existing: linked.existing.map((e) => ({ id: e.id, sha256: e.sha256, size_bytes: e.size_bytes, created_at: e.created_at })),
-        note: 'DB の検査値は保存済みです。原本の差し替えは管理者が明示的に行ってください。',
+        note: '事前検査の後に別の原本が登録されたため、DB の検査値は保存済みです。原本の差し替えは管理者が明示的に行ってください。',
       }, 409);
     }
     return json({

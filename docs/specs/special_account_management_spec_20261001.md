@@ -470,8 +470,29 @@ UID: xxxxxxxx-…
 
 1. **確認モーダルを開いた時点で assemble を実走させ、`plan` を作る。**
    `plan` = **これから書く予定のファイル一覧**で、各要素は
-   **`format_id` / `delivered_date`（date フォルダ）/ `destination_key` / 中身の `sha256`** を持つ。
-   **この時点で S3 へは 1 バイトも書かない**（§23 K-46 / V-4）。
+   **`format_id` / `delivered_date`（date フォルダ）/ `destination_key` /
+   `content_sha256`（生成メタを除いた中身の指紋）/ `delivery_sha256`（実 body の指紋）** を持つ。
+   **この時点で Elith 本番受取領域（`deliveryPrefix` 配下）へは書かない**（§23 K-46 / V-4）。
+
+   **【P0-1・2026-10-01 訂正】「S3 へ 1 バイトも書かない」は事実ではなかった。**
+   preview は確認用データを組み立てるために既存パイプラインを実走させるので、副作用として
+
+   | 書かれる先 | 経路 | 何か |
+   |---|---|---|
+   | **中間 source** `{sourcePrefix}user/…` | `elith-manual-delivery.ts` `materializeHealthCheckups()` → `elith-delivery.ts:231` `putFiles()` | HealthCheckupData（§16.3 で恒久的に残すと決めた監査層） |
+   | **`diagnosis.health_age_scores`** | `elith-manual-delivery.ts` `computeWellnessFromMeasurements()` → `elith-delivery.ts:288` `upsert()` | ウェルネス年齢（同じ入力から同じ値が出る算出結果） |
+
+   が**更新される場合がある**。どちらも**納品ではない**ので要件
+   （= 確認前に Elith 本番受取領域へ書かない）は満たしているが、**文言が実装と違っていた**。
+
+   - **大規模な in-memory 化はしない**（発注者判断 2026-10-01）。副作用を消すには
+     assemble 全体をメモリ上で完結させる必要があり、既存パイプラインの作り替えになる。
+   - **仕様書・コード・UI の文言を実装に合わせる**。画面・API の `note` は次の 1 文で統一する:
+
+     > この確認では Elith 本番受取領域には書き込みません。確認用データを組み立てるため、
+     > 中間 source とウェルネス年齢の算出結果は更新される場合があります。
+
+   - **K-46 も「preview では本番 `user/` へ PUT しない」を検査する内容へ直す**（§23）。
 2. **モーダルの件数は `plan` を数えた数**である。ウェルネス年齢の「N件（算出可能分）」も `plan` から数える。
 3. **一覧の DB 件数と `plan` が食い違ったら警告を出す。** 黙って `plan` を採らない。
 
@@ -1407,7 +1428,7 @@ uid は非 PII だが**メールの digest は PII 由来で、かつメール�
 | 43 | **1 件も verified 納品できなかった run は snapshot 行を作らない** |
 | 44 | snapshot が無い uid では**差分の副文言を出さない**（初回は「前回納品：なし」） |
 | 45 | 差分が **「前回 snapshot のファイル明細」と「今回の `plan`」の突合**から出ている（`getAccountProgress` の DB 件数で作っていない） |
-| 46 | **確認モーダルを開いただけでは S3 に 1 バイトも書かれない**（`plan` 作成は読み取りだけ・**V-4**） |
+| 46 | **確認モーダルを開いただけでは Elith 本番受取領域（`deliveryPrefix` 配下 = `user/…`）へ PUT しない**（中間 source とウェルネス年齢は更新され得る・§7.3.1 P0-1・**V-4**） |
 | 47 | **モーダルの件数が `plan` の件数**であり、**DB 件数と食い違う回は警告が出る**（黙って片方を採らない・§7.3.1） |
 | 48 | **確定後に assemble を作り直さず、確認した `plan` をそのまま `putVerified` に渡す** |
 | 49 | **同日・同件数で中身だけ変わった回が「更新」として差分に出る**（`sha256` 比較が効いている・§14.3.1.1） |
@@ -1482,7 +1503,7 @@ uid は非 PII だが**メールの digest は PII 由来で、かつメール�
 | V-1 | `putVerified` の追加 GET は **1 ファイルにつき最大 2 回**（事前比較 ＋ readback）。**最悪ケース = 全ファイルが新規 / 変更**（1 ファイルあたり GET 2 回 ＋ PUT 1 回）で、**複数年 × 複数 format の cron が `maxDuration: 800` に収まるか**を実測する。**既存同一の 1 回で見積らない** | §27 P6 |
 | V-2 | `elith_delivery_runs` の migration を**アプリより先に適用**する。適用前は差分の副文言を出さない（F-5） | §27 P8 の前 |
 | V-3 | snapshot の中身に **PII が 1 つも入っていないこと**を検査で固定する（目視では守れない） | §23 に追加 |
-| V-4 | 確認モーダルの `plan`（assemble 実走）が **S3 を 1 バイトも変更しないこと**を検査で固定する（§7.3.1 / K-46） | §27 P6 |
+| V-4 | 確認モーダルの `plan`（assemble 実走）が **Elith 本番受取領域へ PUT しないこと**を検査で固定する（§7.3.1 P0-1 / K-46）。**中間 source とウェルネス年齢は更新され得る**（在ってよい副作用） | §27 P6 |
 
 **実装時点の状況（2026-10-01）**
 
@@ -1578,7 +1599,7 @@ uid は非 PII だが**メールの digest は PII 由来で、かつメール�
 | **P3** | **一覧の集計拡張**（§6.4）。API の返り値を広げるだけで UI はまだ変えない | I-33〜I-36 |
 | **P4** | **一覧 UI の整理**（§6）＋ 状態 badge（§8）＋ 3 ボタンの枠（押すとまだ何もしない） | 目視 + 既存 `verify:screen` を壊さない |
 | **P5** | **［追加検査データ］導線**（§7.1）＋ **［共有URL設定］導線**（§13）。**`sessionStorage`（D-2）**。**placeholder の一般化（G-7）を同梱** | C-14 / C-15 → 退行注入 8 で落ちる |
-| **P6** | **共通 `putVerified`（D-1）**で A・B を寄せる → **1 uid 手動納品 API**（§9）＋ 確認モーダル（§7.3）。**7 種全部・複数年** | E-20〜E-23 / F-24 / F-25 / **K-46〜K-48・K-51** → 退行注入 5・6・13・14 / **V-1（最悪ケースで cron が 800s に収まるか）と V-4（`plan` が S3 を変えない）を実測** |
+| **P6** | **共通 `putVerified`（D-1）**で A・B を寄せる → **1 uid 手動納品 API**（§9）＋ 確認モーダル（§7.3）。**7 種全部・複数年** | E-20〜E-23 / F-24 / F-25 / **K-46〜K-48・K-51** → 退行注入 5・6・13・14 / **V-1（最悪ケースで cron が 800s に収まるか）と V-4（`plan` が本番受取領域へ書かない）を実測** |
 | **P7** | **検診・人間ドックの Admin 登録**（§11）。**重複 artifact を作らないことが受入条件** | G-26〜G-29 → 退行注入 7 で落ちる |
 | **P8** | **migration を先に適用（V-2）** → run snapshot と前回差分（D-7・§14.3）＋ **一括ボタンの移設**（D-6）＋ 検索（D-8・§19.3） | H-30〜H-32 / **K-49・K-50** → 退行注入 15・16 / **V-3（snapshot に PII が無い）** |
 
@@ -1613,6 +1634,25 @@ wellfort-site は `verify:special-accounts-ui`（50 件）と `verify:admin-targ
 | **A-4** | 受診日が `2025-13-45` のような**形は通るが実在しない日付**を素通ししていた | `isRealDate()`（暦日の往復）で弾く。Postgres の `date` 列が拒否して `save_failed` という分かりにくい形で落ちるのと、`date/2025_13_45/` という在りえないフォルダを防ぐ |
 | **A-5** | `account-progress` の 4 本の問い合わせを `Promise.all` でまとめていたので、**`elith_delivery_runs` / `elith_delivery_items` が未作成の環境で全部 0 件**になり得た | 問い合わせごとに fail-safe。**1 本引けなくても他を道連れにしない** |
 | **A-6** | 退行注入 2（除外を和の前に置く）と 16（cron にも run を記録）は、**素の検査では落ちなかった** | 2 は「緊急停止したスペシャルが契約者としても引ける」ケースを、16 は「cron 経路から呼んでいないこと」を直接見る検査を足した |
+
+#### 27.1.2 実装レビューで出た是正（**P0-1〜P0-4 ＋ Hardening 2 件・2026-10-01**）
+
+発注者が P1〜P8 のコードを読んで出した指摘。**4 件は blocker**で、いずれも
+「仕様の意図は正しいが実装がその通りになっていない」もの。**実コードで裏取りしてから直した。**
+
+| # | 指摘 | 実コードの裏取り | どう直したか |
+|---|---|---|---|
+| **P0-1** | delivery preview は read-only ではない。「S3 へ 1 バイトも書かない」は事実と違う | `elith-manual-delivery.ts` `materializeHealthCheckups()` → **`elith-delivery.ts:231` `putFiles()`**（中間 source へ PUT）/ `computeWellnessFromMeasurements()` → **`elith-delivery.ts:288` `upsert()`**（`health_age_scores`）。**指摘どおり** | **要件（確認前に本番受取領域へ書かない）は満たしているので挙動は変えない。** 大規模な in-memory 化はしない（発注者判断）。**仕様書 §7.3.1・コードコメント・API の `note`・モーダルの文言を実装に合わせた**。K-46 も「preview では本番 `user/` へ PUT しない」を見る形へ |
+| **P0-2** | run snapshot の差分 SHA が volatile metadata を含む。`PlannedFile.sha256` は raw body SHA で、`planFingerprint()` だけが `stableBody()` を使っていた | `elith-manual-delivery.ts:172`（当時）。**指摘どおり** — このままだと `exported_at` / `diagnostic_id` が毎回変わり、**内容が同じでも次回必ず「更新」**になる | `PlannedFile` を **`contentSha256`（`stableBody()` の SHA）と `deliverySha256`（実 body の SHA）へ分離**。**preview→confirm の指紋と run 差分は `contentSha256`** / `putVerified` の読戻し検証は実 body。snapshot は**両方**を持つ（`delivery_sha256` は監査用）。`planFingerprint()` は `contentSha256` を**そのまま使う**（2 か所で別々に計算しない）。**退行検査「同じ実データから 2 回 plan を組んでも `diff.updated=0`」を必須で追加** |
+| **P0-3** | 原本 conflict 判定が DB mutation の後。別 PDF で **原本 A / ダッシュボード値 B** の不整合が起こり得る | `finalize.ts:174` `saveAdditionalArtifact()` → `:192` `linkAdditionalOriginal()`。**指摘どおり** — 409 で止めても DB は戻らない | **`preflightAdditionalOriginal()` を新設**（read しかしない）。S3 原本を読んだ直後・**DB mutation の前**に既存 artifact の `raw_pdf` SHA 衝突を見る。衝突なら 409 で停止し、`scan_md` / `measurements` / `measurement_values` / `test_artifact_files` が**すべて unchanged** であることを検査で固定（既存 E22 は原本しか見ていなかった） |
+| **P0-4** | `special-additional-tests.ts:167` の `.order('created_at', …)`。repo schema に `created_at` は無い | `20260601000010:203` は **`imported_at`**。`test_artifacts` の定義に `created_at` は**無い**。**指摘どおり** | **`.order()` 自体を削除**。0 / 1 / 2 件以上の判定に順序は要らない。**本番 DB に偶然その列が在ることを前提にしない** |
+| **H-1** | `safeTriggeredBy()` が「`@` が無い」で通していた | `elith-delivery-runs.ts`。`@` を弾くのは**生 email を弾く条件であって PII を弾く条件ではない**（氏名・社員番号・`admin%40example.com` は素通り） | **`/^[0-9a-f]{64}$/i` の digest だけ受ける**（allow-list）。それ以外は `null`。控えは 10 年残る |
+| **H-2** | 実在暦日の検証が保存の段にしか無く、`2026-02-31` で**原本だけ S3 へ上がる孤児ファイル**が作れた | 署名の段（`createAdditionalOriginalTicket`）は形式だけの `DATE_RE`。原本バケットは**削除不可** | **`isRealDate()` を `additional-originals.ts` の 1 か所へ集約**し、`buildAdditionalOriginalKey` / `createAdditionalOriginalTicket` / `resolveAdditionalArtifact` / `saveAdditionalArtifact` / `finalize.ts` がすべてこれを使う。**複製を置かない**（段ごとに判定が食い違うと孤児が出る） |
+
+**この是正では設計を 1 つも変えていない。** P0-1 は文言、P0-2 は指紋の取り方、
+P0-3 は順序、P0-4 は不要な句の削除、H-1/H-2 は入力の絞り込み。
+
+---
 
 ---
 
@@ -1697,3 +1737,4 @@ wellfort-site は `verify:special-accounts-ui`（50 件）と `verify:admin-targ
 | 1.2 | 2026-10-01 | **発注者裁定により U-1〜U-8 を確定**し、§25.1 の未確定表を**確定仕様（D-1〜D-8）へ移した**。うち 3 件は推奨案からの**変更**: **U-1 = 共通 Verified PUT/readback helper 方式**（「A の後に B を回す」ではない）/ **U-4・U-7 = 前回 run の PII なし snapshot との差分比較**（そのため **migration が 1 本要る**。1.1 までの「0 本で足りる」は撤回）。あわせて **§13.4.1 の placeholder 一般化を「候補」から今回の必須文言変更へ格上げ**、**F-1 の表現を厳密化**。**実装は 1 行もしていない。** |
 | 1.3 | 2026-10-01 | 実装着手前の精査で **4 点 ＋ 1 点を修正**。① `putVerified` の追加 GET は **新規 / 変更で最大 2 回**（事前比較＋readback）・既存同一なら 1 回と明記し、**V-1 を最悪ケースで測る**ことにした（§9.6.1 / §9.6.2 a / §25.1.1）。② run snapshot に**集計値だけでなく納品ファイル 1 件ごとの明細**（`format_id` / `delivered_date` / `destination_key` / `sha256`）を持たせ、**同日・同件数で中身だけ変わった回を「更新」として検知**できるようにした（§14.3.1 / §14.3.1.1 / §16.1.2）。③ **確認モーダルの正本を `getAccountProgress` の DB 件数から「実際の assemble 結果（delivery preview = `plan`）」へ変更**し、**DB 件数と不一致なら警告**・**確定後は同じ `plan` を `putVerified`**・**snapshot は verified 結果から**とした（§7.3.1）。④ **「未確定事項は 1 件も残っていない」を撤回**し、「**発注者裁定事項 U-1〜U-8 は全て確定**」に修め、**E-1〜E-6 / V-1〜V-4 は未確認として明示**した（§25.1）。あわせて **`elith_delivery_runs` の対象を「スペシャルの手動納品 run」だけに限定**し、**通常 cron の run snapshot へは広げない**ことを確定した（§14.3.2 / §16.1.2）。検査は **K-45 を改め K-46〜K-51 を追加**、退行注入を **12 → 16 種**へ。**実装は 1 行もしていない。** |
 | 2.0 | 2026-10-01 | **P1〜P8 を実装した**（§27 の段取りどおり・1 段 1 コミット）。仕様は変えていない — 足したのは **§27.1 実装の地図**と **§27.1.1「実装して分かったこと」**、および §25.1.1 の V-1〜V-4 の実測結果。実装で補正したのは 6 点で、いずれも仕様の意図を保つための具体化: ①納品 JSON の `exported_at` / `diagnostic_id` が毎回変わるので指紋から外す ②HTTP 2 往復では plan を持ち越せないので「指紋が一致したときだけ書く」形にする ③その帰結として `putVerified` の冪等は検診・ウェルネス年齢には効かない（V-1 は最悪ケースで正しい）④実在しない暦日を弾く ⑤`account-progress` を問い合わせごとに fail-safe にする ⑥退行注入 2 と 16 が素の検査では落ちなかったので検査を足した。**未確認として残っているのは V-1 の本番実測（鍵も S3 もこの環境に無い）と E-1〜E-6（Elith 確認事項）。** |
+| 2.1 | 2026-10-01 | **実装レビューの是正**（§27.1.2）。発注者がコードを読んで出した **blocker 4 件 ＋ hardening 2 件**。**P0-1** delivery preview は read-only ではなかった（`elith-delivery.ts:231` が中間 source へ PUT・`:288` が `health_age_scores` を upsert）→ **挙動は変えず**、仕様書 §7.3.1・コード・UI・K-46 の文言を実装へ合わせた。**P0-2** `PlannedFile` を `contentSha256` / `deliverySha256` へ分離し、**差分判定は生成メタを除いた指紋**にした（従来は実 body の SHA なので内容が同じでも毎回「更新」になった）。**P0-3** 原本 SHA 衝突の判定を **DB mutation の前**へ（`preflightAdditionalOriginal()` 新設）。**P0-4** `.order('created_at')` を削除（schema は `imported_at`）。**H-1** `safeTriggeredBy()` を digest allow-list へ。**H-2** 実在暦日の検証を `additional-originals.ts` 1 か所へ集約し、署名の段にも適用した。**設計は 1 つも変えていない。** |
