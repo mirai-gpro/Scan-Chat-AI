@@ -718,6 +718,137 @@ console.log('\nG. 検診・人間ドックの Admin 登録 (saveAdditionalArtifa
     'API から直接呼ぶと本人の行の隣に 2 行目ができる');
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// H / K. run snapshot と前回差分 (§14.3 / §16.1・D-4 / D-7)
+// ══════════════════════════════════════════════════════════════════════
+//
+// **集計値だけでは「同じ日・同じ件数で中身だけ変わった回」が差分に出ない。**
+// persistIntoExistingArtifact は既存 artifact の中身を更新して行を増やさないので、
+// これは実際に起こる。→ ファイル 1 件ごとの sha256 を控えて「更新」も検知する。
+//
+// **PII は 1 つも入れない。** ここは静かに壊れる — 混ざっても画面は何も変わらない。
+console.log('\nH / K. run snapshot と前回差分\n');
+{
+  const H = await import('./lib/sat-harness.mjs');
+  const { M, UID_A } = H;
+  const R = M.runs;
+  const key = (fmt, d) => `user/${UID_A}/date/${d}/${fmt}_date_${d}_user_${UID_A}.json`;
+  const pf = (fmt, d, sha) => ({ formatId: fmt, deliveredDate: d, destinationKey: key(fmt, d), sha256: sha });
+
+  // K-49 — 同日・同件数で中身だけ変わった回を「更新」として検知する
+  const before = R.buildSnapshot([pf('HealthCheckupData', '2026_03_29', 'aaa'), pf('BloodTestData', '2026_05_10', 'bbb')]);
+  let d = R.diffAgainst(before, [pf('HealthCheckupData', '2026_03_29', 'aaa'), pf('BloodTestData', '2026_05_10', 'bbb')]);
+  eq('K-49 何も変わっていなければ差分は 0', [d.added.length, d.updated.length], [0, 0]);
+
+  d = R.diffAgainst(before, [pf('HealthCheckupData', '2026_03_29', 'ZZZ'), pf('BloodTestData', '2026_05_10', 'bbb')]);
+  eq('K-49 **同じ日・同じ件数でも中身が変われば「更新」として出る**',
+    [d.added.length, d.updated.length, d.updated[0]?.format_id], [0, 1, 'HealthCheckupData']);
+
+  d = R.diffAgainst(before, [...before.files.map((f) => pf(f.format_id, f.delivered_date, f.sha256)), pf('GeneticTestResultData', '2024_11_01', 'ccc')]);
+  eq('K-49 新しい納品先キーは「追加」', [d.added.length, d.updated.length], [1, 0]);
+
+  d = R.diffAgainst(before, [pf('HealthCheckupData', '2026_03_29', 'aaa')]);
+  eq('K-49 **「減った」は出さない**（S3 の既存ファイルは消していない）',
+    [d.added.length, d.updated.length], [0, 0]);
+
+  eq('K-49 控えが無い回は差分を出さない（0 件と混同しない）',
+    [R.diffAgainst(null, [pf('BloodTestData', '2026_05_10', 'x')]).noPrevious], [true]);
+
+  // K-41 / V-3 — snapshot に PII が 1 つも入らない
+  {
+    const snap = R.buildSnapshot([{
+      formatId: 'HealthCheckupData', deliveredDate: '2026_03_29',
+      destinationKey: key('HealthCheckupData', '2026_03_29'), sha256: 'aaa',
+      // **混ぜても落ちる**こと（allow-list で 4 つだけ通す）
+      name: '相川 佳之', email: 'r@example.com', birth: '1971-01-01',
+      measurements: [{ item_name: 'AST', value: '22' }], sourceFileName: '250804ALAPDS結果本田大作.pdf',
+    }]);
+    const text = JSON.stringify(snap);
+    ok('K-41 snapshot に氏名・メール・生年月日・測定値・原本ファイル名が入らない (V-3)',
+      !/(相川|@example|1971-01-01|item_name|ALAPDS|本田)/.test(text), text.slice(0, 300));
+    eq('K-41 明細は 4 つのキーだけ', Object.keys(snap.files[0]).sort(),
+      ['delivered_date', 'destination_key', 'format_id', 'sha256']);
+    ok('K-41 sha256 は中身ではない（指紋だけ）', snap.files[0].sha256 === 'aaa');
+  }
+
+  // K-42 — triggered_by に生 email を入れない
+  eq('K-42 `@` を含む値は控えへ入れない', R.safeTriggeredBy('admin@example.com'), null);
+  eq('K-42 digest は通す', R.safeTriggeredBy('a'.repeat(64)), 'a'.repeat(64));
+  eq('K-42 空は null', [R.safeTriggeredBy(''), R.safeTriggeredBy(null)], [null, null]);
+
+  // K-43 / K-50 — 行を作る条件
+  const hcMd3 = '## 検査結果\n\n| 検査項目 | 読み取った値 | 単位 |\n|---|---|---|\n| アルブミン | 4.4 | g/dL |\n| クレアチニン | 0.85 | mg/dL |\n| HbA1c | 5.4 | % |\n';
+  const row = (date) => ({ diagnostic_user_id: UID_A, test_type: 'health_checkup', status: 'active', test_date: date, age_at_test: 54, sex: 'male', scan_md: hcMd3 });
+  const runs = () => M.db.TABLES.elith_delivery_runs ?? [];
+
+  M.db.reset(); M.s3.reset();
+  M.db.TABLES.test_artifacts = [row('2026-03-29')];
+  let plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: 'scan-accuracy-test/', deliveryPrefix: '' });
+  let exec = await M.manual.executeDeliveryPlan(plan, { deliveryPrefix: '', triggeredBy: 'd'.repeat(64) });
+  eq('H-31 納品できた run は控えを 1 行作る', [exec.runRecorded, runs().length], [true, 1]);
+  eq('K-50 **source は manual 固定**（cron の run を書かない）', runs()[0].source, 'manual');
+  // 行の値だけでは足りない。**cron 経路から呼ばれていないこと**を直接見る (§14.3.2) —
+  // cron は契約者・単品を含む母集団を 1 起動で回すので、ここから書くと
+  // **この画面のための表が全ユーザーの納品ログになる**。
+  ok('K-50 cron / 一括経路 (elith-delivery.ts) から run を記録していない',
+    !/elith-delivery-runs|recordDeliveryRun/.test(code('src/lib/elith-delivery.ts')),
+    'cron の履歴は elith_deliveries / elith_delivery_items のまま');
+  ok('K-50 cron の口 (api/cron/elith-deliver.ts) からも記録していない',
+    !/elith-delivery-runs|recordDeliveryRun/.test(code('src/pages/api/cron/elith-deliver.ts')));
+  ok('K-50 控えを書くのは手動納品の 1 か所だけ',
+    (code('src/lib/elith-manual-delivery.ts').match(/recordDeliveryRun\(/g) ?? []).length === 1);
+  eq('H-31 verified_count は読み戻して一致した数', runs()[0].verified_count, plan.files.length);
+  ok('H-31 控えに明細が入っている',
+    Array.isArray(runs()[0].snapshot.files) && runs()[0].snapshot.files.length === plan.files.length);
+  eq('K-42 triggered_by は digest のまま', runs()[0].triggered_by, 'd'.repeat(64));
+
+  M.db.reset(); M.s3.reset();
+  M.db.TABLES.test_artifacts = [row('2026-03-29')];
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: 'scan-accuracy-test/', deliveryPrefix: '' });
+  M.s3.STATE.putFail = true;
+  exec = await M.manual.executeDeliveryPlan(plan, { deliveryPrefix: '' });
+  M.s3.STATE.putFail = false;
+  eq('K-43 **1 件も verified できなかった run は控えを作らない**', [exec.runRecorded, runs().length], [false, 0]);
+  ok('K-43 作らなかった理由を返す', !!exec.runReason);
+
+  // 生 email を渡しても控えへ入らない（実際に流して確かめる）
+  M.db.reset(); M.s3.reset();
+  M.db.TABLES.test_artifacts = [row('2026-03-29')];
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: 'scan-accuracy-test/', deliveryPrefix: '' });
+  await M.manual.executeDeliveryPlan(plan, { deliveryPrefix: '', triggeredBy: 'admin@example.com' });
+  ok('K-42 生 email を渡しても控えへ入らない',
+    !JSON.stringify(runs()).includes('@'), JSON.stringify(runs()[0]?.triggered_by));
+
+  // K-44 — 控えが無ければ差分の副文言を出さない
+  const api = async (body) => {
+    const res = await M.deliverOne.POST({ request: new Request('http://x/api', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) });
+    return JSON.parse(await res.text());
+  };
+  M.db.reset(); M.s3.reset();
+  M.db.TABLES.test_artifacts = [row('2026-03-29')];
+  let prev = await api({ diagnosticUserId: UID_A, sourcePrefix: 'scan-accuracy-test/', deliveryPrefix: '' });
+  eq('K-44 控えが無い回は previous_run.state=none', prev.previous_run.state, 'none');
+  ok('K-44 **差分を出さない**（0 件と偽らない）', prev.diff === undefined);
+
+  // migration 未適用（引けない）→ unavailable。**none と区別する。**
+  M.db.FAIL.select = 'elith_delivery_runs';
+  prev = await api({ diagnosticUserId: UID_A, sourcePrefix: 'scan-accuracy-test/', deliveryPrefix: '' });
+  M.db.FAIL.select = null;
+  eq('K-44 引けなかった回は unavailable（none と区別する）', prev.previous_run.state, 'unavailable');
+  ok('K-44 このときも差分を出さない', prev.diff === undefined);
+  ok('K-44 preview 自体は成立する（画面を壊さない）', prev.ok === true);
+
+  // 2 回目は差分が出る
+  M.db.reset(); M.s3.reset();
+  M.db.TABLES.test_artifacts = [row('2026-03-29')];
+  const p1 = await api({ diagnosticUserId: UID_A, sourcePrefix: 'scan-accuracy-test/', deliveryPrefix: '' });
+  await api({ diagnosticUserId: UID_A, sourcePrefix: 'scan-accuracy-test/', deliveryPrefix: '', confirm: true, fingerprint: p1.plan.fingerprint });
+  M.db.TABLES.test_artifacts = [row('2026-03-29'), row('2025-02-17')];
+  const p2 = await api({ diagnosticUserId: UID_A, sourcePrefix: 'scan-accuracy-test/', deliveryPrefix: '' });
+  eq('H-32 2 回目は前回の控えと比べて差分が出る', p2.previous_run.state, 'found');
+  ok('H-32 増えた年が「追加」として出る', (p2.diff?.added ?? 0) >= 2, JSON.stringify(p2.diff));
+}
+
 console.log(`\n${fails.length ? '✗' : '✓'} ${fails.length ? `${fails.length} 件 失敗` : '全件 OK'}`);
 for (const f of fails) console.log(`  ✗ ${f}`);
 process.exit(fails.length ? 1 : 0);

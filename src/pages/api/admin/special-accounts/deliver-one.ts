@@ -32,6 +32,7 @@ import type { APIRoute } from 'astro';
 import { isAdminAuthorized } from '../../../../lib/api-auth';
 import { getS3Config } from '../../../../lib/s3';
 import { buildDeliveryPlan, executeDeliveryPlan, planFingerprint } from '../../../../lib/elith-manual-delivery';
+import { diffAgainst, loadLatestRun } from '../../../../lib/elith-delivery-runs';
 
 export const prerender = false;
 /** 複数年 × 複数 format を組んで読み戻すので、既定の 60s では足りない。 */
@@ -106,11 +107,34 @@ export const POST: APIRoute = async ({ request }) => {
 
   // ── 1 回目: 確認用の preview を返すだけ。**S3 は変えない。** ───────────
   if (body.confirm !== true) {
+    /*
+     * 前回の**手動**納品 run の控えと比べる（D-7・§14.3）。
+     *
+     * **3 つの状態を混同しない**（§6.5 F-5）:
+     *   found       … 控えがある → 追加 / 更新を出せる
+     *   none        … まだ手動納品していない → 「前回納品：なし」
+     *   unavailable … 引けなかった（migration 未適用 等）→ **差分の副文言を出さない**
+     *                 0 件と偽らない。
+     */
+    const prev = await loadLatestRun(plan.uid);
+    const diff = prev.state === 'found' ? diffAgainst(prev.snapshot, plan.files) : null;
     return json({
       ok: plan.ok,
       mode: 'preview',
       delivery_prefix: deliveryPrefix,
       plan: publicPlan(plan),
+      previous_run: {
+        state: prev.state,
+        delivered_at: prev.state === 'found' ? prev.deliveredAt : null,
+        ...(prev.state === 'unavailable' ? { reason: prev.reason } : {}),
+      },
+      ...(diff ? {
+        diff: {
+          added: diff.added.length,
+          updated: diff.updated.length,
+          count_by_format: diff.countByFormat,
+        },
+      } : {}),
       note: '本番の Elith 受け取り位置へ書き出します。この応答では S3 へ 1 バイトも書いていません。',
     }, plan.ok ? 200 : 409);
   }
@@ -136,7 +160,8 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   try {
-    const exec = await executeDeliveryPlan(plan, { deliveryPrefix });
+    // **生 email は受け取らない。** 中継側が digest にして送る（§14.3.1）。
+    const exec = await executeDeliveryPlan(plan, { deliveryPrefix, triggeredBy: str(body.triggeredBy) });
     return json({
       ok: exec.ok,
       mode: 'deliver',
@@ -146,6 +171,9 @@ export const POST: APIRoute = async ({ request }) => {
       verified_count: exec.verifiedCount,
       recorded_dates: exec.recordedDates,
       skipped_dates: exec.skippedDates,
+      // 控えを残せたか。**残せなくても納品は成立している**（黙って成功と言わない）。
+      run_recorded: exec.runRecorded === true,
+      ...(exec.runReason ? { run_reason: exec.runReason } : {}),
       // **黙って落とさない**（§9.6.2 c）。落ちたファイルは理由つきで返す。
       failed: exec.results.filter((r) => !r.verified).map((r) => ({
         destination_key: r.key, error: r.error ?? 'unknown', detail: r.detail ?? null,

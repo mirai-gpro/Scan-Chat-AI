@@ -54,6 +54,7 @@ import {
 import { isSpecialAccount } from './special-accounts';
 import { refreshConfig } from './app-config';
 import { putVerified, type VerifiedPutResult } from './s3-verified-put';
+import { recordDeliveryRun } from './elith-delivery-runs';
 import { sha256Hex } from './originals-storage';
 import type { S3PutFile } from './s3';
 
@@ -266,6 +267,9 @@ export interface DeliveryExecution {
   recordedDates: string[];
   /** 記録しなかった年と理由（verified でない年は納品済みと呼ばない）。 */
   skippedDates: { date: string; reason: string }[];
+  /** run の控え（次回の差分用）を残せたか。**残せなくても納品は成立している。** */
+  runRecorded?: boolean;
+  runReason?: string;
 }
 
 /**
@@ -277,9 +281,11 @@ export interface DeliveryExecution {
  */
 export async function executeDeliveryPlan(plan: DeliveryPlan, opts: {
   deliveryPrefix: string;
+  /** 実行した admin の**識別子 digest**。`@` を含む値は控えへ入らない（§14.3.1）。 */
+  triggeredBy?: unknown;
 }): Promise<DeliveryExecution> {
   if (!plan.ok || !plan.internal) {
-    return { uid: plan.uid, ok: false, results: [], fileCount: 0, verifiedCount: 0, recordedDates: [], skippedDates: [] };
+    return { uid: plan.uid, ok: false, results: [], fileCount: 0, verifiedCount: 0, recordedDates: [], skippedDates: [], runRecorded: false };
   }
 
   const results = await putVerified(plan.internal.files);
@@ -306,8 +312,25 @@ export async function executeDeliveryPlan(plan: DeliveryPlan, opts: {
   }
 
   const verifiedCount = results.filter((r) => r.verified).length;
+
+  /*
+   * **次回の差分のために控えを残す**（D-7・§14.3）。
+   * 1 件も verified できなかった run は行を作らない（空振りで「前回納品」を作らない）。
+   * **投げない** — 控えが残らなくても納品そのものは成立している。
+   */
+  const run = await recordDeliveryRun({
+    uid: plan.uid,
+    deliveryPrefix: opts.deliveryPrefix,
+    files: plan.files,
+    verifiedKeys,
+    fileCount: results.length,
+    triggeredBy: opts.triggeredBy,
+  });
+
   return {
     uid: plan.uid,
+    runRecorded: run.ok,
+    ...(run.ok ? {} : { runReason: run.reason }),
     ok: verifiedCount === results.length && results.length > 0,
     results,
     fileCount: results.length,
