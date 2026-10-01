@@ -30,6 +30,15 @@ export interface MetricTrendPoint {
   raw: string;
   /** 検査機関が付けた基準外マーカー。アプリは算出しない。 */
   flag?: 'H' | 'L' | null;
+  /**
+   * データの出所。**任意フィールド**（既存の呼び出しは何も変わらない）。
+   *
+   * `'health_checkup_scan'` = 人間ドック・健康診断のスキャンから抽出した血液検査値
+   * (`blood-subset.ts` の `DERIVED_HC_BLOOD_SOURCE`)。画面に「人間ドックから抽出」と出す
+   * (`docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §7.3・発注者裁定 Q-7)。
+   * 通常の検査由来は `null` / 未設定。
+   */
+  source?: string | null;
 }
 
 export interface MetricTrendSeries {

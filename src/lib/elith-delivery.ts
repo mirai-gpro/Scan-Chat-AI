@@ -31,6 +31,7 @@ import { normalizeMarkers, type HealthAgeMarkers, type RawItem } from './health-
 import { computeWellnessAge } from './wellness-age';
 import { getServerSupabase } from './supabase';
 import { listSpecialAccounts, specialSubjectByUid } from './special-accounts';
+import { DERIVED_HC_BLOOD_IMPORTED_BY } from './blood-subset';
 import { refreshConfig } from './app-config';
 import { buildDeliveryPopulation, checkFormatsReady, listEntitledSubscribers } from './elith-entitlement';
 
@@ -244,6 +245,98 @@ export async function materializeHealthCheckups(
       fallbackAge: ageAtTest ?? fromMd.age,
       fallbackSex: dbSex ?? fromMd.sex,
     });
+  }
+  return out;
+}
+
+/**
+ * **人間ドック・健康診断由来の派生 blood（`BloodTestData`）を S3(source) へ年ごとに書き出す。**
+ *
+ * 正本: `docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §8.2 / §8.3 / §8.6。
+ *
+ * 【`materializeHealthCheckups` と同型】同じ段・同じ命名規約・同じ fail-safe（書けない年は飛ばす）。
+ * **下流（`assembleElithDeliverySet`）は 1 行も変えない** — `BloodTestData` は既に
+ * 時系列 format（`elith-assemble.ts` の `SERIES_FORMATS`）なので、規約どおりのキーで置けば拾われる。
+ *
+ * 【材料】派生 artifact の `measurements`(jsonb)。**再解析しない**し、
+ * `scan_md` からの再抽出もしない（保存時に `blood-subset.ts` が決めた結果をそのまま使う）。
+ *
+ * 【同一日は通常 blood を優先（裁定 Q-10）】納品キーは 1 日 1 format 1 ファイルなので、
+ * 同じ date に通常由来の `BloodTestData` が既に在る年は **書かない**（上書きしない）。
+ *
+ * 【`raw_markdown` を載せない】人間ドックの全項目（血球・腫瘍マーカー等）が
+ * `BloodTestData` に同梱されてしまい、v1.1 §9「血球系・CRP・腫瘍マーカー等は含めない」に反するため。
+ */
+async function materializeDerivedBloodTests(
+  uid: string,
+  sourcePrefix: string,
+  /** source prefix に既に在る「通常由来」`BloodTestData` の date フォルダ（`YYYY_MM_DD`）。 */
+  normalBloodDates: ReadonlySet<string>,
+): Promise<{ keys: string[]; skippedDates: string[] }> {
+  const out: { keys: string[]; skippedDates: string[] } = { keys: [], skippedDates: [] };
+  const sb = getServerSupabase();
+  if (!sb) return out;
+  let rows: Array<{ measurements?: unknown; test_date?: string | null }> = [];
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data } = await (sb.schema('diagnosis') as any)
+      .from('test_artifacts')
+      .select('measurements, test_date')
+      .eq('diagnostic_user_id', uid)
+      .eq('test_type', 'blood')
+      .eq('status', 'active')
+      .eq('imported_by', DERIVED_HC_BLOOD_IMPORTED_BY)
+      .order('test_date', { ascending: false })
+      .limit(20); // 複数年 (仕様上限 5 年に十分な安全枠)
+    rows = Array.isArray(data) ? data : [];
+  } catch {
+    return out;
+  }
+
+  const prefix = sourcePrefix ? sourcePrefix.replace(/^\/+/, '').replace(/\/*$/, '/') : '';
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const measurements = Array.isArray(row?.measurements) ? (row.measurements as Record<string, unknown>[]) : [];
+    if (measurements.length === 0) continue; // 0 項目は納品しない (裁定 Q-6 と同じ規律)
+    const testDate =
+      typeof row?.test_date === 'string' && /^\d{4}-\d{2}-\d{2}$/.test(row.test_date) ? row.test_date : null;
+    if (!testDate) continue; // 受診日が無い回は date フォルダを決められない
+    const dateFolder = testDate.replace(/-/g, '_');
+    if (seen.has(dateFolder)) continue;
+    seen.add(dateFolder);
+    // **同一日は通常 blood を優先** — 書くと同名キーで上書きしてしまう (裁定 Q-10)。
+    if (normalBloodDates.has(dateFolder)) { out.skippedDates.push(dateFolder); continue; }
+
+    const json = {
+      format_id: 'BloodTestData',
+      schema_version: ELITH_HANDOFF_SCHEMA_VERSION,
+      kind: 'scan',
+      client_id: uid,
+      diagnostic_id: uid,
+      source_image: null,
+      test_date: testDate,
+      date_source: 'test_artifacts',
+      exported_at: new Date().toISOString(),
+      subject: { sex: null, age: null },
+      source: {
+        origin: 'scan-chat-ai',
+        app: 'scan-chat-ai',
+        // **固定文言**（発注者裁定 Q-8）。変えない。
+        note: '人間ドック・健康診断の既存AIスキャン結果から血液検査値を抽出（再解析なし）',
+        lab_name: null,
+      },
+      // measurements は保存時に確定した 7 フィールドのまま（裁定 Q-9・独自構造を作らない）。
+      data: { measurements, notes: [] as unknown[] },
+      // raw_markdown は載せない（上のコメント）。
+    };
+    const key = `${prefix}user/${uid}/date/${dateFolder}/BloodTestData_date_${dateFolder}_user_${uid}.json`;
+    const body = JSON.stringify(json, null, 2);
+    try {
+      await putFiles([{ key, contentType: 'application/json; charset=utf-8', body, bytes: Buffer.byteLength(body, 'utf8') }]);
+      out.keys.push(key);
+    } catch {
+      continue; // この年は書けなければ飛ばす (他の年は続行)
+    }
   }
   return out;
 }
@@ -501,7 +594,7 @@ export async function deliverReadySpecialAccounts(opts: {
 
   const resolveSubject = makeSubjectResolver();
   const healthAgeByRef: Record<string, HealthAgeRecord> = {};
-  const manualMapping: Record<string, Partial<Record<'HealthCheckupData' | 'LifestyleQuestionnaireData', string>>> = {};
+  const manualMapping: Record<string, Partial<Record<'HealthCheckupData' | 'LifestyleQuestionnaireData' | 'BloodTestData', string>>> = {};
   const wellnessReasonByUid = new Map<string, string>();
   const wellnessYearsByUid = new Map<string, number>(); // その uid で HealthAge を載せた年数
   const repHcKeyByUid = new Map<string, string>();       // manualMapping 用の代表(最新年)キー
@@ -551,13 +644,40 @@ export async function deliverReadySpecialAccounts(opts: {
     return items[0];
   };
 
+  /*
+   * ②-2 **人間ドック由来の派生 BloodTestData** を source へ置く
+   *     (`docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §8.2・裁定 Q-4/Q-10)。
+   *
+   * - **inventory の後**に走らせる — 同じ date に**通常由来**の BloodTestData が既に在るかを
+   *   見てから書く必要があるため (同名キーなので書くと上書きになる・裁定 Q-10)。
+   * - **readiness には一切関わらない。** 揃い判定は `checkFormatsReady()` 側で
+   *   `imported_by` を見て派生を外してある (`elith-entitlement.ts`)。
+   *   ここは「揃った人の納品セットには含める」側の処理。
+   */
+  const bloodKeyByUid = new Map<string, string>();
+  for (const uid of repHcKeyByUid.keys()) {
+    const existing = (inv.byFormat.BloodTestData ?? []).filter((c) => c.clientId === uid);
+    const normalDates = new Set(existing.map((c) => c.date));
+    const derived = await materializeDerivedBloodTests(uid, opts.sourcePrefix, normalDates);
+    // 代表キーは「通常が在ればそれ / 無ければ派生」。assemble は代表の client の
+    // **全 date** を時系列として展開するので、どちらを渡しても両方が納品される。
+    const rep = existing.length > 0
+      ? existing.slice().sort((a, b) => (a.date === b.date ? b.key.localeCompare(a.key) : b.date.localeCompare(a.date)))[0].key
+      : derived.keys[0];
+    if (rep) bloodKeyByUid.set(uid, rep);
+  }
+
   for (const uid of repHcKeyByUid.keys()) {
     const lq = latestByClient('LifestyleQuestionnaireData', uid);
+    const bl = bloodKeyByUid.get(uid);
     manualMapping[uid] = {
       // 代表(最新年)のみ渡すが、assemble は HealthCheckupData を時系列 format として
       // この client の**全 date フォルダ**へ展開する (年ごとに 1 つずつ納品される)。
       HealthCheckupData: repHcKeyByUid.get(uid)!,
       ...(lq ? { LifestyleQuestionnaireData: lq.key } : {}),
+      // BloodTestData も時系列 format。**mapping に載せないと納品されない**
+      // (`elith-assemble.ts` の manualMapping 経路は載っている format だけを picks に入れる)。
+      ...(bl ? { BloodTestData: bl } : {}),
     };
   }
 
