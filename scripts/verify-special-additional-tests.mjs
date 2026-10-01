@@ -119,12 +119,16 @@ console.log('\nB. PDF\n');
     `/additional_results/${UID_A}/blood/2025_08_04/${shaHex(PDF)}.pdf`,
     `additional_results/${UID_A}//blood/2025_08_04/${shaHex(PDF)}.pdf`,
     `additional_results/${UID_A}/blood/2025_13_04/${shaHex(PDF)}.pdf`,
-    `additional_results/${UID_A}/health_checkup/2025_08_04/${shaHex(PDF)}.pdf`,
+    // **2026-10-01 以降 `health_checkup` は正当**（P7 で Admin 登録を足した）ので、
+    // ここは「知らない検査種別」で見る。allow-list が閉じた集合であることが要点。
+    `additional_results/${UID_A}/nanika/2025_08_04/${shaHex(PDF)}.pdf`,
     'lab_results/prevent/2025/08/x.pdf',
     `additional_results/${UID_A}/blood/2025_08_04/notasha.pdf`,
   ];
   eq('B10 不正キーを 8 件とも弾く', bad.filter((k) => M.addOrig.isAdditionalOriginalKey(k)).length, 0);
   eq('B10-2 正しいキーは通る', M.addOrig.isAdditionalOriginalKey(t.key), true);
+  eq('B10-3 検診・人間ドックのキーも通る (P7 で対象に足した)',
+    M.addOrig.isAdditionalOriginalKey(`additional_results/${UID_A}/health_checkup/2025_02_17/${shaHex(PDF)}.pdf`), true);
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -670,8 +674,8 @@ await inject('K-2 常に新規作成する', [[
 // K-3: test_date を today へ fallback させる → 11 が落ちる
 await inject('K-3 受診日を today へ落とす', [[
   'src/lib/special-additional-tests.ts',
-  "  if (!DATE_RE.test(input.testDate)) {\n    return { ok: false, error: 'invalid_test_date', detail: '受診日 (YYYY-MM-DD) が要ります。実行日で代用しません。' };\n  }",
-  "  if (!DATE_RE.test(input.testDate)) {\n    input = { ...input, testDate: new Date().toISOString().slice(0, 10) };\n  }",
+  "  if (!isRealDate(input.testDate)) {\n    return { ok: false, error: 'invalid_test_date', detail: '受診日 (実在する YYYY-MM-DD) が要ります。実行日で代用しません。' };\n  }",
+  "  if (!isRealDate(input.testDate)) {\n    input = { ...input, testDate: new Date().toISOString().slice(0, 10) };\n  }",
 ]], async (mod) => {
   mod.db.reset();
   const r = await mod.sat.saveAdditionalArtifact({ uid: UID_A, testType: 'blood', testDate: 'not-a-date', markdownClean: 'x', measurements: [] });

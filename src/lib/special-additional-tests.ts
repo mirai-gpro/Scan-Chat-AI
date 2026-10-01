@@ -54,6 +54,13 @@ import type { ElithFormatId } from './elith-export';
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** 実在する暦日か (形式 + カレンダー往復)。`2025-13-45` / `2026-02-31` は false。 */
+function isRealDate(v: unknown): v is string {
+  if (typeof v !== 'string' || !DATE_RE.test(v)) return false;
+  const t = Date.parse(`${v}T00:00:00Z`);
+  return !Number.isNaN(t) && new Date(t).toISOString().slice(0, 10) === v;
+}
+
 // supabase-js の型を引き回さずに使うための最小形（`register.ts:64` と同じ）。
 type Db = { from: (t: string) => any }; // eslint-disable-line @typescript-eslint/no-explicit-any
 const db = (sb: NonNullable<ReturnType<typeof getServerSupabase>>): Db =>
@@ -200,8 +207,11 @@ export async function saveAdditionalArtifact(input: {
   pageCount?: number;
 }): Promise<SaveResult> {
   // **受診日は必須。ここで弾く**（下の 2 関数は today へ落とす・§8 / §47）。
-  if (!DATE_RE.test(input.testDate)) {
-    return { ok: false, error: 'invalid_test_date', detail: '受診日 (YYYY-MM-DD) が要ります。実行日で代用しません。' };
+  // **形だけでなく実在する暦日かまで見る** — `2025-13-45` は形は通るが、
+  // Postgres の `date` 列が拒否するので `save_failed` という分かりにくい形で落ちるし、
+  // 納品側では `date/2025_13_45/` という在りえないフォルダになる（§11.4 / §11.5）。
+  if (!isRealDate(input.testDate)) {
+    return { ok: false, error: 'invalid_test_date', detail: '受診日 (実在する YYYY-MM-DD) が要ります。実行日で代用しません。' };
   }
 
   const found = await resolveAdditionalArtifact({ uid: input.uid, testType: input.testType, testDate: input.testDate });

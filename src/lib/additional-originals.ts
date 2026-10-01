@@ -37,8 +37,26 @@ import {
   type TicketResult,
 } from './originals-upload-ticket';
 
-/** 追加検査で扱う 4 種（§4）。`test_artifacts.test_type` の部分集合。 */
-export const ADDITIONAL_TEST_TYPES = ['blood', 'cancer_urine', 'genetics', 'ai_prediction'] as const;
+/**
+ * Admin から登録できる検査（`test_artifacts.test_type` の部分集合）。
+ *
+ * **2026-10-01 に `health_checkup` を足した**（P7）。正本
+ * `docs/specs/special_account_management_spec_20261001.md` §11
+ * （`special_account_additional_tests_spec_20260930.md` §4 の「4 種」を置き換える）。
+ *
+ * 検診・人間ドックは本人がアプリでスキャンする経路（`source='user_upload'`）が主だが、
+ * **本人が入れられない回を Wellfort 管理者が代わりに入れられない**のは運用上の穴だった。
+ * **どちらの経路でも同じユーザーの同じ検査データとして扱う**（§11.1）。
+ *
+ * **新しい解析は作らない。** `scanImageToParsed()` は `elith-hc-merge` と同じ関数で、
+ * 検診・人間ドックの解析そのもの。健診専用 OCR も専用プロンプトも作らない（§11.2）。
+ *
+ * **重複 artifact を作らない**のが受入条件（§11.3）。
+ * `test_artifacts` の UNIQUE は `source` を含み `external_test_id` が NULL だと効かないので、
+ * **DB は守ってくれない**。`resolveAdditionalArtifact()`（`source` を条件に入れない）で
+ * 本人の行を見つけ、`persistIntoExistingArtifact()` で中身だけ更新する。
+ */
+export const ADDITIONAL_TEST_TYPES = ['health_checkup', 'blood', 'cancer_urine', 'genetics', 'ai_prediction'] as const;
 export type AdditionalTestType = (typeof ADDITIONAL_TEST_TYPES)[number];
 
 export function isAdditionalTestType(v: unknown): v is AdditionalTestType {

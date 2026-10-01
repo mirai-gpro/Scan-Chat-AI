@@ -629,6 +629,95 @@ console.log('\nE / F / K. 1 uid 手動納品 (plan → putVerified を実際に�
     JSON.stringify(prev.json).slice(0, 200));
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// G. 検診・人間ドックの Admin 登録 (§11)
+// ══════════════════════════════════════════════════════════════════════
+//
+// **DB は守ってくれない。** `test_artifacts` の UNIQUE は `source` を含み、
+// `external_test_id` が NULL のとき PostgreSQL は NULL 同士を別物として扱うので効かない。
+// 本人がアプリで入れた回に admin が同じ日付で入れると **active が 2 行**になり、
+// 画面上は「登録できた」ようにしか見えない（本田さんの重複事故と同型）。
+console.log('\nG. 検診・人間ドックの Admin 登録 (saveAdditionalArtifact を実際に動かす)\n');
+{
+  const H = await import('./lib/sat-harness.mjs');
+  const { M, UID_A } = H;
+  const arts = () => M.db.TABLES.test_artifacts ?? [];
+  const hcMd2 = '## 検査結果\n\n| 検査項目 | 読み取った値 | 単位 |\n|---|---|---|\n| AST(GOT) | 22 | U/L |\n';
+
+  ok('G-26 health_checkup が Admin 登録の対象に入っている',
+    M.addOrig.isAdditionalTestType('health_checkup'), 'ここが false だと画面に出てこない');
+  eq('G-26 format_id は HealthCheckupData', M.sat.FORMAT_BY_TEST_TYPE.health_checkup, 'HealthCheckupData');
+  ok('G-26 measurement 型として扱う (items 型ではない)', !M.sat.isItemsFormat('health_checkup'));
+
+  // G-26 / G-27: 本人 user_upload の回がある日に Admin 登録 → **その行を更新する**
+  M.db.reset();
+  M.db.TABLES.test_artifacts = [{
+    id: 'art-user-1', diagnostic_user_id: UID_A, test_type: 'health_checkup',
+    test_date: '2025-02-17', status: 'active', source: 'user_upload',
+    display_mode: 'scan_md', scan_md: '（本人のスキャン）', created_at: '2025-02-17T00:00:00Z',
+  }];
+  let r = await M.sat.saveAdditionalArtifact({
+    uid: UID_A, testType: 'health_checkup', testDate: '2025-02-17',
+    markdownClean: hcMd2, measurements: [{ item_name: 'AST(GOT)', value: '22' }],
+  });
+  eq('G-26 **2 行目を作らない**（本人の行を更新する）',
+    [r.ok, r.created, arts().length], [true, false, 1]);
+  eq('G-26 更新したのは本人の行', r.artifactId, 'art-user-1');
+  eq('G-27 source / test_date / status を変えない',
+    [arts()[0].source, arts()[0].test_date, arts()[0].status], ['user_upload', '2025-02-17', 'active']);
+  ok('G-27 scan_md は新しい内容に差し替わる', String(arts()[0].scan_md).includes('AST(GOT)'));
+  ok('G-27 display_mode も触らない', arts()[0].display_mode === 'scan_md');
+
+  // G-28: 同日 active が 2 件 → 自動で選ばず止まる
+  M.db.reset();
+  M.db.TABLES.test_artifacts = [
+    { id: 'a1', diagnostic_user_id: UID_A, test_type: 'health_checkup', test_date: '2025-02-17', status: 'active', source: 'user_upload', display_mode: 'scan_md', created_at: '2025-02-17T00:00:00Z' },
+    { id: 'a2', diagnostic_user_id: UID_A, test_type: 'health_checkup', test_date: '2025-02-17', status: 'active', source: 'admin_batch', display_mode: 'scan_md', created_at: '2025-03-01T00:00:00Z' },
+  ];
+  r = await M.sat.saveAdditionalArtifact({
+    uid: UID_A, testType: 'health_checkup', testDate: '2025-02-17',
+    markdownClean: hcMd2, measurements: [{ item_name: 'AST(GOT)', value: '22' }],
+  });
+  eq('G-28 同日 active が 2 件なら **自動で選ばず止まる**', [r.ok, r.error], [false, 'artifact_ambiguous']);
+  eq('G-28 候補を返して人に決めさせる', (r.candidates ?? []).length, 2);
+  eq('G-28 止めたので行は増えていない', arts().length, 2);
+
+  // G-29: 受診日が読めない回は保存しない（today へ落とさない）
+  M.db.reset();
+  for (const bad of ['', '2025/02/17', 'today', '2025-13-45']) {
+    const rb = await M.sat.saveAdditionalArtifact({
+      uid: UID_A, testType: 'health_checkup', testDate: bad,
+      markdownClean: hcMd2, measurements: [{ item_name: 'AST(GOT)', value: '22' }],
+    });
+    eq(`G-29 受診日 ${JSON.stringify(bad)} は保存しない`, [rb.ok, rb.error], [false, 'invalid_test_date']);
+  }
+  eq('G-29 **today へ落として行を作っていない**', arts().length, 0);
+
+  // 既存が無い回は新規作成（admin_batch）
+  M.db.reset();
+  r = await M.sat.saveAdditionalArtifact({
+    uid: UID_A, testType: 'health_checkup', testDate: '2024-02-10',
+    markdownClean: hcMd2, measurements: [{ item_name: 'AST(GOT)', value: '22' }],
+  });
+  eq('G-26 既存が無ければ新規作成する', [r.ok, r.created, arts().length], [true, true, 1]);
+  eq('G-26 新規は source=admin_batch', arts()[0].source, 'admin_batch');
+
+  // §11.5 複数年を壊さない — 年ごとに別の行になる
+  for (const d of ['2025-02-17', '2026-03-29']) {
+    await M.sat.saveAdditionalArtifact({
+      uid: UID_A, testType: 'health_checkup', testDate: d,
+      markdownClean: hcMd2, measurements: [{ item_name: 'AST(GOT)', value: '22' }],
+    });
+  }
+  eq('G-26 複数年は年ごとに 1 行（同じ日付へ畳まれない）',
+    arts().map((a) => a.test_date).sort(), ['2024-02-10', '2025-02-17', '2026-03-29']);
+
+  // **persistAdminBatchArtifact を直接呼んでいない**（あれは admin_batch の行しか片付けない）
+  ok('G-26 saveAdditionalArtifact 以外から persistAdminBatchArtifact を呼んでいない',
+    !/persistAdminBatchArtifact/.test(code('src/pages/api/admin/special-additional-tests/finalize.ts')),
+    'API から直接呼ぶと本人の行の隣に 2 行目ができる');
+}
+
 console.log(`\n${fails.length ? '✗' : '✓'} ${fails.length ? `${fails.length} 件 失敗` : '全件 OK'}`);
 for (const f of fails) console.log(`  ✗ ${f}`);
 process.exit(fails.length ? 1 : 0);
