@@ -42,14 +42,16 @@ const SUPABASE_STUB = `
 import { randomUUID } from 'node:crypto';
 export const TABLES = {};
 export const WRITES = [];
-export const FAIL = { insert: null, update: null };
-export function reset() { for (const k of Object.keys(TABLES)) delete TABLES[k]; WRITES.length = 0; FAIL.insert = null; FAIL.update = null; }
+export const FAIL = { insert: null, update: null, select: null, noServer: false };
+export function reset() { for (const k of Object.keys(TABLES)) delete TABLES[k]; WRITES.length = 0; FAIL.insert = null; FAIL.update = null; FAIL.select = null; FAIL.noServer = false; }
 const rows = (t) => (TABLES[t] ??= []);
 const match = (r, fs) => fs.every(([op, c, v]) => op === 'in' ? v.includes(r[c] ?? null) : (r[c] ?? null) === v);
 
 function q(name, filters, action, payload, opts) {
   const run = async () => {
     if (action === 'select') {
+      // **1 本だけ引けない**状況を作る (表が未作成・権限が無い 等)。
+      if (FAIL.select === name) return { data: null, error: { message: 'stub select failure' } };
       return { data: rows(name).filter((r) => match(r, filters)), error: null };
     }
     if (action === 'insert' || action === 'upsert') {
@@ -106,7 +108,7 @@ const table = (name) => ({
   delete: () => q(name, [], 'delete', null, null),
 });
 
-export function getServerSupabase() { return { schema: () => ({ from: table }) }; }
+export function getServerSupabase() { return FAIL.noServer ? null : { schema: () => ({ from: table }) }; }
 export function getBridgeSupabase() { return null; }
 export function isBridgeConfigured() { return false; }
 export function getBrowserSupabase() { return null; }
@@ -206,6 +208,7 @@ async function bundle() {
       'src/lib/additional-originals.ts',
       'src/lib/elith-delivery-json.ts',
       'src/lib/special-additional-tests.ts',
+      'src/lib/account-progress.ts',
       'src/pages/api/admin/lab-results/register.ts',
       'src/pages/api/admin/special-additional-tests/finalize.ts',
     ],
@@ -229,6 +232,7 @@ async function bundle() {
     addOrig: await import(built('lib/additional-originals.mjs')),
     deliv: await import(built('lib/elith-delivery-json.mjs')),
     sat: await import(built('lib/special-additional-tests.mjs')),
+    progress: await import(built('lib/account-progress.mjs')),
     register: await import(built('pages/api/admin/lab-results/register.mjs')),
     finalize: await import(built('pages/api/admin/special-additional-tests/finalize.mjs')),
     /*

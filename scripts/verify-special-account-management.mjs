@@ -285,6 +285,104 @@ console.log('\nD. 登録と納品の分離 (finalize を実際に動かす)\n');
     '`deliver === false` 型に戻すと、送り忘れがそのまま本番へ出る');
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// I. 一覧の集計 (§6.2 / §6.4)
+// ══════════════════════════════════════════════════════════════════════
+//
+// **ここは静かに壊れる。** 血液・遺伝子・がんリスク・AI疾病予測が 0 件で出ても
+// 「まだ検査が来ていない人」にしか見えないし、納品済みの回が「未納品」に見えても
+// 画面は正常に動く。→ 5 種とも数えること・納品を 2 表の和で見ることを固定する。
+console.log('\nI. 一覧の集計 (getAccountProgress を実際に動かす)\n');
+{
+  const H = await import('./lib/sat-harness.mjs');
+  const { M } = H;
+  const U = 'aaaaaaaa-1111-4111-8111-111111111111';
+  const V = 'bbbbbbbb-2222-4222-8222-222222222222';
+
+  const seed = () => {
+    M.db.reset();
+    M.db.TABLES.interview_completions = [{ diagnostic_user_id: U, completed_at: '2026-09-08T01:00:00Z' }];
+    M.db.TABLES.test_artifacts = [
+      { diagnostic_user_id: U, test_type: 'health_checkup', test_date: '2025-02-17', status: 'active' },
+      { diagnostic_user_id: U, test_type: 'health_checkup', test_date: '2026-03-29', status: 'active' },
+      { diagnostic_user_id: U, test_type: 'blood', test_date: '2026-05-10', status: 'active' },
+      { diagnostic_user_id: U, test_type: 'genetics', test_date: '2024-11-01', status: 'active' },
+      { diagnostic_user_id: U, test_type: 'cancer_urine', test_date: '2026-06-02', status: 'active' },
+      { diagnostic_user_id: U, test_type: 'ai_prediction', test_date: '2025-08-18', status: 'active' },
+      // 取り消した回は数えない
+      { diagnostic_user_id: U, test_type: 'blood', test_date: '2026-07-07', status: 'superseded' },
+      // 知らない種別を混ぜても捏造しない
+      { diagnostic_user_id: U, test_type: 'nanika', test_date: '2026-09-09', status: 'active' },
+      // 他人の行を混ぜない
+      { diagnostic_user_id: V, test_type: 'blood', test_date: '2026-09-30', status: 'active' },
+    ];
+  };
+
+  // I-33 — 5 種すべての件数と最新日が返る
+  seed();
+  let p = (await M.progress.getAccountProgress([U, V]))[U];
+  eq('I-33 検診・人間ドック 2 件 / 最新 2026-03-29',
+    [p.byTestType.health_checkup.count, p.byTestType.health_checkup.latest], [2, '2026-03-29']);
+  eq('I-33 血液 1 件 (superseded は数えない)',
+    [p.byTestType.blood.count, p.byTestType.blood.latest], [1, '2026-05-10']);
+  eq('I-33 遺伝子 / がんリスク / AI疾病予測 もそれぞれ数える',
+    [p.byTestType.genetics.count, p.byTestType.cancer_urine.count, p.byTestType.ai_prediction.count], [1, 1, 1]);
+  eq('I-33 5 種が揃っている', Object.keys(p.byTestType).sort(),
+    ['ai_prediction', 'blood', 'cancer_urine', 'genetics', 'health_checkup']);
+  ok('I-33 知らない test_type を勝手に足さない', !('nanika' in p.byTestType));
+  eq('I-33 他人の行を数えない', (await M.progress.getAccountProgress([U, V]))[V].byTestType.blood.count, 1);
+  eq('I-33 既存の scan キーを消していない (health_checkup と同じ)',
+    [p.scan.count, p.scan.latest], [p.byTestType.health_checkup.count, p.byTestType.health_checkup.latest]);
+  eq('I-33 最終更新は問診と検査 5 種の最大', p.latestActivity, '2026-09-08T01:00:00Z');
+
+  // I-34 — 納品は 2 表の和
+  seed();
+  M.db.TABLES.elith_deliveries = [{ diagnostic_user_id: U, delivered_at: '2026-08-15T14:00:00Z', status: 'delivered' }];
+  p = (await M.progress.getAccountProgress([U]))[U];
+  eq('I-34 elith_deliveries だけでも納品済みになる', [p.delivered.done, p.delivered.count], [true, 1]);
+
+  seed();
+  M.db.TABLES.elith_delivery_items = [
+    { diagnostic_user_id: U, delivered_at: '2026-09-20T14:00:00Z', status: 'delivered' },
+    { diagnostic_user_id: U, delivered_at: null, status: 'failed' },
+  ];
+  p = (await M.progress.getAccountProgress([U]))[U];
+  eq('I-34 **追加検査だけの納品も「納品済み」として見える** (P-2 の修正)',
+    [p.delivered.done, p.delivered.count, p.delivered.latest], [true, 1, '2026-09-20T14:00:00Z']);
+  ok('I-34 failed は納品済みに数えない', p.delivered.count === 1);
+
+  seed();
+  M.db.TABLES.elith_deliveries = [{ diagnostic_user_id: U, delivered_at: '2026-08-15T14:00:00Z', status: 'delivered' }];
+  M.db.TABLES.elith_delivery_items = [{ diagnostic_user_id: U, delivered_at: '2026-09-20T14:00:00Z', status: 'delivered' }];
+  p = (await M.progress.getAccountProgress([U]))[U];
+  eq('I-34 両方あるときは和をとり、前回納品は新しい方', [p.delivered.count, p.delivered.latest],
+    [2, '2026-09-20T14:00:00Z']);
+
+  // I-35 — 引けないときに「済み」と偽らない
+  seed();
+  M.db.FAIL.noServer = true;
+  p = (await M.progress.getAccountProgress([U]))[U];
+  M.db.FAIL.noServer = false;
+  eq('I-35 DB 未設定なら全部「未完了」で返す (画面は壊さない)',
+    [p.interview.done, p.byTestType.blood.done, p.delivered.done, p.latestActivity], [false, false, false, null]);
+
+  seed();
+  M.db.FAIL.select = 'elith_delivery_items';
+  p = (await M.progress.getAccountProgress([U]))[U];
+  M.db.FAIL.select = null;
+  eq('I-35 **1 本引けなくても他を道連れにしない** (migration 未適用で全部 0 件にしない)',
+    [p.interview.done, p.byTestType.blood.count, p.byTestType.health_checkup.count], [true, 1, 2]);
+
+  // I-36 — PII を載せない
+  seed();
+  const all = await M.progress.getAccountProgress([U, V]);
+  const text = JSON.stringify(all);
+  ok('I-36 応答に測定値・回答本文・氏名・生年月日が出てこない',
+    !/(value|measurement|answer|birth|dob|name|email)/i.test(text), text.slice(0, 200));
+  ok('I-36 読むのは件数と日時だけ (select に余計な列を足していない)',
+    !/select\('[^']*\b(value|item_name|answers|raw|markdown)\b/.test(code('src/lib/account-progress.ts')));
+}
+
 console.log(`\n${fails.length ? '✗' : '✓'} ${fails.length ? `${fails.length} 件 失敗` : '全件 OK'}`);
 for (const f of fails) console.log(`  ✗ ${f}`);
 process.exit(fails.length ? 1 : 0);
