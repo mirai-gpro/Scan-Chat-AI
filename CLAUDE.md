@@ -1876,7 +1876,8 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   正本 `docs/operations/スペシャルアカウント_仕様書.md`。上位 = `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md`。
   追加検査の登録は上の `docs/specs/special_account_additional_tests_spec_20260930.md`。**
   **管理画面と Elith 納品の起動は `docs/specs/special_account_management_spec_20261001.md`
-  (2026-10-01・仕様のみ/未実装)。** スペシャルを 23:00 JST の cron から外し、
+  (2026-10-01・**P1〜P8 実装済み**。実装の地図は §27.1 / 実装で分かったことは §27.1.1)。**
+  スペシャルを 23:00 JST の cron から外し、
   `/admin/special-accounts` の行の［Elith納品］ボタンだけで本番納品する改訂。
   **AI問診は必須ではない** / 追加検査登録は「登録」だけにする / 検診・人間ドックの Admin 登録を足す。
   **§6.5 / §13.4 に承認画面案の補正事項**がある — **現 API が氏名・会社名を保持も返却もしないので一覧の表示前提にしない**・
@@ -1898,7 +1899,25 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   ④**`elith_delivery_runs` はスペシャルの手動納品 run だけを対象**とし、**通常 cron の run snapshot へは
   広げない** (`source` は `manual` 固定・cron の履歴は既存 2 表のまま)。
   **発注者裁定事項 U-1〜U-8 は全て確定。ただし未確認は残っている** —
-  **Elith 確認事項 E-1〜E-6** と**実装時に実測する V-1〜V-4** は確定事項として扱わない。
+  **Elith 確認事項 E-1〜E-6** と**V-1 の本番実測**は確定事項として扱わない
+  (V-2 は migration 作成済み・適用は発注者 / V-3・V-4 は検査で固定済み)。
+  **【実装済み 2026-10-01・P1〜P8】** 新しいファイル =
+  `s3-verified-put.ts` (共通 Verified PUT/readback・A と B の両方が呼ぶ) /
+  `elith-manual-delivery.ts` (1 uid 手動納品。plan は S3 を変えない・7 種・複数年) /
+  `elith-delivery-runs.ts` (run の控えと差分) /
+  `api/admin/special-accounts/deliver-one.ts` (preview → confirm の 2 段) /
+  `supabase/migrations/20261001000010_elith_delivery_runs.sql` /
+  wellfort-site `public/admin/admin-target.js` (一覧→別画面へ対象 1 人を渡す・sessionStorage)。
+  **実装で分かったこと (§27.1.1)**: 納品 JSON は毎回 `exported_at`/`diagnostic_id` が変わるので
+  **指紋からこの 2 つだけを外す** (データは外さない) / HTTP 2 往復では plan を持ち越せないので
+  **2 回目も組み直して指紋が一致したときだけ書く** (中身をクライアントから送り返させない) /
+  その帰結で `putVerified` の冪等は検診・ウェルネス年齢には効かない = **V-1 は最悪ケースで正しい**。
+  **検証** = `npm run verify:special-account-management` (147 件・CI の A 層) /
+  wellfort-site `verify:special-accounts-ui` (50 件) と `verify:admin-target` (34 件)。
+  **退行注入 16 種とも名指しで落ちることを確認済み。**
+  **発注者の操作が 2 つ必要**: ① migration `20261001000010_elith_delivery_runs.sql` の適用
+  ② 本番での通し確認 (この環境には鍵も S3 も無いので、Gemini 解析・S3 署名 PUT・
+  本番納品の実挙動と V-1 の所要時間は未確認)。
   **デモ枠とは目的が逆。混ぜない。** あちらは**ダミー**を見せる枠 (社外に渡す)、こちらは
   **本人の実データ**を扱う枠。仕組みが似ているので、判定・供給元・app_config キー・admin 画面を
   すべて分けてある。**共有するのは純粋関数の import だけ** (`hashEmail` / `maskEmail` /
