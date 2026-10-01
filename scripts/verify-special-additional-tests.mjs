@@ -455,8 +455,11 @@ console.log('\nI. Elith\n');
   eq('I41-2 status=delivered', item.status, 'delivered');
   eq('I41-3 読み戻した SHA が本物',
     item.destination_sha256, shaHex(new TextEncoder().encode(M.s3.S3.get(r39.json.delivery.destination_key))));
+  // 読み戻しは **共通 helper `putVerified`** が持つ (D-1・2026-10-01 に一本化)。
+  // 本体の納品経路にも同じ性質が要るので、片方だけ直る形をやめた。
   ok('I41-4 PutObject の成功だけで delivered にしていない',
-    /getObjectText\(destinationKey\)/.test(read('src/lib/elith-delivery-json.ts')));
+    /getObjectText\(f\.key\)/.test(read('src/lib/s3-verified-put.ts'))
+    && /putVerified\(/.test(code('src/lib/elith-delivery-json.ts')));
 
   // 42 再実行で delivery item 増殖なし
   await finalizeBlood();
@@ -692,14 +695,13 @@ await inject('K-4 サニタイズを通さない', [[
 // K-5: elith-delivery-promote の全件コピーを呼ぶ → 39 が落ちる
 await inject('K-5 uid 配下を全件コピーする', [[
   'src/lib/elith-delivery-json.ts',
-  '  try {\n    await putFiles([{',
+  '  const [r] = await putVerified([{',
   `  {
     const { listObjects: __ls, copyObjects: __cp } = await import('./s3');
     const all = await __ls(\`\${normPrefix(cfg.prefix)}user/\${input.uid}/\`);
     await __cp(all.map((o) => ({ from: o.key, to: o.key.slice(normPrefix(cfg.prefix).length) })));
   }
-  try {
-    await putFiles([{`,
+  const [r] = await putVerified([{`,
 ]], async (mod) => {
   mod.db.reset(); mod.s3.reset(); mod.orig.reset();
   mod.s3.S3.set(`scan-accuracy-test/user/${UID_A}/date/2025_08_04/HealthCheckupData_date_2025_08_04_user_${UID_A}.json`, '{"format_id":"HealthCheckupData"}');

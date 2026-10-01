@@ -45,7 +45,8 @@
 import { rewriteClientId, type SubjectInfo } from './elith-assemble';
 import { ELITH_HANDOFF_SCHEMA_VERSION, type ElithFormatId } from './elith-export';
 import { MODELS } from './gemini';
-import { getS3Config, getObjectText, putFiles } from './s3';
+import { getS3Config, getObjectText } from './s3';
+import { putVerified } from './s3-verified-put';
 import { getServerSupabase } from './supabase';
 import { sha256Hex } from './originals-storage';
 
@@ -234,41 +235,29 @@ export async function deliverAdditionalJson(input: {
   const sourceSha256 = sha256Hex(utf8(deliveryText));
 
   /*
-   * **既に同じものが在るなら書き直さない**（§32「Elith 書き込み成功・履歴 DB 記録失敗」の修復 /
-   * §33 冪等）。読めない = まだ無い、として通常の PUT へ進む。
+   * **書き込みは共通 helper に一本化した**（D-1・2026-10-01・
+   * `docs/specs/special_account_management_spec_20261001.md` §9.6）。
+   *
+   * 「事前比較 GET → PUT → 読み戻し GET → SHA256 突合」はここが持っていた性質で、
+   * 本体の納品経路（`assembleElithDeliverySet` → `putFiles`）には**無かった**。
+   * 片方にしか無い状態をやめ、**両方が `putVerified` を呼ぶ**形にした。
+   * **挙動は変えていない** — 既に同じ内容なら PUT しない / 読み戻して一致して初めて
+   * verified / 投げない、の 3 つはそのまま helper が持っている。
+   *
+   * **キー変換・client_id 書き換え・サニタイズは helper に持たせない**（上の責務分界）。
    */
-  let already: string | null = null;
-  try {
-    already = sha256Hex(utf8(await getObjectText(destinationKey)));
-  } catch {
-    already = null;
+  const [r] = await putVerified([{
+    key: destinationKey,
+    contentType: 'application/json; charset=utf-8',
+    body: deliveryText,
+    bytes: utf8(deliveryText).length,
+  }]);
+  if (!r) {
+    return { ok: false, destinationKey, sourceSha256, destinationSha256: null, verified: false, error: 'put_failed', detail: 'no result' };
   }
-  if (already && already === sourceSha256) {
-    return { ok: true, destinationKey, sourceSha256, destinationSha256: already, verified: true };
-  }
-
-  try {
-    await putFiles([{
-      key: destinationKey,
-      contentType: 'application/json; charset=utf-8',
-      body: deliveryText,
-      bytes: utf8(deliveryText).length,
-    }]);
-  } catch (err) {
-    return { ok: false, destinationKey, sourceSha256, destinationSha256: null, verified: false, error: 'put_failed', detail: msg(err) };
-  }
-
-  // **読み戻して突合するまで「納品完了」と言わない**（§29）。
-  let destinationSha256: string | null = null;
-  try {
-    destinationSha256 = sha256Hex(utf8(await getObjectText(destinationKey)));
-  } catch (err) {
-    return { ok: false, destinationKey, sourceSha256, destinationSha256: null, verified: false, error: 'readback_failed', detail: msg(err) };
-  }
-  if (destinationSha256 !== sourceSha256) {
-    return { ok: false, destinationKey, sourceSha256, destinationSha256, verified: false, error: 'readback_mismatch' };
-  }
-  return { ok: true, destinationKey, sourceSha256, destinationSha256, verified: true };
+  return r.verified
+    ? { ok: true, destinationKey, sourceSha256: r.sourceSha256, destinationSha256: r.destinationSha256, verified: true }
+    : { ok: false, destinationKey, sourceSha256: r.sourceSha256, destinationSha256: r.destinationSha256, verified: false, error: r.error, ...(r.detail ? { detail: r.detail } : {}) };
 }
 
 function msg(err: unknown): string {

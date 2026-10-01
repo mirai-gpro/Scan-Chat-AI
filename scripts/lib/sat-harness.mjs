@@ -117,8 +117,10 @@ export function getStagingBridgeEndpoint() { return null; }
 
 const S3_STUB = `
 export const S3 = new Map();
-export const STATE = { prefix: 'scan-accuracy-test/', configured: true, putFail: false };
-export function reset() { S3.clear(); STATE.prefix = 'scan-accuracy-test/'; STATE.configured = true; STATE.putFail = false; }
+export const STATE = { prefix: 'scan-accuracy-test/', configured: true, putFail: false, corruptPut: false };
+/** **GET / PUT の実回数**。putVerified の「1 ファイルあたり最大 2 回」を実測するため (V-1)。 */
+export const COUNTS = { get: 0, put: 0 };
+export function reset() { S3.clear(); STATE.prefix = 'scan-accuracy-test/'; STATE.configured = true; STATE.putFail = false; STATE.corruptPut = false; COUNTS.get = 0; COUNTS.put = 0; }
 export function getS3Config() { return STATE.configured ? { bucket: 'stub-bucket', region: 'ap-northeast-1', prefix: STATE.prefix } : null; }
 export function isS3Configured() { return STATE.configured; }
 export function makeS3Client() { throw new Error('not in stub'); }
@@ -126,12 +128,16 @@ export async function listObjects(prefix) {
   return [...S3.keys()].filter((k) => k.startsWith(prefix)).map((key) => ({ key, size: S3.get(key).length }));
 }
 export async function getObjectText(key) {
+  COUNTS.get += 1;
   if (!S3.has(key)) throw new Error('NoSuchKey: ' + key);
   return S3.get(key);
 }
 export async function putFiles(files) {
+  COUNTS.put += files.length;
   if (STATE.putFail) throw new Error('stub put failure');
-  for (const f of files) S3.set(f.key, String(f.body));
+  // **書けたのに中身が違う**状況 (S3 側で壊れた・別プロセスが上書きした) を作る。
+  // 読み戻し検証が本当に効いているかは、これでしか測れない。
+  for (const f of files) S3.set(f.key, STATE.corruptPut ? String(f.body) + ' /*corrupt*/' : String(f.body));
   return files.map((f) => ({ key: f.key, bytes: f.bytes, uri: 's3://stub-bucket/' + f.key }));
 }
 export async function copyObjects(pairs) { for (const p of pairs) S3.set(p.to, S3.get(p.from)); return pairs.length; }
@@ -209,6 +215,9 @@ async function bundle() {
       'src/lib/elith-delivery-json.ts',
       'src/lib/special-additional-tests.ts',
       'src/lib/account-progress.ts',
+      'src/lib/s3-verified-put.ts',
+      'src/lib/elith-manual-delivery.ts',
+      'src/pages/api/admin/special-accounts/deliver-one.ts',
       'src/pages/api/admin/lab-results/register.ts',
       'src/pages/api/admin/special-additional-tests/finalize.ts',
     ],
@@ -233,6 +242,9 @@ async function bundle() {
     deliv: await import(built('lib/elith-delivery-json.mjs')),
     sat: await import(built('lib/special-additional-tests.mjs')),
     progress: await import(built('lib/account-progress.mjs')),
+    vput: await import(built('lib/s3-verified-put.mjs')),
+    manual: await import(built('lib/elith-manual-delivery.mjs')),
+    deliverOne: await import(built('pages/api/admin/special-accounts/deliver-one.mjs')),
     register: await import(built('pages/api/admin/lab-results/register.mjs')),
     finalize: await import(built('pages/api/admin/special-additional-tests/finalize.mjs')),
     /*

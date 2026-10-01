@@ -17,6 +17,7 @@
  */
 
 import { putFiles, type S3PutFile } from './s3';
+import { putVerified, unverified } from './s3-verified-put';
 import {
   assembleElithDeliverySet,
   inventoryElithSource,
@@ -162,7 +163,7 @@ interface MaterializedHc {
  * 納品ゲート (仕様 §6.2): scan_md 無し / 読み取り 0 項目の回は作らない (捏造しない)。
  * 返り値: 年ごとの MaterializedHc[] (test_date desc)。無ければ空配列。
  */
-async function materializeHealthCheckups(
+export async function materializeHealthCheckups(
   uid: string,
   sourcePrefix: string,
 ): Promise<MaterializedHc[]> {
@@ -248,7 +249,7 @@ async function materializeHealthCheckups(
 }
 
 /** measurements からウェルネス年齢を算出し health_age_scores へ保存。載せられるなら HealthAgeRecord を返す。 */
-async function computeWellnessFromMeasurements(
+export async function computeWellnessFromMeasurements(
   uid: string,
   measurements: Record<string, unknown>[],
   hcTestDate: string,
@@ -397,7 +398,7 @@ async function loadDeliveredBundles(uids: string[], deliveryPrefix: string): Pro
 }
 
 /** elith_deliveries に 1 件記録 (冪等: uid×bundle_date×delivery_prefix)。失敗は投げない。 */
-async function recordDelivery(row: {
+export async function recordDelivery(row: {
   uid: string;
   bundleDate: string;
   deliveryPrefix: string;
@@ -575,7 +576,18 @@ export async function deliverReadySpecialAccounts(opts: {
   });
 
   const files: S3PutFile[] = assembled.users.flatMap((u) => u.files);
-  const uploaded = await putFiles(files);
+  /*
+   * **読み戻して突合するまで「納品完了」と言わない**（D-1・§9.6）。
+   * 以前はここが `putFiles` で、**PutObject の成否だけ**を見ていた。
+   * 追加検査経路 (`deliverAdditionalJson`) には読み戻しが在るのに、
+   * 本体の納品経路に無いのは逆だった。
+   *
+   * 追加 GET は **新規 / 内容が変わったファイルで最大 2 回**（事前比較 + readback）、
+   * 既存と同一内容なら 1 回で PUT は 0 回。
+   */
+  const putResults = await putVerified(files);
+  const verifiedKeys = new Set(putResults.filter((r) => r.verified).map((r) => r.key));
+  const failed = unverified(putResults);
 
   // 納品記録・集計は **年(date フォルダ)ごと**。elith_deliveries は (uid, bundle_date) 単位なので
   // 各年を 1 行として記録する (冪等の skipDelivered もこの粒度で効く)。
@@ -591,6 +603,12 @@ export async function deliverReadySpecialAccounts(opts: {
     for (const [date, srcs] of byDate) {
       const formatIds = Array.from(new Set(srcs.map((s) => s.formatId)));
       const hasHealthAge = formatIds.includes('HealthAgeData');
+      /*
+       * **一部でも読み戻せていない年は `delivered` として記録しない**（§9.6.2 b）。
+       * 「書けたが読み戻せていない」を納品済みと呼ぶと、`skipDelivered` が
+       * 次回その年を飛ばして**穴が埋まらないまま固定される**。
+       */
+      if (srcs.some((s) => !verifiedKeys.has(s.newKey))) continue;
       if (hasHealthAge) wellnessDeliveredYears++;
       await recordDelivery({
         uid: u.userId,
@@ -614,9 +632,29 @@ export async function deliverReadySpecialAccounts(opts: {
     });
   }
 
+  /*
+   * **黙って落とさない**（§9.6.2 c）。読み戻せなかったファイルは件数と理由を結果に載せる。
+   * uid ごとにまとめて 1 行出す（ファイル単位で並べると結果が読めなくなる）。
+   */
+  if (failed.length > 0) {
+    const byUid = new Map<string, number>();
+    for (const f of failed) {
+      const m = f.key.match(/user\/([^/]+)\//);
+      const u = m ? m[1] : '(unknown)';
+      byUid.set(u, (byUid.get(u) ?? 0) + 1);
+    }
+    for (const [u, n] of byUid) {
+      results.push({
+        uid: u,
+        status: 'error',
+        reason: `${n} 件が読み戻し検証を通りませんでした（${failed.filter((f) => f.key.includes(`user/${u}/`)).map((f) => f.error).join(' / ')}）`,
+      });
+    }
+  }
+
   return {
     results,
-    put_count: uploaded.length,
+    put_count: putResults.filter((r) => r.verified).length,
     delivery_prefix: assembled.deliveryPrefix,
     ready: ready.length,
     delivered: assembled.users.length,

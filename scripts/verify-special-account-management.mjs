@@ -383,6 +383,252 @@ console.log('\nI. 一覧の集計 (getAccountProgress を実際に動かす)\n')
     !/select\('[^']*\b(value|item_name|answers|raw|markdown)\b/.test(code('src/lib/account-progress.ts')));
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// E / F / K. 1 uid 手動納品 — 複数年・7 種・plan と putVerified
+// ══════════════════════════════════════════════════════════════════════
+//
+// **静かに壊れるところ**
+//   ① 複数年が**最新 1 件へ縮退**する — 画面は「納品できた」としか言わない
+//   ② 血液・がん・遺伝子・AI疾病予測が **manualMapping に載らない** (P-1)
+//   ③ **確認モーダルを開いただけで S3 が変わる** — 取り返しがつかない
+//   ④ 確認した内容と**違う内容を書く** — 確認が確認になっていない
+//   ⑤ PutObject の成否だけで「納品完了」と言う
+console.log('\nE / F / K. 1 uid 手動納品 (plan → putVerified を実際に動かす)\n');
+{
+  const H = await import('./lib/sat-harness.mjs');
+  const { M, UID_A, UID_B } = H;
+  const P = 'scan-accuracy-test/';
+  const prod = () => [...M.s3.S3.keys()].filter((k) => k.startsWith('user/'));
+
+  const srcKey = (fmt, d) => `${P}user/${UID_A}/date/${d}/${fmt}_date_${d}_user_${UID_A}.json`;
+  const putSrc = (fmt, d, data) => M.s3.S3.set(srcKey(fmt, d), JSON.stringify({
+    format_id: fmt, client_id: UID_A, test_date: d.replace(/_/g, '-'),
+    data: data ?? { measurements: [{ item_name: 'AST', value: '22' }] },
+  }));
+  const hcMd = (alb) => [
+    '## 検査結果', '',
+    '| 検査項目 | 読み取った値 | 単位 | 基準値下限 | 基準値上限 |',
+    '|---|---|---|---|---|',
+    `| アルブミン | ${alb} | g/dL | 3.9 | 5.1 |`,
+    '| クレアチニン | 0.85 | mg/dL | 0.6 | 1.1 |',
+    '| HbA1c | 5.4 | % | 4.6 | 6.2 |',
+    '',
+  ].join('\n');
+  const hcRow = (date, age, md) => ({
+    diagnostic_user_id: UID_A, test_type: 'health_checkup', status: 'active',
+    test_date: date, age_at_test: age, sex: 'male', scan_md: md,
+  });
+  const reset = () => { M.db.reset(); M.s3.reset(); };
+
+  // ── E-20 血液 3 年分が 3 つの date フォルダになる ────────────────────
+  reset();
+  for (const d of ['2023_05_10', '2024_05_10', '2025_05_10']) putSrc('BloodTestData', d);
+  let plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  eq('E-20 血液 3 年分が 3 つの date フォルダになる (最新 1 件へ縮退しない)',
+    [...new Set(plan.files.map((f) => f.deliveredDate))].sort(), ['2023_05_10', '2024_05_10', '2025_05_10']);
+  eq('E-20 代表 1 件の指定で 3 ファイル', plan.countByFormat.BloodTestData, 3);
+
+  // ── K-46 / V-4 plan を作っても S3 を変えない ───────────────────────
+  eq('K-46 **確認モーダルを開いただけでは本番へ 1 バイトも書かない** (V-4)', prod().length, 0);
+
+  // ── E-21 検診 5 年分 ＋ E-22 ウェルネス年齢は年ごと ─────────────────
+  reset();
+  M.db.TABLES.test_artifacts = [
+    hcRow('2026-03-29', 54, hcMd('4.4')),
+    hcRow('2025-02-17', 53, hcMd('4.2')),
+    hcRow('2024-02-10', 52, hcMd('4.3')),
+    hcRow('2023-02-11', 51, hcMd('4.1')),
+    hcRow('2022-02-12', 50, hcMd('4.0')),
+    // **読み取り 0 項目の回は作らない**（捏造しない）
+    hcRow('2021-02-13', 49, '## 空\n'),
+  ];
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  eq('E-21 検診 5 年分が 5 つの date フォルダになる', plan.countByFormat.HealthCheckupData, 5);
+  eq('E-22 ウェルネス年齢も**年ごと**に載る', plan.countByFormat.HealthAgeData, 5);
+  ok('E-22 読み取り 0 項目の回は作らない (捏造しない)',
+    !plan.files.some((f) => f.deliveredDate === '2021_02_13'));
+
+  // 算出不能な年は HealthAgeData を載せない
+  reset();
+  M.db.TABLES.test_artifacts = [
+    hcRow('2026-03-29', 54, hcMd('4.4')),
+    // アルブミン・クレアチニンが無い = ウェルネス年齢は算出不能。**検診は納品し、年齢だけ載せない。**
+    hcRow('2025-02-17', 53, ['## 検査結果', '', '| 検査項目 | 読み取った値 | 単位 |', '|---|---|---|', '| 身長 | 170 | cm |', ''].join('\n')),
+  ];
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  eq('E-22 算出不能な年は HealthAgeData を載せない (検診は納品する)',
+    [plan.countByFormat.HealthCheckupData, plan.countByFormat.HealthAgeData], [2, 1]);
+
+  // ── F-24 / F-25 7 種すべてが載り得る / 無い format は載せない ────────
+  reset();
+  M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.4'))];
+  putSrc('BloodTestData', '2026_05_10');
+  putSrc('CancerRiskAssessmentData', '2026_06_02');
+  putSrc('GeneticTestResultData', '2024_11_01');
+  putSrc('Other', '2025_08_18');
+  putSrc('LifestyleQuestionnaireData', '2026_09_08', { answers: [] });
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  eq('F-24 **7 種すべてが載る** (P-1 の修正)', Object.keys(plan.countByFormat).sort(), [
+    'BloodTestData', 'CancerRiskAssessmentData', 'GeneticTestResultData',
+    'HealthAgeData', 'HealthCheckupData', 'LifestyleQuestionnaireData', 'Other',
+  ]);
+
+  reset();
+  M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.4'))];
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  ok('F-25 存在しない format は載せない (空のファイルを作らない)',
+    !('BloodTestData' in plan.countByFormat) && !('GeneticTestResultData' in plan.countByFormat),
+    JSON.stringify(plan.countByFormat));
+
+  // ── B-6〜B-9 最低条件 (§10.2) ──────────────────────────────────────
+  reset();
+  plan = await M.manual.buildDeliveryPlan({ uid: '', sourcePrefix: P, deliveryPrefix: '' });
+  ok('B-6 uid 未確定は納品できない', !plan.ok && !!plan.reason);
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_B, sourcePrefix: P, deliveryPrefix: '' });
+  ok('C-12 スペシャルアカウント以外の uid は拒否する', !plan.ok && /スペシャル/.test(plan.reason ?? ''));
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  ok('B-9 渡せるデータが 0 種類なら納品できない', !plan.ok && /1 件もありません/.test(plan.reason ?? ''));
+
+  reset();
+  putSrc('BloodTestData', '2026_05_10');
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  ok('B-7 **AI問診が無くても**納品できる', plan.ok && !('LifestyleQuestionnaireData' in plan.countByFormat));
+  ok('B-8 **検診が無くても**（血液だけでも）納品できる', plan.ok && !('HealthCheckupData' in plan.countByFormat));
+
+  // ── K-48 確認した plan をそのまま書く ──────────────────────────────
+  reset();
+  M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.4')), hcRow('2025-02-17', 53, hcMd('4.2'))];
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  const fp = M.manual.planFingerprint(plan);
+  const exec = await M.manual.executeDeliveryPlan(plan, { deliveryPrefix: '' });
+  eq('K-48 plan のファイルがそのまま書かれる',
+    [exec.fileCount, exec.verifiedCount, prod().length], [plan.files.length, plan.files.length, plan.files.length]);
+  eq('K-48 plan の指紋は書いても変わらない (同じ内容を書いた)', M.manual.planFingerprint(plan), fp);
+  eq('H-30 同じ内容で 2 回納品しても S3 のオブジェクト数が増えない',
+    (await M.manual.executeDeliveryPlan(plan, { deliveryPrefix: '' }), prod().length), plan.files.length);
+  ok('H-30 2 回目は PUT しない (事前比較で止まる)',
+    (await M.manual.executeDeliveryPlan(plan, { deliveryPrefix: '' })).results.every((r) => r.skipped));
+
+  // ── K-51 / V-1 追加 GET は **新規 2 回・既存同一 1 回**（実回数で測る）─────
+  //
+  // 「1 ファイルにつき GET が 1 回増える」で見積もると**最悪ケースを 2 倍外す**。
+  // V-1（cron が maxDuration 800s に収まるか）はここの実測を根拠にする。
+  {
+    reset();
+    M.s3.S3.set('user/x/a.json', 'same');
+    M.s3.COUNTS.get = 0; M.s3.COUNTS.put = 0;
+    const res1 = await M.vput.putVerified([{ key: 'user/x/a.json', contentType: 'application/json', body: 'same', bytes: 4 }]);
+    eq('K-51 既存と同一なら **GET 1 回・PUT 0 回**', [M.s3.COUNTS.get, M.s3.COUNTS.put], [1, 0]);
+    eq('K-51 それでも verified (skipped として返る)', [res1[0].verified, res1[0].skipped], [true, true]);
+
+    M.s3.COUNTS.get = 0; M.s3.COUNTS.put = 0;
+    const res2 = await M.vput.putVerified([{ key: 'user/x/b.json', contentType: 'application/json', body: 'new', bytes: 3 }]);
+    eq('K-51 新規は **GET 2 回（事前比較 + 読み戻し）・PUT 1 回**', [M.s3.COUNTS.get, M.s3.COUNTS.put], [2, 1]);
+    eq('K-51 新規も verified (skipped ではない)', [res2[0].verified, res2[0].skipped], [true, false]);
+
+    M.s3.COUNTS.get = 0; M.s3.COUNTS.put = 0;
+    await M.vput.putVerified([{ key: 'user/x/b.json', contentType: 'application/json', body: 'changed', bytes: 7 }]);
+    eq('K-51 **内容が変わった回も GET 2 回・PUT 1 回**（最悪ケース = 全ファイルがこれ）',
+      [M.s3.COUNTS.get, M.s3.COUNTS.put], [2, 1]);
+
+    // 10 ファイルぶんの最悪ケースを実測しておく（V-1 の見積りの根拠）
+    reset();
+    const many = Array.from({ length: 10 }, (_, i) => ({ key: `user/x/m${i}.json`, contentType: 'application/json', body: `v${i}`, bytes: 2 }));
+    M.s3.COUNTS.get = 0; M.s3.COUNTS.put = 0;
+    await M.vput.putVerified(many);
+    eq('K-51 最悪ケース 10 ファイル = GET 20 回 / PUT 10 回', [M.s3.COUNTS.get, M.s3.COUNTS.put], [20, 10]);
+  }
+
+  // ── K-37 / K-39 / K-40 putVerified の性質 ─────────────────────────
+  reset();
+  M.s3.STATE.putFail = true;
+  const bad = await M.vput.putVerified([{ key: 'user/x/c.json', contentType: 'application/json', body: 'x', bytes: 1 }]);
+  M.s3.STATE.putFail = false;
+  eq('K-40 **投げない**。失敗は戻り値で返る', [bad[0].verified, bad[0].error], [false, 'put_failed']);
+  eq('K-37 PUT に失敗した回は destinationSha256 を持たない', bad[0].destinationSha256, null);
+
+  // **書けたのに中身が違う**回。PutObject の成否だけを見ていると、ここが通ってしまう。
+  reset();
+  M.s3.STATE.corruptPut = true;
+  const corrupt = await M.vput.putVerified([{ key: 'user/x/d.json', contentType: 'application/json', body: 'hello', bytes: 5 }]);
+  M.s3.STATE.corruptPut = false;
+  eq('K-37 **読み戻して一致しなければ verified にしない**',
+    [corrupt[0].verified, corrupt[0].error], [false, 'readback_mismatch']);
+  ok('K-37 突合に使ったハッシュを両方返す (何が起きたか分かる)',
+    !!corrupt[0].sourceSha256 && !!corrupt[0].destinationSha256 && corrupt[0].sourceSha256 !== corrupt[0].destinationSha256);
+
+  reset();
+  M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.4'))];
+  plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  M.s3.STATE.putFail = true;
+  const execFail = await M.manual.executeDeliveryPlan(plan, { deliveryPrefix: '' });
+  M.s3.STATE.putFail = false;
+  eq('K-39 **1 件でも読み戻せない年は delivered として記録しない**',
+    [execFail.ok, execFail.recordedDates.length, execFail.skippedDates.length > 0], [false, 0, true]);
+  eq('K-39 elith_deliveries へも書いていない', (M.db.TABLES.elith_deliveries ?? []).length, 0);
+  ok('K-39 なぜ記録しなかったかを返す (黙って落とさない)',
+    /読み戻し検証/.test(execFail.skippedDates[0]?.reason ?? ''), JSON.stringify(execFail.skippedDates));
+
+  // ── API の 2 段 (preview → confirm) ────────────────────────────────
+  const callApi = async (body) => {
+    const res = await M.deliverOne.POST({ request: new Request('http://x/api', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body) }) });
+    return { status: res.status, json: JSON.parse(await res.text()) };
+  };
+  reset();
+  M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.4'))];
+  const prev = await callApi({ diagnosticUserId: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+  eq('K-46 preview は mode=preview で返る', prev.json.mode, 'preview');
+  eq('K-46 **preview では S3 を 1 バイトも変えない**', prod().length, 0);
+  ok('K-47 preview に 1 ファイルごとの明細がある (format_id / delivered_date / destination_key / sha256)',
+    prev.json.plan.files.every((f) => f.format_id && f.delivered_date && f.destination_key && f.sha256));
+  ok('K-46 本番へ書くことを文言で言う', /本番/.test(prev.json.note ?? ''));
+
+  const noFp = await callApi({ diagnosticUserId: UID_A, sourcePrefix: P, deliveryPrefix: '', confirm: true });
+  eq('K-48 指紋を送らない確定は受け付けない', [noFp.status, noFp.json.error], [400, 'fingerprint_required']);
+  eq('K-48 受け付けなかったので S3 も変わっていない', prod().length, 0);
+
+  const stale = await callApi({ diagnosticUserId: UID_A, sourcePrefix: P, deliveryPrefix: '', confirm: true, fingerprint: 'deadbeef' });
+  eq('K-48 **確認したときと内容が違えば書かない**', [stale.status, stale.json.error], [409, 'plan_changed']);
+  eq('K-48 書いていない', prod().length, 0);
+
+  const okRes = await callApi({ diagnosticUserId: UID_A, sourcePrefix: P, deliveryPrefix: '', confirm: true, fingerprint: prev.json.plan.fingerprint });
+  eq('K-48 指紋が一致したときだけ書く', [okRes.status, okRes.json.ok], [200, true]);
+  eq('K-48 plan の件数と書いた件数が一致', okRes.json.verified_count, prev.json.plan.file_count);
+
+  // ── 指紋そのものの性質（**ここが緩むと確認が形だけになる**）───────────
+  reset();
+  M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.4'))];
+  const f1 = M.manual.planFingerprint(await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' }));
+  const f2 = M.manual.planFingerprint(await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' }));
+  eq('K-48 **何も変わっていなければ指紋は同じ** (生成時刻・採番で毎回変わらない)', f1, f2);
+  {
+    const sb = JSON.parse(M.manual.stableBody(JSON.stringify({
+      exported_at: '2026-10-01T00:00:00Z', diagnostic_id: 'x',
+      format_id: 'HealthCheckupData', client_id: 'u', test_date: '2026-03-29',
+      data: { measurements: [{ item_name: 'AST', value: '22' }] },
+    })));
+    eq('K-48 生成メタ (exported_at / diagnostic_id) だけを外す',
+      Object.keys(sb).sort(), ['client_id', 'data', 'format_id', 'test_date']);
+    eq('K-48 **データは 1 つも外さない**', sb.data.measurements[0].value, '22');
+  }
+
+  M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.9'))];   // 値が変わった
+  const f3 = M.manual.planFingerprint(await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' }));
+  ok('K-48 **中身が変われば指紋も変わる** (同じ日・同じ件数でも検知する)', f3 !== f1, `${f1} / ${f3}`);
+
+  M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.9')), hcRow('2025-02-17', 53, hcMd('4.2'))];
+  const f4 = M.manual.planFingerprint(await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' }));
+  ok('K-48 年が増えても指紋が変わる', f4 !== f3);
+
+  const other = await callApi({ diagnosticUserId: UID_B, sourcePrefix: P, deliveryPrefix: '' });
+  eq('C-12 スペシャル以外は API でも拒否', other.status, 409);
+
+  // PII を admin 応答に載せない
+  ok('I-36 応答に測定値・氏名・生年月日が出てこない',
+    !/(measurement|item_name|birth|dob|氏名)/i.test(JSON.stringify(prev.json)),
+    JSON.stringify(prev.json).slice(0, 200));
+}
+
 console.log(`\n${fails.length ? '✗' : '✓'} ${fails.length ? `${fails.length} 件 失敗` : '全件 OK'}`);
 for (const f of fails) console.log(`  ✗ ${f}`);
 process.exit(fails.length ? 1 : 0);
