@@ -6,8 +6,8 @@
 | 作成日 | 2026-10-01 |
 | 業務仕様の正 | Wellfort「人間ドック・健康診断由来 血液検査データ連携仕様書 v1.1 (2026-10-01)」(docx・発注者支給) |
 | 調査基準 | `6abc310`（branch `claude/amazing-einstein-rd0fur` / repo `mirai-gpro/scan-chat-ai`） |
-| 版 | **v2.0（2026-10-01 発注者裁定 Q-1〜Q-14 を反映）** |
-| 状態 | **確定仕様。これを唯一の実装基準とする**（v1.0 = `01fb51e` は調査のみ・要確認 14 件） |
+| 版 | **v2.1（2026-10-01・実装に合わせて §7.3 / §10.5 / §12.5 を更新）** |
+| 状態 | **確定仕様＋実装済み**（v1.0 `01fb51e` = 調査 / v2.0 `5fe8651` = 裁定反映 / v2.1 = 実装）。**merge はしていない** |
 
 > **この文書は `docs/specs/_TEMPLATE.md`（`WF-NNNN` 形式の Implementation Spec）ではない。**
 > `scripts/spec-guard.mjs` は `docs/specs/WF-\d{4}\.md` だけを検証対象にするので、本ファイルの存在は
@@ -643,14 +643,28 @@ const TG_SOURCES = ['空腹時中性脂肪', '随時中性脂肪', '中性脂肪
 ### 7.3 「人間ドックから抽出」の表示
 
 **既存の `MetricTrendPoint` に出所のフィールドが無い**（`dashboard-queries.ts:26-33`）ので、
-点ごとの出所を運ぶ経路を 1 本足す。**DB 変更は不要**（`source_file_kind` が既に在る）。
+点ごとの出所を運ぶ経路を 1 本足す。**DB 変更は不要。**
+
+**運ぶのは `test_artifacts.imported_by`**（発注者裁定 D-2「`imported_by` で派生を識別する」）。
 
 ```text
-measurement_values.source_file_kind  ('scan_md' | 'raw_csv' | null)   ← 既存列
-  ↓ measurement-queries.ts: select に source_file_kind を追加（Row 型にも追加）
-  ↓ MetricTrendPoint に source?: 'health_checkup_scan' | null を追加
-  ↓ MetricTrendChart.astro が表示
+test_artifacts.imported_by = 'derived_healthcheck_blood'          ← 既存列・§4.3 の marker
+  ↓ measurement-queries.ts: activeArtifacts() が id → imported_by の Map を返す
+     （status と同じやり方。measurement_values は status も imported_by も持たない）
+  ↓ MetricTrendPoint.source = 'health_checkup_scan'（任意フィールド）
+  ↓ MetricTrendChart.astro が「人間ドックから抽出」を表示
 ```
+
+> **v2.0 では `measurement_values.source_file_kind` を運ぶと書いていた。** 実装で
+> `imported_by` ベースへ変えた。理由は 2 つ:
+> ① `source_file_kind='scan_md'` は health_checkup 由来の行にも付くので、
+>    **`blood` 以外に広げた瞬間に意味が崩れる**（派生の印としては間接的）。
+> ② 裁定 D-2 は「`imported_by` で派生を識別する」と決めている。
+>    readiness・冪等キー・supersede・グラフの 4 か所が**同じ 1 つの marker**を見るほうが、
+>    片方だけ直して静かに食い違う事故が起きない。
+>
+> `activeArtifacts()` は**もともと `test_artifacts` を引いている**（status の絞り込みのため）
+> ので、**クエリは増えない**。`select('id')` が `select('id, imported_by')` になるだけ。
 
 **表示箇所（提案）**
 
@@ -986,12 +1000,19 @@ select diagnostic_user_id, test_date, count(*)
 | 派生が先に在る → 通常 blood が後から届く | **派生を `superseded` に落とす**。`measurement_values` は artifact の `status` で読み分けられる（`measurement-queries.ts:156-174`）ので、グラフからも自動的に消える。**削除はしない**（監査のため） |
 | 同日に通常が 2 件 | 本件の対象外。既存の挙動のまま |
 
-**「後から届く」側の実装位置**: 通常 blood の artifact を作る既存の 2 経路
-（`api/admin/lab-results/upload.ts:102-115` / `register.ts:179-191`）で、
-**insert のあとに同じ `(uid, 'blood', test_date)` の派生行を `superseded` に落とす**。
+**「後から届く」側の実装位置**: `api/admin/lab-results/register.ts`（顧客割当つき）で、
+付け先の artifact が決まった直後に
+**同じ `(uid, 'blood', test_date)` の派生行を `superseded` に落とす**。
+
+> **`api/admin/lab-results/upload.ts` には置かない。** あちらは artifact を
+> **`UNASSIGNED_UID` で作る**（`:105`「顧客未割当」）ので、**その時点では誰の血液検査か
+> 決まっていない**。呼んでも対象 0 件の空振りにしかならず、「やっているつもり」になるだけ。
+> 通常 blood が**実在の利用者に紐づく**のは `register` 側なので、優先の適用はそこ 1 本。
+> （v2.0 では 2 経路と書いていた。実装で `register.ts` のみに改めた。）
 
 - **最小変更**にするため、この処理は `src/lib/blood-subset.ts` に
-  `supersedeDerivedBloodOnSameDate(uid, testDate)` として 1 本だけ置き、2 経路から呼ぶ。
+  `supersedeDerivedBloodOnSameDate(sb, uid, testDate, { exceptArtifactId })` として 1 本だけ置く。
+  `exceptArtifactId` は**自分（通常 blood の行）を落とさないための保険**。
 - **通常 blood の行には一切触らない。** 触るのは `imported_by='derived_healthcheck_blood'` の行だけ。
 - 失敗しても通常 blood の取り込みは成功のまま返す（既存の fail-safe の流儀）。
 
@@ -1101,6 +1122,22 @@ select diagnostic_user_id, test_date, count(*)
 | **AC-1** | **現行デメカル CSV の実ヘッダ 15 件と §5.1 の mapping が一致すること**（裁定 Q-1）。CSV ヘッダの `項目名N` セルの標準名を実物で確認する。**一致しない名称が見つかったら §5.1 を実測値へ直してから merge する** | Wellfort から現行 CSV を受領して確認 |
 | **AC-2** | **Production の read-only 確認**（§9.5・裁定 Q-14）。`source='user_upload' AND test_type='blood'` の既存行、`imported_by='derived_healthcheck_blood'` の先行使用、同一日 blood 重複 | deployment 前 |
 | **AC-3** | **backfill は発注者の明示指示まで production で実行しない**（裁定 Q-11） | 運用 |
+
+### 12.5 実装した検査コマンド
+
+| コマンド | 中身 | 件数 |
+|---|---|---|
+| `npm run verify:blood-subset` | §12.1 / §12.2 のケース。**サーバも鍵も要らない**（Supabase はスタブ） | **96** |
+| `npm run verify:blood-subset-injections` | §12.4 の退行注入を**実際に注入して落ちることを確認**する。ファイルは必ず元に戻す | **18 種** |
+
+`verify:blood-subset` は CI の `static-required` に入れてある（`.github/workflows/ci.yml`）。
+**退行注入は CI に入れない** — ソースを書き換えて戻すため、並列実行と相性が悪い。手で回す。
+
+> **検査データの置き方に 1 つ注意**（実装中に実際に踏んだ）。
+> N（混在系列の基準線）は、**人間ドック由来の点を系列の「最新」に置かないと検知できない**。
+> 基準値は `sorted` の**最後の行**から取る作りなので、派生を途中の日付に置くと
+> **抑止を外しても検査が緑のまま通る**。`verify-blood-subset.mjs` の `ROWS_MIXED` は
+> 派生を最新（2026-11-15）に置いてある。
 
 ### 12.4 退行注入（**落ちることを確認する**）
 
@@ -1278,18 +1315,19 @@ S3 の Elith JSON は**一切読まない**。
 | `src/lib/blood-subset.ts` | （存在しない） | **新規** | 15 項目マスタ / `extractBloodSubset()`（中性脂肪の統合・競合除外） / `supersedeDerivedBloodOnSameDate()` / `DERIVED_HC_BLOOD_IMPORTED_BY` 定数。I/O は supersede 1 本だけ |
 | `src/lib/standard-master.ts` | 標準項目マスタ | **変更** | `アルブミン` / `尿素窒素` / `中性脂肪`（無修飾のみ alias）を追加、`eGFR` の synonyms に `e-GFR`（裁定 Q-2 / Q-3） |
 | `src/lib/scan-persist.ts` | スキャン結果の DB 保存（`saveScanResult` `:136`） | **変更** | ① `replaceSameDateArtifacts` に**任意の `importedBy` 条件**を足す（既存 2 呼び出しは不変） ② `saveScanResult` 末尾に派生 blood の生成（0 件なら作らない／同日に通常があれば作らない）。**health_checkup 側の処理は 1 行も変えない** |
-| `src/lib/elith-entitlement.ts` | Elith の揃い判定（`FORMAT_SOURCE` `:49`） | **変更** | `checkFormatsReady()` の select に `imported_by` を足し、**`BloodTestData` の判定からだけ**派生を除外（裁定 Q-4 / D-1） |
-| `src/lib/measurement-queries.ts` | 検査値の取得・推移グラフ（`:357`） | **変更** | ① `Row` 型と select に `source_file_kind` ② `MetricTrendPoint.source` に載せる ③ **混在系列では `referenceUpper` / `referenceLower` を付けない**（D-4）。**`:390` の絞り込みロジックは変えない** |
+| `src/lib/elith-entitlement.ts` | Elith の揃い判定（`FORMAT_SOURCE` `:49`） | **変更** | `checkFormatsReady()` の select に `imported_by` を足し、**`BloodTestData` の判定からだけ**派生を除外（裁定 Q-4 / D-1）。判定は純関数 `readinessCountableRows()` / `isDerivedHealthCheckBlood()` に切り出して export（DB も env も無しで検査できるようにするため） |
+| `src/lib/measurement-queries.ts` | 検査値の取得・推移グラフ（`:357`） | **変更** | ① `activeArtifacts()` を足して `id → imported_by` を引く（`activeArtifactIds()` はその薄い包み＝既存 3 呼び出しは不変） ② `MetricTrendPoint.source` に載せる ③ **混在系列では `referenceUpper` / `referenceLower` を付けない**（D-4）。**`test_type` の絞り込みロジックは変えない** |
 | `src/lib/dashboard-queries.ts` | 型 `MetricTrendPoint` / `MetricTrendSeries`（`:26-43`） | **変更** | `MetricTrendPoint` に `source?: string \| null` を足す（**任意フィールド**＝既存の呼び出しは不変） |
 | `src/components/dashboard/MetricTrendChart.astro` | 推移グラフの描画 | **変更** | 測定履歴テーブル（`:299-318`）とミニカード（`:127`）に「人間ドックから抽出」。**列は増やさない**（§7.4） |
 | `src/lib/elith-delivery.ts` | Elith 納品の materialize と組み立て | **変更** | ① `materializeDerivedBloodTests()` を追加（`materializeHealthCheckups` `:154` と同型・**同日に通常があれば書かない**） ② `manualMapping`（`:545-551`）に `BloodTestData` を足す |
-| `src/pages/api/admin/lab-results/upload.ts` | 検査機関ファイルの取込（`:102-115`） | **変更** | blood の insert 後に `supersedeDerivedBloodOnSameDate()` を呼ぶ（D-5・**通常 blood の行には触らない**） |
-| `src/pages/api/admin/lab-results/register.ts` | 原本の後付け登録（`:179-191`） | **変更** | 同上 |
+| `src/pages/api/admin/lab-results/register.ts` | 原本の後付け登録・顧客割当（`:179-191`） | **変更** | 付け先が blood なら `supersedeDerivedBloodOnSameDate()` を呼ぶ（D-5・**通常 blood の行には触らない**・`exceptArtifactId` で自分を除く）。応答に `superseded_derived_blood` |
+| `src/pages/api/admin/lab-results/upload.ts` | 検査機関ファイルの取込（`:102-115`） | **コメントのみ** | `UNASSIGNED_UID` で作る経路なので supersede は空振りになる。**呼ばない理由をコードに残す**（§10.5） |
 | `scripts/backfill-derived-blood.mjs` | （存在しない） | **新規** | 既存の人間ドックへの遡及。**dry-run 既定・cron にしない**（裁定 Q-11） |
-| `scripts/verify-blood-subset.ts` | （存在しない） | **新規** | Case A〜S + 退行注入 R-1〜R-19 |
-| `scripts/verify-screen.mjs` | 画面の実測検査 | **変更** | Case I（「人間ドックから抽出」の表示と mobile 幅） |
-| `scripts/verify-trend-series.mjs` | 系列グルーピングの検査 | **変更** | `source` が点まで運ばれること（R-8）／混在系列で基準線が付かないこと（N / N-2） |
-| `package.json` | スクリプト定義 | **変更** | `verify:blood-subset` を追加 |
+| `scripts/verify-blood-subset.mjs` | （存在しない） | **新規** | §12.1 / §12.2 のケース **96 件**（Supabase はスタブ・鍵不要） |
+| `scripts/verify-blood-subset-injections.mjs` | （存在しない） | **新規** | §12.4 の退行注入 **18 種**を実際に注入して落ちることを確認する |
+| `scripts/verify-trend-series.mjs` | 系列グルーピングの検査 | **なし** | `activeArtifacts()` の select 追加は後方互換（stub が `imported_by` を返さなくても `null` 扱い）。実測で通過を確認済み |
+| `scripts/verify-screen.mjs` | 画面の実測検査 | **なし** | 画面の文言・列数は `verify:blood-subset` の I で静的に固定した（dev サーバ不要）。実ブラウザでの確認は §17.1 に残す |
+| `package.json` | スクリプト定義 | **変更** | `verify:blood-subset` / `verify:blood-subset-injections` を追加 |
 | `.github/workflows/ci.yml` | CI | **変更** | `static-required` に `verify:blood-subset` |
 | `src/lib/measurement-persist.ts` | 検査値の唯一の書き込み口 | **なし** | `testType` は既に引数（`:132`）。**そのまま使える** |
 | `src/lib/elith-export.ts` | 納品整形・`measurementsFromMarkdown` | **なし** | 再利用のみ。**スキャンの読み取りには一切触れない**（v1.1 §12 / 裁定） |
@@ -1339,7 +1377,39 @@ S3 の Elith JSON は**一切読まない**。
 [ ] AC-1 現行デメカル CSV の実ヘッダ 15 件と §5.1 の mapping が一致する（裁定 Q-1）
 [ ] AC-2 Production の read-only 確認（§9.5・裁定 Q-14）
 [ ] AC-3 backfill は発注者の明示指示まで production で実行しない（裁定 Q-11）
+[ ] 実機（スマホ / PC の実ブラウザ）で「人間ドックから抽出」の見え方を 1 回確認する
+        — 文言と列数は `verify:blood-subset` の I が静的に固定しているが、
+          実データでの折り返しは実測していない
 ```
+
+---
+
+## 19. 実装状況（v2.1）
+
+**実装済み。merge はしていない。** 段は §13 のとおり。
+
+| 段 | 状態 | 実体 |
+|---|---|---|
+| P-0 標準マスタ 4 件 | **済** | `standard-master.ts`（アルブミン / 尿素窒素 / 中性脂肪 / `e-GFR` alias） |
+| P-1 抽出の純関数 | **済** | `src/lib/blood-subset.ts`（新規） |
+| P-2 派生 artifact の保存 | **済** | `scan-persist.ts` `persistDerivedBloodArtifact()` + `replaceSameDateArtifacts` の `importedBy` |
+| P-3 readiness 除外 | **済** | `elith-entitlement.ts` `readinessCountableRows()` |
+| P-4 グラフへ source / 基準線抑止 | **済** | `measurement-queries.ts` `activeArtifacts()` / `mixedOrigin` |
+| P-5 画面の文言 | **済** | `MetricTrendChart.astro`（履歴テーブル + ミニカード） |
+| P-6 Elith 納品 | **済** | `elith-delivery.ts` `materializeDerivedBloodTests()` + `manualMapping` |
+| P-7 通常 blood 到着時の supersede | **済** | `blood-subset.ts` + `lab-results/register.ts`（§10.5） |
+| P-8 backfill | **済** | `scripts/backfill-derived-blood.mjs`（**dry-run 既定**） |
+
+**DB migration: 0 本**（`supabase/migrations/` に 1 ファイルも足していない）。
+
+### 19.1 実装中に判明して仕様へ戻した 2 点
+
+| # | v2.0 の記述 | 実装（v2.1） | 理由 |
+|---|---|---|---|
+| 1 | グラフへ運ぶのは `measurement_values.source_file_kind` | **`test_artifacts.imported_by`** | 裁定 D-2 と同じ marker に一本化。`source_file_kind='scan_md'` は health_checkup にも付くので派生の印としては間接的（§7.3） |
+| 2 | supersede を `upload.ts` と `register.ts` の 2 経路に置く | **`register.ts` の 1 経路だけ** | `upload.ts` は `UNASSIGNED_UID` で作るため呼んでも空振り（§10.5） |
+
+どちらも**発注者裁定の方向へ寄せた変更**で、裁定を緩めたものではない。
 
 ---
 

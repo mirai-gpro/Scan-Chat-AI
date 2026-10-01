@@ -26,6 +26,7 @@
  */
 
 import { cfg } from './app-config';
+import { DERIVED_HC_BLOOD_IMPORTED_BY } from './blood-subset';
 import { getBridgeSupabase } from './supabase';
 
 /** Elith の format_id。納品セットの単位 (`elith_s3_data_handoff_spec §2`)。 */
@@ -155,6 +156,40 @@ export interface ReadyCheck {
  * 回 (cycle) の窓で絞る仕組みは契約テーブルが埋まってから (§4.3.1 の cadence)。
  * ここで日付の窓を推測で入れると、**揃っているのに出ない**が黙って起きる。
  */
+/**
+ * **人間ドック・健康診断由来の派生 blood か**（発注者裁定 2026-10-01 Q-4）。
+ *
+ * 業務要件は「通常のデメカル血液検査 年 3 回 ＋ 人間ドック／健診由来データ 1 回」であり、
+ * **派生は通常血液検査の代替ではない**。これを `BloodTestData` の揃い判定に数えると、
+ * **実際の血液検査が届く前に Elith 納品が発火する**（しかも `skipDelivered` のため
+ * 後から追いつけない）。
+ *
+ * 【`source='user_upload'` 全体を除外しない】将来「利用者が血液検査の紙をスキャンする」
+ * 経路ができたとき、それまで巻き込んで排除してしまうため。**`imported_by` の完全一致 1 本**で見る。
+ *
+ * 【`blood` 以外は一切触らない】health_checkup / cancer_urine / genetics / ai_prediction の
+ * 判定は従来どおり。
+ *
+ * **納品からは外さない。** readiness が通った回の納品セットには派生 BloodTestData を**含める**
+ * (`docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §8.5)。
+ */
+export function isDerivedHealthCheckBlood(r: { test_type: string; imported_by?: string | null }): boolean {
+  return r.test_type === 'blood' && r.imported_by === DERIVED_HC_BLOOD_IMPORTED_BY;
+}
+
+/**
+ * 揃い判定に**数えてよい**行だけを残す。`checkFormatsReady()` から使う。
+ *
+ * **純関数として切り出してある** — 揃い判定は DB と env が要るので、
+ * ここだけを `scripts/verify-blood-subset.mjs` が直接呼んで固定できるようにするため
+ * （この除外が外れると「血液検査が届く前に納品が走る」が**黙って**起きる）。
+ */
+export function readinessCountableRows<T extends { test_type: string; imported_by?: string | null }>(
+  rows: readonly T[],
+): T[] {
+  return rows.filter((r) => !isDerivedHealthCheckBlood(r));
+}
+
 export async function checkFormatsReady(
   uids: string[],
   requiredByUid: Map<string, ElithFormat[] | null>,
@@ -189,11 +224,14 @@ export async function checkFormatsReady(
     if (neededTypes.size) {
       const { data } = await diagnosis
         .from('test_artifacts')
-        .select('diagnostic_user_id, test_type')
+        // `imported_by` も引く — 人間ドック由来の派生 blood を揃い判定から外すため (下)。
+        .select('diagnostic_user_id, test_type, imported_by')
         .eq('status', 'active')
         .in('test_type', Array.from(neededTypes))
         .in('diagnostic_user_id', clean);
-      for (const r of (data ?? []) as { diagnostic_user_id: string; test_type: string }[]) {
+      const countable = readinessCountableRows((data ?? []) as
+        { diagnostic_user_id: string; test_type: string; imported_by: string | null }[]);
+      for (const r of countable) {
         have[r.diagnostic_user_id?.toLowerCase()]?.add(r.test_type);
       }
     }

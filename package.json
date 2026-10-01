@@ -64,7 +64,9 @@
     "verify:interview-ui": "node scripts/verify-interview-ui.mjs",
     "verify:laif-revoke-key": "node scripts/verify-laif-revoke-key.mjs",
     "verify:interview-live-transport": "node scripts/verify-interview-live-transport.mjs",
-    "verify:ala-pds": "node scripts/verify-ala-pds.mjs"
+    "verify:ala-pds": "node scripts/verify-ala-pds.mjs",
+    "verify:blood-subset": "node scripts/verify-blood-subset.mjs",
+    "verify:blood-subset-injections": "node scripts/verify-blood-subset-injections.mjs"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",
