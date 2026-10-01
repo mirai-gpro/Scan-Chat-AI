@@ -205,6 +205,86 @@ const SINGLE = '44444444-4444-4444-4444-444444444444';
     /deliverReadySpecialAccounts/.test(cron));
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// D. 登録と納品の分離 (§12 / D-3)
+// ══════════════════════════════════════════════════════════════════════
+//
+// **「送り忘れ = 誤納品」を構造的に消す。** 以前は `finalize` が
+// `if (body.deliver === false)` = 明示的に false のときだけ止まる形だったので、
+// UI の 1 行を忘れたらそのまま Elith 本番へ出た。
+// 既定を反転したので、**UI が何も送らなければ出ない**。
+//
+// ハーネス (DB / S3 / 原本 / 認可のスタブ) は `verify:special-additional-tests` と
+// **同じものを共有する** — 実装も検査台も 2 つ持たない。
+console.log('\nD. 登録と納品の分離 (finalize を実際に動かす)\n');
+{
+  const H = await import('./lib/sat-harness.mjs');
+  const { M, UID_A, PDF, shaHex, putOriginal, bloodPart, resetAll, call, finalizeBlood } = H;
+  const prodKeys = () => [...M.s3.S3.keys()].filter((k) => k.startsWith('user/'));
+  const makeOriginal = (testDate = '2025-08-04') => {
+    const key = M.addOrig.buildAdditionalOriginalKey({ uid: UID_A, testType: 'blood', testDate, sha256Hex: shaHex(PDF) });
+    putOriginal(key, PDF);
+    return key;
+  };
+  const noDeliverArgs = (key) => ({
+    diagnosticUserId: UID_A, testType: 'blood', testDate: '2025-08-04',
+    originalKey: key, parts: [bloodPart(1), bloodPart(2)],
+    // **deliver を送らない** = UI が送り忘れた状態そのもの
+  });
+
+  // D-16 — 既定で本番へ書かない
+  resetAll();
+  const r16 = await call(M.finalize, noDeliverArgs(makeOriginal()));
+  ok('D-16 deliver を送らない呼び出しが成功する (登録は通る)', r16.json.ok === true, JSON.stringify(r16.json).slice(0, 200));
+  eq('D-16 **既定では本番 user/ へ 1 件も書かない**', prodKeys().length, 0);
+  eq('D-16 応答が「納品していない」と言い切る', [r16.json.delivered, r16.json.delivery], [false, null]);
+  ok('D-16 次にどうすればよいかを出す (黙らせない)',
+    typeof r16.json.note === 'string' && r16.json.note.includes('スペシャルアカウント'), String(r16.json.note));
+  eq('D-16 納品履歴の行も作らない', (M.db.TABLES.elith_delivery_items ?? []).length, 0);
+
+  // deliver:false も同じ (旧い呼び出し元が残っていても壊れない)
+  resetAll();
+  const rFalse = await call(M.finalize, { ...noDeliverArgs(makeOriginal()), deliver: false });
+  eq('D-16 deliver:false も従来どおり納品しない', [rFalse.json.ok, prodKeys().length], [true, 0]);
+
+  // 真偽を取り違えやすい値で**納品側へ倒れない**こと
+  for (const v of ['true', 1, {}, null]) {
+    resetAll();
+    const r = await call(M.finalize, { ...noDeliverArgs(makeOriginal()), deliver: v });
+    eq(`D-16 deliver=${JSON.stringify(v)} (true ではない) で納品しない`, prodKeys().length, 0);
+    ok(`D-16 deliver=${JSON.stringify(v)} でも登録は通る`, r.json.ok === true);
+  }
+
+  // D-17 — 明示したときだけ書く
+  resetAll();
+  const r17 = await finalizeBlood();   // ハーネスの BASE が deliver:true を明示している
+  eq('D-17 deliver:true のときだけ本番へ書く', prodKeys().length, 1);
+  eq('D-17 読み戻し検証まで通っている', r17.json.delivery.verified, true);
+
+  // D-18 — 納品しなくても登録側は全部書かれる
+  resetAll();
+  const r18 = await call(M.finalize, noDeliverArgs(makeOriginal()));
+  eq('D-18 test_artifacts は書かれる', M.db.TABLES.test_artifacts.length, 1);
+  ok('D-18 measurement_values は書かれる', (M.db.TABLES.measurement_values ?? []).length > 0,
+    `rows=${(M.db.TABLES.measurement_values ?? []).length}`);
+  eq('D-18 原本の紐付けは書かれる', M.db.TABLES.test_artifact_files.length, 1);
+  ok('D-18 Elith 中間 source は書かれる (監査層は残す)',
+    !!r18.json.source_key && M.s3.S3.has(r18.json.source_key), String(r18.json.source_key));
+  ok('D-18 中間 source は本番 prefix ではない',
+    !String(r18.json.source_key).startsWith('user/'), String(r18.json.source_key));
+
+  // D-19 — 本番 PUT だけ失敗しても DB は残す
+  ok('D-19 失敗した納品は status=failed で残す (再実行できる)',
+    /status: d\.verified \? 'delivered' : 'failed'/.test(read('src/pages/api/admin/special-additional-tests/finalize.ts')));
+  ok('D-19 納品が失敗しても Dashboard の登録は消さない',
+    /Dashboard 側の登録は残す/.test(read('src/pages/api/admin/special-additional-tests/finalize.ts')));
+
+  // 退行注入 4 の的 — 既定が「納品する」側へ戻ったら落ちる
+  ok('D-16 ゲートが「true を明示したときだけ」になっている',
+    /body\.deliver !== true/.test(code('src/pages/api/admin/special-additional-tests/finalize.ts')),
+    '`deliver === false` 型に戻すと、送り忘れがそのまま本番へ出る');
+}
+
 console.log(`\n${fails.length ? '✗' : '✓'} ${fails.length ? `${fails.length} 件 失敗` : '全件 OK'}`);
 for (const f of fails) console.log(`  ✗ ${f}`);
 process.exit(fails.length ? 1 : 0);

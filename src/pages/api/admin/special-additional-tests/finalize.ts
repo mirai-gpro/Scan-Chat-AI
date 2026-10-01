@@ -5,7 +5,7 @@
  *   POST (json) {
  *     diagnosticUserId, testType, testDate, originalKey,
  *     parts: [ scan-part の応答 ... ],
- *     pageCount?, deliver?   // deliver:false で「DB だけ入れて Elith へは出さない」
+ *     pageCount?, deliver?   // **deliver:true を明示したときだけ** Elith 本番へ出す
  *   }
  *
  * ══════════════════════════════════════════════════════════════════════
@@ -260,9 +260,25 @@ export const POST: APIRoute = async ({ request }) => {
     }, 502);
   }
 
-  // `deliver:false` は「DB と監査層まで」。既定は納品する。
-  if (body.deliver === false) {
-    return json({ ...base, ok: true, configured: true, source_key: sourceKey, delivery: null, delivered: false });
+  /*
+   * ══════════════════════════════════════════════════════════════════
+   * **既定は納品しない** (D-3・確定 2026-10-01)
+   * ══════════════════════════════════════════════════════════════════
+   * 正本 `docs/specs/special_account_management_spec_20261001.md` §12.2。
+   *
+   * 以前はここが `if (body.deliver === false)` = **明示的に false のときだけ止まる**形
+   * だったので、**`deliver` を送り忘れた呼び出しがそのまま本番へ出た**。
+   * 「送り忘れ = 誤納品」は危険側のフェイルセーフなので、**危険な側を明示的な値に寄せる**。
+   *
+   * この画面の役割は **登録まで** (§12.1)。Elith 本番納品は
+   * `/admin/special-accounts` の［Elith納品］が起動する (§9.1)。
+   * Dashboard 反映 ≠ Elith 納品 (§12.3)。
+   */
+  if (body.deliver !== true) {
+    return json({
+      ...base, ok: true, configured: true, source_key: sourceKey, delivery: null, delivered: false,
+      note: 'Elith 本番へは出していません。納品は「スペシャルアカウント」画面の［Elith納品］から実行してください。',
+    });
   }
 
   // ── Elith 本番納品 + 読戻し（§24 / §29）────────────────────────────
