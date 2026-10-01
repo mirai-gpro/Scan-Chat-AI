@@ -1,6 +1,6 @@
 # スペシャルアカウント管理機能 改訂仕様書
 
-**版**: 1.1 (2026-10-01・**承認画面案の補正事項 §6.5 / §13.4 を追加。設計は 1.0 から変えていない**)
+**版**: 1.2 (2026-10-01・**U-1〜U-8 を発注者裁定で確定し、未確定表から確定仕様へ移した**)
 **状態**: **仕様のみ。実装していない。** `src` / `supabase` / `scripts` は 1 行も変更していない。
 **対象**: `mirai-gpro/Scan-Chat-AI`（処理 API・判定ロジック）/ `mirai-gpro/wellfort-site`（管理 UI）
 
@@ -42,8 +42,8 @@
 | # | 指示書の記述 | 実コード | 本書での扱い |
 |---|---|---|---|
 | **C-1** | §3「**AI問診＋検診データが揃ったら自動納品**という従来の固定条件」 | 正しい。`elith-delivery.ts:467` の `SINGLE_FORMATS = ['LifestyleQuestionnaireData','HealthCheckupData']` が**スペシャル/単品の固定 2 条件**で、`:469` で全 `singleUids` に適用される | 指示どおり。**§9 / §17 で廃止** |
-| **C-2** | §6/§8「既存 **opaque context / server session / short-lived handoff** を再利用」 | **再利用できる既存機構が無い。** 既存の short-lived handoff（`admin-impersonation.ts:106` `createHandoff`）が発行するのは **Scan-Chat-AI の `/admin-view/<ctx>/…` 代理表示 context**（同 `:42` `ADMIN_VIEW_PREFIX`・`middleware.ts:220-262`）で、**wellfort-site の admin 画面に対象をセットする用途には使えない**。`share-access.ts` の pending / session も**外部閲覧者**用 | **§19.2 で 3 案を提示し 1 案を推奨 + 要裁定（U-2）**。「既存を流用」と書いて実体の無い機構を指さない（R2） |
-| **C-3** | §4/§15 一覧に**氏名・会社名**を出す案（§16 の検索条件にも氏名/会社名） | スペシャルアカウントは **EC 購入が無いので `customer.customer_profiles` に行が無い**。`makeSubjectResolver()`（`elith-delivery.ts:82-90`）が `customer_profiles` を引いて空振りし `:103` の `specialSubjectByUid(uid)` にフォールバックしている構造がその証拠。保持しているのは**メールのマスク（`r***@example.com`）とメモ**だけ（`special-accounts.ts:114` / `api/admin/special-accounts.ts:12`） | **氏名・会社名は出せない。**「対象者」は**メモ（案件名）＋マスク＋uid 先頭**で構成（§6.2）。検索も同じ 3 つに限る（§25 U-8） |
+| **C-2** | §6/§8「既存 **opaque context / server session / short-lived handoff** を再利用」 | **再利用できる既存機構が無い。** 既存の short-lived handoff（`admin-impersonation.ts:106` `createHandoff`）が発行するのは **Scan-Chat-AI の `/admin-view/<ctx>/…` 代理表示 context**（同 `:42` `ADMIN_VIEW_PREFIX`・`middleware.ts:220-262`）で、**wellfort-site の admin 画面に対象をセットする用途には使えない**。`share-access.ts` の pending / session も**外部閲覧者**用 | **§19.2 のとおり `sessionStorage` 方式で確定（D-2）**。「既存を流用」と書いて実体の無い機構を指さない（R2） |
+| **C-3** | §4/§15 一覧に**氏名・会社名**を出す案（§16 の検索条件にも氏名/会社名） | スペシャルアカウントは **EC 購入が無いので `customer.customer_profiles` に行が無い**。`makeSubjectResolver()`（`elith-delivery.ts:82-90`）が `customer_profiles` を引いて空振りし `:103` の `specialSubjectByUid(uid)` にフォールバックしている構造がその証拠。保持しているのは**メールのマスク（`r***@example.com`）とメモ**だけ（`special-accounts.ts:114` / `api/admin/special-accounts.ts:12`） | **氏名・会社名は出せない。**「対象者」は**メモ（案件名）＋マスク＋uid 先頭**で構成（§6.2）。検索も同じ 3 つに限る（D-8・§19.3） |
 | **C-4** | §8「対象 UID がセット済みの共有 URL 設定画面へ遷移」 | `/admin/share-links` の対象選択は**氏名カナで `customer_profiles` を検索する**実装（`share-links.astro:208-226`）。スペシャルアカウントは**この検索に 1 件も出ない** | 導線を足すだけでは足りない。**対象を外から受け取る受け皿が無い**ことを §13.3 に明記 |
 | **C-5** | §17「既存『Elith納品を一括作成』は廃止 **または** 役割分離」 | あのボタンが呼ぶ `deliverReadySpecialAccounts()` は**スペシャルと契約者の両方**を母集団にする（`elith-delivery.ts:450-457`）。**スペシャルだけ外す**のが正しく、**ボタン自体を消すと契約者の手動再ラップ手段が消える** | **§18.2 で「役割分離」を採用**（廃止しない） |
 
@@ -365,11 +365,11 @@ Elith intake / ウェルネス年齢 / 複数年 / 既存 S3 パス規約 / 通�
 
 | # | 画面案 | 確定 | 根拠 |
 |---|---|---|---|
-| **F-1** | 対象者を**氏名・会社名**で表す | **氏名・会社名を表示の前提にしない。** 表示の正本は **メモ（案件名）＋メールマスク（`r***@example.com`）＋UID** | スペシャルアカウントは EC 購入が無く `customer.customer_profiles` に行が無い。API が返す正本は uid / マスク / メモ が中心（`api/admin/special-accounts.ts:12`）。`makeSubjectResolver()` が `customer_profiles` を引いて空振りし `specialSubjectByUid` へ落ちる構造がその証拠（`elith-delivery.ts:82-90` / `:103`） |
+| **F-1** | 対象者を**氏名・会社名**で表す | **氏名・会社名を表示の前提にしない。** 表示の正本は **メモ（案件名）＋メールマスク（`r***@example.com`）＋UID** | **現在のスペシャルアカウント管理の正本と API が、氏名・会社名を保持も返却もしていない**ため。保持しているのは sha256 / マスク / uid / メモ の 4 つ（`api/admin/special-accounts.ts:12`）で、一覧 API の応答にも氏名・会社名は無い（同 `:79-93` の `present()`）。**「`customer_profiles` に行が必ず無い」と言っているのではない** — 将来その人が EC 顧客にもなれば行は在り得る。**この枠の管理 UI がその経路に依存しない**、という意味である |
 | **F-2** | UID が `wf_7f3a9c2e` | **実体は UUID。** 画面では可読性のため**先頭 8 文字程度の短縮表示は可**。ただし**内部値と API は完全な UUID** を使う | `special-accounts.astro:425` の入力検証が UUID 固定 |
 | **F-3** | AI問診が「**未実施**」と「なし」で混在 | **「完了 / なし」の 2 語に統一。**「未実施」は使わない | §10.1 |
 | **F-4** | 列見出し「AI疾病予測」 | **正式表示名は `AI疾病予測報告書`。** 列幅の都合でやむを得ず短縮するときも、**正式名称を `title` / `aria-label` 等で保持**する。**勝手な別名称を正本化しない** | `display-names.ts:28` の `AI_PREDICTION_REPORT_LABEL` |
-| **F-5** | badge の副文言「追加データあり」「最新と同一」 | **U-7 が確定し実装されるまで表示しない** | 前回納品との差分計算が要る。粒度は §14.3 / §25.1 U-7 が未裁定 |
+| **F-5** | badge の副文言「追加データあり」「最新と同一」 | **前回 run の snapshot（D-7）が実装されるまで表示しない** | 差分の出所は §14.3 の snapshot。**snapshot が無い回（初回・migration 適用前）は副文言を出さない** |
 | **F-6** | badge の副文言「データあり / データなし」 | **不要**（badge 本体「準備あり / 未準備」と同義の重複） | §8.1 |
 | **F-7** | ページネーション / 通知ベル / ヘルプボタン | **今回は追加しない**（現在存在しない装飾機能） | 指示書 §16「実装コストに対して過剰なものは作らない」 |
 | **F-8** | 独自のサイドバー | **`AdminLayout` を既存のまま使う。** 利用者側の「検査結果」「AI疾病予防報告書」を**持ち込まない** | 下記 6.5.1 |
@@ -402,7 +402,7 @@ Elith intake / ウェルネス年齢 / 複数年 / 既存 S3 パス規約 / 通�
 - 押すと **対象アカウントがセット済みの `/admin/special-additional-tests`** へ入る。
 - 対象者表示は **メモ（案件名）＋マスク＋uid**（C-3 により氏名は出せない）。
 - 管理者が再度 uid を探して選ぶ操作をなくす。
-- 受け渡し方式は **§19.2（要裁定 U-2）**。
+- 受け渡し方式は **`sessionStorage`**（D-2・§19.2）。
 - **サーバ側の関所は必ず通す。** セットされた対象であっても `scan-part` / `original-ticket` /
   `finalize` は毎回 `checkAdditionalTarget()` で `isSpecialAccount(uid)` を再確認する
   （`special-additional-tests.ts:109-121` / `scan-part.ts:64-65` / `finalize.ts:90-92`）。
@@ -582,22 +582,54 @@ UID: xxxxxxxx-…
 cron 側（`api/cron/elith-deliver.ts:61`）に条件を書くと、
 **admin の一括ボタンと cron で母集団がずれる**（§18.2 と二重管理になる）。
 
-### 9.6 どちらの納品器を使うか（**要裁定 U-1**）
+### 9.6 納品の書き込みは **共通 Verified PUT/readback helper** に一本化する（**D-1・確定**）
 
-手動納品には 2 つの実装が既にあり、**挙動が違う**。
+現状、納品の書き込み方が **2 つあり、挙動が違う**。
 
 | | A. `assembleElithDeliverySet` 経路 | B. `deliverAdditionalJson` 経路 |
 |---|---|---|
 | 単位 | uid 丸ごと（全 format・全 date） | **1 ファイル** |
-| 読み戻し検証 | **無い**（`putFiles` の成否だけ） | **有る**（SHA256 突合・`elith-delivery-json.ts:261-271`） |
-| 履歴 | `elith_deliveries`（年ごと・`format_ids` を upsert で上書き） | `elith_delivery_items`（検査ごと・`attempt_count`） |
-| 複数年 | `SERIES_FORMATS` が自動展開 | ファイル単位なので呼び出し側がループする |
+| **読み戻し検証** | **無い**（`putFiles` の成否だけ・`elith-delivery.ts:573`） | **有る**（PUT → GET → SHA256 突合・`elith-delivery-json.ts:261-271`） |
+| 既に同一内容なら PUT しない | 無い | 有る（同 `:240-248`） |
+| 履歴 | `elith_deliveries`（年ごと） | `elith_delivery_items`（検査ごと） |
+| 複数年 | `SERIES_FORMATS` が自動展開 | 呼び出し側がループする |
 | 既存の呼び出し元 | deliver API / cron | 追加検査 finalize |
 
-**推奨 = A を主とし、B の読み戻し検証を A のあとに回す。**
-理由: ①複数年の展開を自分で書き直さずに済む（§9.3）②`elith_deliveries` の年ごと記録と
-`elith_delivery_items` の検査ごと記録を**両方残せる**（§14）。
-ただし A に読み戻しを足すのは**既存 deliver API と cron にも波及する**ので**裁定が要る**（U-1）。
+#### 9.6.1 確定した方式
+
+**「A を主にして、そのあとに `deliverAdditionalJson` を回す」ではない。**
+（1.1 までの推奨案はこれだったが、**発注者裁定で変更**した。B は
+「source を GET → `rewriteClientId` → キー変換 → PUT → 読み戻し」まで**丸ごと 1 つ**なので、
+A のあとに回すと **PUT が 2 度走り、キー変換と client_id 書き換えも二重に通る**。）
+
+→ **「書いて・読み戻して・突合する」部分だけを共通 helper に切り出し、A と B の両方がそれを呼ぶ。**
+
+```
+putVerified(files: S3PutFile[]) → VerifiedPutResult[]
+  各ファイルについて
+    ① 納品先を GET し、SHA256 が一致すれば **PUT しない**（冪等・既存 B の性質）
+    ② PUT する
+    ③ **読み戻して SHA256 を突合**し、一致して初めて verified:true
+    ④ **投げない。** 失敗は戻り値（verified:false + 理由）で返す
+```
+
+- 置き場所は **`src/lib/s3.ts` の隣に 1 本**（`putFiles` を置き換えず、**その上に重ねる**）。
+- **A は `putFiles(files)` を `putVerified(files)` に差し替える**だけ。
+- **B は自前の PUT・readback・sha 比較を捨てて helper を呼ぶ**。
+  **`toDestinationKey` / `rewriteClientId` / `sanitizeDelivery` は helper に持たせない** —
+  あれらはキーと中身の責務で、書き込みの責務ではない（§9.4 の共用方針のまま）。
+
+#### 9.6.2 これに伴って必ず決めること（実装時の受入条件）
+
+| # | 事項 | 確定 |
+|---|---|---|
+| a | **既存 deliver API と cron にも読み戻しが入る**（1 ファイルにつき GET が 1 回増える） | **許容する。** ただし複数年 × 複数 format でファイル数が増えるので、**cron の `maxDuration: 800`（`api/cron/elith-deliver.ts:26`）に収まること**を実測で確かめる |
+| b | 一部のファイルだけ verified:false になったとき | **その年（date フォルダ）を `elith_deliveries` へ `delivered` として記録しない。** 「書けたが読み戻せていない」を納品済みと呼ばない（既存 B の §29 と同じ規律） |
+| c | 結果の見せ方 | **黙って落とさない。** verified:false のファイルは件数と理由を結果に載せ、確認モーダルの戻りと admin の表示に出す（§20） |
+| d | 既存 `elith_delivery_items` の記録 | **変えない。** B の呼び出し側が従来どおり `recordDeliveryItem` を呼ぶ |
+
+**`putFiles` 自体の挙動は変えない** — 他の経路（scan export / 問診 export / 中間 source の書き出し）が
+そのまま使っているため。**読み戻しが要るのは納品先（`user/…`）だけ**である。
 
 ---
 
@@ -706,7 +738,7 @@ source を書く（`elith-delivery.ts:168-175`）。**同一 `dateFolder` は 1 
 Elith納品は「スペシャルアカウント」画面から実行してください。
 ```
 
-### 12.2 既定をどちらに置くか（**要裁定 U-3**）
+### 12.2 サーバ側の既定を「納品しない」へ反転する（**D-3・確定**）
 
 `finalize.ts:264` は `if (body.deliver === false)` で**明示的に false のときだけ**止まる。
 つまり**既定は納品**。
@@ -717,7 +749,10 @@ Elith納品は「スペシャルアカウント」画面から実行してくだ
 | 案 b | サーバは据え置き、UI が `deliver:false` を送る | **UI の 1 行を忘れたら本番へ出る。**「送り忘れ = 誤納品」は危険側のフェイルセーフ |
 
 → **案 a を推奨。** CLAUDE.md の規律（「綴り違いで黙って全停止しないよう、止める側を明示的な値に
-寄せる」）の裏返しとして、**危険な側を明示的な値に寄せる**。**裁定が要る（U-3）。**
+寄せる」）の裏返しとして、**危険な側を明示的な値に寄せる**。
+
+**確定（D-3）= 案 a。** `finalize` は **`deliver: true` を明示されたときだけ**本番へ出す。
+実装時の受入条件: **`deliver` を送らない既存の呼び出しが本番へ出ないこと**を検査で固定する（§23 D-16 / §24 注入 4）。
 
 ### 12.3 Dashboard 反映 ≠ Elith 納品（指示書 §18）
 
@@ -738,7 +773,7 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
 - 各行に［共有URL設定］を置く。押すと **対象 uid がセット済みの `/admin/share-links`** へ入る。
 - **新しい共有機能を作らない。** 既に実装済みのセキュア共有リンク機能をそのまま使う。
 - 今回追加するのは**導線だけ**であり、**共有基盤そのものの再実装ではない。**
-- 受け渡し方式は **§19.2（要裁定 U-2）**。
+- 受け渡し方式は **`sessionStorage`**（D-2・§19.2）。
 
 ### 13.2 変更しない既存セキュリティ仕様（指示書 §8・そのまま転記）
 
@@ -781,7 +816,7 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
 | **G-5** | 「有効期限 30日間（推奨）」等の独自項目 | **設定項目の正本は既存の 5 つ** — 用途・ラベル / 開始日時 / 期限 / **AI問診の利用を許可** / **AIスキャンの利用を許可** | `share-links.astro:66-72` |
 | **G-6** | 一覧から共有設定へ入る | **対象 UID をセット済みにする導線だけを追加する。** 共有基盤・token・session・revoke・access log・kill switch は**変更しない** | §13.2 |
 
-#### 13.4.1 あわせて直す候補（UI 改修時・必須ではない）
+#### 13.4.1 用途ラベルの placeholder を一般化する（**G-7・今回の必須文言変更**）
 
 `/admin/share-links` の用途ラベルの placeholder が
 
@@ -789,9 +824,14 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
 用途・ラベル（例: 助成金事務局 確認用）
 ```
 
-で、**特定の利用先を想起させる**（`share-links.astro:66`）。UI に手を入れる機会に
-**「外部確認用」等の一般的な表現へ変更する候補**として挙げておく。
-**本件の必須要件ではない**ので、単独でこの変更だけを入れる必要はない。
+で、**特定の利用先を想起させる**（`share-links.astro:66`）。
+
+**今回の UI 改修で「外部確認用」等の一般的な表現へ変更する。必須。**
+（1.1 では「候補・必須ではない」としていたが、**発注者裁定で必須の文言変更へ格上げ**した。）
+
+- **変えるのは placeholder の文字列だけ。** `maxlength` も `id` も送信値も触らない。
+- **既に発行済みリンクの `label` は書き換えない**（過去の記録を改変しない）。
+- §13 の導線を入れる PR に**同梱する**（単独の PR にしない）。
 
 ---
 
@@ -827,14 +867,44 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
 | 詳細展開の納品履歴 | **2 つの表を別の表として並べる** |
 | 冪等 | 各表の既存 unique をそのまま使う |
 
-### 14.3 差分の出し方（**要裁定 U-7**）
+### 14.3 差分の出し方 — **前回 run の PII なし snapshot と比べる**（**D-7・確定**）
 
-**推奨**: 「前回納品日時」以降に `created_at` が付いた `test_artifacts` を**検査種別ごとに数える**。
-一覧の件数と同じ数え方なので**数字が食い違わない**。
+**納品が成立した時点の「何が入っていたか」を PII なしで控えておき、次回はそれと今を比べる。**
 
-代替案（date × format 単位で `elith_delivery_items` と突き合わせる）はより正確だが、
-**`elith_deliveries` 経由で納品した分は `elith_delivery_items` に行が無い**ため
-「納品済みなのに差分に出る」が起きる。**裁定が要る（U-7）。**
+1.1 までの推奨案（「前回納品日時以降に `created_at` が付いた行を数える」）と、
+代替案（`elith_delivery_items` と突き合わせる）は**どちらも採らない**。前者は
+**artifact が後から更新された回を取り逃す**（`persistIntoExistingArtifact` は `created_at` を動かさない・
+`special-additional-tests.ts:211-223`）し、後者は **`elith_deliveries` 経由の分が
+`elith_delivery_items` に行を持たない**ので「納品済みなのに差分に出る」。
+
+#### 14.3.1 snapshot に入れるもの / 入れないもの
+
+| 入れる（**すべて非 PII**） | 入れない（**絶対に**） |
+|---|---|
+| `diagnostic_user_id`（非 PII） | 氏名・会社名・メールアドレス（マスクも含め**入れない**） |
+| 納品時刻 / 納品先 prefix | 生年月日 |
+| **検査種別ごとの件数と最新 `test_date`** | **測定値・検査結果の中身** |
+| AI問診の有無と最新 `completed_at` | **問診の回答本文** |
+| format_id ごとのファイル数と date フォルダの一覧 | S3 の中身・原本のファイル名 |
+| ウェルネス年齢を載せた年数 | 算出に使ったマーカーの値 |
+| 実行した admin の**識別子 digest** | **生 email**（`@` を含む値は捨てる・`share-access.ts:283-292` と同じ規律） |
+
+**一覧に出す数字と同じ出所**（§6.4 の `getAccountProgress`）から作る。
+**別計算にしない** — 食い違うと「差分だけ合わない」が静かに起きる。
+
+#### 14.3.2 いつ書くか
+
+- **実際に 1 件以上 verified 納品できた run だけ**記録する（§9.6 の `putVerified` が verified:true を返した回）。
+  **何も納品しなかった cron の空振りで行を増やさない。**
+- cron も手動も**同じ経路を通る**ので両方が記録してよい。
+  ただし**一覧の「前回納品後の追加」に使うのは、その uid の最新 run 1 件**である。
+- **初回（snapshot が無い）回は差分を出さない。**「前回納品：なし」とだけ出す
+  （0 件と「まだ無い」を混同しない）。
+
+#### 14.3.3 差分の粒度
+
+**検査種別ごとの件数差分**（現在の件数 − snapshot の件数）。確認モーダルの表示例は §7.3 のとおり。
+date 単位の内訳は**行の詳細展開**でだけ出す（§6.3）。
 
 ---
 
@@ -866,11 +936,45 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
 
 ## 16. DB / S3 / API への影響（指示書 §16）
 
-### 16.1 DB — 新しい表は作らない
+### 16.1 DB — **migration を 1 本足す**（**D-4・確定**）
 
-§14.2 の 2 表をそのまま使う。**新しい列も表も要らない**見込み（**要確認 U-4**）。
+> **1.1 までの「migration は不要（0 本で足りる）」は撤回する。**
+> §14.3 の snapshot を置く先が既存 2 表のどちらにも無いため。
 
-→ **migration は不要。** 実装着手時に §6.2 の表示項目を既存列と 1 つずつ突き合わせて確認する。
+#### 16.1.1 既存 2 表は意味を変えない
+
+§14.2 のとおり `elith_deliveries`（年 × 納品先）と `elith_delivery_items`（検査 × format × 納品先）は
+**役割も粒度もそのまま**。**統合しない。列も足さない。**
+
+#### 16.1.2 新設する表（1 本）
+
+`diagnosis.elith_delivery_runs` — **1 行 = 1 回の納品 run**。
+
+**なぜ既存表に入れないか**: `elith_deliveries` の粒度は **(uid, bundle_date, delivery_prefix) = 年単位**だが、
+1 回の手動納品は**複数年をまとめて**出す。run 単位の控えは年単位の表に収まらない。
+`20260930000060_elith_delivery_items.sql:4-10` が `elith_deliveries` と `elith_delivery_items` を
+分けたのと**同じ理由**（粒度が違うものを同じ表へ upsert すると、既にある情報を消す）。
+
+| 列 | 中身 |
+|---|---|
+| `id` | uuid pk |
+| `diagnostic_user_id` | uuid not null（`app_users` 参照） |
+| `delivery_prefix` | text（`''` = 本番） |
+| `delivered_at` | timestamptz |
+| `triggered_by` | text — **admin 識別子の digest。生 email を入れない** |
+| `source` | text — `manual` / `cron`（どちらの経路の run か） |
+| `file_count` / `verified_count` | int — §9.6 の `putVerified` の結果 |
+| `snapshot` | jsonb — **§14.3.1 の内訳。PII を 1 つも入れない** |
+
+- **RLS は service_role 以外に権限を出さない**（新表の既定の規律・`20260930000060:15`）。
+- migration 番号は **`20261001000010` 以降**（`…20260930000060` まで使用済み）。
+- **`drop` も `alter` もしない。追加だけ。**
+
+#### 16.1.3 適用の順序
+
+**後方互換な追加**（表を足すだけ）なので、**アプリより先に DB へ適用する**
+（CLAUDE.md「migration / Edge Function」）。**適用前はアプリが snapshot を読めない** ので、
+その間は **F-5 のとおり差分の副文言を出さない**（§6.5）。
 
 ### 16.2 S3 — 既存のパス規約を変えない
 
@@ -885,7 +989,7 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
 - **A と B を混同しない**（§3.9）。**`elith-delivery-cleanup` は A を消す口**である（P-4）ので、
   **スペシャルアカウントの運用手順に組み込まない。**
 
-### 16.3 中間 source をどうするか（指示書 §13・**要裁定 U-5**）
+### 16.3 中間 source は監査層として恒久的に残す（指示書 §13・**D-5・確定**）
 
 指示書は「AI問診完了時 / Scan export / 追加検査登録時に source JSON を残すか、
 すべて Admin 納品時に DB から再生成するか」を調査して整理せよ、としている。**現行実装の事実:**
@@ -905,7 +1009,10 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
   **「Admin 納品時に全部 DB から再生成する」案は採れない。**
 - **A の削除を自動化しない。** **勝手に既存 source 保存を消さない**（指示書 §13）。
 
-> **要裁定 U-5**: 上記の整理で確定としてよいか（= 中間 source を恒久的に監査層として残す）。
+**確定（D-5）= 中間 source を恒久的に監査層として残す。**
+**「Admin 納品時に全部 DB から再生成する」案は採らない**（問診の回答本文と items 形式は S3 が唯一の保存先）。
+**A の削除を自動化しない** — `elith-delivery-cleanup` は A を消す口（P-4）なので、
+**スペシャルアカウントの運用手順に組み込まない。**
 
 ### 16.4 API
 
@@ -914,7 +1021,7 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
 | Scan-Chat-AI `GET /api/admin/special-accounts` | **返り値を拡張**（§6.4）。既存キーは消さない |
 | Scan-Chat-AI `POST /api/admin/special-accounts/deliver` | **母集団からスペシャルを外す**（§18.2） |
 | Scan-Chat-AI **（新）1 uid 指定の手動納品** | 新規。`isSpecialAccount` 必須・§10.2 の 2 条件 |
-| Scan-Chat-AI `POST /api/admin/special-additional-tests/finalize` | **既定を「納品しない」へ**（§12.2・要裁定 U-3）/ `health_checkup` を受ける |
+| Scan-Chat-AI `POST /api/admin/special-additional-tests/finalize` | **既定を「納品しない」へ**（D-3・§12.2）/ `health_checkup` を受ける / PUT は `putVerified` 経由へ（D-1） |
 | Scan-Chat-AI `POST /api/admin/special-additional-tests/scan-part` | `health_checkup` を受ける |
 | Scan-Chat-AI `GET /api/cron/elith-deliver` | **削除しない。** 母集団の変更に追従するだけ |
 | Scan-Chat-AI `POST /api/admin/share-links` | **変更しない** |
@@ -984,7 +1091,8 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
 2. **ボタンは「契約者/単品の一括納品」として残す。** ただし
    **`/admin/special-accounts` から外す**（この画面の対象は全員スペシャルなので、
    同じ画面に「この画面の人は対象外のボタン」を置くと必ず誤解される）。
-   置き場所は `/admin/elith-batch` が自然（**要裁定 U-6**）。
+   **移設先は `/admin/elith-batch`（D-6・確定）。** あの画面は既に `elith-assemble` の単発納品と
+   promote を持つ技術管理画面で、契約者向けの一括操作の置き場として筋が通る。
 3. **スペシャルを一括で自動選択・納品する操作は作らない**（指示書 §17 末尾）。
 
 **移設までの間の手段**: `GET /api/cron/elith-deliver` は **`ADMIN_API_KEY` でも通る**
@@ -1008,7 +1116,7 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
 | 共有 URL の仕様を変えない | §13.2 | — |
 | intake 専用キーの範囲を広げない | 新しい API を `LAB_INTAKE_API_KEY` で通さない（admin キーだけ） | `api-auth.ts:74-79` / `verify:intake-scope` |
 
-### 19.2 対象 UID の受け渡し（**要裁定 U-2**）
+### 19.2 対象 UID の受け渡し — **`sessionStorage` 方式**（**D-2・確定**）
 
 **現行実装では uid は URL に出ていない（確認済み）**
 
@@ -1018,23 +1126,49 @@ Dashboard 側の登録は残す」）。**新仕様はこれを常態にする�
 
 → **現状は漏れていない。** 問題は「**対象をセット済みで遷移する手段が無い**」ことだけ。
 
-C-2 のとおり**再利用できる既存機構が無い**ので、3 案を比較する。
+C-2 のとおり**再利用できる既存機構が無い**ので 3 案を比較し、**案 2（`sessionStorage`）で確定した**。
 
 | 案 | 方式 | URL / 履歴 / Referer | サーバ変更 | 評価 |
 |---|---|---|---|---|
 | **案 1** | 遷移先を**別画面にしない**。一覧の行から**その場でパネルを開く**（`<details>` / モーダル）。対象は**既にその行の DOM にある値**をそのまま POST | **何も載らない** | **ゼロ**（新テーブル・新 API なし） | 「新方式を増やさない」に最も忠実。admin 画面で uid を表示することは既に許容されている（`share-links.astro:231-232`） |
-| **案 2** | `sessionStorage` の 1 キー（例 `welltect.admin.target`）に uid を置いて遷移。遷移先が読んで `<select>` を選択済みにする | 載らない（タブ単位・閉じれば消える） | ゼロ | 画面を分ける指示書 §6 の形に沿う。**ただし新しい受け渡し規約が 1 つ増える** |
+| **案 2（採用）** | `sessionStorage` の 1 キー（例 `welltect.admin.target`）に uid を置いて遷移。遷移先が読んで `<select>` を選択済みにする | 載らない（タブ単位・閉じれば消える） | ゼロ | 画面を分ける指示書 §6 の形に沿う。新しい受け渡し規約が 1 つ増えるが、**サーバ側の新機構はゼロ** |
 | 案 3 | wellfort-site 側に short-lived handoff（opaque token → サーバで uid へ解決）を新設 | 載るのは opaque token だけ | **新テーブル + 新 API**（`admin-impersonation.ts` と同形を 2 本目として作る） | 指示書 §6 の「既存パターン」に最も近い見た目だが、**実体は新機構**。コストが大きい |
 
 **採らない案**: メールの sha256（`e.hash`・`special-accounts.astro:303` で既に使われている）を URL に載せる。
 uid は非 PII だが**メールの digest は PII 由来で、かつメールは推測可能なので総当たりが効く**。
 **uid より悪い**ので候補にしない。
 
-> **裁定が要る（U-2）**: 指示書 §6 は「`/admin/special-additional-tests` へ遷移」と書いているので
-> **案 2 が指示に近い**が、「新しい独自方式を勝手に増やさない」に忠実なのは**案 1**。こちらでは決めない。
+#### 19.2.1 採用した案 2 の約束
 
-**どの案でも守ること**: 遷移先のサーバ API は**渡された uid を信用せず `isSpecialAccount(uid)` を再確認する**
-（§19.1）。受け渡しは「探す手間を省く」ためのものであって、**認可の根拠にしない。**
+- キーは **1 本だけ**（`welltect.admin.target`）。**用途ごとに増やさない。**
+- 置く値は **uid 1 つだけ**。氏名・メール・メールの digest は**置かない**。
+- **読んだら消す**（`sessionStorage.removeItem`）。遷移先に残したまま別の対象を開くと**取り違える**。
+- **`sessionStorage` はタブ単位**なので、別タブで開いた一覧の選択が混ざらない。
+  タブを閉じれば消える。**`localStorage` を使わない**（端末に残る）。
+- **無い / 壊れている / UUID でない**ときは**何もセットせず通常の `<select>` を出す**。
+  当てずっぽうで 1 件目を選ばない。
+- **URL・履歴・Referer には何も載らない。**
+
+**採用後も守ること**: 遷移先のサーバ API は**渡された uid を信用せず `isSpecialAccount(uid)` を再確認する**
+（§19.1・`special-additional-tests.ts:109-121`）。
+**受け渡しは「探す手間を省く」ためのものであって、認可の根拠にしない。**
+
+### 19.3 検索・フィルタ（**D-8・確定**）
+
+指示書 §16 の「氏名 / 会社名 / UID 検索」は、**F-1 のとおり氏名・会社名を持っていない**ので成立しない。
+
+**確定した範囲（これ以上は作らない）**
+
+| 作る | 作らない |
+|---|---|
+| **メモ（案件名）/ メールマスク / UID** の**部分一致 1 本** | 氏名・会社名での検索 |
+| **状態**（未準備 / 準備あり / 納品済み）での絞り込み | データ有無・登録日順などの多段フィルタ |
+| — | ページネーション（F-7） |
+
+- UID の検索は**先頭一致でも部分一致でもよい**が、**入力は完全 UUID でなくてよい**（短縮表示から探せること）。
+- **検索はクライアント側で足りる**（一覧は 1 回の GET で全件取れている）。
+  **検索のためにサーバ API を増やさない。**
+- 検索語を**ログにも URL にも残さない**（メモには案件名が入る）。
 
 ---
 
@@ -1185,11 +1319,25 @@ uid は非 PII だが**メールの digest は PII 由来で、かつメール�
 | 35 | DB 失敗時に**空（未完了）**で返り、「済み」と偽らない |
 | 36 | 応答に氏名・生年月日・測定値・回答本文が含まれない |
 
+### K. Verified PUT と run snapshot（D-1 / D-4 / D-7）
+
+| # | 検査 |
+|---|---|
+| 37 | `putVerified` が **読み戻して SHA256 が一致したときだけ** `verified:true` を返す |
+| 38 | 納品先に**同一内容が既に在れば PUT しない**（PUT 回数で見る） |
+| 39 | **一部が `verified:false` の年を `elith_deliveries` へ delivered として記録しない** |
+| 40 | `putVerified` は**投げない**（失敗は戻り値で返る） |
+| 41 | **snapshot に PII が 1 つも入らない** — 氏名・会社名・メール・マスク・生年月日・測定値・回答本文・原本ファイル名のいずれも現れない（**V-3**） |
+| 42 | `triggered_by` に **`@` を含む値が入らない**（生 email を弾く） |
+| 43 | **1 件も verified 납品できなかった run は snapshot 行を作らない** |
+| 44 | snapshot が無い uid では**差分の副文言を出さない**（初回は「前回納品：なし」） |
+| 45 | 差分の件数が**一覧の件数と同じ出所**から出ている（別計算になっていない） |
+
 ---
 
 ## 24. 退行テスト（指示書 §24）
 
-**この家の規律として、退行を注入して「名指しで落ちる」ことを確認する。最低 8 種。**
+**この家の規律として、退行を注入して「名指しで落ちる」ことを確認する。最低 12 種。**
 
 | # | 注入する退行 | 落ちるべき検査 |
 |---|---|---|
@@ -1201,8 +1349,12 @@ uid は非 PII だが**メールの digest は PII 由来で、かつメール�
 | 6 | 複数年を**最新 1 件へ縮退**させる | E-20 / E-21 |
 | 7 | `resolveAdditionalArtifact` の検索に **`source` を足す** | G-26（2 行目ができる） |
 | 8 | 遷移 URL に `?u=<uid>` を足す | C-14 |
+| 9 | `putVerified` の**読み戻しを省いて PUT の成否だけ**にする | K-37 |
+| 10 | snapshot に**氏名 / メール / 測定値のどれか 1 つ**を混ぜる | K-41（V-3） |
+| 11 | `triggered_by` に**生 email** を入れる | K-42 |
+| 12 | `sessionStorage` の代わりに **`localStorage`** を使う（端末に残る） | C-14 と同系（新設） |
 
-**8 種とも落ちることを確認してから実装完了とする。**
+**12 種とも落ちることを確認してから実装完了とする。**
 
 あわせて **§18.1 の既存 `verify:*` を全部通す**こと（特に `verify:elith-entitlement` /
 `verify:special-accounts` / `verify:special-additional-tests` / `verify:share-access` /
@@ -1212,18 +1364,32 @@ uid は非 PII だが**メールの digest は PII 由来で、かつメール�
 
 ## 25. 未確定事項 / Elith 確認事項（指示書 §19 / §20 / §25）
 
-### 25.1 こちらで裁定が要るもの（**実装前に埋める**）
+### 25.1 裁定済み（2026-10-01・発注者確定）
 
-| # | 未確定 | 本書の推奨 |
+**1.1 までの U-1〜U-8 はすべて確定した。未確定事項として残っているものは無い。**
+内容は下表の **D-1〜D-8** で、本文の該当節が正本である。
+**実装はここに書かれた形から外れてはならない。**
+
+| # | 旧 | 確定した仕様 | 正本 |
+|---|---|---|---|
+| **D-1** | U-1 | **共通 Verified PUT/readback helper（`putVerified`）に一本化する。** A と B の**両方がそれを呼ぶ**。**「A の後に `deliverAdditionalJson` を回す」ではない**（PUT とキー変換が二重に走るため・1.1 の推奨案から**変更**） | §9.6 |
+| **D-2** | U-2 | 対象 uid の受け渡しは **`sessionStorage` の 1 キー**。読んだら消す。URL・履歴・Referer に載せない。**サーバ側の新機構はゼロ** | §19.2 |
+| **D-3** | U-3 | `finalize` の**サーバ側の既定を「納品しない」へ反転**する。`deliver: true` を明示したときだけ本番へ出す | §12.2 |
+| **D-4** | U-4 | **migration を 1 本足す**（`diagnosis.elith_delivery_runs`）。**1.1 の「0 本で足りる」は撤回**。既存 2 表は意味も列も変えない | §16.1 |
+| **D-5** | U-5 | **中間 source を恒久的に監査層として残す。** 「納品時に全部 DB から再生成」は採らない。削除を自動化しない | §16.3 |
+| **D-6** | U-6 | ［Elith納品を一括作成］の移設先は **`/admin/elith-batch`**（廃止はしない・契約者用として残す） | §18.2 |
+| **D-7** | U-7 | 差分は **前回 run の PII なし snapshot と現在を比べる**。粒度は**検査種別ごとの件数差分**。snapshot が無い回は差分を出さない | §14.3 |
+| **D-8** | U-8 | 検索は **メモ / メールマスク / UID の部分一致 1 本 ＋ 状態フィルタ**まで。氏名・会社名での検索は作らない | §19.3 |
+
+**画面案の補正事項（F-1〜F-8 / G-1〜G-7）も確定事項**である（§6.5 / §13.4）。
+
+### 25.1.1 確定に伴って増えた実装上の宿題（未確定ではない・確認事項）
+
+| # | 確認すること | いつ |
 |---|---|---|
-| **U-1** | 手動納品を `assembleElithDeliverySet` 経路（A）で作るか、`deliverAdditionalJson` 経路（B）で作るか。A に読み戻し検証を足すと既存 deliver API / cron にも波及する | **A を主、読み戻しは A の後に足す**（§9.6） |
-| **U-2** | 対象 uid の受け渡し方式。案 1（画面を分けず行でパネルを開く）/ 案 2（`sessionStorage`）/ 案 3（新 handoff） | 指示に近いのは**案 2**、「新方式を増やさない」に忠実なのは**案 1**（§19.2） |
-| **U-3** | `finalize` の既定を「納品しない」へ反転するか、UI が `deliver:false` を送るか | **反転（案 a）**（§12.2） |
-| **U-4** | migration が本当に 0 本で足りるか（既存 2 表の列で §6.2 の表示が全部作れるか） | 本書の調査では**0 本で足りる**。実装着手時に列を 1 つずつ突き合わせて確認する（§16.1） |
-| **U-5** | 中間 source を恒久的に監査層として残す整理で確定としてよいか | **残す**（問診の回答本文と items 形式は S3 が唯一の保存先・§16.3） |
-| **U-6** | ［Elith納品を一括作成］の移設先 | `/admin/elith-batch`（§18.2） |
-| **U-7** | 「前回納品後の追加」の差分粒度（検査種別ごとの件数差分 / format×date 差分） | **検査種別ごとの件数差分**（§14.3） |
-| **U-8** | 検索・フィルタ（指示書 §16）をどこまで作るか。**氏名・会社名は出せない**（C-3） | メモ / マスク / uid 先頭の**部分一致 1 本** + 状態での絞り込みまで。それ以上は作らない |
+| V-1 | `putVerified` で 1 ファイルにつき GET が 1 回増える。**複数年 × 複数 format で cron が `maxDuration: 800` に収まるか**を実測する | §27 P6 |
+| V-2 | `elith_delivery_runs` の migration を**アプリより先に適用**する。適用前は差分の副文言を出さない（F-5） | §27 P8 の前 |
+| V-3 | snapshot の中身に **PII が 1 つも入っていないこと**を検査で固定する（目視では守れない） | §23 に追加 |
 
 ### 25.2 Elith へ確認すること（リポジトリ内では裏取りできない）
 
@@ -1261,24 +1427,26 @@ uid は非 PII だが**メールの digest は PII 由来で、かつメール�
 | ファイル | 操作 | 内容 |
 |---|---|---|
 | `src/lib/account-progress.ts` | modify | 5 つの `test_type` 集計 + `elith_delivery_items`（§6.4） |
-| `src/lib/elith-delivery.ts` | modify | 母集団からスペシャル除外（§18.2）/ 1 uid 手動納品（§9）/ `manualMapping` を 7 種へ（§9.2） |
+| `src/lib/elith-delivery.ts` | modify | 母集団からスペシャル除外（§18.2）/ 1 uid 手動納品（§9）/ `manualMapping` を 7 種へ（§9.2）/ `putFiles` → `putVerified`（D-1）/ run snapshot の記録（D-7） |
 | `src/lib/elith-entitlement.ts` | modify | **`decideReady()` は触らない。** スペシャル用の別述語（`hasAnyDeliverable`）を足す（§10.3） |
 | `src/lib/special-additional-tests.ts` | modify | `health_checkup` を対象に足す（§11） |
 | `src/lib/additional-originals.ts` | modify | `ADDITIONAL_TEST_TYPES` に `health_checkup`（§11.2） |
 | `src/pages/api/admin/special-accounts.ts` | modify | 拡張した progress を返す |
 | `src/pages/api/admin/special-accounts/deliver.ts` | modify | スペシャル除外に追従 |
 | `src/pages/api/admin/special-accounts/deliver-one.ts`（仮） | create | 1 uid 手動納品（§9） |
-| `src/pages/api/admin/special-additional-tests/finalize.ts` | modify | 既定を「納品しない」へ（§12.2・U-3）/ `health_checkup` |
+| `src/pages/api/admin/special-additional-tests/finalize.ts` | modify | 既定を「納品しない」へ（D-3）/ `health_checkup` |
 | `src/pages/api/admin/special-additional-tests/scan-part.ts` | modify | `health_checkup` を受ける |
 | `src/pages/api/cron/elith-deliver.ts` | modify | **削除しない。** 母集団の変更に追従するだけ |
+| `src/lib/elith-put-verified.ts`（仮） | create | **共通 Verified PUT/readback helper**（D-1・§9.6） |
+| `supabase/migrations/20261001000010_elith_delivery_runs.sql`（仮） | create | **run の PII なし snapshot**（D-4・§16.1.2） |
 | `scripts/verify-special-account-management.mjs` | create | §23 / §24 |
 | `package.json` | modify | `verify:special-account-management` |
 | `docs/specs/special_account_management_spec_20261001.md` | （本書） | — |
 
 **触らない**: `elith-assemble.ts`（`SERIES_FORMATS` / `sanitizeDelivery` / `rewriteClientId` を共用するだけ）/
-`elith-delivery-json.ts`（読み戻し検証を共用するだけ）/ `share-access.ts` / `admin-impersonation.ts` /
+`elith-assemble.ts` 以外では、`elith-delivery-json.ts` は**自前の PUT・readback を `putVerified` へ寄せる**（D-1）/ `share-access.ts` / `admin-impersonation.ts` /
 `middleware.ts` / `write-guard.ts` / `scan-persist.ts` / `interview/export.ts` / `api/scan/save.ts` /
-`supabase/migrations/**`（U-4）。
+`src/lib/s3.ts` の `putFiles` 本体（**`putVerified` を上に重ねるだけ**・D-1）。
 
 ### 26.2 wellfort-site
 
@@ -1289,7 +1457,7 @@ uid は非 PII だが**メールの digest は PII 由来で、かつメール�
 | `src/pages/admin/share-links.astro` | modify | 外から対象を受け取る経路（§13.3）。**共有基盤は 1 行も触らない** |
 | `src/pages/api/admin/special-accounts/deliver-one.ts`（仮） | create | 中継（2 層認証は既存と同形） |
 | `src/pages/api/admin/special-additional-tests/[action].ts` | modify | `finalize` の既定変更に追従 |
-| `src/pages/admin/elith-batch.astro` | modify | 一括納品ボタンの移設先（U-6） |
+| `src/pages/admin/elith-batch.astro` | modify | 一括納品ボタンの移設先（D-6） |
 
 **触らない**: `AdminLayout.astro`（メニューは既に 3 本とも在る・`:45` / `:51` / `:56`）/
 `api/admin/share-links.ts`（中継の形を変えない）/ `api/admin/impersonation-handoff.ts`。
@@ -1302,15 +1470,15 @@ uid は非 PII だが**メールの digest は PII 由来で、かつメール�
 
 | 段 | 内容 | 受入 |
 |---|---|---|
-| **P0** | **裁定を取る**（U-1〜U-8）。特に U-2（受け渡し方式）と U-3（既定の向き）は後戻りが大きい | 発注者の回答 |
+| **P0** | **裁定は済んでいる**（D-1〜D-8・§25.1）。着手前に §25.1 と §6.5 / §13.4 を読み、**そこから外れないことを確認する**だけ | — |
 | **P1** | **cron からスペシャルを除外**（§17）。**これだけで「人の確認前に本番へ出る」が止まる**ので最初に入れる | `verify:elith-entitlement` に A-1〜A-5 → 退行注入 1・2 で落ちる |
 | **P2** | **`finalize` の既定反転**（§12.2）＋ UI 文言（§12.1）。**登録とその場納品の一体化を切る** | D-16〜D-19 → 退行注入 4 で落ちる |
 | **P3** | **一覧の集計拡張**（§6.4）。API の返り値を広げるだけで UI はまだ変えない | I-33〜I-36 |
 | **P4** | **一覧 UI の整理**（§6）＋ 状態 badge（§8）＋ 3 ボタンの枠（押すとまだ何もしない） | 目視 + 既存 `verify:screen` を壊さない |
-| **P5** | **［追加検査データ］導線**（§7.1）＋ **［共有URL設定］導線**（§13）。U-2 の裁定どおり | C-14 / C-15 → 退行注入 8 で落ちる |
-| **P6** | **1 uid 手動納品 API**（§9）＋ 確認モーダル（§7.3）。**7 種全部・複数年** | E-20〜E-23 / F-24 / F-25 → 退行注入 5・6 で落ちる |
+| **P5** | **［追加検査データ］導線**（§7.1）＋ **［共有URL設定］導線**（§13）。**`sessionStorage`（D-2）**。**placeholder の一般化（G-7）を同梱** | C-14 / C-15 → 退行注入 8 で落ちる |
+| **P6** | **共通 `putVerified`（D-1）**で A・B を寄せる → **1 uid 手動納品 API**（§9）＋ 確認モーダル（§7.3）。**7 種全部・複数年** | E-20〜E-23 / F-24 / F-25 → 退行注入 5・6 / **V-1（cron が 800s に収まるか）を実測** |
 | **P7** | **検診・人間ドックの Admin 登録**（§11）。**重複 artifact を作らないことが受入条件** | G-26〜G-29 → 退行注入 7 で落ちる |
-| **P8** | **一括ボタンの移設**（§18.2・U-6）＋ 前回差分（§14・U-7）＋ 検索（U-8） | H-30〜H-32 |
+| **P8** | **migration を先に適用（V-2）** → run snapshot と前回差分（D-7・§14.3）＋ **一括ボタンの移設**（D-6）＋ 検索（D-8・§19.3） | H-30〜H-32 / **V-3（snapshot に PII が無い）** |
 
 **P1 と P2 を先に入れる理由**: どちらも「意図しない本番納品を止める」側の変更で、
 **機能追加を待たずに単独で価値がある**。逆に P6（手動納品）を先に入れると、
@@ -1396,3 +1564,4 @@ uid は非 PII だが**メールの digest は PII 由来で、かつメール�
 |---|---|---|
 | 1.0 | 2026-10-01 | 初版。発注者指示書（2026-10-01・26 節）を実コードで裏取りして起こした。**実装は 1 行もしていない。** |
 | 1.1 | 2026-10-01 | 承認画面案（ChatGPT 作成）を実コードと突き合わせ、**§6.5（F-1〜F-8）と §13.4（G-1〜G-6）を追加**。画像だけを見て存在しない機能を実装させないための禁止事項。あわせて **§6.5.1 で 1.0 の誤り（「ダッシュボードも admin に無い」）を訂正**。**設計は 1 つも変えていない。実装は 1 行もしていない。** |
+| 1.2 | 2026-10-01 | **発注者裁定により U-1〜U-8 を確定**し、§25.1 の未確定表を**確定仕様（D-1〜D-8）へ移した**。うち 3 件は推奨案からの**変更**: **U-1 = 共通 Verified PUT/readback helper 方式**（「A の後に B を回す」ではない）/ **U-4・U-7 = 前回 run の PII なし snapshot との差分比較**（そのため **migration が 1 本要る**。1.1 までの「0 本で足りる」は撤回）。あわせて **§13.4.1 の placeholder 一般化を「候補」から今回の必須文言変更へ格上げ**、**F-1 の表現を厳密化**。**実装は 1 行もしていない。** |
