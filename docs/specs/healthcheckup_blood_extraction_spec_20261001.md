@@ -6,7 +6,8 @@
 | 作成日 | 2026-10-01 |
 | 業務仕様の正 | Wellfort「人間ドック・健康診断由来 血液検査データ連携仕様書 v1.1 (2026-10-01)」(docx・発注者支給) |
 | 調査基準 | `6abc310`（branch `claude/amazing-einstein-rd0fur` / repo `mirai-gpro/scan-chat-ai`） |
-| 状態 | **仕様書のみ。実装は未着手**（発注者の実装開始指示待ち） |
+| 版 | **v2.0（2026-10-01 発注者裁定 Q-1〜Q-14 を反映）** |
+| 状態 | **確定仕様。これを唯一の実装基準とする**（v1.0 = `01fb51e` は調査のみ・要確認 14 件） |
 
 > **この文書は `docs/specs/_TEMPLATE.md`（`WF-NNNN` 形式の Implementation Spec）ではない。**
 > `scripts/spec-guard.mjs` は `docs/specs/WF-\d{4}\.md` だけを検証対象にするので、本ファイルの存在は
@@ -14,8 +15,8 @@
 > `secure_shared_access_and_admin_impersonation_spec_20260930.md`）と同じ体裁。
 >
 > **本文の事実はすべて `6abc310` 時点の実コードで確認したもの**で、`file:line` を付けている。
-> 確認できなかったものは本文中に **`要確認`** と書き、§14 に一覧でまとめた。
-> **推測で仕様を決めた箇所は無い。**
+> **v1.0 で `要確認` として隔離していた 14 件は、2026-10-01 に発注者が全件裁定した**（§14）。
+> **本書に `要確認` は残っていない。推測で決めた仕様は 1 つも無い。**
 
 ---
 
@@ -38,6 +39,20 @@ Dashboard の時系列グラフと Elith 納品へ反映する。
 - 元の `HealthCheckupData` は保持する。上書き・変換・削除しない（v1.1 §1.1 / §8）。
 - `eGFR` は原本記載値のみ。クレアチニンから計算しない（v1.1 §5）。
 
+### 1.2.1 発注者裁定（2026-10-01）で追加された確定事項
+
+v1.1（業務仕様）に無く、調査で浮かんだ論点を発注者が裁定した。**全文は §14。**
+設計上とくに効くのは次の 6 つで、§4 以降の各章と §12 の受入テストに織り込んである。
+
+| # | 確定 | 反映先 |
+|---|---|---|
+| **D-1** | **派生 blood は Elith の readiness に数えない**。`imported_by='derived_healthcheck_blood'` で識別し、`checkFormatsReady()` の BloodTestData 判定からだけ除外する。**`source='user_upload'` 全体は除外しない** | §4.3 / §8.5 |
+| **D-2** | **派生の識別子は既存列 `test_artifacts.imported_by`**（`text not null`・CHECK 無し）。**DB migration なし** | §4.3 / §9 |
+| **D-3** | **中性脂肪の統合は派生 `BloodTestData` の中だけ**。`HealthCheckupData` と `STANDARD_MASTER` の 空腹時/随時 の区別は壊さない | §5.4 / §6.4 |
+| **D-4** | **混在系列では基準線（`referenceUpper` / `referenceLower`）を出さない**。点ごとの H/L は原本由来なので残す | §7.5 |
+| **D-5** | **同一 `test_date` は通常 blood を優先**。派生が通常を上書きしない。通常が後から届いても最終的に通常が勝つ | §8.6 / §10.5 |
+| **D-6** | **対象 15 項目が 0 件なら何も作らない**（artifact も JSON もグラフも）。これは成立判定ではない | §6.2 |
+
 ### 1.3 対象範囲
 
 | | |
@@ -51,9 +66,9 @@ Dashboard の時系列グラフと Elith 納品へ反映する。
 - **wellfort-site の変更**。血液 CSV まわりの wellfort-site 側は Scan-Chat-AI API への**中継だけ**
   （`src/pages/api/admin/elith-blood-csv.ts:2`「本エンドポイントは中継のみ」）で、
   本件に関係する画面・処理を持たない。
-- **admin バッチ経路**（`/api/admin/elith-scan` / `elith-hc-merge`）。こちらは既に
-  `TEST_TYPE_BY_FORMAT`（`src/lib/scan-persist.ts:244-250`）で `formatId` を選べるため、
-  `BloodTestData` を選べば血液の artifact を作れる。**今回の業務仕様は利用者のスキャンが対象**。
+- **admin バッチ経路**（`/api/admin/elith-scan` / `elith-hc-merge`）。**発注者裁定 Q-13 で明示的に対象外。**
+  こちらは既に `TEST_TYPE_BY_FORMAT`（`src/lib/scan-persist.ts:244-250`）で `formatId` を選べるが、
+  **今回は拡張しない。** `persistAdminBatchArtifact` の挙動を 1 バイトも変えないことを検査で固定する（§12.1 S）。
 - **デメカル側の取り込み処理の変更**。
 - **AI スキャンのプロンプト・読み取りロジックの変更**（v1.1 §12「再解析禁止」）。
 
@@ -336,24 +351,32 @@ flowchart TD
   A4 --> A6["persistMeasurements() health_checkup (既存・不変)"]
   A6 --> A8[("measurement_values test_type=health_checkup (既存・不変)")]
 
-  A4 --> N1["★新規 extractBloodSubset(kept) src/lib/blood-subset.ts"]
-  N1 --> N2{"1 件以上抽出できたか"}
-  N2 -- いいえ --> N3["★新規 何もしない (空の回を作らない)"]
-  N2 -- はい --> N4["★新規 派生 artifact を作る<br/>既存 replaceSameDateArtifacts で冪等<br/>source=user_upload / test_type=blood"]
+  A4 --> N1["★新規 extractBloodSubset(kept) src/lib/blood-subset.ts<br/>15 項目だけ抽出 / 中性脂肪を統合 / 競合項目は除外"]
+  N1 --> N2{"抽出 1 件以上か"}
+  N2 -- 0 件 --> N3["★D-6 何も作らない<br/>(artifact も JSON もグラフも)"]
+  N2 -- 1 件以上 --> N7{"★D-5 同じ test_date に<br/>通常 blood が在るか"}
+  N7 -- 在る --> N8["★作らない (通常 blood を優先)<br/>理由を呼び出し元へ返す"]
+  N7 -- 無い --> N4["★新規 派生 artifact<br/>source=user_upload / test_type=blood<br/>★imported_by=derived_healthcheck_blood<br/>既存 replaceSameDateArtifacts で冪等"]
   N4 --> N5["persistMeasurements() 既存関数<br/>testType=blood / sourceFileKind=scan_md"]
   N5 --> N6[("measurement_values test_type=blood")]
 
   N6 --> G2["/trend?type=blood (既存)"]
-  G2 --> G3["getMeasurementTrend()<br/>★select に source_file_kind を追加<br/>★MetricTrendPoint.source を載せる"]
+  G2 --> G3["getMeasurementTrend()<br/>★select に source_file_kind<br/>★MetricTrendPoint.source<br/>★D-4 混在系列は基準線を付けない"]
   G3 --> G4["MetricTrendChart.astro<br/>★人間ドックから抽出 を表示"]
 
   A5 --> E1["materializeHealthCheckups() (既存・不変)"]
   E1 --> E2[["HealthCheckupData_date_*.json (既存・不変)"]]
-  N6 --> E5["★新規 materializeDerivedBloodTests()<br/>materializeHealthCheckups と同型"]
+  N6 --> E5["★新規 materializeDerivedBloodTests()<br/>★D-5 同日に通常 BloodTestData が在れば書かない"]
   E5 --> E6[["BloodTestData_date_*.json (既存の命名規約どおり)"]]
   E2 --> E3["assembleElithDeliverySet() (既存・不変)"]
   E6 --> E3
   E3 --> E4[["S3 delivery (既存・不変)"]]
+
+  N4 -. "★D-1 readiness には数えない" .-> R1["checkFormatsReady()<br/>★BloodTestData 判定からだけ<br/>imported_by=derived_healthcheck_blood を除外"]
+  R1 --> E3
+
+  X1["通常 blood が後から到着<br/>lab-results/upload | register"] --> X2["★D-5 同日の派生を superseded に落とす<br/>(削除しない / 通常 blood には触らない)"]
+  X2 --> N6
 ```
 
 ### 4.1 既存のまま再利用できるもの（変更しない）
@@ -371,14 +394,39 @@ flowchart TD
 
 ### 4.2 新規に要るもの
 
-| # | 内容 | 想定の置き場所 |
+| # | 内容 | 置き場所 | 裁定 |
+|---|---|---|---|
+| N-0 | `STANDARD_MASTER` に 4 件追加（アルブミン / 尿素窒素 / 中性脂肪 / `e-GFR` alias） | `src/lib/standard-master.ts` | Q-2 / Q-3 |
+| N-1 | 15 項目の対象マスタ＋抽出（中性脂肪の統合・競合項目の除外を含む） | **新規** `src/lib/blood-subset.ts` | Q-3 / Q-12 |
+| N-2 | 派生 `test_type='blood'` artifact の生成（`saveScanResult` から呼ぶ・`imported_by` 付き・同日優先） | `src/lib/scan-persist.ts` | Q-4 / Q-6 / Q-10 |
+| N-3 | readiness から派生を外す | `src/lib/elith-entitlement.ts` | **Q-4** |
+| N-4 | `source_file_kind` をグラフまで運ぶ／混在系列の基準線抑止 | `src/lib/measurement-queries.ts` / `src/lib/dashboard-queries.ts` | Q-5 |
+| N-5 | 「人間ドックから抽出」の表示 | `src/components/dashboard/MetricTrendChart.astro` | Q-7 |
+| N-6 | 派生 `BloodTestData` の S3 出力（同日優先つき） | `src/lib/elith-delivery.ts` | Q-8 / Q-9 / Q-10 |
+| N-7 | 通常 blood 到着時に同日の派生を `superseded` へ | `src/lib/blood-subset.ts` + `lab-results/upload.ts` / `register.ts` | Q-10 |
+| N-8 | backfill スクリプト（**dry-run 既定**） | `scripts/backfill-derived-blood.mjs` | **Q-11** |
+| N-9 | 回帰チェック `npm run verify:blood-subset` | `scripts/verify-blood-subset.ts` + `package.json` + `.github/workflows/ci.yml` | — |
+
+### 4.3 派生データの識別（D-1 / D-2）
+
+派生 artifact は **既存列 `test_artifacts.imported_by` に専用の値**を入れて識別する。
+
+| 列 | 値 | 既存か |
 |---|---|---|
-| N-1 | 15 項目の対象マスタ + 抽出関数（lean measurements → 血液サブセット） | **新規** `src/lib/blood-subset.ts` |
-| N-2 | 派生 `test_type='blood'` artifact の生成（`saveScanResult` から呼ぶ） | `src/lib/scan-persist.ts`（既存関数の後段） |
-| N-3 | `measurement_values` の `source_file_kind` をグラフまで運ぶ | `src/lib/measurement-queries.ts` / `src/lib/dashboard-queries.ts`（型） |
-| N-4 | 「人間ドックから抽出」の表示 | `src/components/dashboard/MetricTrendChart.astro` |
-| N-5 | 派生 `BloodTestData` の S3 出力 | `src/lib/elith-delivery.ts`（`materializeHealthCheckups` と同型の関数） |
-| N-6 | 回帰チェック `npm run verify:blood-subset` | `scripts/verify-blood-subset.ts` + `package.json` |
+| `source` | `'user_upload'` | 既存の CHECK 値（`20260927000010:32`） |
+| `test_type` | `'blood'` | 既存の CHECK 値（`20260601000010:193`） |
+| **`imported_by`** | **`'derived_healthcheck_blood'`** | **列は既存**（`20260601000010:204`・`text not null`・**CHECK 無し**）。値が新しいだけ |
+| `lab_name` | `null` | 検査機関ではない |
+| `scan_md` | `null` | **入れない**。原文は health_checkup 側の artifact に在る（二重に持たない） |
+
+**`source='user_upload'` 全体を識別子にしない**（発注者裁定 Q-4）。
+将来「利用者が血液検査の紙をスキャンする」経路ができたとき、それまで巻き込んで
+readiness から外してしまうため。**除外は `imported_by` の完全一致 1 本で行う。**
+
+既存の `imported_by` の値（`'user'` / `'admin'` / `'wellfort_admin_upload'` / `'demo'`。
+`scan-persist.ts:205,325` / `lab-results/upload.ts:109` / `register.ts:187` / `demo-data.ts:204`）
+とは重ならない。**`imported_by` に CHECK 制約は無い**（`grep -n imported_by supabase/migrations/*.sql` が
+`20260601000010:204` の 1 行だけを返す）ので、migration を伴わずに値を足せる。
 
 ---
 
@@ -391,26 +439,28 @@ flowchart TD
 - **JSON key** = `BloodTestData.data.measurements[].name`
   （`docs/elith/elith_s3_data_handoff_spec.md` §7.1 / `elith-blood-csv.ts:259-266`）。
 - **DB field** = `diagnosis.measurement_values.item_name` / `.canonical_name`。
-- **デメカル表記** = デメカル CSV ヘッダの標準名。fixture で実在が確認できたものだけ記載し、
-  残りは `要確認`（§14 Q-1）。
+- **デメカル CSV ヘッダ（実測）** = リポジトリ内の fixture で**実在を確認できたものだけ**を書く。
+  確認できていないものは **`未確認`** と書く。**ここに推測で名称を書かない**（発注者裁定 Q-1）。
+  業務仕様上の正は v1.1 添付の 15 項目であり、**実ヘッダが未確認であることは実装着手の阻害要因ではない。**
+  **merge 前の受入条件**として、現行デメカル CSV の実ヘッダ 15 件と本表の mapping の一致を確認する（§12.2 / AC-1）。
 
 | # | 業務名称 (v1.1 §4) | 既存内部名称 (`canonical_name`) | デメカル CSV ヘッダ標準名 | 既存同義語処理（`findByAlias` が当たる表記） | 単位 (`standard-master`) | 備考 |
 |---|---|---|---|---|---|---|
 | 1 | AST（GOT） | `GOT(AST)` | `AST(GOT)` (fixture 実在) | AST / GOT / AST(GOT) / GOT(AST) | `U/L` | |
-| 2 | ALT（GPT） | `GPT(ALT)` | `要確認` | ALT / GPT / ALT(GPT) / GPT(ALT) | `U/L` | |
-| 3 | γ-GTP | `γ-GTP` | `要確認` | γ-GTP / γGTP / GGT / Y-GTP / YGTP / ガンマGTP | `U/L` | **`γ-GT` は当たらない**（実測 NULL） |
+| 2 | ALT（GPT） | `GPT(ALT)` | `未確認` | ALT / GPT / ALT(GPT) / GPT(ALT) | `U/L` | |
+| 3 | γ-GTP | `γ-GTP` | `未確認` | γ-GTP / γGTP / GGT / Y-GTP / YGTP / ガンマGTP | `U/L` | **`γ-GT` は当たらない**（実測 NULL） |
 | 4 | 総蛋白（TP） | `総蛋白` | `総タンパク` (fixture 実在) | TP / 総蛋白 / 総タンパク / 血清総蛋白 | `g/dL` | |
-| 5 | アルブミン（Alb） | **なし（NULL）** | `要確認` | **当たらない** | — | **標準マスタ未収録**（§6.3 / Q-2） |
+| 5 | アルブミン（Alb） | **`アルブミン`（★`STANDARD_MASTER` へ新規追加）** | `未確認` | アルブミン / Alb / ALB（★追加する synonyms） | `g/dL` | 裁定 Q-2。golden 実在（§5.3） |
 | 6 | LDLコレステロール | `LDLコレステロール` | `LDLコレステロール` (fixture 実在) | LDL / LDL-C / LDLコレステロール | `mg/dL` | `LDLコレステロール(F式)` は**別項目**として収録済 |
-| 7 | HDLコレステロール | `HDLコレステロール` | `要確認` | HDL / HDL-C / HDLコレステロール | `mg/dL` | |
-| 8 | 総コレステロール | `総コレステロール` | `要確認` | TC / T-Cho / 総コレステロール | `mg/dL` | v1.1「人間ドックに無ければブランク」 |
-| 9 | 中性脂肪（TG） | **`空腹時中性脂肪` / `随時中性脂肪` の 2 本に分かれる** | `要確認` | 無修飾の `TG` / `中性脂肪` / `トリグリセライド` / `中性脂肪(TG)` は**当たらない** | `mg/dL` | **最大の論点。§6.4 / Q-3** |
-| 10 | 空腹時血糖 | `空腹時血糖` | `要確認` | 空腹時血糖 / 空腹時血糖(FBS) / FBS | `mg/dL` | `血糖` / `随時血糖` は**当たらない**（仕様どおり） |
+| 7 | HDLコレステロール | `HDLコレステロール` | `未確認` | HDL / HDL-C / HDLコレステロール | `mg/dL` | |
+| 8 | 総コレステロール | `総コレステロール` | `未確認` | TC / T-Cho / 総コレステロール | `mg/dL` | v1.1「人間ドックに無ければブランク」 |
+| 9 | 中性脂肪（TG） | **派生では `中性脂肪` に統一**（★`STANDARD_MASTER` へ `中性脂肪` を新設・無修飾表記だけを alias） | `未確認` | **無修飾のみ** `中性脂肪` / `TG` / `中性脂肪(TG)` / `トリグリセライド`。**`空腹時中性脂肪` / `随時中性脂肪` は alias にしない** | `mg/dL` | **統合は `blood-subset.ts` の中だけ。§5.4 / §6.4（裁定 Q-3）** |
+| 10 | 空腹時血糖 | `空腹時血糖` | `未確認` | 空腹時血糖 / 空腹時血糖(FBS) / FBS | `mg/dL` | `血糖` / `随時血糖` は**当たらない**（仕様どおり） |
 | 11 | HbA1c | `HbA1c(NGSP)` | `HbA1c(NGSP)` (fixture 実在) | HbA1c / HbA1c(NGSP) / ヘモグロビンA1c | `%` | |
-| 12 | クレアチニン | `クレアチニン` | `要確認` | Cr / CRE / クレアチニン / クレアチニン(血清) | `mg/dL` | |
-| 13 | eGFR | `eGFR` | `要確認` | eGFR / 推算GFR / eGFRcreat | `mL/min` | **`e-GFR` は当たらない**（実測 NULL・§6.3） |
-| 14 | 尿酸（UA） | `尿酸` | `要確認` | UA / 尿酸 / 尿酸値 / 痛風 | `mg/dL` | |
-| 15 | 尿素窒素（BUN） | **なし（NULL）** | `要確認` | **当たらない** | — | **標準マスタ未収録**（§6.3 / Q-2） |
+| 12 | クレアチニン | `クレアチニン` | `未確認` | Cr / CRE / クレアチニン / クレアチニン(血清) | `mg/dL` | |
+| 13 | eGFR | `eGFR` | `未確認` | eGFR / 推算GFR / eGFRcreat / **`e-GFR`（★synonyms へ追加）** | `mL/min` | 裁定 Q-2。追加前は `normKey('e-GFR')='e-gfr'` ≠ `'egfr'` で**当たらない**（§6.3） |
+| 14 | 尿酸（UA） | `尿酸` | `未確認` | UA / 尿酸 / 尿酸値 / 痛風 | `mg/dL` | |
+| 15 | 尿素窒素（BUN） | **`尿素窒素`（★`STANDARD_MASTER` へ新規追加）** | `未確認` | 尿素窒素 / BUN / UN（★追加する synonyms） | `mg/dL` | 裁定 Q-2。golden 実在（§5.3） |
 
 ### 5.2 再現コマンド（この表の根拠）
 
@@ -442,6 +492,41 @@ npx esbuild /tmp/probe.ts --bundle --platform=node --format=esm --log-level=erro
 
 ---
 
+### 5.4 中性脂肪の正規化（裁定 Q-3・**派生 `BloodTestData` の中だけ**）
+
+> **元データの意味を書き換える処理ではない。** 15 項目による血液検査時系列表示のための
+> **派生データ**に限った写像である。
+
+| 層 | 名前 | 変えるか |
+|---|---|---|
+| `test_artifacts.scan_md`（原文） | 原本の印字どおり | **変えない** |
+| `test_artifacts.measurements`(jsonb) / `measurement_values`（`test_type='health_checkup'`） | `空腹時中性脂肪` / `随時中性脂肪` / `中性脂肪(TG)` のまま | **変えない** |
+| Elith `HealthCheckupData` | 同上 | **変えない** |
+| **派生 `measurement_values`（`test_type='blood'`）** | **`中性脂肪`** | **統合する** |
+| **派生 `BloodTestData.data.measurements[].name`** | **`中性脂肪`** | **統合する** |
+
+**`STANDARD_MASTER` の扱い（裁定どおり）**
+
+- `canonical_name: '中性脂肪'` を**新設**し、**無修飾表記だけ**を synonyms にする
+  （`TG` / `中性脂肪(TG)` / `トリグリセライド`）。
+- **`空腹時中性脂肪` と `随時中性脂肪` を `中性脂肪` の alias にしない。**
+  既存の 2 項目（`standard-master.ts:83-84`）は**そのまま残す**。
+  グローバルな alias にすると `HealthCheckupData` 側の名寄せまで変わってしまう。
+- `空腹時中性脂肪` / `随時中性脂肪` → `中性脂肪` の写像は
+  **`src/lib/blood-subset.ts` の中に明示的な表として持つ**（`findByAlias` には載せない）。
+
+```ts
+// src/lib/blood-subset.ts（実装イメージ・この 1 か所だけが統合を知る）
+// 派生 BloodTestData 専用。HealthCheckupData 側の名寄せには一切影響しない。
+const TG_SOURCES = ['空腹時中性脂肪', '随時中性脂肪', '中性脂肪'] as const; // canonical_name で突合
+```
+
+**`空腹時血糖` には同じ統合をしない。** v1.1 §5 が「『血糖』とだけ記載され、空腹時血糖と
+確認できない値は空腹時血糖へ推測マッピングしない」と明示しており、裁定でも触れられていない。
+15 項目の対象は **`空腹時血糖` だけ**で、`随時血糖` は対象外のまま（§11 E-8）。
+
+---
+
 ## 6. 欠損値仕様
 
 ### 6.1 各層が使っている欠損の表し方（実測）
@@ -459,57 +544,74 @@ npx esbuild /tmp/probe.ts --bundle --platform=node --format=esm --log-level=erro
 **→ 今回の「ブランク」は、既存のどの層でも「行・要素ごと出さない」で表現する。**
 `null` を入れた空行も、空文字も、`0` も作らない。**今回だけの独自表現は追加しない。**
 
-### 6.2 「15 項目が揃わなくても有効」の実装上の意味
+### 6.2 「15 項目が揃わなくても有効」の実装上の意味（**確定・D-6**）
 
 業務仕様 v1.1 §11 C3 の「成立判定を行わない」は、実装では
 
 - **項目数の閾値を書かない**（`if (count >= N)` を作らない）。
 - **領域の判定を書かない**（肝/脂質/糖/腎 の数を数えない）。
 
-と読む。ただし **1 件も抽出できなかった回**は、派生 artifact を作ると
-`data.measurements` が空の `BloodTestData` を Elith に渡すことになる。
-既存の `materializeHealthCheckups()` は同じ場面で
-`if (measurements.length === 0) continue;`（`elith-delivery.ts:185`）と**作らない**方を選んでいる。
-→ **0 件のときだけ作らない**を既存規律に合わせて採る。これは「成立判定」ではなく
-「空のファイルを納品しない」という既存ルールの適用。**`要確認` Q-6 として発注者確認に出す。**
+と読む。**1 件でも抽出できれば、その項目だけで派生データを作る。**
 
-### 6.3 標準マスタ未収録項目の扱い（アルブミン / 尿素窒素 / `e-GFR`）
+**0 件のときだけ、何も作らない**（発注者裁定 Q-6）。
+
+| 0 件のとき | 挙動 |
+|---|---|
+| 派生 blood artifact | **作らない** |
+| 派生 `BloodTestData` JSON | **作らない** |
+| グラフ | **何も追加しない** |
+| `health_checkup` 側 | **一切変えない**（通常どおり保存される） |
+
+> これは「○項目以上必要」という成立判定ではない。
+> **抽出できる血液値が 0 件だから何も作らない**、というだけである。
+> 既存の `materializeHealthCheckups()` も同じ場面で
+> `if (measurements.length === 0) continue;`（`elith-delivery.ts:185`）としており、規律が一致する。
+
+### 6.3 標準マスタへの 3 件の追加（**確定・裁定 Q-2**）
 
 `findByAlias()` は**正規化した完全一致のみ**（`standard-master.ts:18-20` の安全設計）。
-`normKey()`（`:49-55`）は NFKC・小文字化・`空白 / 　 / ・ / （） / ()` の除去だけで、
-**ハイフンは消さない**。したがって:
+`normKey()`（`:49-56`）は NFKC・小文字化・`空白 / 　 / ・ / （） / ()` の除去だけで、
+**ハイフンは消さない**。したがって追加前の実測は:
 
-- `アルブミン` / `Alb` → `canonical_name = null`（実測）
-- `尿素窒素` / `BUN` / `UN` → `canonical_name = null`（実測）
-- `e-GFR` → `normKey='e-gfr'` ≠ `'egfr'` → `null`（実測）
+| 表記 | `normKey` | `findByAlias` |
+|---|---|---|
+| `アルブミン` / `Alb` / `ALB` | `アルブミン` / `alb` | **NULL** |
+| `尿素窒素` / `BUN` / `UN` | `尿素窒素` / `bun` / `un` | **NULL** |
+| `e-GFR` | `e-gfr` | **NULL**（`egfr` と別キー） |
 
-`canonical_name` が null でも、`seriesKey()`（`measurement-queries.ts:313-319`）が
-**`item_name` にフォールバックする**ので**グラフには出る**。ただし
-「表記が揺れたら別系列に割れる」という既知のリスク（同ファイル `:268-283` のコメント）を負う。
+**発注者裁定: 3 件とも追加してよい。** golden に実在する（§5.3）ので、
+`STANDARD_MASTER` の明文の規律（`standard-master.ts:9-11`「代表ゴールデン検体に実在する
+標準項目だけを収録する」）に反しない。
 
-→ **恒久策は `STANDARD_MASTER` に 3 件（アルブミン / 尿素窒素 / `e-GFR` 別名）を追加すること。**
-ただし `STANDARD_MASTER` は「**代表ゴールデン検体に実在する標準項目だけ**を収録する」
-という明文の規律を持つ（`standard-master.ts:9-11`）。アルブミンと尿素窒素は
-`scan_golden_humandock_20240924.md:80,:88` / `…_20250217.md:92,:106` に実在するので
-この規律に反しない。**`e-GFR` も `…_20250217.md:106` の alt に実在する。**
-→ **追加してよいが、発注者判断事項として §14 Q-2 に出す。**
+追加する内容:
 
-### 6.4 中性脂肪（最大の論点）
+```ts
+// src/lib/standard-master.ts — STANDARD_MASTER に追加（★新規 4 件）
+{ canonical_name: 'アルブミン', synonyms: ['Alb', 'ALB'], unit: 'g/dL',
+  unit_aliases: ['g/dl'], category: '肝機能', source_std: 'starter' },
+{ canonical_name: '尿素窒素', synonyms: ['BUN', 'UN', '血中尿素窒素'], unit: 'mg/dL',
+  unit_aliases: ['mg/dl'], category: '腎機能', source_std: 'starter' },
+{ canonical_name: '中性脂肪', synonyms: ['TG', '中性脂肪(TG)', 'トリグリセライド'], unit: 'mg/dL',
+  unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },   // §5.4。空腹時/随時 は alias にしない
+// 既存 eGFR の synonyms に 'e-GFR' を足す
+```
 
-`STANDARD_MASTER` は **無修飾の `TG` / `中性脂肪` を意図的に登録していない**
-（`standard-master.ts:82`「空腹時/随時 は別項目として区別。ambiguous な『中性脂肪』単独は登録しない」）。
-これは業務仕様 v1.1 §5「『血糖』とだけ記載され、空腹時血糖と確認できない値は
-空腹時血糖へ推測マッピングしない」と**同じ思想**である。
+**注意（遡及しない）**: `canonical_name` は `measurement_values` に**書き込み時点で確定する**
+（`measurement-persist.ts:127`）。マスタに足しても**既存行の `canonical_name` は後から付かない**。
+既存データへ効かせるには再取込が要る → **§10.6 の backfill スクリプトの対象**。
 
-一方 v1.1 §4 の 15 項目は「中性脂肪 / TG / 中性脂肪 / トリグリセライド」を**1 項目**として扱う。
+### 6.4 中性脂肪（**確定・裁定 Q-3**）
 
-実在する 3 検体で表記が 3 通り（`随時中性脂肪` / `中性脂肪(TG)` / `空腹時中性脂肪`）に割れているため、
-**この 3 つを 1 系列にまとめるか、別系列のままにするかで、グラフの線の本数が変わる。**
-まとめるなら「空腹時 TG と随時 TG を同じ線に乗せる」ことになり、これは**検査値の意味を変える解釈**で、
-CLAUDE.md の「アプリは独自に分析・解釈しない」に触れる。
+**派生 `BloodTestData` の中だけで `中性脂肪` に統合する。** 写像と理由は §5.4 に全文。
 
-→ **こちらで決めない。§14 Q-3 として発注者・Wellfort へ確認に出す。**
-（デメカルが「中性脂肪」をどの修飾で出しているかが分かれば自動的に決まる＝Q-1 と連動。）
+要点だけ再掲:
+
+- `HealthCheckupData` / `scan_md` / `measurement_values(health_checkup)` は **1 文字も変えない**。
+- `STANDARD_MASTER` で `空腹時中性脂肪 = 随時中性脂肪` という alias を**作らない**。
+- 統合を知っているのは **`src/lib/blood-subset.ts` の 1 ファイルだけ**。
+
+これは「検査値の意味を書き換える」のではなく、
+**デメカル血液検査と同じ 1 本の時系列に並べるための派生表示**である（発注者判断）。
 
 ---
 
@@ -534,9 +636,9 @@ CLAUDE.md の「アプリは独自に分析・解釈しない」に触れる。
 |---|---|---|
 | 日付軸 | `test_date`（`measurement_values.test_date`）の昇順。`maxPoints=12` で末尾から切る（`measurement-queries.ts:425-428`） | **変更なし**。人間ドックの受診日がそのまま 4 点目になる |
 | 同一項目の統合 | `seriesKey()` = `canonical_name` ∥ `item_name`（`:313-319`） | **変更なし**。デメカル側と同じ `canonical_name` が付けば自動的に同じ線に乗る |
-| 通常検査との混在 | `test_type='blood'` の行はすべて同じ系列に入る | **変更なし**（派生行も `test_type='blood'` にするため） |
+| 通常検査との混在 | `test_type='blood'` の行はすべて同じ系列に入る | **変更なし**（派生行も `test_type='blood'`）。ただし**同一日は通常 blood を優先**（§10.5・D-5） |
 | 欠損値 | `value_num` が null の行は点にしない（`:428`）。行が無ければそもそも来ない | **変更なし** = 要件どおり |
-| 基準線 | **系列の最後の行**の `ref_low_num` / `ref_high_num` を使う（`:441-442`） | §7.5 に注意点 |
+| 基準線 | **系列の最後の行**の `ref_low_num` / `ref_high_num` を使う（`:441-442`） | **変更あり**。混在系列では**出さない**（§7.5・D-4） |
 
 ### 7.3 「人間ドックから抽出」の表示
 
@@ -560,7 +662,8 @@ measurement_values.source_file_kind  ('scan_md' | 'raw_csv' | null)   ← 既存
 | 検査カード（`TestResultsSection.astro`） | **出さない** | カードは種別単位で、点単位の出所を持たない |
 
 **文言は「人間ドックから抽出」で固定**（v1.1 §11 C1 の確定文言）。
-健康診断（健診）由来も `test_type='health_checkup'` で区別が付かないため同じ文言になる → **`要確認` Q-7**。
+健康診断（健診）由来も `test_type='health_checkup'` で区別が付かないため同じ文言になる。
+**これで構わない**（発注者裁定 Q-7）。
 
 ### 7.4 mobile 表示への影響
 
@@ -571,14 +674,37 @@ measurement_values.source_file_kind  ('scan_md' | 'raw_csv' | null)   ← 既存
   13px 相当の `text-sm` を使う）。
 - 実測確認は `npm run verify:screen` の系統で行う（390 / 768 / 1280）。
 
-### 7.5 既知の注意（基準線）
+### 7.5 混在系列では基準線を出さない（**確定・裁定 Q-5 / D-4**）
 
-`getMeasurementTrend()` は**系列の最後の行**から `referenceUpper` / `referenceLower` を取る（`:441-442`）。
-デメカル由来の行は `ref_*` が**全部 null**（§2.4・`BLOOD_REFERENCE` 空）なので、
-**人間ドック由来の点が最新になった回だけ、グラフに突然 基準帯が現れる**ことになる。
+`getMeasurementTrend()` は**系列の最後の行**から `referenceUpper` / `referenceLower` を取る
+（`measurement-queries.ts:441-442`）。デメカル由来の行は `ref_*` が**全部 null**
+（§2.4・`BLOOD_REFERENCE` が空）なので、**人間ドック由来の点が最新になった回だけ
+原本の基準値が系列全体の基準帯として描かれる**ことになる。
 
-値は原本どおりで捏造ではないが、**回によって基準線が出たり消えたりする**という
-利用者から見た不連続が生じる。**こちらで決めない → §14 Q-5。**
+これは「その人間ドックを実施した施設の基準値」を、デメカルで測った点にも当てはめて見せることになり、
+**誤解を生む**。
+
+> ## **確定: `blood` 系列に 2 つの出所が混在するときは、`referenceUpper` / `referenceLower` を付けない。**
+
+| 条件 | 基準線 |
+|---|---|
+| `blood` 系列の点が**すべて通常 blood** | 従来どおり（＝現状は `ref_*` が null なので元々出ない） |
+| `blood` 系列の点が**すべて派生（人間ドック由来）** | 従来どおり（原本の基準値を使ってよい） |
+| **混在している** | **出さない**（`referenceUpper` / `referenceLower` を `undefined` にする） |
+
+**点ごとの H/L は残す。** `flag` は原本（検査票 / CSV）が付けた印であって、
+アプリが基準値と比較して出したものではない（`elith-export.ts:277-282` / `measurement-queries.ts:433`）。
+`MetricTrendChart.astro` の「判定」列（`:306-315`）と点の色分け（`:166` / `:274`）はそのまま。
+
+**禁止（明文）**
+
+- デメカルの基準値を人間ドック由来の点に当てはめる。
+- 人間ドックの基準値をデメカル由来の点に当てはめる。
+- どちらかの基準値を「代表」として系列に付ける。
+
+判定の実装は `getMeasurementTrend()` の系列組み立て（`:437-444`）の中で、
+**その系列に `imported_by='derived_healthcheck_blood'` 由来の点と
+それ以外の点が両方あるか**で決める。
 
 ---
 
@@ -639,7 +765,7 @@ measurement_values.source_file_kind  ('scan_md' | 'raw_csv' | null)   ← 既存
   "source": {
     "origin": "scan-chat-ai",
     "app": "scan-chat-ai",
-    "note": "人間ドック/健康診断スキャンから対象15項目を抽出した派生データ",   // ← 要確認 Q-8
+    "note": "人間ドック・健康診断の既存AIスキャン結果から血液検査値を抽出（再解析なし）",  // ← 確定 (裁定 Q-8)
     "lab_name": null
   },
   "data": { "measurements": [ /* 抽出できた項目だけ */ ], "notes": [] }
@@ -647,11 +773,15 @@ measurement_values.source_file_kind  ('scan_md' | 'raw_csv' | null)   ← 既存
 }
 ```
 
-**`measurements[]` の要素は `leanMeasurement` の 7 フィールド**（`name / value / value_num / unit /
-ref_low / ref_high / flag`）。デメカル由来は `name_detail` / `note` / `assessment` を持つ（`elith-blood-csv.ts:262-269`）ので
-**キー構成が揃わない**。`docs/elith/elith_s3_data_handoff_spec.md` §7.1 は `name_detail` と `note` を
-含む形で定義している。→ **`要確認` Q-9**（既存 `HealthCheckupData` も同じ 7 フィールドなので、
-揃えずに現状どおりでよい可能性が高い）。
+**`measurements[]` の要素は `leanMeasurement` の 7 フィールドちょうど**
+（`name / value / value_num / unit / ref_low / ref_high / flag`）。**確定（裁定 Q-9）**:
+
+- **`name_detail` / `note` / `category` / `assessment` を今回のために新設しない。**
+- 既存の `sanitizeMeasurementsForDelivery()` / `leanMeasurement()`（`elith-export.ts:271-292`）の
+  出力をそのまま使う。**整形を二重管理しない。**
+- デメカル由来（`elith-blood-csv.ts:262-269`）が `name_detail` / `note` / `assessment` を持つのは
+  **CSV 側の事情**で、既存 `HealthCheckupData`（`elith-delivery.ts:196-215`）も 7 フィールドなので、
+  **派生 `BloodTestData` は `HealthCheckupData` と同じ形になる。Elith 側の JSON shape は変更しない。**
 
 ### 8.4 `raw_markdown`
 
@@ -660,31 +790,70 @@ ref_low / ref_high / flag`）。デメカル由来は `name_detail` / `note` / `
 `BloodTestData` の中に同梱される**ことになり、v1.1 §9「血球系・CRP・腫瘍マーカー等は
 BloodTestData に含めない」と矛盾する。→ **載せない。**
 
-### 8.5 既存の揃い判定への影響（**重要・副作用**）
+### 8.5 揃い判定から派生を外す（**確定・裁定 Q-4 / D-1**・最重要）
 
 `checkFormatsReady()`（`elith-entitlement.ts:189-198`）は
 **`test_artifacts` に `test_type='blood'` の active 行があるか**だけを見る。
+派生をそのまま作ると、**実際のデメカル血液検査が届く前に
+`BloodTestData` が「揃った」と判定され、Elith 納品が発火し得る**。
 
-→ **派生の血液 artifact を作ると、コースプラン契約者の `BloodTestData` が
-「揃った」と判定され、実際のデメカル血液検査が届く前に Elith 納品が発火し得る。**
+毎晩 23:00 JST の cron（`vercel.json` `0 14 * * *` → `api/cron/elith-deliver.ts:61`）が
+`skipDelivered:true` で走るため、**その回の納品が 1 度成立すると、後からデメカルが届いても
+同じ `bundle_date` では再送されない**（`elith_deliveries` の unique・`20260924000010:41`）。
 
-毎晩 23:00 JST の cron（`vercel.json` `0 14 * * *` → `src/pages/api/cron/elith-deliver.ts:61`）が
-`skipDelivered:true` で走るので、**その回の納品が 1 度成立すると、後からデメカルの血液が届いても
-同じ `bundle_date` では再送されない**（`elith_deliveries` の unique）。
+> ## **確定: 派生 blood は readiness に数えない。納品データには含める。**
+>
+> この 2 つを混同しない。
+> **年 3 回のデメカル ＋ 人間ドック由来 1 回**が業務要件であり、
+> **派生は通常血液検査の代替ではない。**
 
-これは**業務仕様 v1.1 の範囲外の副作用**なので、こちらで決めない。→ **§14 Q-4**（最重要）。
-取り得る形は 2 つ（**どちらを採るかは発注者判断**）:
+**実装（最小変更）**
 
-- **(a)** `FORMAT_SOURCE.BloodTestData` の判定を「`source != 'user_upload'` の blood 行」に絞る
-  （＝派生は揃い判定に数えない）。
-- **(b)** 派生 artifact を `test_type='blood'` で作らない（§9.3 の代替案 B を採る）。
+`elith-entitlement.ts` の `checkFormatsReady()` で、`test_artifacts` を引くときに
+`imported_by` も select し、**`BloodTestData` の判定に使う行からだけ**
+`imported_by === 'derived_healthcheck_blood'` を落とす。
 
-### 8.6 同一 `test_date` の衝突
+```text
+現在 (elith-entitlement.ts:189-198)
+  .select('diagnostic_user_id, test_type')
+  .eq('status','active').in('test_type', neededTypes).in('diagnostic_user_id', clean)
+  → have[uid].add(test_type)
 
-納品キーは `{format}_date_{bd}_user_{uid}.json` で **1 日 1 format 1 ファイル**。
-同じ日にデメカル血液と人間ドックがあると**後勝ちで 1 件消える**。
-これは既存の未解決事項として `docs/elith/elith_s3_data_handoff_spec.md` §5.4 が
-「**要確認(Elith)**」としてすでに挙げている論点。→ **§14 Q-10**。
+変更後
+  .select('diagnostic_user_id, test_type, imported_by')
+  …
+  → test_type === 'blood' かつ imported_by === DERIVED_HC_BLOOD_IMPORTED_BY なら add しない
+```
+
+**守ること（発注者の明示指示）**
+
+- **`source='user_upload'` 全体を除外しない。**
+  将来「利用者が血液検査の紙をスキャンする」経路ができたとき、それを誤って排除するため。
+- 除外は **`imported_by` の完全一致 1 本**。部分一致・前方一致にしない。
+- **`blood` 以外の format の判定は 1 文字も変えない**（health_checkup / cancer_urine /
+  genetics / ai_prediction / interview）。
+- **納品側（`assembleElithDeliverySet`）からは外さない。** readiness が通った回の
+  納品セットには、派生 `BloodTestData` を**含める**。
+
+### 8.6 同一 `test_date` は通常 blood を優先（**確定・裁定 Q-10 / D-5**）
+
+納品キーは `{format}_date_{bd}_user_{uid}.json` で **1 日 1 format 1 ファイル**
+（`elith-assemble.ts:496`）。同じ日に通常 blood と派生 blood があると**後勝ちで 1 件消える**。
+
+> ## **確定: 同一ユーザー・同一 `test_date` では通常 blood を優先する。**
+> Dashboard でも Elith 納品でも、**同一日に 2 つの `BloodTestData` を並べない**。
+> **派生が通常血液を上書きしてはいけない。**
+> **通常 blood が後から到着した場合も、最終的に通常 blood が勝つ**こと。
+
+実装は §10.5 に書く（**最小変更**・現行構造のまま）。要点だけ:
+
+| 面 | 優先のかけ方 |
+|---|---|
+| **S3（Elith source）** | 派生 JSON を**書く前に**、同じ `date` に通常由来の `BloodTestData` が在るか見て、在れば**書かない**（`materializeDerivedBloodTests` の中） |
+| **DB / Dashboard** | 派生 artifact を作る前に、同じ `(uid, 'blood', test_date)` に**派生でない** active 行が在れば**作らない**。既に派生が在るところへ通常が届いたら**派生を `superseded` に落とす** |
+
+`docs/elith/elith_s3_data_handoff_spec.md` §5.4 が同種の論点を
+「**要確認(Elith)**」として挙げているが、**本件については発注者が上記のとおり裁定済み**。
 
 ---
 
@@ -703,6 +872,7 @@ BloodTestData に含めない」と矛盾する。→ **載せない。**
 | 血液として扱う回の行 | `test_artifacts.test_type` の CHECK に `'blood'` が既にある（`20260601000010_schemas_and_tables.sql:192-193`） |
 | 利用者スキャン由来という印 | `test_artifacts.source` の CHECK に `'user_upload'` が既にある（`20260927000010_test_artifacts_source_admin_batch.sql:30-32`）。**`user_upload` × `blood` を insert するコードが現状どこにも無い**（§2.5・コードの実測。Production DB の実データは未確認＝Q-14）ので、この組み合わせ自体が「人間ドック由来の血液」を一意に表せる |
 | 測定値の出所 | `measurement_values.source_file_kind`（`20260820000010_measurement_values.sql:61`）。スキャン由来は `'scan_md'`、デメカル CSV は `'raw_csv'` |
+| **派生であることの印（D-2）** | **`test_artifacts.imported_by`**（`20260601000010:204`）。**`text not null` で CHECK が無い**ので、`'derived_healthcheck_blood'` を migration なしで入れられる。`grep -n imported_by supabase/migrations/*.sql` が返すのはこの 1 行だけ |
 | 元データの保持 | `test_artifacts.measurements`(jsonb) と `scan_md` は **health_checkup の artifact 側に在り、派生とは別行**。上書きされない |
 | 冪等 | `replaceSameDateArtifacts()` が (uid, test_type, test_date, source) で既存行を片付ける（`scan-persist.ts:81-130`） |
 | Elith 納品の冪等 | `diagnosis.elith_deliveries`（既存） |
@@ -715,12 +885,41 @@ BloodTestData に含めない」と矛盾する。→ **載せない。**
 | **B** | 派生行を作らず、`getMeasurementTrend()` が `testType==='blood'` のとき `health_checkup` 行の 15 項目も読む（読み出し時の派生） | **DB も Elith も一切増えない**という長所がある一方、① `TestResultsSection.astro:100` の `canGraph` は artifact 件数で決まるので**血液カードの「グラフ」ボタンが出ない** ② Elith に `BloodTestData` を出せない（v1.1 §8 を満たせない） ③ `/result/[id]` の「読み取り結果」にも出ない。**要件を満たせないので不採用。ただし §8.5 Q-4 の回答次第では再検討の余地がある** |
 | **C** | 既存 health_checkup artifact の `measurement_values` に `test_type='blood'` の行を**追加**する | `persistMeasurements()` は artifact 単位で **delete → insert の総入れ替え**（`measurement-persist.ts:116-122`）で、`testType` は呼び出し 1 回につき 1 つ（`:132`）。**既存の唯一の書き込み口を壊さないと実現できない**ので不採用 |
 
-### 9.4 もし Q-2（標準マスタ追加）が「追加する」になった場合
+### 9.4 標準マスタ追加（裁定 Q-2）も migration を伴わない
 
-`src/lib/standard-master.ts` の `STANDARD_MASTER` 配列に 3 件を足すだけで、**DB 変更は発生しない**。
-ただし `canonical_name` は `measurement_values` に**書き込み時点で確定**する（`measurement-persist.ts:127`）ので、
-**既存行の `canonical_name` は遡って付かない**。既存データにも効かせるなら
-再取込（`persistIntoExistingArtifact`・`scan-persist.ts:378-`）が要る。→ **§14 Q-11**。
+`src/lib/standard-master.ts` の `STANDARD_MASTER` 配列に 4 件（アルブミン / 尿素窒素 / 中性脂肪 /
+`eGFR` の `e-GFR` alias）を足すだけで、**DB 変更は発生しない**。
+
+ただし `canonical_name` は `measurement_values` に**書き込み時点で確定する**
+（`measurement-persist.ts:127`）ので、**既存行には遡って付かない**。
+既存データに効かせるのは **§10.6 の backfill スクリプトの役目**で、
+**通常の新規スキャン経路の実装とは分離する**（裁定 Q-11）。
+
+### 9.5 Production 適用前の read-only 確認（**裁定 Q-14・必須**）
+
+**実装開始の blocker ではないが、production deployment 前の必須チェックとする。**
+
+```sql
+-- ① 既存の user_upload × blood（コード上は作られないはずの組み合わせ）
+select id, diagnostic_user_id, test_date, imported_by, source, status
+  from diagnosis.test_artifacts
+ where source = 'user_upload' and test_type = 'blood';
+
+-- ② 'derived_healthcheck_blood' の先行使用が無いこと
+select count(*) from diagnosis.test_artifacts
+ where imported_by = 'derived_healthcheck_blood';
+
+-- ③ 同一日に blood が 2 件以上ある利用者（§8.6 / §10.5 の前提確認）
+select diagnostic_user_id, test_date, count(*)
+  from diagnosis.test_artifacts
+ where test_type = 'blood' and status = 'active'
+ group by 1,2 having count(*) > 1;
+```
+
+- **read-only で実行する。**
+- **既存行を勝手に削除・supersede してはいけない。**
+- ① が 1 件でも在れば、§10.2 の冪等キーが**それを巻き込む**ので、
+  発注者へ報告して扱いを確認してから deploy する。
 
 ---
 
@@ -739,11 +938,18 @@ BloodTestData に含めない」と矛盾する。→ **載せない。**
 
 ### 10.2 今回の冪等（**新しい方式を作らない**）
 
-派生 artifact も**同じ `replaceSameDateArtifacts` を使う**。キーは
+派生 artifact も**同じ `replaceSameDateArtifacts` を使う**。ただし
+**`imported_by` でさらに絞る**（`source='user_upload'` だけでは、将来の実血液 user upload 経路を
+巻き込むため・D-1 と同じ理由）。
 
 ```text
-(diagnostic_user_id, test_type='blood', test_date=<人間ドックの受診日>, source='user_upload')
+(diagnostic_user_id, test_type='blood', test_date=<人間ドックの受診日>,
+ source='user_upload', imported_by='derived_healthcheck_blood')
 ```
+
+`replaceSameDateArtifacts()`（`scan-persist.ts:81-130`）は現在
+`(uid, test_type, test_date, source)` の 4 条件で引いている（`:95-98`）。
+**`importedBy` を任意の 5 つ目の条件として足す**（渡されなければ従来どおり＝既存 2 呼び出しは不変）。
 
 - 同じ PDF を再スキャン → 同じ受診日 → **既存の派生行を消してから入れ直す**＝増えない。
 - 測定値も `persistMeasurements` の総入れ替えで増えない。
@@ -769,6 +975,42 @@ BloodTestData に含めない」と矛盾する。→ **載せない。**
 → **派生側は独自に日付を決めない。`saveScanResult` が確定した `testDate` をそのまま使う。**
 差し戻された回（`blocked`）は **health_checkup を保存していない**ので、派生も作らない。
 
+### 10.5 同一日の優先（**確定・裁定 Q-10 / D-5**）
+
+**通常 blood が常に勝つ。** 「通常 blood」＝ `test_type='blood'` かつ
+`imported_by !== 'derived_healthcheck_blood'` の active 行（デメカル・検査機関・admin バッチ）。
+
+| 起きる順序 | 挙動 |
+|---|---|
+| 通常 blood が先に在る → 人間ドックをスキャン | **派生 artifact を作らない**。S3 にも派生 `BloodTestData` を書かない。「通常があるので派生は作らなかった」ことは**黙らせず**呼び出し元へ理由として返す |
+| 派生が先に在る → 通常 blood が後から届く | **派生を `superseded` に落とす**。`measurement_values` は artifact の `status` で読み分けられる（`measurement-queries.ts:156-174`）ので、グラフからも自動的に消える。**削除はしない**（監査のため） |
+| 同日に通常が 2 件 | 本件の対象外。既存の挙動のまま |
+
+**「後から届く」側の実装位置**: 通常 blood の artifact を作る既存の 2 経路
+（`api/admin/lab-results/upload.ts:102-115` / `register.ts:179-191`）で、
+**insert のあとに同じ `(uid, 'blood', test_date)` の派生行を `superseded` に落とす**。
+
+- **最小変更**にするため、この処理は `src/lib/blood-subset.ts` に
+  `supersedeDerivedBloodOnSameDate(uid, testDate)` として 1 本だけ置き、2 経路から呼ぶ。
+- **通常 blood の行には一切触らない。** 触るのは `imported_by='derived_healthcheck_blood'` の行だけ。
+- 失敗しても通常 blood の取り込みは成功のまま返す（既存の fail-safe の流儀）。
+
+### 10.6 既存データへの backfill（**確定・裁定 Q-11**）
+
+**通常の新規スキャン経路の実装とは完全に分離する。**
+
+| 条件 | 内容 |
+|---|---|
+| 置き場所 | `scripts/backfill-derived-blood.mjs`（`scripts/*.mjs` の既存流儀・追加依存なし） |
+| **既定は dry-run** | **引数なしで実行したら絶対に書かない。** `--apply` を明示したときだけ書く |
+| 自動実行しない | **cron に載せない**（`vercel.json` の `crons` に足さない）。GitHub Actions にも載せない |
+| 表示 | 対象件数・uid・`test_date`・抽出できる項目数・**作る/作らない の理由**を 1 回分ずつ出す |
+| production | **発注者の明示的な実行指示があるまで production では実行しない** |
+| 既存行 | **削除・supersede しない**（§10.5 の「通常が後から届いた」ケースを除く。backfill はそれを行わない） |
+| 冪等 | `--apply` を 2 回流しても増えない（§10.2 と同じキー） |
+
+
+
 ---
 
 ## 11. 異常系
@@ -779,17 +1021,21 @@ BloodTestData に含めない」と矛盾する。→ **載せない。**
 | E-2 | 総コレステロールが無い | E-1 と同じ。**他の脂質から計算しない** |
 | E-3 | 尿素窒素が無い | E-1 と同じ。**クレアチニンから推定しない** |
 | E-4 | 複数項目が無い | E-1 と同じ。**件数で無効化しない** |
-| E-5 | 15 項目が 1 件も取れない | **派生 artifact を作らない**（§6.2・`要確認` Q-6） |
+| E-5 | 15 項目が 1 件も取れない | **派生 artifact も JSON も作らず、グラフにも何も足さない**（§6.2・D-6）。`health_checkup` 側は通常どおり保存される |
 | E-6 | 単位が無い | `unit=null` のまま格納（既存どおり・`leanMeasurement`）。**マスタから補完しない**（`scan.canonicalize` が off のため。§11.1） |
 | E-7 | 数値化できない値（`127/82`・`陰性` 等） | `value_num=null`。**行は残る**（`elith-export.ts:489` は value があれば残す）が、**グラフには点が出ない**（`measurement-queries.ts:434`）。15 項目はすべて数値項目なので通常は起きない |
-| E-8 | OCR 結果が曖昧（`血糖` のみ・`中性脂肪` のみ） | **`findByAlias` が当たらない**＝推測マッピングしない（v1.1 §5）。15 項目の対象外として扱う。§14 Q-3 の結論に従う |
-| E-9 | 同一項目が複数行ある（同名別値） | `observation-dedup`（`src/lib/observation-dedup.ts`・app_config `scan.obs_dedup` 既定 on）が**同値だけ統合し、別値は競合として残す**。**自動採用しない**のが既存仕様。→ 抽出側も**自動で 1 つ選ばない**。`要確認` Q-12 |
+| E-8 | OCR 結果が曖昧（`血糖` のみ） | **推測マッピングしない**（v1.1 §5）。`血糖` / `随時血糖` は 15 項目の対象外。**`空腹時血糖` だけが対象** |
+| E-8b | `中性脂肪` / `TG` / `中性脂肪(TG)`（無修飾） | **対象**。`STANDARD_MASTER` の `中性脂肪` に当たる（§6.3）。派生では `中性脂肪` として出す |
+| E-8c | `空腹時中性脂肪` / `随時中性脂肪` | **対象**。派生の中だけで `中性脂肪` へ統合（§5.4）。`HealthCheckupData` 側は元の名前のまま |
+| E-9 | 同一受診日・同一対象項目に**異なる値が複数**あり、既存ロジックで一意に確定できない | **その項目だけ派生 `BloodTestData` から除外する**（裁定 Q-12）。**推測で片方を選ばない。** 他の正常に確定できた項目は通常どおり出す＝**受診日ごと無効にはしない**。`observation-dedup`（`src/lib/observation-dedup.ts`・app_config `scan.obs_dedup` 既定 on）が「同値だけ統合し、別値は競合として残す」のと同じ規律。除外した項目は**黙って消さず**、呼び出し元へ理由つきで返して監査に出す |
 | E-10 | 同一受診日に複数の人間ドック結果 | `replaceSameDateArtifacts` が後勝ちで差し替える（既存・§10.1）。**派生も同じ挙動**になる |
 | E-11 | 受診日不明 | §10.4。`date_source='today'` の回は health_checkup と同じ日付を共有する |
 | E-12 | 再アップロード | §10.2。増えない |
-| E-13 | 再 AI スキャン | §10.2。増えない。**PDF の再解析は起きない**（派生は DB の `scan_md` / `measurement_values` から作る） |
+| E-13 | 再 AI スキャン | §10.2。増えない。**PDF の再解析は起きない**（派生は `saveScanResult` が既に作った lean measurements から作る。OCR / LLM を 1 度も呼ばない） |
 | E-14 | Elith 納品済みデータの再処理 | `elith_deliveries` の unique + `skipDelivered`。同じ `bundle_date` では再送されない。**S3 は同一キーへの上書き**なので内容は最新になる |
-| E-15 | 同じ日にデメカル血液と人間ドックがある | **Elith 納品ファイルが衝突する**（§8.6）。`要確認` Q-10 |
+| E-15 | 同じ日に通常 blood と人間ドックがある | **通常 blood を優先**（§8.6 / §10.5・D-5）。派生は作らない／既に在れば `superseded` に落とす。**同一日に 2 つの `BloodTestData` を並べない** |
+| E-17 | 派生だけの `blood` 系列 ／ 通常だけの系列 | 基準線は従来どおり。**混在している系列のときだけ基準線を出さない**（§7.5・D-4） |
+| E-18 | `imported_by='derived_healthcheck_blood'` の行が readiness に混ざる | **混ざらない。** `checkFormatsReady()` が `BloodTestData` の判定からだけ除外する（§8.5・D-1）。他 format の判定は不変 |
 | E-16 | 派生の生成だけ失敗 | **health_checkup の保存は成功のまま返す**（§10.3）。次回のスキャン送信・admin の再実行で回復する |
 
 ### 11.1 単位について（補足・実測）
@@ -805,83 +1051,142 @@ BloodTestData に含めない」と矛盾する。→ **載せない。**
 
 > **形式は既存の `verify:*` にそろえる**（`npm run verify:trend-series` / `verify:measurement-status` と同型。
 > サーバも鍵も要らない純ロジック＋スタブ）。新設は `npm run verify:blood-subset`。
-> ブラウザが要るもの（Case I）は `npm run verify:screen` 側に足す。
+> ブラウザが要るもの（Case I / N）は `npm run verify:screen` 側に足す。
 
 共通の前提:
 
-- 利用者 `U`。デメカル血液が 2026-01 / 2026-04 / 2026-10 の 3 回（`test_type='blood'` / `source='wellfort_lab'`）。
+- 利用者 `U`。通常の血液検査（デメカル）が 2026-01-10 / 2026-04-10 / 2026-10-10 の 3 回
+  （`test_type='blood'` / `source='wellfort_lab'` / `imported_by='wellfort_admin_upload'`）。
 - 人間ドック `2026-07-15`（`test_type='health_checkup'` / `source='user_upload'`）。
+
+### 12.1 ケース
 
 | ID | 入力 | 期待 DB | 期待 Dashboard | 期待 Elith JSON |
 |---|---|---|---|---|
-| **A** | 15 項目すべて印字された人間ドック | `test_artifacts` に `(U, blood, 2026-07-15, user_upload)` が **1 行**。`measurement_values` に **15 行**（`test_type='blood'` / `source_file_kind='scan_md'`）。health_checkup 側の行は**不変** | `/trend?type=blood` の 15 項目すべてに 2026-07-15 の点が乗る | `BloodTestData_date_2026_07_15_user_U.json` の `data.measurements.length === 15` |
+| **A** | 15 項目すべて印字された人間ドック | `test_artifacts` に `(U, blood, 2026-07-15, user_upload, **imported_by='derived_healthcheck_blood'**)` が **1 行**。`measurement_values` に **15 行**（`test_type='blood'` / `source_file_kind='scan_md'`）。health_checkup 側の行は**不変** | `/trend?type=blood` の 15 項目すべてに 2026-07-15 の点が乗る | `BloodTestData_date_2026_07_15_user_U.json` の `data.measurements.length === 15`。各要素のキーが**7 つちょうど**。`source.note` が確定文言 |
 | **B** | 総コレステロールだけ無い | `measurement_values` **14 行**。総コレステロールの行は**存在しない**（null 行も 0 の行も作らない） | 総コレステロールのグラフは 2026-04 → 2026-10 で結ばれ、**2026-07 に点が無い**。他 14 項目には点がある | `measurements` に `総コレステロール` を**含まない**（`"value": null` も出さない） |
-| **C** | 尿素窒素だけ無い | B と同型（14 行） | B と同型 | B と同型 |
+| **C** | 尿素窒素だけ無い | B と同型（14 行）。**`canonical_name='尿素窒素'` が付く**（§6.3 の追加後） | B と同型 | B と同型 |
 | **D** | 13 項目側の 1 つ（例: γ-GTP）が無い | 14 行。**受診日ごと無効化されない** | γ-GTP だけ点が抜け、残り 14 項目には点がある | 14 項目 |
 | **E** | 総コレステロール + 尿素窒素 + γ-GTP + ALT の 4 つが無い | 11 行 | 11 項目に点・4 項目に点なし。**受診日は有効** | 11 項目 |
 | **F** | クレアチニンあり / eGFR なし | eGFR の行が**無い**。**クレアチニンから計算した行が作られていないこと**を明示的に検査する | eGFR のグラフに 2026-07 の点が無い | `eGFR` を含まない |
-| **G** | 同じ PDF をもう一度送信 | **artifact が増えない**（`(U, blood, 2026-07-15, user_upload)` は 1 行のまま）。`measurement_values` も同数。`seq` が振り直される | 点が二重に出ない | 同じキーへの上書き。`elith_deliveries` に 2 行目を作らない |
-| **H** | A の状態で `/trend?type=blood` | — | 1 系列に **4 点**（2026-01 / 04 / **07** / 10）。順序は日付昇順 | — |
+| **G** | 同じ PDF をもう一度送信 | **artifact が増えない**（冪等キー 5 条件・§10.2）。`measurement_values` も同数。`seq` が振り直される | 点が二重に出ない | 同じキーへの上書き。`elith_deliveries` に 2 行目を作らない |
+| **H** | A の状態で `/trend?type=blood` | — | 1 系列に **4 点**（2026-01-10 / 04-10 / **07-15** / 10-10）。日付昇順 | — |
 | **I** | H の状態で拡大モーダルを開く | — | 測定履歴テーブルの **2026年7月15日の行にだけ**「人間ドックから抽出」。他 3 行には出ない。390 / 768 / 1280 で横スクロールが出ない | — |
-| **J** | `deliverReadySpecialAccounts()` を実行 | `elith_deliveries` に 1 行 | — | 納品先に `user/U/date/2026_07_15/BloodTestData_date_2026_07_15_user_U.json` が在る。**同じ日付フォルダの `HealthCheckupData_...json` も残っている**（上書き・削除されていない）。`raw_markdown` が**無い** |
+| **J** | `deliverReadySpecialAccounts()` を実行 | `elith_deliveries` に 1 行 | — | 納品先に `user/U/date/2026_07_15/BloodTestData_date_2026_07_15_user_U.json` が在る。**同じ日付フォルダの `HealthCheckupData_...json` も残っている**。`raw_markdown` が**無い** |
 
-### 12.1 退行注入（**落ちることを確認する**）
+### 12.2 発注者裁定に対応するケース（**6 点を機械で固定する**）
+
+| ID | 対応 | 入力 | 期待 |
+|---|---|---|---|
+| **K** | **D-1**（readiness） | 通常 blood が 1 件も無い `U2` が人間ドックをスキャン。プランの required_formats に `BloodTestData` を含む | `checkFormatsReady([U2])` が **`ready:false`** を返し、`missing` に **`BloodTestData`** が入る。派生 artifact は**存在する**（作られている） |
+| **K-2** | **D-1**（他 format を壊さない） | 同上 | `HealthCheckupData` / `LifestyleQuestionnaireData` / `CancerRiskAssessmentData` / `GeneticTestResultData` / `Other` の判定が**除外前と 1 件も変わらない** |
+| **K-3** | **D-1**（将来経路を巻き込まない） | `source='user_upload'` / `test_type='blood'` / **`imported_by='user'`**（＝将来の実血液 user upload を模した行） | **readiness に数えられる**（`ready:true`）。`source` で除外していないことの証明 |
+| **L** | **D-2**（識別子） | A の状態 | 派生行の `imported_by === 'derived_healthcheck_blood'`。**`source` は `'user_upload'`**。**migration が 1 本も増えていない**（`supabase/migrations/` の件数が実装前後で同じ） |
+| **M** | **D-3**（中性脂肪） | 人間ドックに `随時中性脂肪 221` のみ | 派生 `measurement_values` / `BloodTestData` の name が **`中性脂肪`**。**health_checkup 側の `measurement_values.item_name` は `随時中性脂肪` のまま**。`HealthCheckupData` JSON も `随時中性脂肪` のまま |
+| **M-2** | **D-3**（マスタを壊さない） | — | `findByAlias('空腹時中性脂肪').canonical_name === '空腹時中性脂肪'`、`findByAlias('随時中性脂肪').canonical_name === '随時中性脂肪'`、`findByAlias('中性脂肪').canonical_name === '中性脂肪'`。**3 つが別々**であること |
+| **M-3** | **D-3**（同一日に両方あったら） | 人間ドックに `空腹時中性脂肪 54` と `随時中性脂肪 221` が**両方**ある | **値が 2 つで確定できない** → **E-9 と同じ扱いで `中性脂肪` を派生から除外**。他項目は通常どおり |
+| **N** | **D-4**（基準線） | A の状態（通常 3 点は `ref_*` が null・派生 1 点に原本基準値あり） | `getMeasurementTrend(U, [...], 12, 'blood')` の各系列で **`referenceUpper` / `referenceLower` が `undefined`**。**点ごとの `flag` は残る** |
+| **N-2** | **D-4**（混在でなければ出す） | 派生 1 件だけ（通常 blood なし）で 2 回ぶん | `referenceUpper` / `referenceLower` が**付く**（従来どおり） |
+| **O** | **D-5**（同一日優先・先に通常） | `2026-07-15` に通常 blood が既にある状態で人間ドック `2026-07-15` をスキャン | **派生 artifact が作られない**。S3 に派生 `BloodTestData` が**書かれない**。理由が呼び出し元へ返る。通常 blood は**無傷** |
+| **O-2** | **D-5**（同一日優先・後から通常） | 派生 `2026-07-15` がある状態で通常 blood `2026-07-15` が届く | 派生が **`superseded`**（**削除ではない**）。通常 blood は `active`。グラフの 2026-07-15 の点が**通常の値**になる |
+| **P** | **D-6**（0 件） | 15 項目が 1 つも無い人間ドック（例: 画像検査だけの紙） | 派生 artifact **0 行**・`BloodTestData` **作られない**・`/trend?type=blood` に変化なし。**health_checkup の artifact と測定値は通常どおり保存される** |
+| **Q** | **Q-12**（競合） | 同一受診日に `尿酸 5.9` と `尿酸 7.2` が確定できずに残っている | **尿酸だけ**が派生から除外される。他 14 項目は出る。除外理由が監査に出る |
+| **R** | **Q-11**（backfill） | `scripts/backfill-derived-blood.mjs` を**引数なし**で実行 | **DB に 1 行も書かない**。対象件数と「作る予定の内容」だけを出力する。`--apply` を付けたときだけ書き、2 回流しても増えない |
+| **S** | **Q-13**（admin 対象外） | admin バッチ（`/api/admin/elith-scan` の `HealthCheckupData`）で人間ドックを取り込む | **派生 blood が作られない**（今回の対象外）。`persistAdminBatchArtifact` の挙動が**実装前と 1 バイトも変わらない** |
+
+### 12.3 merge 前の受入条件（コードでは閉じられないもの）
+
+| ID | 条件 | 誰が |
+|---|---|---|
+| **AC-1** | **現行デメカル CSV の実ヘッダ 15 件と §5.1 の mapping が一致すること**（裁定 Q-1）。CSV ヘッダの `項目名N` セルの標準名を実物で確認する。**一致しない名称が見つかったら §5.1 を実測値へ直してから merge する** | Wellfort から現行 CSV を受領して確認 |
+| **AC-2** | **Production の read-only 確認**（§9.5・裁定 Q-14）。`source='user_upload' AND test_type='blood'` の既存行、`imported_by='derived_healthcheck_blood'` の先行使用、同一日 blood 重複 | deployment 前 |
+| **AC-3** | **backfill は発注者の明示指示まで production で実行しない**（裁定 Q-11） | 運用 |
+
+### 12.4 退行注入（**落ちることを確認する**）
 
 既存の `verify:*` の流儀（CLAUDE.md「退行注入で落ちることを確認済み」）にそろえる。
 
 | # | 注入する壊し方 | 落ちるべき検査 |
 |---|---|---|
-| R-1 | 欠損項目に `value: "0"` を入れる | Case B/C/D/E |
-| R-2 | eGFR をクレアチニンから計算して補う | Case F |
+| R-1 | 欠損項目に `value: "0"` を入れる | B / C / D / E |
+| R-2 | eGFR をクレアチニンから計算して補う | F |
 | R-3 | `findByAlias` を部分一致に緩める（`総蛋白` が `尿蛋白` に当たる等） | 抽出の誤マップ検査 |
-| R-4 | `replaceSameDateArtifacts` の呼び出しを外す | Case G |
-| R-5 | 派生 artifact の `source` を `'wellfort_lab'` にする | 「デメカル由来を巻き込んで消さない」検査 |
-| R-6 | `raw_markdown` を派生 BloodTestData に載せる | Case J |
+| R-4 | 冪等キーから `imported_by` を外す（`source` だけで消す） | G / K-3 |
+| R-5 | 派生 artifact の `source` を `'wellfort_lab'` にする | L |
+| R-6 | `raw_markdown` を派生 `BloodTestData` に載せる | J |
 | R-7 | 15 項目のマスタに `随時血糖` を足す | 「15 項目以外を足さない」検査（v1.1 §12） |
-| R-8 | `measurement-queries.ts` の select から `source_file_kind` を外す | Case I |
-| R-9 | health_checkup 側の `measurement_values` を派生生成時に消す | Case A の「health_checkup 側は不変」 |
+| R-8 | `measurement-queries.ts` の select から `source_file_kind` を外す | I |
+| R-9 | health_checkup 側の `measurement_values` を派生生成時に消す | A の「health_checkup 側は不変」 |
+| **R-10** | **readiness の除外を消す**（`checkFormatsReady` を元に戻す） | **K** |
+| **R-11** | **readiness の除外を `source='user_upload'` ベースにする** | **K-3** |
+| **R-12** | **`STANDARD_MASTER` に `空腹時中性脂肪 → 中性脂肪` の alias を足す** | **M-2** |
+| **R-13** | **派生生成で health_checkup 側の `item_name` も `中性脂肪` に書き換える** | **M** |
+| **R-14** | **混在系列でも `referenceUpper` を付ける** | **N** |
+| **R-15** | **同一日の優先を外す（派生を無条件に作る）** | **O** |
+| **R-16** | **0 件でも空の artifact / JSON を作る** | **P** |
+| **R-17** | **競合項目を「先に出てきた方」で確定する** | **Q** |
+| **R-18** | **backfill の既定を `--apply` にする** | **R** |
+| **R-19** | **`persistAdminBatchArtifact` からも派生を作る** | **S** |
 
 ---
 
-## 13. 実装順序（提案）
+## 13. 実装順序
 
-> **§14 の `要確認` が解消してから着手する。** とくに Q-1 / Q-3 / Q-4 は
-> 実装の形そのものを変えるので、**回答前に書き始めない**。
+> **§14 の裁定はすべて確定済み。着手してよい。**
+> AI スキャン／OCR／LLM の再解析処理は**一切追加しない**（v1.1 §3 / 裁定 §14 共通）。
 
 | 段 | 内容 | 検証 |
 |---|---|---|
-| P-0 | `src/lib/blood-subset.ts`（15 項目マスタ + 抽出・**I/O 無しの純関数**） | `npm run verify:blood-subset`（新設） |
-| P-1 | 派生 artifact の生成を `saveScanResult` の後段に足す | 同上 + `npm run verify:scan-persist` |
-| P-2 | `measurement-queries.ts` に `source_file_kind` を通す（型 + select） | `npm run verify:trend-series` に追加 |
-| P-3 | `MetricTrendChart.astro` に「人間ドックから抽出」 | `npm run verify:screen` に追加 |
-| P-4 | `materializeDerivedBloodTests()` + `manualMapping` への追加 | `npm run verify:blood-subset` に Case J |
-| P-5 | （Q-2 が「追加する」なら）`STANDARD_MASTER` に 3 件 | `npm run check` / 既存 `verify:*` 全通し |
+| P-0 | `src/lib/standard-master.ts` に 4 件追加（アルブミン / 尿素窒素 / 中性脂肪 / `e-GFR` alias）＝§6.3 | `npm run check` + M-2 |
+| P-1 | `src/lib/blood-subset.ts`（15 項目マスタ・抽出・中性脂肪統合・競合除外。**I/O 無しの純関数**） | `npm run verify:blood-subset`（新設）A〜F / M / M-3 / P / Q |
+| P-2 | `replaceSameDateArtifacts` に任意の `importedBy` 条件、派生 artifact の生成を `saveScanResult` 後段へ（§10.2 / §10.5 の「先に通常」側） | 同上 + `npm run verify:scan-persist` + G / L / O |
+| P-3 | `elith-entitlement.ts` の readiness 除外（§8.5） | K / K-2 / K-3 |
+| P-4 | `measurement-queries.ts` + `dashboard-queries.ts` に `source` を通す／混在系列の基準線抑止（§7.5） | `npm run verify:trend-series` + H / N / N-2 |
+| P-5 | `MetricTrendChart.astro` に「人間ドックから抽出」（§7.3） | `npm run verify:screen` + I |
+| P-6 | `materializeDerivedBloodTests()` ＋ `manualMapping` へ `BloodTestData`（§8.2 / §8.6） | `verify:blood-subset` に J |
+| P-7 | 「通常が後から届いた」側の supersede（`lab-results/upload.ts` / `register.ts`・§10.5） | O-2 |
+| P-8 | `scripts/backfill-derived-blood.mjs`（**dry-run 既定**・§10.6） | R |
 
 各段で `npm run check`（`astro check`）と `npm run build` が通ること。
 CI（`.github/workflows/ci.yml`）の `static-required` に `verify:blood-subset` を足す。
 
+**admin バッチ経路（`persistAdminBatchArtifact` / `/api/admin/elith-scan` / `elith-hc-merge`）は
+今回の対象外**（裁定 Q-13）。**拡張しない。**
+
 ---
 
-## 14. 要確認事項
+## 14. 発注者裁定（**全 14 件 確定済み・2026-10-01**）
 
-> **ここに挙げたものは、業務仕様 v1.1 にも実コードにも答えが無い。勝手に決めない。**
+> v1.0（`01fb51e`）で `要確認` として隔離した Q-1〜Q-14 を、発注者が全件裁定した。
+> **本書に未確定事項は残っていない。** 各裁定の反映先を右端に書く。
 
-| # | 内容 | なぜ決められないか | 決まらないと何が困るか |
+| # | 論点 | **確定した内容** | 反映先 |
 |---|---|---|---|
-| **Q-1** | **デメカルが出している 15 項目の CSV ヘッダ標準名の一次資料** | CSV は自己記述型（`elith-blood-csv.ts:68-78`）で、項目名はコードに持っていない。リポジトリの fixture で実在が確認できるのは `総タンパク` / `HbA1c(NGSP)` / `LDLコレステロール` / `AST(GOT)` の **4 件だけ** | 「デメカルに合わせる」(v1.1 §2) が検証できない。**名前が 1 文字違うと別系列に割れてグラフが分断する** |
-| **Q-2** | `STANDARD_MASTER` に **アルブミン / 尿素窒素 / `e-GFR` 別名**を追加してよいか | 3 件とも現在 `canonical_name = null`（§6.3 実測）。追加はマスタの既存規律（ゴールデン実在項目のみ）には反しないが、マスタは Elith 納品名の正準形でもある | `item_name` フォールバック頼みになり、表記ゆれで系列が割れる |
-| **Q-3** | **中性脂肪の扱い**（`中性脂肪(TG)` / `空腹時中性脂肪` / `随時中性脂肪` を 1 系列にまとめるか） | 実在 3 検体で 3 通り（§5.3）。まとめるのは**検査値の意味を変える解釈**で、CLAUDE.md の「独自に解釈しない」に触れる | 15 項目のうち 1 つが実装できない／線が割れる |
-| **Q-4** | **派生 blood artifact を Elith の「揃い判定」に数えるか**（§8.5） | `checkFormatsReady()` が `test_type='blood'` の有無だけを見る（`elith-entitlement.ts:189-198`）ので、**実血液検査の到着前に納品が発火し得る**。業務仕様 v1.1 に記載が無い | コースプラン契約者で**血液検査が揃う前に AI 診断が走る**。`skipDelivered` のため後から追いつけない |
-| **Q-5** | **基準線が回によって出たり消えたりしてよいか**（§7.5） | デメカル由来は `ref_*` が全 null（`BLOOD_REFERENCE` 空）／人間ドック由来は原本の基準値が入る。v1.1 §9 は「原本にあれば原本値」で正しいが、混在時の見え方は書かれていない | グラフの基準帯が不連続になる |
-| **Q-6** | **15 項目が 1 件も取れない回**に空の `BloodTestData` を作るか（§6.2） | v1.1 §11 C3「項目数による成立判定をしない」と、既存の「空は納品しない」（`elith-delivery.ts:185`）のどちらを優先するか | 空ファイルが Elith に渡る／渡らない |
-| **Q-7** | **健康診断（健診）由来も「人間ドックから抽出」と表示してよいか** | `test_type='health_checkup'` に人間ドックと健診が集約されており（`elith_s3_data_handoff_spec.md:125`）、**実装上は区別が付かない** | 健診の人に「人間ドックから」と出る |
-| **Q-8** | 派生 `BloodTestData` の `source.note` の文言（§8.3） | Elith が読む可能性がある。既存は `'admin バッチ (血液CSV・決定論パース)。書式は暫定。'` 等 | 先方が由来を誤解する |
-| **Q-9** | 派生 `BloodTestData` の `measurements` に `name_detail` / `note` を入れるか（§8.3） | `elith_s3_data_handoff_spec.md` §7.1 はキーを含む形で定義しているが、既存 `HealthCheckupData` も 7 フィールドのみ。**揃っていない状態が現状** | Elith 側のパースが分岐する可能性 |
-| **Q-10** | **同一 `test_date` でのファイル名衝突**（§8.6） | `elith_s3_data_handoff_spec.md` §5.4 が既に「要確認(Elith)」としている未決事項 | 片方が黙って消える |
-| **Q-11** | **既存の人間ドックデータへ遡って派生を作るか**（backfill） | v1.1 に記載が無い。`canonical_name` は書き込み時に確定するため（`measurement-persist.ts:127`）、既存行は再取込しないと更新されない | 既に人間ドックを出している利用者のグラフに 4 点目が出ない |
-| **Q-12** | **同名別値（dedup 競合）が残っている項目**をどう扱うか（E-9） | `observation-dedup` は「自動採用しない」のが既存仕様。15 項目に競合が残った場合の採用規則は v1.1 にも無い | 両方入れると二重、片方選ぶと解釈になる |
-| **Q-13** | **admin バッチ経路（`/api/admin/elith-scan`）の人間ドックにも適用するか** | v1.1 は「ユーザーがアップロードした人間ドック／健康診断」と書いており、admin バッチは対象外に読める。ただし `persistAdminBatchArtifact` も同じ形で派生を作れる | Wellfort が代行取り込みした人間ドックで 4 点目が出ない |
-| **Q-14** | **Production DB に `source='user_upload'` × `test_type='blood'` の行が既に無いか** | コードからは作られないことを確認した（§2.5）が、**DB の実データはこのセッションから参照できない**。手で入れられた行が在ると、派生の冪等キー（§10.2）がそれを巻き込んで消す | 既存行が黙って消える |
+| **Q-1** | デメカル CSV の実ヘッダ | **v1.1 添付の 15 項目を業務仕様上の正とする。** 実ヘッダが repo で確認できないことは**実装開始を止める理由にしない**。ただし**現行デメカル CSV の実ヘッダ 15 件と canonical mapping の一致を merge 前の受入条件**とする。**未確認の名称を「デメカル実ヘッダである」と書かない** | §5.1（`未確認` 表記）/ §12.3 AC-1 |
+| **Q-2** | 標準マスタへの追加 | **アルブミン / 尿素窒素 / `eGFR` の alias `e-GFR` を `STANDARD_MASTER` へ追加してよい。** golden に実在するため既存規律に反しない | §6.3 / §9.4 |
+| **Q-3** | 中性脂肪 | **派生 `BloodTestData` に限り `中性脂肪` へ統一する。** `HealthCheckupData` は一切変更しない。**`STANDARD_MASTER` で `空腹時中性脂肪 = 随時中性脂肪` の alias を作らない。** マスタには `canonical_name: 中性脂肪` を別途設け、**無修飾表記だけ**を alias にする。空腹時／随時 からの変換は **`blood-subset.ts` の中でのみ**明示的に行う | §5.4 / §6.3 / §6.4 |
+| **Q-4** | Elith 揃い判定 | **派生 blood を readiness に使わない。** 通常デメカル年 3 回＋人間ドック由来 1 回であり、**派生は通常血液検査の代替ではない。** `test_artifacts.imported_by = 'derived_healthcheck_blood'` を marker にし、**`BloodTestData` の ready 判定のときだけ**除外する。**`source='user_upload'` 全体を除外しない**（将来の実血液 user upload 経路を誤って排除しないため）。**納品セットには含める**（readiness に使わない／納品に使う、を混同しない） | §4.3 / §8.5 |
+| **Q-5** | 基準値・グラフ | **デメカル＋人間ドック由来が混在する `blood` 系列では `referenceUpper` / `referenceLower` を表示しない。** 各点の原本由来 H/L は保持してよい。**デメカルの基準値を人間ドックへ適用すること、およびその逆を禁止する** | §7.2 / §7.5 |
+| **Q-6** | 0 件のとき | **派生 artifact を作らない・`BloodTestData` を作らない・グラフにも何も追加しない。** これは成立判定ではなく「抽出可能な血液値が 0 件だから何も作らない」だけ。1 件以上あればその項目だけで作る | §6.2 |
+| **Q-7** | 由来表示 | **「人間ドックから抽出」**で固定。人間ドックと健康診断が `health_checkup` に統合されている現行実装のまま、この固定表示でよい | §7.3 |
+| **Q-8** | `source.note` | **固定文言**: `人間ドック・健康診断の既存AIスキャン結果から血液検査値を抽出（再解析なし）`。**Elith 側の既存 JSON shape は変更しない** | §8.3 |
+| **Q-9** | measurements の形 | **既存の `sanitizeMeasurementsForDelivery()` / `leanMeasurement()` と同じ 7 フィールド**を使う。`name_detail` / `note` / `category` / `assessment` 用の独自構造を**今回だけ新設しない** | §8.3 |
+| **Q-10** | 同一受診日の重複 | **通常 blood を優先。** Dashboard でも Elith 納品でも**同一日に 2 つの `BloodTestData` を並べない**。**派生が通常血液を上書きしない。** 通常 blood が後から到着した場合も**最終的に通常 blood が勝つ**こと。実装は現行構造のまま最小変更 | §8.6 / §10.5 |
+| **Q-11** | 過去データ | **backfill 用の管理スクリプトを用意する。** **初期状態は dry-run・本番 DB を自動変更しない・cron にしない・対象件数と変更予定内容を表示・明示的な実行指示があるまで production で実行しない。** 新規スキャン経路の実装と**分離**する | §10.6 |
+| **Q-12** | 値の競合 | **一意に確定できない項目だけを派生 `BloodTestData` から除外する。** **推測で片方を選ばない。** 他の正常に確定できた項目まで無効にしない | §11 E-9 / §12.1 Q |
+| **Q-13** | admin バッチ | **今回の対象外。** 実装するのは業務仕様にある**利用者の Web アプリ／AI スキャン経路**のみ。**admin バッチ対応を追加で拡張しない** | §1.4 / §13 / §12.1 S |
+| **Q-14** | Production の既存データ | **production 適用前に read-only で確認する**（`source='user_upload' AND test_type='blood'` 等）。**実装開始の blocker ではないが deployment 前の必須チェック。** **既存行を勝手に削除・supersede してはいけない** | §9.5 / §12.3 AC-2 |
+
+### 14.1 設計図・受入テストへ必ず反映する 6 点（発注者指定）
+
+| # | 反映した章 | 反映した受入テスト | 退行注入 |
+|---|---|---|---|
+| 1. 派生 blood は readiness に数えない | §4.3 / §8.5 / §13 P-3 | K / K-2 / K-3 | R-10 / R-11 |
+| 2. `imported_by` で派生を識別する | §4.3 / §9.2 / §10.2 | L / K-3 | R-4 / R-5 |
+| 3. 中性脂肪の統合は派生の中だけ | §5.4 / §6.3 / §6.4 | M / M-2 / M-3 | R-12 / R-13 |
+| 4. 混在系列では基準線を出さない | §7.2 / §7.5 | N / N-2 | R-14 |
+| 5. 同一日は通常 blood を優先 | §8.6 / §10.5 | O / O-2 | R-15 |
+| 6. 0 件なら何も生成しない | §6.2 / §11 E-5 | P | R-16 |
 
 ---
 
@@ -921,7 +1226,8 @@ S3 の Elith JSON は**一切読まない**。
 | artifact が `status='active'` | 既定値が `'active'` | `20260601000010:205` |
 | `value_num` が付いている | 15 項目はすべて数値 → `toValueNum` が通る | `elith-export.ts:190-196` |
 | 系列がデメカル側と同じキーになる | **`canonical_name` が一致すれば自動。付かない 3 項目（§6.3）は `item_name` 一致が要る** | `measurement-queries.ts:313-319` |
-| 「グラフ」ボタンが出る | **artifact が 2 件以上要る**（`canGraph = mine.length >= 2`） | `TestResultsSection.astro:100` |
+| 「グラフ」ボタンが出る | **artifact が 2 件以上要る**（`canGraph = mine.length >= 2`）。派生も `test_type='blood'` なので数に入る | `TestResultsSection.astro:100` |
+| readiness に数えない | **`imported_by='derived_healthcheck_blood'`** を `checkFormatsReady()` の BloodTestData 判定からだけ外す（裁定 Q-4） | §8.5 |
 
 **載らないケースが 2 つある（明記）**
 
@@ -941,7 +1247,8 @@ S3 の Elith JSON は**一切読まない**。
   picks に入らない（`elith-assemble.ts:400-411`）。
 - **status の変更は不要。** `test_artifacts.status` は既定 `'active'`。
 - **新しい cron も不要。** 既存の `GET /api/cron/elith-deliver`（23:00 JST）がそのまま拾う。
-- **副作用**: `checkFormatsReady()` の判定が変わる（§8.5・**Q-4**）。
+- **readiness からは外す**（§8.5・裁定 Q-4）。`checkFormatsReady()` に `imported_by` の除外を 1 つ足す。
+- **同一日は通常 blood を優先**するので、`materializeDerivedBloodTests()` は書く前に同日の通常 `BloodTestData` を見る（§8.6）。
 
 ### E. 「年間 4 回目」という概念がコード上に存在するのか
 
@@ -968,32 +1275,39 @@ S3 の Elith JSON は**一切読まない**。
 
 | ファイル | 現行役割 | 今回変更 | 変更内容 |
 |---|---|---|---|
-| `src/lib/blood-subset.ts` | （存在しない） | **新規** | 15 項目マスタ + `extractBloodSubset(lean[]): lean[]`。I/O 無しの純関数 |
-| `src/lib/scan-persist.ts` | スキャン結果の DB 保存（`saveScanResult` `:136`） | **変更** | `saveScanResult` の末尾に派生 blood artifact の生成を足す。既存の `replaceSameDateArtifacts` / `persistMeasurements` を再利用。**health_checkup 側の処理は 1 行も変えない** |
-| `src/lib/measurement-queries.ts` | 検査値の取得・推移グラフ（`:330`） | **変更** | `Row` 型と select に `source_file_kind` を追加し、`MetricTrendPoint.source` に載せる。**`:390` の絞り込みロジックは変えない** |
-| `src/lib/dashboard-queries.ts` | 型 `MetricTrendPoint` / `MetricTrendSeries`（`:26-43`） | **変更** | `MetricTrendPoint` に `source?: string \| null` を足す（任意フィールド＝既存の呼び出しは不変） |
+| `src/lib/blood-subset.ts` | （存在しない） | **新規** | 15 項目マスタ / `extractBloodSubset()`（中性脂肪の統合・競合除外） / `supersedeDerivedBloodOnSameDate()` / `DERIVED_HC_BLOOD_IMPORTED_BY` 定数。I/O は supersede 1 本だけ |
+| `src/lib/standard-master.ts` | 標準項目マスタ | **変更** | `アルブミン` / `尿素窒素` / `中性脂肪`（無修飾のみ alias）を追加、`eGFR` の synonyms に `e-GFR`（裁定 Q-2 / Q-3） |
+| `src/lib/scan-persist.ts` | スキャン結果の DB 保存（`saveScanResult` `:136`） | **変更** | ① `replaceSameDateArtifacts` に**任意の `importedBy` 条件**を足す（既存 2 呼び出しは不変） ② `saveScanResult` 末尾に派生 blood の生成（0 件なら作らない／同日に通常があれば作らない）。**health_checkup 側の処理は 1 行も変えない** |
+| `src/lib/elith-entitlement.ts` | Elith の揃い判定（`FORMAT_SOURCE` `:49`） | **変更** | `checkFormatsReady()` の select に `imported_by` を足し、**`BloodTestData` の判定からだけ**派生を除外（裁定 Q-4 / D-1） |
+| `src/lib/measurement-queries.ts` | 検査値の取得・推移グラフ（`:357`） | **変更** | ① `Row` 型と select に `source_file_kind` ② `MetricTrendPoint.source` に載せる ③ **混在系列では `referenceUpper` / `referenceLower` を付けない**（D-4）。**`:390` の絞り込みロジックは変えない** |
+| `src/lib/dashboard-queries.ts` | 型 `MetricTrendPoint` / `MetricTrendSeries`（`:26-43`） | **変更** | `MetricTrendPoint` に `source?: string \| null` を足す（**任意フィールド**＝既存の呼び出しは不変） |
 | `src/components/dashboard/MetricTrendChart.astro` | 推移グラフの描画 | **変更** | 測定履歴テーブル（`:299-318`）とミニカード（`:127`）に「人間ドックから抽出」。**列は増やさない**（§7.4） |
-| `src/lib/elith-delivery.ts` | Elith 納品の materialize と組み立て | **変更** | `materializeDerivedBloodTests()` を追加（`materializeHealthCheckups` `:154` と同型）。`manualMapping`（`:545-551`）に `BloodTestData` を足す |
-| `src/lib/standard-master.ts` | 標準項目マスタ | **変更（Q-2 次第）** | `アルブミン` / `尿素窒素` / `eGFR` の `e-GFR` 別名を追加 |
-| `src/lib/elith-entitlement.ts` | Elith の揃い判定（`FORMAT_SOURCE` `:49`） | **変更（Q-4 次第）** | 派生を揃い判定から外す場合のみ |
-| `scripts/verify-blood-subset.ts` | （存在しない） | **新規** | Case A〜H / J + 退行注入 R-1〜R-9 |
+| `src/lib/elith-delivery.ts` | Elith 納品の materialize と組み立て | **変更** | ① `materializeDerivedBloodTests()` を追加（`materializeHealthCheckups` `:154` と同型・**同日に通常があれば書かない**） ② `manualMapping`（`:545-551`）に `BloodTestData` を足す |
+| `src/pages/api/admin/lab-results/upload.ts` | 検査機関ファイルの取込（`:102-115`） | **変更** | blood の insert 後に `supersedeDerivedBloodOnSameDate()` を呼ぶ（D-5・**通常 blood の行には触らない**） |
+| `src/pages/api/admin/lab-results/register.ts` | 原本の後付け登録（`:179-191`） | **変更** | 同上 |
+| `scripts/backfill-derived-blood.mjs` | （存在しない） | **新規** | 既存の人間ドックへの遡及。**dry-run 既定・cron にしない**（裁定 Q-11） |
+| `scripts/verify-blood-subset.ts` | （存在しない） | **新規** | Case A〜S + 退行注入 R-1〜R-19 |
 | `scripts/verify-screen.mjs` | 画面の実測検査 | **変更** | Case I（「人間ドックから抽出」の表示と mobile 幅） |
-| `scripts/verify-trend-series.mjs` | 系列グルーピングの検査 | **変更** | `source` が点まで運ばれることの検査（R-8） |
+| `scripts/verify-trend-series.mjs` | 系列グルーピングの検査 | **変更** | `source` が点まで運ばれること（R-8）／混在系列で基準線が付かないこと（N / N-2） |
 | `package.json` | スクリプト定義 | **変更** | `verify:blood-subset` を追加 |
 | `.github/workflows/ci.yml` | CI | **変更** | `static-required` に `verify:blood-subset` |
 | `src/lib/measurement-persist.ts` | 検査値の唯一の書き込み口 | **なし** | `testType` は既に引数（`:132`）。**そのまま使える** |
-| `src/lib/elith-export.ts` | 納品整形・`measurementsFromMarkdown` | **なし** | 再利用のみ。**スキャンの読み取りには一切触れない**（v1.1 §12） |
+| `src/lib/elith-export.ts` | 納品整形・`measurementsFromMarkdown` | **なし** | 再利用のみ。**スキャンの読み取りには一切触れない**（v1.1 §12 / 裁定） |
 | `src/lib/elith-assemble.ts` | 納品セットの組み立て | **なし** | `BloodTestData` は既に `SERIES_FORMATS`（`:392`）。キーを置けば拾う |
 | `src/lib/elith-blood-csv.ts` | デメカル CSV パーサ | **なし** | デメカル経路は変えない |
-| `src/lib/blood-reference-master.ts` | 血液の基準値マスタ（**空**） | **なし** | 人間ドックの基準値は原本由来。ここは埋めない（v1.1 §9） |
+| `src/lib/blood-reference-master.ts` | 血液の基準値マスタ（**空**） | **なし** | 人間ドックの基準値は原本由来。ここは埋めない（v1.1 §9 / 裁定 Q-5） |
 | `src/lib/canonicalize.ts` | ②正準化（既定 off） | **なし** | 今回 on にしない（§11.1） |
+| `src/lib/observation-dedup.ts` | 同名別値の競合記録 | **なし** | 既存の「自動採用しない」をそのまま使う（裁定 Q-12） |
 | `src/pages/api/scan/save.ts` | 保存 API | **なし** | `saveScanResult` の中で完結する |
 | `src/pages/api/cron/scan-worker.ts` | 背景ジョブ | **なし** | 同上（`:151` で同じ関数を呼ぶ） |
+| `src/pages/api/admin/elith-scan.ts` | admin バッチスキャン | **なし** | **裁定 Q-13 で対象外。拡張しない** |
+| `src/pages/api/admin/elith-hc-merge.ts` | admin バッチ（人間ドック統合） | **なし** | 同上 |
 | `src/pages/trend.astro` | 推移グラフのページ | **なし** | `type=blood` をそのまま渡すだけ |
 | `src/components/dashboard/TestResultsSection.astro` | 検査 5 種カード | **なし** | `canGraph`（`:100`）は artifact 件数なので派生が増えれば自動で出る |
 | `src/pages/dashboard.astro` | ダッシュボード | **なし** | `singlePurchaseTypes`（`:153-157`）は「持っている種別は出す」なので自動で血液カードが増える |
-| `src/pages/api/cron/elith-deliver.ts` | 自動納品 cron | **なし** | 既存のまま拾う |
-| `supabase/migrations/**` | DB | **なし** | **migration なし**（§9） |
+| `src/pages/api/cron/elith-deliver.ts` | 自動納品 cron | **なし** | 既存のまま拾う。**backfill を cron に載せない**（裁定 Q-11） |
+| `vercel.json` | cron 定義 | **なし** | **backfill を足さない**（裁定 Q-11） |
+| `supabase/migrations/**` | DB | **なし** | **migration なし**（§9・裁定 Q-4 の marker も既存列） |
 | wellfort-site 全体 | admin UI / 中継 | **なし** | 本件に関係する処理を持たない（§1.4） |
 
 ---
@@ -1011,11 +1325,20 @@ S3 の Elith JSON は**一切読まない**。
 [x] S3納品処理確認済            … s3.ts / elith_s3_data_handoff_spec.md §3 §5 §7.1
 [x] 欠損値表現確認済            … §6.1（全層で「行・要素ごと出さない」）
 [x] 冪等性確認済                … §10（replaceSameDateArtifacts / persistMeasurements / elith_deliveries）
-[x] DB migration有無確認済      … §9（**なし**）
+[x] DB migration有無確認済      … §9（**なし**。imported_by は既存列・CHECK 無し）
 [x] 実装変更対象ファイル確定    … §16
 [x] 要確認事項抽出済            … §14（Q-1〜Q-14）
-[ ] 発注者による §14 の回答      … **未**（Q-1 / Q-3 / Q-4 は実装の形を変えるため、回答前に着手しない）
-[ ] 実装開始の明示指示          … **未**
+[x] 発注者による §14 の回答      … **2026-10-01 に全 14 件 確定**
+[x] 6 点を設計図・受入テストへ反映 … §14.1 の対応表
+[x] 実装開始の明示指示          … **受領済み**
+```
+
+### 17.1 merge 前に残る確認（コードで閉じられないもの）
+
+```text
+[ ] AC-1 現行デメカル CSV の実ヘッダ 15 件と §5.1 の mapping が一致する（裁定 Q-1）
+[ ] AC-2 Production の read-only 確認（§9.5・裁定 Q-14）
+[ ] AC-3 backfill は発注者の明示指示まで production で実行しない（裁定 Q-11）
 ```
 
 ---
