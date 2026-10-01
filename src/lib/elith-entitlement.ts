@@ -238,3 +238,64 @@ export function decideReady(
   });
   return { ready: missing.length === 0, missing, checked };
 }
+
+/**
+ * **自動納品 (cron) と一括ボタンの母集団を組む** (DB に触れない純粋関数)。
+ *
+ * 正本: `docs/specs/special_account_management_spec_20261001.md` §17 / §18.2 / §9.5。
+ *
+ * 【P1 でここを切り出した理由】従来は `elith-delivery.ts` の中で
+ * `listSpecialAccounts()` の uid と契約者を直接 union していたため、
+ * **「スペシャルが cron に乗っていないこと」を機械で固定できなかった**。
+ * ここは**静かに壊れる**場所 (契約者が納品されなくなっても画面は正常に見える) なので、
+ * 判定を純粋関数に出して `verify:special-account-management` A-1〜A-5 で見張る。
+ *
+ * 【スペシャルは 1 件も入れない】`specialUids` は**登録簿にある uid を全部**渡す。
+ * `isSpecialAccount()` が false になる uid (= 除外リストに入っている uid) も外す —
+ * **緊急停止した人が自動納品だけ生き残る**のは逆である。
+ * スペシャルの納品は `/admin/special-accounts` の［Elith納品］だけが起動する (§9.1)。
+ *
+ * 【単品 (非スペシャル) はここに残る】EC で買った人は `app_bridge.subscription` 経由で
+ * `subscribers` に入る (`listEntitledSubscribers`)。スペシャル登録簿とは別の供給元なので、
+ * スペシャルを外しても単品・契約者は従来どおり自動納品される。
+ */
+export interface DeliveryPopulation {
+  /** 納品判定にかける uid (小文字・重複なし)。 */
+  uids: string[];
+  /** uid → 必要 format。null = 仕様を引けない (fail-closed で納品しない)。 */
+  requiredByUid: Map<string, ElithFormat[] | null>;
+  /** スペシャルとして母集団から外した uid。**黙って落とさないため**に返す。 */
+  excludedSpecial: string[];
+}
+
+export function buildDeliveryPopulation(input: {
+  /** スペシャルアカウント登録簿の uid (**除外リストに入っているものも含めて全部**)。 */
+  specialUids: string[];
+  /** `app_bridge.subscription` の status='active' から引いた契約者・単品。 */
+  subscribers: EntitledUser[];
+}): DeliveryPopulation {
+  const norm = (u: string): string => u.trim().toLowerCase();
+  const special = new Set(input.specialUids.map(norm).filter(Boolean));
+
+  const requiredByUid = new Map<string, ElithFormat[] | null>();
+  const uids: string[] = [];
+  const excludedSpecial: string[] = [];
+
+  for (const s of input.subscribers) {
+    const uid = norm(s.uid);
+    if (!uid) continue;
+    if (special.has(uid)) {
+      // スペシャルに登録されている人は、契約者として引けても cron では出さない。
+      // (両方に登録される運用は想定しないが、起きたときに本番へ出る側へ倒さない)
+      if (!excludedSpecial.includes(uid)) excludedSpecial.push(uid);
+      continue;
+    }
+    if (requiredByUid.has(uid)) continue;
+    requiredByUid.set(uid, s.requiredFormats ?? null);
+    uids.push(uid);
+  }
+
+  for (const u of special) if (!excludedSpecial.includes(u)) excludedSpecial.push(u);
+
+  return { uids, requiredByUid, excludedSpecial };
+}

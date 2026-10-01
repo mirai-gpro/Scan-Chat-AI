@@ -31,7 +31,7 @@ import { computeWellnessAge } from './wellness-age';
 import { getServerSupabase } from './supabase';
 import { listSpecialAccounts, specialSubjectByUid } from './special-accounts';
 import { refreshConfig } from './app-config';
-import { checkFormatsReady, listEntitledSubscribers, type ElithFormat } from './elith-entitlement';
+import { buildDeliveryPopulation, checkFormatsReady, listEntitledSubscribers } from './elith-entitlement';
 
 export interface DeliverResult {
   uid: string;
@@ -52,6 +52,12 @@ export interface DeliverSummary {
   delivered: number;
   /** うちウェルネス年齢(HealthAgeData)を同梱できた件数。算出不能はここに数えない。 */
   wellness_delivered: number;
+  /**
+   * **スペシャルアカウントとして母集団から外した件数** (§17)。
+   * 0 件納品でも「対象が居なかった」と「スペシャルだから外した」を混同しないために出す。
+   * uid は載せない (結果を admin のログへ流すため)。
+   */
+  excluded_special: number;
 }
 
 /** customer.sex 表記を 'male'|'female'|null に (elith-assemble.ts と同じ規則)。 */
@@ -437,41 +443,40 @@ export async function deliverReadySpecialAccounts(opts: {
   skipDelivered?: boolean;
 }): Promise<DeliverSummary> {
   await refreshConfig(true);
-  const snap = listSpecialAccounts();
   /*
-   * 母集団 = 単品/スペシャル ∪ **契約者 (コースプラン)**。
+   * 母集団 = **契約者・単品 (`app_bridge.subscription` の status='active') だけ**。
+   * **スペシャルアカウントは 1 件も入れない。**
    *
-   * 【なぜ広げたか】従来はスペシャルアカウントだけを見ていたため、本番で実購入が入っても
-   * **契約者は永久に拾われなかった** (データが揃っても納品されず、しかも黙って起きる)。
-   * 契約者は `app_bridge.subscription` の **status='active' だけ**を採る
-   * (`create-order` は決済前に pending で契約行を作るので、pending を権利と読むと
-   *  未決済の人へ納品してしまう)。
+   * 【2026-10-01 変更・P1】正本 `docs/specs/special_account_management_spec_20261001.md`
+   * §9.1 / §17 / §18.2。スペシャルの Elith 本番納品は
+   * **`/admin/special-accounts` の［Elith納品］を人が押したときだけ**になった。
+   * 以前はここが `listSpecialAccounts()` の uid を母集団に含めていたため、
+   * **人の確認を通らずに 23:00 JST の cron が本番へ書いていた**。
+   *
+   * 除外は**ここ 1 か所だけ**で行う (`api/cron/elith-deliver.ts` 側に条件を書くと
+   * cron と一括ボタンで母集団がずれて二重管理になる・§9.5)。
+   * 判定は純粋関数 `buildDeliveryPopulation()` が持つ — **ここは静かに壊れる**
+   * (契約者が納品されなくなっても画面は正常に見える) ので
+   * `verify:special-account-management` A-1〜A-5 が両方向を見張る。
+   *
+   * 契約者は status='active' だけを採る (`create-order` は決済前に pending で契約行を
+   * 作るので、pending を権利と読むと未決済の人へ納品してしまう)。
+   * 必要 format は plan_code から引き、**引けなければ納品しない (fail-closed)**。
    */
-  const singleUids = Array.from(
-    new Set([
-      ...snap.rows.filter((r) => !r.denied).map((r) => r.uid),
-      ...snap.emails.map((e) => e.uid).filter((u): u is string => !!u),
-    ]),
-  );
+  const snap = listSpecialAccounts();
   const subscribers = await listEntitledSubscribers();
-  const uids = Array.from(new Set([...singleUids, ...subscribers.map((s) => s.uid)]));
+  const population = buildDeliveryPopulation({
+    // 除外リストに入っている uid も**外す**。緊急停止した人が自動納品だけ生き残るのは逆。
+    specialUids: [
+      ...snap.rows.map((r) => r.uid),
+      ...snap.emails.map((e) => e.uid).filter((u): u is string => !!u),
+    ],
+    subscribers,
+  });
+  const uids = population.uids;
+  const requiredByUid = population.requiredByUid;
 
   const results: DeliverResult[] = [];
-
-  /*
-   * 揃い判定は **プランごとの required_formats の総当たり** (§4.3.1)。
-   * 単品/スペシャルは従来どおり「問診 ∧ 人間ドック」を必要 format として扱う
-   * (これは従来の固定 2 条件と同一 = 既存挙動を変えない)。
-   * 契約者は plan_code → required_formats を引く。**引けなければ納品しない (fail-closed)**。
-   */
-  const SINGLE_FORMATS: ElithFormat[] = ['LifestyleQuestionnaireData', 'HealthCheckupData'];
-  const requiredByUid = new Map<string, ElithFormat[] | null>();
-  for (const u of singleUids) requiredByUid.set(u, SINGLE_FORMATS);
-  for (const s of subscribers) {
-    // 単品/スペシャルにも登録されている人は、緩い方 (単品) を残さず契約の仕様を優先する。
-    if (s.requiredFormats) requiredByUid.set(s.uid, s.requiredFormats);
-    else if (!singleUids.includes(s.uid)) requiredByUid.set(s.uid, null);
-  }
 
   const readiness = await checkFormatsReady(uids, requiredByUid);
   const ready = uids.filter((u) => readiness[u]?.ready);
@@ -490,7 +495,7 @@ export async function deliverReadySpecialAccounts(opts: {
     });
   }
   if (ready.length === 0) {
-    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: 0, delivered: 0, wellness_delivered: 0 };
+    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: 0, delivered: 0, wellness_delivered: 0, excluded_special: population.excludedSpecial.length };
   }
 
   const resolveSubject = makeSubjectResolver();
@@ -533,7 +538,7 @@ export async function deliverReadySpecialAccounts(opts: {
   }
 
   if (repHcKeyByUid.size === 0) {
-    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: ready.length, delivered: 0, wellness_delivered: 0 };
+    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: ready.length, delivered: 0, wellness_delivered: 0, excluded_special: population.excludedSpecial.length };
   }
 
   // ② HC を置いた後で inventory (問診 Lifestyle を拾う。HealthCheckup は assemble が全 date を出す)。
@@ -556,7 +561,7 @@ export async function deliverReadySpecialAccounts(opts: {
   }
 
   if (Object.keys(manualMapping).length === 0) {
-    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: ready.length, delivered: 0, wellness_delivered: 0 };
+    return { results, put_count: 0, delivery_prefix: opts.deliveryPrefix, ready: ready.length, delivered: 0, wellness_delivered: 0, excluded_special: population.excludedSpecial.length };
   }
 
   const assembled = await assembleElithDeliverySet({
@@ -617,5 +622,6 @@ export async function deliverReadySpecialAccounts(opts: {
     delivered: assembled.users.length,
     // **年単位**の件数 (複数年なら 1 uid で複数)。「うちウェルネス年齢 N 件」= HealthAge を載せた年数。
     wellness_delivered: wellnessDeliveredYears,
+    excluded_special: population.excludedSpecial.length,
   };
 }
