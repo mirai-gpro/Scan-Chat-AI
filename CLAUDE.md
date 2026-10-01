@@ -1813,8 +1813,165 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   - **切り分け** = `GET /api/debug/viewer?k=<PROBE_UPLOAD_TOKEN>`。**`?u=` が付いていないか必ず確認する**。
   - **経緯 (ボツ・根拠にしない)**: `docs/旧版・ボツ/2026-08-30_admin判定とデモゲートの試行錯誤.md`。
 
+- **【スペシャルアカウントの追加検査登録 (遺伝子/血液/がんリスク/AI疾病予測) 2026-09-30 実装済み】
+  正本 `docs/specs/special_account_additional_tests_spec_20260930.md`。触る前に必読。**
+  **【2026-10-01・改訂予定】「登録 → その場で Elith 本番納品」(§9/§24/§28) と「対象 4 種」(§4) は
+  `docs/specs/special_account_management_spec_20261001.md` §11/§12 が置き換える (仕様のみ・未実装)。
+  それ以外 (解析・artifact・原本・サニタイズ・冪等) は本書がそのまま正本。**
+  目的 = **`/admin/elith-batch` へ上げて、同じ PDF を `/admin/lab-results` へもう一度上げる
+  二重運用の廃止**。原本選択 1 回で 原本S3 / `test_artifacts` / `measurement_values` /
+  `test_artifact_files` / Elith source JSON / Elith 本番納品 / 読戻し検証 まで通す。
+  新画面 = wellfort-site `/admin/special-additional-tests` (既存 `/admin/elith-batch` は
+  技術管理画面として残す)。
+  - **既存パイプラインを組み合わせるだけ。専用の別解析を作らない。**
+    1 つの解析結果から Dashboard 用と Elith 納品 JSON の両方を作る (別々に解析しない)。
+  - **重複防止が核心。DB は守ってくれない** — `test_artifacts` の UNIQUE は
+    `(uid, source, test_type, test_date, external_test_id)` で **`source` を含み、
+    `external_test_id` が NULL のとき効かない** (`20260601000010:208`)。さらに
+    `persistAdminBatchArtifact()` は **`source='admin_batch'` の行しか置き換えない**
+    (`scan-persist.ts:306`) ので、既存 `wellfort_lab` 行がある人に呼ぶと行が増える
+    (= 本田さんの重複事故)。→ **検索は `source` を条件に入れない**・1 件なら
+    `persistIntoExistingArtifact()` で更新・**2 件以上は 409 で停止 (自動判断禁止)**。
+  - **受診日は必須入力。today へ落とさない** (`persistAdminBatchArtifact` は不正な日付を
+    `jstToday()` にする・`scan-persist.ts:295` → **渡す前に検証して 400 で止める**)。
+  - **原本キーに氏名・元ファイル名を入れない**。
+    `additional_results/{uid}/{test_type}/{YYYY_MM_DD}/{sha256}.pdf`。
+    署名は既存 `originals-upload-ticket.ts` を共用 (Object Lock の checksum ＋
+    `unhoistableHeaders` の罠を再現しない)。
+  - **`manifest.json` は作らない**。`elith_s3_data_handoff_spec.md` に Draft が残っているが
+    現行 `elith-assemble.ts:543-546` が正 (規約外ファイルを納品先へ置かない)。
+  - **`elith-delivery-promote` を自動で呼ばない** (uid 配下の全 JSON をコピーするため)。
+    納品履歴は **新表 `diagnosis.elith_delivery_items`** に持つ
+    (`elith_deliveries` は `(uid, bundle_date, delivery_prefix)` で 1 行 + `format_ids` 上書きなので流用不可)。
+  - **migration 番号は `20260930000060` 以降** (`…000010`〜`…000050` は使用済み)。
+  - **着手前に Production (`6abc310`) を作業ブランチへ取り込む** (仕様書 §0.4.1)。
+    履歴は diverge しているが**コードのファイル差分は 0** なので設計変更は無い。
+    取り込んだら `astro check` / `build` / A 層 28 本が緑であることを先に確認する。
+  - **原本競合の共通化で既存 `/admin/lab-results/register` の契約を壊さない** (§0.4.2)。
+    共通ライブラリは **`'same_sha' / 'different_sha' / 'none'` の判定だけ**を返し、
+    **`error` 文字列と HTTP ステータスは各 API が決める** —
+    既存は **409 `file_exists`** のまま、追加検査だけ **409 `original_conflict`**。
+    **`replace` は新 API に付けない** (原本を置換できる口は既存の 1 つだけに保つ)。
+  - **【実装の地図 2026-09-30】**
+    - Scan-Chat-AI: `src/lib/additional-originals.ts` (キー・検証器・原本判定) /
+      `src/lib/elith-delivery-json.ts` (source JSON・納品・**読戻し検証**・納品履歴) /
+      `src/lib/special-additional-tests.ts` (対象者・artifact 確定・原本紐付け) /
+      `src/pages/api/admin/special-additional-tests/{scan-part,original-ticket,finalize}.ts` /
+      `supabase/migrations/20260930000060_elith_delivery_items.sql`。
+    - wellfort-site: `src/pages/admin/special-additional-tests.astro` /
+      `src/pages/api/admin/special-additional-tests/[action].ts` (3 口を 1 ファイル・allow-list) /
+      **`public/admin/pdf-pages.js`** (PDF のページ展開。`elith-batch.astro` もここへ委譲した＝実装を 2 つ持たない)。
+    - **既存ファイルへの変更は `export` を足しただけ**: `elith-assemble.ts`
+      (`sanitizeDelivery` / `rewriteClientId`) と `elith-delivery.ts` (`makeSubjectResolver`)。
+      **中身は 1 行も変えていない** (そのことを `verify:special-additional-tests` が見張る)。
+  - **検証 `npm run verify:special-additional-tests` (142 件・退行注入 7 種・CI の A 層)**。
+    **K-7 だけ仕様書 §44 K の表と落ちる検査が違う** — 表は「25 (既存 register の 409)」だが、
+    `register.ts` は判定をそのまま転送していないので 25 は通る。実際に落ちるのは
+    **E28 (共通ライブラリが API のエラー名と HTTP ステータスを持たない)**。
+  - **発注者の操作が 2 つ必要**: ① migration `20260930000060_elith_delivery_items.sql` の適用
+    ② 本番での通し確認 (この環境には鍵も S3 も無いので、**Gemini 解析・S3 署名 PUT・
+    本番納品の実挙動は未確認**。検証はすべて決定論部とスタブでの実行)。
+
 - **【EC 購入を伴わない招待に実データで使わせる = スペシャルアカウント 2026-09-15 実装】
-  正本 `docs/operations/スペシャルアカウント_仕様書.md`。上位 = `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md`。**
+  正本 `docs/operations/スペシャルアカウント_仕様書.md`。上位 = `docs/lab/スペシャルアカウント_複数年スキャン_仕様書.md`。
+  追加検査の登録は上の `docs/specs/special_account_additional_tests_spec_20260930.md`。**
+  **管理画面と Elith 納品の起動は `docs/specs/special_account_management_spec_20261001.md`
+  (2026-10-01・**P1〜P8 実装済み**。実装の地図は §27.1 / 実装で分かったことは §27.1.1)。**
+  スペシャルを 23:00 JST の cron から外し、
+  `/admin/special-accounts` の行の［Elith納品］ボタンだけで本番納品する改訂。
+  **AI問診は必須ではない** / 追加検査登録は「登録」だけにする / 検診・人間ドックの Admin 登録を足す。
+  **§6.5 / §13.4 に承認画面案の補正事項**がある — **現 API が氏名・会社名を保持も返却もしないので一覧の表示前提にしない**・
+  **共有URLにパスワードを足さない**（既存の「共通ID・パスワードを採らない」原則）・
+  **「ダウンロード可」権限は存在しない**（scope は `view` 固定＋`interview`/`scan`）。**画面案の画像だけで実装しない。**
+  **裁定済み (D-1〜D-8・§25.1)**: 納品の書き込みは**共通 Verified PUT/readback helper に一本化** (D-1) /
+  対象 uid の受け渡しは **`sessionStorage`** (D-2) / `finalize` の**サーバ既定は非納品** (D-3) /
+  **migration 1 本** `elith_delivery_runs` で**前回 run の PII なし snapshot** を控え差分に使う (D-4/D-7) /
+  **中間 source は恒久的に残す** (D-5) / 一括ボタンは `/admin/elith-batch` へ移設 (D-6) /
+  検索は**メモ・マスク・UID の部分一致＋状態フィルタ**まで (D-8)。
+  **cron 自体は残す** (契約者・単品の自動納品は従来どおり)。
+  **【v1.3 で精査・2026-10-01】** ①`putVerified` の追加 GET は**新規/変更で最大 2 回**
+  (事前比較＋readback)・**既存同一なら 1 回** (PUT 0 回)。**V-1 は最悪ケース (全ファイル新規/変更) で実測** /
+  ②run snapshot は集計値だけでなく**納品ファイル 1 件ごとの明細** (`format_id`/`delivered_date`/
+  `destination_key`/`sha256`) を持つ → **同日・同件数で中身だけ変わった回を「更新」として検知** /
+  ③**確認モーダルの正本は `getAccountProgress` の DB 件数ではなく、実際の assemble 結果
+  (delivery preview = `plan`)**。**DB 件数と不一致なら警告** (ブロックしない)・**確定後は同じ `plan` を
+  `putVerified`** (作り直さない)・**snapshot は verified 結果から** /
+  ④**`elith_delivery_runs` はスペシャルの手動納品 run だけを対象**とし、**通常 cron の run snapshot へは
+  広げない** (`source` は `manual` 固定・cron の履歴は既存 2 表のまま)。
+  **発注者裁定事項 U-1〜U-8 は全て確定。ただし未確認は残っている** —
+  **Elith 確認事項 E-1〜E-6** と**V-1 の本番実測**は確定事項として扱わない
+  (V-2 は migration 作成済み・適用は発注者 / V-3・V-4 は検査で固定済み)。
+  **【実装済み 2026-10-01・P1〜P8】** 新しいファイル =
+  `s3-verified-put.ts` (共通 Verified PUT/readback・A と B の両方が呼ぶ) /
+  `elith-manual-delivery.ts` (1 uid 手動納品。plan は S3 を変えない・7 種・複数年) /
+  `elith-delivery-runs.ts` (run の控えと差分) /
+  `api/admin/special-accounts/deliver-one.ts` (preview → confirm の 2 段) /
+  `supabase/migrations/20261001000010_elith_delivery_runs.sql` /
+  wellfort-site `public/admin/admin-target.js` (一覧→別画面へ対象 1 人を渡す・sessionStorage)。
+  **実装で分かったこと (§27.1.1)**: 納品 JSON は毎回 `exported_at`/`diagnostic_id` が変わるので
+  **指紋からこの 2 つだけを外す** (データは外さない) / HTTP 2 往復では plan を持ち越せないので
+  **2 回目も組み直して指紋が一致したときだけ書く** (中身をクライアントから送り返させない) /
+  その帰結で `putVerified` の冪等は検診・ウェルネス年齢には効かない = **V-1 は最悪ケースで正しい**。
+  **検証** = `npm run verify:special-account-management` (198 件・CI の A 層) /
+  wellfort-site `verify:special-accounts-ui` (62 件) と `verify:admin-target` (34 件)。
+  **退行注入 31 種 (既存 16 + P0 7 + 第 2 巡 8) とも名指しで落ちることを確認済み。**
+  **【実装レビューの是正 2026-10-01・仕様書 §27.1.2】発注者がコードを読んで出した
+  blocker 4 件 + hardening 2 件を直した。設計は 1 つも変えていない。**
+  - **P0-1 delivery preview は read-only ではなかった。** `materializeHealthCheckups()` →
+    `elith-delivery.ts:231` が**中間 source へ PUT** し、`computeWellnessFromMeasurements()` →
+    `:288` が **`health_age_scores` を upsert** する。要件 (= 確認前に Elith 本番受取領域へ
+    書かない) は満たしているので**挙動は変えず**、仕様書・コード・API の `note`・モーダルの
+    文言を実装へ合わせた。**文言の正** =「この確認では Elith 本番受取領域には書き込みません。
+    確認用データを組み立てるため、中間 source とウェルネス年齢の算出結果は更新される場合が
+    あります」。**「S3 へ 1 バイトも書かない」と書かないこと** (検査が落とす)。
+  - **P0-2 run 差分の SHA が volatile metadata を含んでいた。** `PlannedFile` を
+    **`contentSha256`** (`stableBody()` = 生成メタを除いた指紋・**preview→confirm と run 差分は
+    こちら**) と **`deliverySha256`** (実 body・`putVerified` の読戻し検証と監査) へ分離。
+    snapshot は両方を持つ。**退行検査「同じ実データから 2 回 plan を組んでも diff.updated=0」が必須。**
+  - **P0-3 原本 SHA の衝突判定が DB mutation の後だった** (409 で止めても DB は戻らないので
+    **原本 A / ダッシュボード値 B** の不整合が起こり得た)。`preflightAdditionalOriginal()`
+    (read しかしない) を S3 原本の読み出し直後・`saveAdditionalArtifact()` の**前**へ。
+    `scan_md` / `measurements` / `measurement_values` / `test_artifact_files` が
+    **4 つとも unchanged** であることを検査で固定 (既存 E22 は原本しか見ていなかった)。
+  - **P0-4 `.order('created_at')` を削除。** `diagnosis.test_artifacts` に `created_at` は無く
+    (`20260601000010:203` は `imported_at`)、0/1/2 件以上の判定に順序は要らない。
+    **本番 DB に偶然その列が在ることを前提にしない。**
+  - **H-1 `safeTriggeredBy()` は `/^[0-9a-f]{64}$/i` の digest だけ受ける** (allow-list)。
+    「`@` が無い」は生 email を弾く条件であって PII を弾く条件ではない
+    (氏名・社員番号・`admin%40example.com` が素通りしていた)。控えは 10 年残る。
+  - **H-2 実在暦日の判定を `additional-originals.ts` の `isRealDate` 1 か所へ集約**し、
+    **署名の段 (`createAdditionalOriginalTicket`) にも適用**した。以前は署名が形式だけを見て
+    いたので、`2026-02-31` の原本が S3 へ上がったあとに DB 保存が 400 で落ち、
+    **削除不可のバケットに孤児ファイルが残り得た**。**複製を置かない** (段ごとに判定が
+    食い違うと孤児が出る)。
+  **【実装レビューの是正 第 2 巡 2026-10-01・仕様書 §27.1.2′=§27.1.3】さらに 3 点。**
+  - **R-1 `triggered_by` に素の `SHA256(email)` を使っていた。** `admin-identity.ts:93` が
+    **「素の `sha256(email)` にしない。メールアドレスは列挙可能なので辞書で戻せる」**と
+    明示しており、控えは 10 年残る。→ **secure share と同じ形**
+    (`api/admin/share-links.ts:138` の `created_by_email`) に寄せた。**中継 (wellfort-site) は
+    サーバ検証済み email をサーバ間で渡すだけ** (`triggeredByEmail`)、**digest は
+    Scan-Chat-AI 側が `adminIdentity()` (鍵つき HMAC + domain separation) で作る**。
+    **中継に digest を作らせない** — 鍵が無いので作れるのは素の sha256 だけになる。
+    `safeTriggeredBy()` は **base64url 43 文字**だけ通す。**ブラウザ申告の email は禁止のまま**・
+    **生 email は受けた直後に digest へ落とし、応答にもログにも DB にも載せない。**
+  - **R-2 `stableBody()` が `HealthAgeData` の `data.computed_date` を落としていなかった。**
+    `elith-assemble.ts:291` ← `elith-delivery.ts:281` の `new Date()` = **算出を回した日**で、
+    preview のたび更新される。**`exported_at` / `diagnostic_id` と違い `data` の中にいる**ので
+    top-level だけ削る実装では取り逃し、**同じ検査データでも翌日は必ず「更新」**になっていた。
+    → `VOLATILE_DATA_META = ['computed_date']` を追加 (`data` が素のオブジェクトのときだけ触る)。
+    **`health_age` / `actual_age` / `delta` / `model_version` は 1 つも落とさない。**
+    検査は**時計を 1 日進めて plan を組み直す**実走も含む (`diff.updated=0`)。
+  - **R-3 `finalize` が `originalKey` を uid / 検査種別 / 受診日と binding 確認していなかった。**
+    `isAdditionalOriginalKey()` は**形**しか見ないので、**別の人・別の検査・別の受診日の
+    原本キーを添えて送れた** (通ると UID-A の PDF が UID-B の artifact へ紐付く・原本は
+    10 年保管・削除不可)。→ S3 から読み戻した**実 SHA**で
+    `buildAdditionalOriginalKey()` を組み直し、**完全一致しなければ DB mutation の前に
+    409 `invalid_original_binding`**。自己申告の SHA は使わない。
+  - あわせて migration `20261001000010` の `snapshot` / `triggered_by` コメントを現実装へ同期
+    (**DDL は 1 行も変えていない**ので未適用のまま編集してよい)。
+  **発注者の操作が 2 つ必要**: ① migration `20261001000010_elith_delivery_runs.sql` の適用
+  ② 本番での通し確認 (この環境には鍵も S3 も無いので、Gemini 解析・S3 署名 PUT・
+  本番納品の実挙動と V-1 の所要時間は未確認)。
   **デモ枠とは目的が逆。混ぜない。** あちらは**ダミー**を見せる枠 (社外に渡す)、こちらは
   **本人の実データ**を扱う枠。仕組みが似ているので、判定・供給元・app_config キー・admin 画面を
   すべて分けてある。**共有するのは純粋関数の import だけ** (`hashEmail` / `maskEmail` /
@@ -1964,6 +2121,8 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/elith/elith_s3_data_handoff_spec.md` | **Elith S3 受け渡し仕様** (パス/命名/format_id/JSON) |
 | `docs/elith/elith_batch_centralization_design.md` | Elith バッチ**一元化設計**(キーは Vercel・役割分担・admin バッチ) |
 | `docs/elith/elith_assembly_wrapping_spec.md` | **納品セット アセンブリのラップ仕様(Elith向け説明)**。フォルダ/命名/ウェルネス年齢の時系列化(検査日毎・旧1件を撤回)・疑似データも同様に時系列生成・**LAiF AI疾病発症予測(Other/ai_prediction)のファイル仕様=Elith承諾により確定(§5・2026-08)。合成は data.items[] の発症率%/相対リスク比のみジッタ・昨年比は前年の相対リスク比を引継ぎ(実装済)**・manifest不一致の確認事項 |
+| **`docs/specs/special_account_management_spec_20261001.md`** | **【スペシャルアカウントの「管理画面と Elith 納品の起動」の正本。仕様のみ・未実装】** 発注者指示 2026-10-01。**スペシャルは 23:00 JST の cron 対象から外し、`/admin/special-accounts` の行の［Elith納品］ボタンでだけ本番納品する**（cron 自体は残し、契約者/単品の自動納品は壊さない）/ **AI問診は必須ではない**・最低条件は「uid 確定 ∧ Elith へ渡せるデータが 1 種類以上」（`decideReady()` の fail-closed は契約者用なので触らない）/ 一覧を 1 アカウント 1 行へ整理し**検査種別ごとの件数＋最新日**を出す / ［追加検査データ］［共有URL設定］［Elith納品］の 3 ボタン / **追加検査登録は「登録」だけにし、その場で本番納品しない** / 検診・人間ドックの Admin 登録を追加（`source` 違いで 2 行目を作らない）/ **裁定済み D-1〜D-8**（2026-10-01・§25.1。**発注者裁定は全て確定だが、Elith 確認事項 E-1〜E-6 と実装時に実測する V-1〜V-4 は未確認のまま**）/ **v1.3 の精査 4 点**（`putVerified` の追加 GET は新規・変更で最大 2 回／run snapshot に**納品ファイル 1 件ごとの `format_id`・`delivered_date`・`destination_key`・`sha256`** を持たせ同日同件数の内容変更も検知／**確認モーダルの正本は DB 件数でなく実際の assemble 結果 = delivery preview**・不一致なら警告・確定後は同じ plan を putVerified・snapshot は verified 結果から／**`elith_delivery_runs` はスペシャルの手動納品 run 限定で通常 cron へ広げない**） / **§6.5・§13.4 = 承認画面案 (2026-10-01) の補正事項**（画像だけを見て存在しない機能を実装させないための禁止事項。氏名・会社名は持っていないので表示前提にしない / UID は UUID / **共有URLにパスワードを足さない・「ダウンロード可」権限は存在しない**・scope は `view` 固定＋`interview`/`scan` のみ / AdminLayout は既存のまま） |
+| **`docs/specs/special_account_additional_tests_spec_20260930.md`** | **【スペシャルアカウントの追加検査 (遺伝子/血液/がんリスク/AI疾病予測) の正本。触る前に必読・2026-09-30 実装済み】** 原本選択 1 回で 原本S3→DB→Dashboard→Elith 納品→読戻し検証 まで通し、**`/admin/lab-results` への二重アップロードを廃止**する。既存パイプラインの組み合わせに徹する (専用の別解析を作らない) / **重複防止は DB でなくアプリが守る** (UNIQUE に `source` が入り NULL で効かない) / 受診日必須・today fallback 禁止 / 原本キーに氏名を入れない / manifest を作らない / `elith_delivery_items` を新設 / 検証 `npm run verify:special-additional-tests` 142 件 + 退行注入 7 種 |
 | **`docs/operations/スペシャルアカウント_仕様書.md`** | **スペシャルアカウントの正本 (アプリ全体)**。EC 購入を伴わない招待で**本人の実データ**を扱う枠。**デモ枠とは目的が逆で、混ぜると本人の画面に他人名義のダミーが出る**。判定 / 登録 (メール) と判定 (uid) の分離 / 供給元の和と除外 / サインインの橋渡しの位置 / **全停止スイッチを持たない理由** / 検証 / 切り分け |
 | **`docs/operations/デモ用アカウント_仕様書.md`** | **デモ用アカウントの正本 (アプリ全体)**。目的 / 誰が見るか / 判定の順序と理由 / 3 供給元の和 / 増やし方 / 実装上の約束 / 検証 / 切り分け。**権限 (admin) の仕組みに乗せない**のが設計の要 |
 | **`docs/elith/AI疾病予防報告書_引継ぎ書.md`** | **【この機能に着手する人が最初に読む】** 新規セッション用の入口。読む順番 / 越えてはならない線 / コードの地図 / 検証コマンド / いま動いているものと残っているもの / 詰まったときの切り分け。**仕様は書かない** (仕様の正は下の仕様書) |

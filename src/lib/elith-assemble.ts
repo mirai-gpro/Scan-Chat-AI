@@ -313,7 +313,13 @@ const CATEGORY_STRIP_FORMATS = new Set(['HealthCheckupData', 'CancerRiskAssessme
  * 納品用サニタイズ + 妥当性ガード。除外した測定値(anomalies)を返す（納品物には含めない）。
  * 正規化本体は elith-export.sanitizeMeasurementsForDelivery に集約 (全書き出し経路共通)。
  */
-function sanitizeDelivery(obj: Record<string, unknown>): MeasurementAnomaly[] {
+/*
+ * **2026-09-30: `export` を足しただけ。中身は 1 行も変えていない。**
+ * 追加検査 (`elith-delivery-json.ts`) が**同じサニタイズ**を通すために要る
+ * (仕様書 §25「追加検査専用に別の JSON 整形を作ってはならない」)。
+ * 実装を写すと **片方だけ直る**ので、ここ 1 か所を共用する。
+ */
+export function sanitizeDelivery(obj: Record<string, unknown>): MeasurementAnomaly[] {
   const fmt = typeof obj.format_id === 'string' ? obj.format_id : '';
   const anomalies: MeasurementAnomaly[] = [];
   const data = obj.data;
@@ -348,8 +354,11 @@ function sanitizeDelivery(obj: Record<string, unknown>): MeasurementAnomaly[] {
   return anomalies;
 }
 
-/** JSON テキストの client_id を new へ書き換え + 納品用サニタイズ (パース失敗時は素の置換にフォールバック)。 */
-function rewriteClientId(jsonText: string, newId: string, sourceKey: string, subj: SubjectInfo | null): { text: string; anomalies: MeasurementAnomaly[] } {
+/**
+ * JSON テキストの client_id を new へ書き換え + 納品用サニタイズ (パース失敗時は素の置換にフォールバック)。
+ * **2026-09-30: `export` を足しただけ。中身は 1 行も変えていない** (上の `sanitizeDelivery` と同じ理由)。
+ */
+export function rewriteClientId(jsonText: string, newId: string, sourceKey: string, subj: SubjectInfo | null): { text: string; anomalies: MeasurementAnomaly[] } {
   try {
     const obj = JSON.parse(jsonText) as Record<string, unknown>;
     obj.client_id = newId;

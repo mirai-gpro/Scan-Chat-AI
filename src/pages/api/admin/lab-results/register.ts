@@ -33,6 +33,7 @@ import type { APIRoute } from 'astro';
 import { isAdminAuthorized } from '../../../../lib/api-auth';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { readUploadedOriginal } from '../../../../lib/originals-upload-ticket';
+import { decideOriginalRegistration, type ExistingOriginalRow } from '../../../../lib/additional-originals';
 
 export const prerender = false;
 /** S3 から 1 件読み直してハッシュを取るので、既定の 60s では足りないことがある。 */
@@ -211,9 +212,16 @@ export const POST: APIRoute = async ({ request }) => {
     .eq('file_kind', fileKind);
   if (exErr) return json({ ok: false, error: 'db_error', detail: exErr.message }, 500);
 
-  const prior = (existing ?? []) as { id: string; storage_url: string; sha256: string; size_bytes: number; created_at: string }[];
-  if (prior.length > 0) {
-    if (prior.some((p) => p.sha256 === got.sha256)) {
+  /*
+   * **判定は共通ライブラリへ寄せた** (2026-09-30・仕様書 §0.4.2)。
+   * 追加検査の `finalize` と**同じ判定**を使うが、
+   * **返すエラー名とステータスはこの API が決める** — 下の `file_exists` / 409 は
+   * 既存の契約なので 1 バイトも変えない (wellfort-site がこの文字列を見ている)。
+   */
+  const prior = (existing ?? []) as ExistingOriginalRow[];
+  const { decision } = decideOriginalRegistration(prior, got.sha256);
+  if (decision !== 'none') {
+    if (decision === 'same_sha') {
       // 中身が同じ = 既に登録済み。何もしない (再実行しても増えない)。
       return json({
         ok: true,

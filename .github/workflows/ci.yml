@@ -101,6 +101,14 @@ jobs:
       # 中身が別人、という形で出る。identity 照合・single-use・GET で claim しない、を固定。
       - run: npm run verify:admin-handoff
       - run: npm run verify:share-access
+      # スペシャルアカウント 追加検査。**ここも静かに壊れる** — artifact 検索から
+      # `source` 条件が落ちても画面は「登録できた」ように見え、DB の UNIQUE も
+      # (source を含み external_test_id が NULL なので) 止めてくれない。
+      - run: npm run verify:special-additional-tests
+      # スペシャルアカウント管理と Elith 納品の起動。**最重要は A (母集団と cron の分離)** —
+      # スペシャルが cron に戻っても「納品できている」ようにしか見えず、
+      # 逆に契約者が母集団から落ちても画面は正常に見える。どちらも目視では守れない。
+      - run: npm run verify:special-account-management
       - run: npm run verify:blood-csv
       - run: npm run verify:blood-parser
       - run: npm run verify:intake-scope
