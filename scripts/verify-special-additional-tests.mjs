@@ -259,6 +259,68 @@ console.log('\nE. original\n');
     !/replace/.test(code('src/lib/special-additional-tests.ts')));
 
   /* ────────────────────────────────────────────────────────────────
+   * **P0-B: 原本キーが この uid / 検査種別 / 受診日 のものか (binding)**
+   *
+   * `isAdditionalOriginalKey()` は**形**しか見ないので、
+   * **別の人・別の検査・別の受診日の原本キー**を body に添えて送れた。
+   * 通ると UID-A の PDF が UID-B の artifact へ `raw_pdf` として紐付く
+   * (原本は 10 年保管・削除不可)。
+   *
+   * サーバが採番した形
+   *   `additional_results/{uid}/{test_type}/{YYYY_MM_DD}/{sha256}.pdf`
+   * を **S3 から読み戻した実 SHA で組み直して完全一致**を見る。
+   * **DB mutation より前**で止まること (4 つとも unchanged) も併せて固定する。
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    const UID_OTHER = 'cccccccc-3333-4333-8333-333333333333';
+    const mkKey = (uid, tt, d) => `additional_results/${uid}/${tt}/${d.replace(/-/g, '_')}/${shaHex(PDF)}.pdf`;
+    const cases = [
+      ['別 UID の原本キー', mkKey(UID_OTHER, 'blood', '2025-08-04')],
+      ['別 検査種別 の原本キー', mkKey(UID_A, 'genetics', '2025-08-04')],
+      ['別 受診日 の原本キー', mkKey(UID_A, 'blood', '2024-01-15')],
+    ];
+    for (const [label, key] of cases) {
+      resetAll();
+      putOriginal(key, PDF);                       // S3 には実在させる (形も SHA も正しい)
+      const r = await call(M.finalize, {
+        ...BASE, testType: 'blood', testDate: '2025-08-04', originalKey: key, parts: [bloodPart()],
+      });
+      eq(`P0-B ${label} は 409 invalid_original_binding`, [r.status, r.json.error], [409, 'invalid_original_binding']);
+      eq(`P0-B ${label} — test_artifacts を作っていない`, (M.db.TABLES.test_artifacts ?? []).length, 0);
+      eq(`P0-B ${label} — measurement_values を書いていない`, (M.db.TABLES.measurement_values ?? []).length, 0);
+      eq(`P0-B ${label} — test_artifact_files を書いていない`, (M.db.TABLES.test_artifact_files ?? []).length, 0);
+      eq(`P0-B ${label} — Elith へ 1 ファイルも出していない`, M.s3.S3.size, 0);
+    }
+
+    // 正しい binding は通る (弾きすぎていないこと)。
+    resetAll();
+    const okRes = await finalizeBlood();
+    eq('P0-B 正しい原本キーは通る', [okRes.status, okRes.json.ok], [200, true]);
+    eq('P0-B このとき原本は 1 件紐付く', (M.db.TABLES.test_artifact_files ?? []).length, 1);
+
+    // SHA が実体と違うキー (= 中身を差し替えたのに名前は元のまま) も通さない。
+    resetAll();
+    const wrongSha = `additional_results/${UID_A}/blood/2025_08_04/${shaHex(PDF2)}.pdf`;
+    putOriginal(wrongSha, PDF);                    // キーは PDF2 の SHA / 中身は PDF
+    const rSha = await call(M.finalize, {
+      ...BASE, testType: 'blood', testDate: '2025-08-04', originalKey: wrongSha, parts: [bloodPart()],
+    });
+    eq('P0-B キーの SHA と S3 の実体が食い違えば 409',
+      [rSha.status, rSha.json.error], [409, 'invalid_original_binding']);
+    eq('P0-B このときも DB は変わっていない', (M.db.TABLES.test_artifacts ?? []).length, 0);
+
+    // 判定は DB mutation より前・自己申告でなく読み戻した実 SHA で組む。
+    {
+      const src = code('src/pages/api/admin/special-additional-tests/finalize.ts');
+      ok('P0-B binding 確認が saveAdditionalArtifact より前にある',
+        src.indexOf('invalid_original_binding') < src.indexOf('saveAdditionalArtifact({'));
+      ok('P0-B **読み戻した実 SHA で組み直す** (body の申告を使わない)',
+        /buildAdditionalOriginalKey\(\{[\s\S]{0,120}original\.sha256/.test(src),
+        'original.sha256 = readAdditionalOriginal が S3 の実体から取った値');
+    }
+  }
+
+  /* ────────────────────────────────────────────────────────────────
    * **P0-3: 競合で止めたとき DB が 1 つも変わっていないこと**
    *
    * 以前は `saveAdditionalArtifact()`（= `scan_md` / `measurements` /

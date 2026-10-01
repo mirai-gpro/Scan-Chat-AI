@@ -616,7 +616,9 @@ console.log('\nE / F / K. 1 uid 手動納品 (plan → putVerified を実際に�
     })));
     eq('K-48 生成メタ (exported_at / diagnostic_id) だけを外す',
       Object.keys(sb).sort(), ['client_id', 'data', 'format_id', 'test_date']);
-    eq('K-48 **データは 1 つも外さない**', sb.data.measurements[0].value, '22');
+    // **`?.` で守る** — `data` ごと落とす退行を注入したとき、throw だと
+    // 「名指しで落ちる」にならずスタックトレースで止まってしまう。
+    eq('K-48 **データは 1 つも外さない**', sb.data?.measurements?.[0]?.value, '22');
   }
 
   M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.9'))];   // 値が変わった
@@ -662,20 +664,114 @@ console.log('\nE / F / K. 1 uid 手動納品 (plan → putVerified を実際に�
     ok('P0-2 **中身が変わった回は updated で出る** (検知力を殺していない)', d2.updated.length > 0, JSON.stringify(d2.countByFormat));
   }
 
-  // ── H-1 safeTriggeredBy は digest だけを通す ──────────────────────
-  eq('H-1 sha256 digest (hex 64) は通る',
-    M.runs.safeTriggeredBy('a'.repeat(64)), 'a'.repeat(64));
-  eq('H-1 大文字 digest は小文字へ正規化', M.runs.safeTriggeredBy('A'.repeat(64)), 'a'.repeat(64));
+  /* ── P0-2b **ウェルネス年齢の算出日も生成メタ** ────────────────────────
+   *
+   * `HealthAgeData` の `data.computed_date`（`elith-assemble.ts:291`）は
+   * **算出を回した日**で、preview を回すたび更新される。指紋に入れると
+   * **同じ検査データでも翌日は必ず「更新」**になる。
+   * `exported_at` / `diagnostic_id` と違い **`data` の中にいる**ので、
+   * top-level だけを削る実装では取り逃す。
+   * ──────────────────────────────────────────────────────────────── */
+  {
+    const ha = (computedDate, healthAge) => JSON.stringify({
+      format_id: 'HealthAgeData', kind: 'health_age', client_id: UID_A,
+      diagnostic_id: `uuid-${computedDate}`, test_date: '2026-03-29',
+      exported_at: `${computedDate}T01:00:00.000Z`,
+      subject: { sex: 'male', age: 54 },
+      data: {
+        health_age: healthAge, actual_age: 54, computed_date: computedDate,
+        delta: Math.round((healthAge - 54) * 10) / 10, model_version: 'CABA-v5.4',
+      },
+    });
+    eq('P0-2b **算出日だけ違う HealthAgeData は同じ指紋になる**',
+      M.manual.stableBody(ha('2026-10-01', 51.2)), M.manual.stableBody(ha('2026-10-02', 51.2)));
+    ok('P0-2b **ウェルネス年齢の実値が変われば指紋も変わる** (検知力を殺していない)',
+      M.manual.stableBody(ha('2026-10-01', 51.2)) !== M.manual.stableBody(ha('2026-10-01', 49.8)));
+    const kept = JSON.parse(M.manual.stableBody(ha('2026-10-01', 51.2)));
+    // ここも `?? {}` / `?.` で守る（`data` ごと落とす乱暴な直し方を名指しで落とすため）。
+    eq('P0-2b 外すのは computed_date だけ (実値は 1 つも落とさない)',
+      Object.keys(kept.data ?? {}).sort(), ['actual_age', 'delta', 'health_age', 'model_version']);
+    eq('P0-2b 実値はそのまま',
+      [kept.data?.health_age, kept.data?.actual_age, kept.data?.delta, kept.data?.model_version],
+      [51.2, 54, -2.8, 'CABA-v5.4']);
+    // `data` が素のオブジェクトでない形でも落ちない (黙って空にしない)。
+    eq('P0-2b data が配列でも壊れない',
+      JSON.parse(M.manual.stableBody(JSON.stringify({ exported_at: 'x', data: [1, 2] }))).data, [1, 2]);
+    eq('P0-2b data が無くても壊れない',
+      JSON.parse(M.manual.stableBody(JSON.stringify({ exported_at: 'x', format_id: 'f' }))).format_id, 'f');
+  }
+
+  /* ── P0-2c **翌日に組み直しても diff.updated = 0** (plan ごと通して確かめる)──
+   * 上の単体だけだと「`stableBody` は直ったが plan 側で別の日付が混ざる」を取り逃す。
+   * `computed_at` は `new Date()` なので、**時計を 1 日進めて**実際に組み直す。 */
+  {
+    reset();
+    M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('4.4'))];
+    const day1 = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+    ok('P0-2c ウェルネス年齢が plan に載っている (0 件だと検査が素通りする)',
+      day1.files.some((f) => f.formatId === 'HealthAgeData'), JSON.stringify(day1.countByFormat));
+    const snap1 = M.runs.buildSnapshot(day1.files);
+
+    const RealDate = Date;
+    const SHIFT = 24 * 60 * 60 * 1000;
+    globalThis.Date = class extends RealDate {
+      constructor(...a) { if (a.length === 0) super(RealDate.now() + SHIFT); else super(...a); }
+      static now() { return RealDate.now() + SHIFT; }
+    };
+    let day2;
+    try {
+      day2 = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+    } finally {
+      globalThis.Date = RealDate;
+    }
+    const d = M.runs.diffAgainst(snap1, day2.files);
+    eq('P0-2c **同じ検査データを翌日に組み直しても diff.updated = 0**', d.updated.length, 0);
+    eq('P0-2c 追加も 0', d.added.length, 0);
+    eq('P0-2c 指紋も一致する', M.manual.planFingerprint(day1), M.manual.planFingerprint(day2));
+
+    // 検査値を変えれば (= ウェルネス年齢も動く) ちゃんと「更新」になる。
+    M.db.TABLES.test_artifacts = [hcRow('2026-03-29', 54, hcMd('3.1'))];
+    const changed = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: P, deliveryPrefix: '' });
+    const d2 = M.runs.diffAgainst(snap1, changed.files);
+    ok('P0-2c **実値が変われば updated で出る**', d2.updated.length > 0, JSON.stringify(d2.countByFormat));
+  }
+
+  /* ── H-1 safeTriggeredBy は `adminIdentity()` の HMAC digest だけを通す ────
+   *
+   * **素の sha256(email) を通してはいけない。** `admin-identity.ts:93` が
+   * 「メールアドレスは列挙可能なので辞書で戻せる」と明示しており、控えは 10 年残る。
+   * 形 = base64url(HMAC-SHA256) = 43 文字。
+   * ──────────────────────────────────────────────────────────────── */
+  const IDENT = 'Ab3-_'.padEnd(43, 'x');
+  eq('H-1 adminIdentity の digest (base64url 43 文字) は通る', M.runs.safeTriggeredBy(IDENT), IDENT);
   for (const bad of [
     'admin@example.com',            // 生 email
-    'admin%40example.com',          // **エンコード済み = 旧実装はこれを通していた**
+    'admin%40example.com',          // エンコード済み（「@ が無い」では通ってしまう）
     '浜田',                          // 氏名
     'E12345',                       // 社員番号
-    'a'.repeat(63), 'a'.repeat(65), // 桁違い
-    'g'.repeat(64),                 // hex でない
+    'a'.repeat(64),                 // **素の sha256(email) の形 = もう通さない**
+    'a'.repeat(42), 'a'.repeat(44), // 桁違い
+    `${'a'.repeat(42)}+`,           // base64url でない文字 (+)
+    `${'a'.repeat(42)}/`,           // base64url でない文字 (/)
+    `${'a'.repeat(42)}=`,           // パディング
     '', null, undefined, 123,
   ]) {
-    eq(`H-1 digest でない値は控えへ入れない: ${JSON.stringify(bad)}`, M.runs.safeTriggeredBy(bad), null);
+    eq(`H-1 identity でない値は控えへ入れない: ${JSON.stringify(bad)}`, M.runs.safeTriggeredBy(bad), null);
+  }
+  ok('H-1 **素の sha256(email) の形を通さない** (辞書で戻せる値を 10 年残さない)',
+    M.runs.safeTriggeredBy('a'.repeat(64)) === null);
+
+  /* ── H-1 中継は digest を作らず、サーバ検証済み email をサーバ間で渡す ────
+   * 鍵 (`APP_SESSION_SECRET` / `SUPABASE_SERVICE_ROLE_KEY`) は Scan-Chat-AI 側にしか無い。
+   * 中継が自前で digest を作ると、作れるのは素の sha256 だけになる。 */
+  {
+    const api = code('src/pages/api/admin/special-accounts/deliver-one.ts');
+    ok('H-1 **digest は Scan 側で `adminIdentity()` に通して作る**', /adminIdentity\(/.test(api));
+    ok('H-1 中継から来るのは email (`triggeredByEmail`)', /triggeredByEmail/.test(api));
+    ok('H-1 **digest 済みの値を body からは受け取らない**',
+      !/body\.triggeredBy\b/.test(api), '事前に digest された値を信用しない');
+    ok('H-1 **生 email を応答へ載せない**',
+      !/triggeredByEmail[^)]*\}\s*,\s*(?:200|400|409|502)/.test(api));
   }
 
   const other = await callApi({ diagnosticUserId: UID_B, sourcePrefix: P, deliveryPrefix: '' });
@@ -837,11 +933,13 @@ console.log('\nH / K. run snapshot と前回差分\n');
       snap.files[0].content_sha256 === 'aaa' && snap.files[0].delivery_sha256 === 'bbb');
   }
 
-  // K-42 — triggered_by に生 email を入れない
+  // K-42 — triggered_by に生 email を入れない（通すのは adminIdentity の digest だけ）
+  const IDENT42 = 'Zz9-_'.padEnd(43, 'q');
   eq('K-42 生 email は控えへ入れない', R.safeTriggeredBy('admin@example.com'), null);
   // **H-1**: `@` を抜いたエンコード済みアドレスも通さない（allow-list だから通らない）。
   eq('K-42 エンコード済みアドレスも通さない', R.safeTriggeredBy('admin%40example.com'), null);
-  eq('K-42 digest は通す', R.safeTriggeredBy('a'.repeat(64)), 'a'.repeat(64));
+  eq('K-42 adminIdentity の digest は通す', R.safeTriggeredBy(IDENT42), IDENT42);
+  eq('K-42 **素の sha256(email) の形は通さない**', R.safeTriggeredBy('a'.repeat(64)), null);
   eq('K-42 空は null', [R.safeTriggeredBy(''), R.safeTriggeredBy(null)], [null, null]);
 
   // K-43 / K-50 — 行を作る条件
@@ -852,7 +950,7 @@ console.log('\nH / K. run snapshot と前回差分\n');
   M.db.reset(); M.s3.reset();
   M.db.TABLES.test_artifacts = [row('2026-03-29')];
   let plan = await M.manual.buildDeliveryPlan({ uid: UID_A, sourcePrefix: 'scan-accuracy-test/', deliveryPrefix: '' });
-  let exec = await M.manual.executeDeliveryPlan(plan, { deliveryPrefix: '', triggeredBy: 'd'.repeat(64) });
+  let exec = await M.manual.executeDeliveryPlan(plan, { deliveryPrefix: '', triggeredBy: IDENT42 });
   eq('H-31 納品できた run は控えを 1 行作る', [exec.runRecorded, runs().length], [true, 1]);
   eq('K-50 **source は manual 固定**（cron の run を書かない）', runs()[0].source, 'manual');
   // 行の値だけでは足りない。**cron 経路から呼ばれていないこと**を直接見る (§14.3.2) —
@@ -868,7 +966,7 @@ console.log('\nH / K. run snapshot と前回差分\n');
   eq('H-31 verified_count は読み戻して一致した数', runs()[0].verified_count, plan.files.length);
   ok('H-31 控えに明細が入っている',
     Array.isArray(runs()[0].snapshot.files) && runs()[0].snapshot.files.length === plan.files.length);
-  eq('K-42 triggered_by は digest のまま', runs()[0].triggered_by, 'd'.repeat(64));
+  eq('K-42 triggered_by は digest のまま', runs()[0].triggered_by, IDENT42);
 
   M.db.reset(); M.s3.reset();
   M.db.TABLES.test_artifacts = [row('2026-03-29')];

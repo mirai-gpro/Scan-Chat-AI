@@ -40,6 +40,7 @@ import { isAdminAuthorized } from '../../../../lib/api-auth';
 import { getS3Config } from '../../../../lib/s3';
 import { buildDeliveryPlan, executeDeliveryPlan, planFingerprint } from '../../../../lib/elith-manual-delivery';
 import { diffAgainst, loadLatestRun } from '../../../../lib/elith-delivery-runs';
+import { adminIdentity } from '../../../../lib/admin-identity';
 
 export const prerender = false;
 /** 複数年 × 複数 format を組んで読み戻すので、既定の 60s では足りない。 */
@@ -170,8 +171,27 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   try {
-    // **生 email は受け取らない。** 中継側が digest にして送る（§14.3.1）。
-    const exec = await executeDeliveryPlan(plan, { deliveryPrefix, triggeredBy: str(body.triggeredBy) });
+    /*
+     * **誰が押したかは `adminIdentity()` の HMAC digest だけを残す**（§14.3.1）。
+     *
+     * 中継（wellfort-site）が送るのは **`triggeredByEmail` = サーバ検証済みの admin メール**で、
+     * **その名前のまま DB へ入れない**ことを示すために控えの列名と別のキーにしてある
+     * （secure share の `created_by_email` と同じ流儀・`api/admin/share-links.ts:138`）。
+     *
+     * **digest はここで作る。中継では作らない。**
+     *   - 中継に鍵（`APP_SESSION_SECRET` / `SUPABASE_SERVICE_ROLE_KEY`）は無い。
+     *   - 素の `sha256(email)` を中継で作って送っていたのが誤りだった —
+     *     `admin-identity.ts:93` が**「素の `sha256(email)` にしない。メールアドレスは
+     *     列挙可能なので辞書で戻せる」**と明示している。控えは 10 年残る。
+     *
+     * **ブラウザ申告の email は受け取らない**（中継の `verifyAdmin()` が Supabase で
+     * 検証した値だけが来る）。**生 email はこの変数から先へ出さない** —
+     * 直後に digest へ落とし、応答にもログにも DB にも載せない。
+     * 鍵が無ければ `adminIdentity()` は null を返し、控えは `triggered_by=null` になる
+     * （素の値で埋めない = 生 email が混ざる余地を作らない）。
+     */
+    const triggeredBy = await adminIdentity(str(body.triggeredByEmail));
+    const exec = await executeDeliveryPlan(plan, { deliveryPrefix, triggeredBy });
     return json({
       ok: exec.ok,
       mode: 'deliver',

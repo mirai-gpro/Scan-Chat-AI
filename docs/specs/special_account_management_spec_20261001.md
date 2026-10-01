@@ -1654,6 +1654,31 @@ P0-3 は順序、P0-4 は不要な句の削除、H-1/H-2 は入力の絞り込�
 
 ---
 
+#### 27.1.3 実装レビューの是正 第 2 巡（**2026-10-01・3 点**）
+
+| # | 指摘 | 実コードの裏取り | どう直したか |
+|---|---|---|---|
+| **R-1** | `triggered_by` に**素の `SHA256(email)`** を使っている。`admin-identity.ts` が明示的に禁止している | 中継 (wellfort-site `api/admin/special-accounts/deliver-one.ts`) が `crypto.subtle.digest('SHA-256', email)` を計算して送っていた。**`admin-identity.ts:93` は「素の `sha256(email)` にしない。メールアドレスは列挙可能なので辞書で戻せる」**と書いてある。控えは 10 年残る。**指摘どおり** | **secure share と同じ形**（`api/admin/share-links.ts:138` の `created_by_email`）に寄せた。中継は**サーバ検証済み email をサーバ間で渡すだけ**（`triggeredByEmail`）で、**digest は Scan-Chat-AI 側が `adminIdentity()`（鍵つき HMAC + domain separation）で作る**。鍵は中継に無いので、中継が自前で作れる digest は必然的に素の sha256 になる＝**作らせない**のが正しい。`safeTriggeredBy()` は `/^[A-Za-z0-9_-]{43}$/`（base64url 43 文字）だけ通す。**ブラウザ申告の email は禁止のまま**（中継の `verifyAdmin()` が Supabase で検証した値だけを送る）・**生 email は受けた直後に digest へ落とし、応答にもログにも DB にも載せない** |
+| **R-2** | `stableBody()` が `HealthAgeData` の `computed_date` を落としていない | `elith-assemble.ts:291` の `data.computed_date` は `elith-delivery.ts:281` の `computedAt = new Date()` 由来＝**算出を回した日**。preview のたび upsert される。**`exported_at` / `diagnostic_id` と違い `data` の中にいる**ので、top-level だけを削る実装では取り逃す。**指摘どおり**（同じ検査データでも翌日は必ず「更新」になる） | `VOLATILE_DATA_META = ['computed_date']` を足し、**`data` が素のオブジェクトのときだけ**その 1 つを削る（配列・null・無しでも壊れない）。**`health_age` / `actual_age` / `delta` / `model_version` は 1 つも落とさない。** 検査は 2 段 — 単体（算出日だけ違えば同じ指紋 / 実値が違えば別の指紋 / 残るキーは 4 つ）と、**時計を 1 日進めて plan を組み直す**実走（`diff.updated=0`・指紋一致・実値を変えれば `updated>0`） |
+| **R-3** | `finalize` が `originalKey` を body の `uid` / `testType` / `testDate` と binding 確認していない | `isAdditionalOriginalKey()` は**形**しか見ない。`readAdditionalOriginal(key)` も鍵の中身を見ない。→ **別の人・別の検査・別の受診日の原本キーを添えて送れる**。通ると **UID-A の PDF が UID-B の artifact へ `raw_pdf` として紐付く**（原本は 10 年保管・削除不可）。**指摘どおり** | S3 から読み戻した**実 SHA**で `buildAdditionalOriginalKey({uid,testType,testDate,sha256Hex:original.sha256})` を組み直し、**受け取った `originalKey` と完全一致**でなければ **409 `invalid_original_binding`**。**DB mutation より前**（P0-3 の preflight よりさらに前）。自己申告の SHA は使わない。検査は**別 UID / 別検査種別 / 別受診日**の 3 ケース＋**キーの SHA と S3 の実体が食い違う**ケースで、いずれも `test_artifacts` / `measurement_values` / `test_artifact_files` が 0 件・Elith へ 0 ファイルであることまで見る |
+
+あわせて **migration `20261001000010_elith_delivery_runs.sql` の `snapshot` / `triggered_by` の
+コメントを現実装へ同期**した（`content_sha256` / `delivery_sha256` の 2 本立てと、
+`triggered_by` が `adminIdentity()` の HMAC digest であること）。**DDL は 1 行も変えていない**
+ので、**未適用のまま編集して問題ない**（適用済みを編集しない規律に触れない）。
+
+**退行注入は 8 種とも名指しで落ちることを確認済み**（既存 23 種と合わせて **31 種**）。
+うち 2 種は最初の版で名指しにならず、検査を直した:
+
+- 「中継が自前で sha256 digest を作る」… **中継のファイルを誰も見ていなかった** →
+  `verify:special-accounts-ui` に中継 4 本（digest を作らない / `triggeredByEmail: admin.email` /
+  ブラウザ申告を素通ししない / preview では送らない）を追加。
+- 「`data` ごと落として指紋を取る」… **`kept.data.x` が throw してスタックトレースで止まり**、
+  名指しの ✗ にならなかった → 当該アサーションを `?.` / `?? {}` で守った
+  （既存の K-48 も同じ形だったので併せて直した）。
+
+---
+
 ---
 
 ## 28. Source of Truth
@@ -1738,3 +1763,4 @@ P0-3 は順序、P0-4 は不要な句の削除、H-1/H-2 は入力の絞り込�
 | 1.3 | 2026-10-01 | 実装着手前の精査で **4 点 ＋ 1 点を修正**。① `putVerified` の追加 GET は **新規 / 変更で最大 2 回**（事前比較＋readback）・既存同一なら 1 回と明記し、**V-1 を最悪ケースで測る**ことにした（§9.6.1 / §9.6.2 a / §25.1.1）。② run snapshot に**集計値だけでなく納品ファイル 1 件ごとの明細**（`format_id` / `delivered_date` / `destination_key` / `sha256`）を持たせ、**同日・同件数で中身だけ変わった回を「更新」として検知**できるようにした（§14.3.1 / §14.3.1.1 / §16.1.2）。③ **確認モーダルの正本を `getAccountProgress` の DB 件数から「実際の assemble 結果（delivery preview = `plan`）」へ変更**し、**DB 件数と不一致なら警告**・**確定後は同じ `plan` を `putVerified`**・**snapshot は verified 結果から**とした（§7.3.1）。④ **「未確定事項は 1 件も残っていない」を撤回**し、「**発注者裁定事項 U-1〜U-8 は全て確定**」に修め、**E-1〜E-6 / V-1〜V-4 は未確認として明示**した（§25.1）。あわせて **`elith_delivery_runs` の対象を「スペシャルの手動納品 run」だけに限定**し、**通常 cron の run snapshot へは広げない**ことを確定した（§14.3.2 / §16.1.2）。検査は **K-45 を改め K-46〜K-51 を追加**、退行注入を **12 → 16 種**へ。**実装は 1 行もしていない。** |
 | 2.0 | 2026-10-01 | **P1〜P8 を実装した**（§27 の段取りどおり・1 段 1 コミット）。仕様は変えていない — 足したのは **§27.1 実装の地図**と **§27.1.1「実装して分かったこと」**、および §25.1.1 の V-1〜V-4 の実測結果。実装で補正したのは 6 点で、いずれも仕様の意図を保つための具体化: ①納品 JSON の `exported_at` / `diagnostic_id` が毎回変わるので指紋から外す ②HTTP 2 往復では plan を持ち越せないので「指紋が一致したときだけ書く」形にする ③その帰結として `putVerified` の冪等は検診・ウェルネス年齢には効かない（V-1 は最悪ケースで正しい）④実在しない暦日を弾く ⑤`account-progress` を問い合わせごとに fail-safe にする ⑥退行注入 2 と 16 が素の検査では落ちなかったので検査を足した。**未確認として残っているのは V-1 の本番実測（鍵も S3 もこの環境に無い）と E-1〜E-6（Elith 確認事項）。** |
 | 2.1 | 2026-10-01 | **実装レビューの是正**（§27.1.2）。発注者がコードを読んで出した **blocker 4 件 ＋ hardening 2 件**。**P0-1** delivery preview は read-only ではなかった（`elith-delivery.ts:231` が中間 source へ PUT・`:288` が `health_age_scores` を upsert）→ **挙動は変えず**、仕様書 §7.3.1・コード・UI・K-46 の文言を実装へ合わせた。**P0-2** `PlannedFile` を `contentSha256` / `deliverySha256` へ分離し、**差分判定は生成メタを除いた指紋**にした（従来は実 body の SHA なので内容が同じでも毎回「更新」になった）。**P0-3** 原本 SHA 衝突の判定を **DB mutation の前**へ（`preflightAdditionalOriginal()` 新設）。**P0-4** `.order('created_at')` を削除（schema は `imported_at`）。**H-1** `safeTriggeredBy()` を digest allow-list へ。**H-2** 実在暦日の検証を `additional-originals.ts` 1 か所へ集約し、署名の段にも適用した。**設計は 1 つも変えていない。** |
+| 2.2 | 2026-10-01 | **実装レビューの是正 第 2 巡**（§27.1.3・3 点）。**R-1** `triggered_by` の素の `SHA256(email)` を廃止し、**secure share と同じく中継はサーバ検証済み email をサーバ間で渡すだけ**にして、**digest は Scan 側の `adminIdentity()`（鍵つき HMAC）で作る**ようにした（`admin-identity.ts:93` が素の sha256 を禁じている・控えは 10 年残る）。`safeTriggeredBy()` は base64url 43 文字だけ通す。**R-2** `stableBody()` が `HealthAgeData` の **`data.computed_date`**（算出を回した日）を指紋から外すようにした — 外さないと**同じ検査データでも翌日は必ず「更新」**になる。実値は 1 つも落とさない。**R-3** `finalize` で `originalKey` を **uid / 検査種別 / 受診日と binding 確認**するようにした（読み戻した実 SHA でキーを組み直して完全一致・不一致は **DB mutation の前**に 409 `invalid_original_binding`）。あわせて migration のコメントを `content_sha256` / `delivery_sha256` の現実装へ同期（**DDL は無変更**）。**設計は 1 つも変えていない。** |

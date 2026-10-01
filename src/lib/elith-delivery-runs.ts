@@ -81,19 +81,28 @@ export function buildSnapshot(files: readonly PlannedFile[]): RunSnapshot {
 }
 
 /**
- * **sha256 digest（hex 64 文字）だけを受け取る**（Hardening 1）。それ以外は `null`。
+ * **`adminIdentity()` の HMAC digest だけを受け取る**。それ以外は `null`。
  *
- * 以前は「`@` を含まなければ通す」だったが、それは**生 email を弾く条件であって、
- * PII を弾く条件ではない**。氏名・社員番号・`admin%40example.com` のような
- * エンコード済みアドレスは全部すり抜ける。控えは 10 年残るので、
- * **形が digest であることを条件にする**（allow-list）。
- * digest は中継側（wellfort-site）が作る（§14.3.1）。
+ * ── 経緯 ──────────────────────────────────────────────────────────
+ * ①「`@` を含まなければ通す」… **生 email を弾く条件であって PII を弾く条件ではない**。
+ *   氏名・社員番号・`admin%40example.com` が全部すり抜けた。
+ * ② `sha256(email)` の hex 64 文字 … 形は固定できたが、**素の sha256(email) 自体が
+ *   使ってはいけない値**だった。`admin-identity.ts:93` が明示している —
+ *   **「素の `sha256(email)` にしない。メールアドレスは列挙可能なので辞書で戻せる」**。
+ *   控えは 10 年残るので、辞書で戻せる digest を 10 年置くことになる。
+ * ③ **いまの形** = `adminIdentity()`（鍵つき HMAC-SHA256 + domain separation）。
+ *   鍵を持たない者には戻せない。secure share の `createdBy` と同じ規律
+ *   （`share-access.ts:266` / `api/admin/share-links.ts:138`）。
+ * ────────────────────────────────────────────────────────────────
+ *
+ * 形 = `base64url(HMAC-SHA256)` = **43 文字**（32 バイト・パディング無し）。
+ * digest を作るのは **Scan-Chat-AI 側**（`deliver-one.ts` が `adminIdentity()` を呼ぶ）。
+ * **中継（wellfort-site）が digest を作らない** — あちらに鍵は無い。
  */
-const DIGEST_RE = /^[0-9a-f]{64}$/i;
+const IDENTITY_RE = /^[A-Za-z0-9_-]{43}$/;
 export function safeTriggeredBy(v: unknown): string | null {
   const s = String(v ?? '').trim();
-  if (!DIGEST_RE.test(s)) return null;
-  return s.toLowerCase();
+  return IDENTITY_RE.test(s) ? s : null;
 }
 
 /**

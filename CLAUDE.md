@@ -1912,9 +1912,9 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   **指紋からこの 2 つだけを外す** (データは外さない) / HTTP 2 往復では plan を持ち越せないので
   **2 回目も組み直して指紋が一致したときだけ書く** (中身をクライアントから送り返させない) /
   その帰結で `putVerified` の冪等は検診・ウェルネス年齢には効かない = **V-1 は最悪ケースで正しい**。
-  **検証** = `npm run verify:special-account-management` (179 件・CI の A 層) /
-  wellfort-site `verify:special-accounts-ui` (58 件) と `verify:admin-target` (34 件)。
-  **退行注入 23 種 (既存 16 + 新規 7) とも名指しで落ちることを確認済み。**
+  **検証** = `npm run verify:special-account-management` (198 件・CI の A 層) /
+  wellfort-site `verify:special-accounts-ui` (62 件) と `verify:admin-target` (34 件)。
+  **退行注入 31 種 (既存 16 + P0 7 + 第 2 巡 8) とも名指しで落ちることを確認済み。**
   **【実装レビューの是正 2026-10-01・仕様書 §27.1.2】発注者がコードを読んで出した
   blocker 4 件 + hardening 2 件を直した。設計は 1 つも変えていない。**
   - **P0-1 delivery preview は read-only ではなかった。** `materializeHealthCheckups()` →
@@ -1944,6 +1944,31 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     いたので、`2026-02-31` の原本が S3 へ上がったあとに DB 保存が 400 で落ち、
     **削除不可のバケットに孤児ファイルが残り得た**。**複製を置かない** (段ごとに判定が
     食い違うと孤児が出る)。
+  **【実装レビューの是正 第 2 巡 2026-10-01・仕様書 §27.1.2′=§27.1.3】さらに 3 点。**
+  - **R-1 `triggered_by` に素の `SHA256(email)` を使っていた。** `admin-identity.ts:93` が
+    **「素の `sha256(email)` にしない。メールアドレスは列挙可能なので辞書で戻せる」**と
+    明示しており、控えは 10 年残る。→ **secure share と同じ形**
+    (`api/admin/share-links.ts:138` の `created_by_email`) に寄せた。**中継 (wellfort-site) は
+    サーバ検証済み email をサーバ間で渡すだけ** (`triggeredByEmail`)、**digest は
+    Scan-Chat-AI 側が `adminIdentity()` (鍵つき HMAC + domain separation) で作る**。
+    **中継に digest を作らせない** — 鍵が無いので作れるのは素の sha256 だけになる。
+    `safeTriggeredBy()` は **base64url 43 文字**だけ通す。**ブラウザ申告の email は禁止のまま**・
+    **生 email は受けた直後に digest へ落とし、応答にもログにも DB にも載せない。**
+  - **R-2 `stableBody()` が `HealthAgeData` の `data.computed_date` を落としていなかった。**
+    `elith-assemble.ts:291` ← `elith-delivery.ts:281` の `new Date()` = **算出を回した日**で、
+    preview のたび更新される。**`exported_at` / `diagnostic_id` と違い `data` の中にいる**ので
+    top-level だけ削る実装では取り逃し、**同じ検査データでも翌日は必ず「更新」**になっていた。
+    → `VOLATILE_DATA_META = ['computed_date']` を追加 (`data` が素のオブジェクトのときだけ触る)。
+    **`health_age` / `actual_age` / `delta` / `model_version` は 1 つも落とさない。**
+    検査は**時計を 1 日進めて plan を組み直す**実走も含む (`diff.updated=0`)。
+  - **R-3 `finalize` が `originalKey` を uid / 検査種別 / 受診日と binding 確認していなかった。**
+    `isAdditionalOriginalKey()` は**形**しか見ないので、**別の人・別の検査・別の受診日の
+    原本キーを添えて送れた** (通ると UID-A の PDF が UID-B の artifact へ紐付く・原本は
+    10 年保管・削除不可)。→ S3 から読み戻した**実 SHA**で
+    `buildAdditionalOriginalKey()` を組み直し、**完全一致しなければ DB mutation の前に
+    409 `invalid_original_binding`**。自己申告の SHA は使わない。
+  - あわせて migration `20261001000010` の `snapshot` / `triggered_by` コメントを現実装へ同期
+    (**DDL は 1 行も変えていない**ので未適用のまま編集してよい)。
   **発注者の操作が 2 つ必要**: ① migration `20261001000010_elith_delivery_runs.sql` の適用
   ② 本番での通し確認 (この環境には鍵も S3 も無いので、Gemini 解析・S3 署名 PUT・
   本番納品の実挙動と V-1 の所要時間は未確認)。

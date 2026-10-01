@@ -240,12 +240,31 @@ export async function buildDeliveryPlan(opts: {
  */
 const VOLATILE_META = ['exported_at', 'diagnostic_id'] as const;
 
+/**
+ * **`data` の中にある生成メタ。**
+ *
+ * `HealthAgeData` の `data.computed_date`（`elith-assemble.ts:291` =
+ * `health_age_scores.computed_at` の日付部分）は**算出を回した日**であって検査の値ではない。
+ * preview を回すたび `computeWellnessFromMeasurements()` が upsert するので、
+ * **同じ検査データでも翌日に組み直すと変わる** → 指紋に入れると
+ * 「中身は 1 文字も変えていないのに翌日は必ず『更新』」になる。
+ *
+ * **外すのはこの 1 つだけ。** `health_age` / `actual_age` / `delta` / `model_version` は
+ * すべて指紋に入る（実値が変われば必ず差分に出る）。
+ */
+const VOLATILE_DATA_META = ['computed_date'] as const;
+
 /** 指紋用に、生成のたびに変わるメタデータだけを落とした本文を作る。 */
 export function stableBody(body: string | Uint8Array): string {
   const text = typeof body === 'string' ? body : new TextDecoder().decode(body);
   try {
     const o = JSON.parse(text) as Record<string, unknown>;
     for (const k of VOLATILE_META) delete o[k];
+    // `data` が**素のオブジェクトのときだけ**触る（配列・null・文字列には手を出さない）。
+    const d = o.data;
+    if (d && typeof d === 'object' && !Array.isArray(d)) {
+      for (const k of VOLATILE_DATA_META) delete (d as Record<string, unknown>)[k];
+    }
     return JSON.stringify(o);
   } catch {
     // JSON で無い（起こらないはずだが）ときは、そのまま使う。**黙って空にしない。**

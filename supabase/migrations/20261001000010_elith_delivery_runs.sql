@@ -20,6 +20,8 @@
 --   氏名・会社名・メール（マスクも）・生年月日・測定値・問診の回答本文・
 --   原本のファイル名は **1 つも入れない**。
 --   snapshot の sha256 は**中身の指紋であって中身ではない**（復元できない）。
+--   triggered_by は **adminIdentity() の鍵つき HMAC digest**（素の sha256(email) にしない
+--   = メールアドレスは列挙可能で辞書で戻せる。src/lib/admin-identity.ts:93）。
 --
 -- 【RLS】**service_role 以外に権限を出さない**（新表の既定の規律）。
 
@@ -34,6 +36,8 @@ create table if not exists diagnosis.elith_delivery_runs (
   delivered_at        timestamptz not null default now(),
 
   -- **admin 識別子の digest。生 email を入れない**（share-access.ts:283-292 と同じ規律）。
+  -- 値は `adminIdentity()` = base64url(HMAC-SHA256(鍵, "admin_identity:v1:" + email)) の 43 文字。
+  -- **素の sha256(email) を入れない**（辞書で戻せる。この控えは 10 年残る）。
   triggered_by        text,
 
   -- **'manual' 固定。** この表はスペシャルの手動納品 run だけを記録する（§14.3.2）。
@@ -64,7 +68,9 @@ create index if not exists elith_delivery_runs_uid_at_idx
 comment on table diagnosis.elith_delivery_runs is
   'スペシャルアカウントの手動納品 run の控え。cron の run は入れない（仕様書 §14.3.2）。PII は 1 つも持たない。';
 comment on column diagnosis.elith_delivery_runs.snapshot is
-  '納品したファイル 1 件ごとの明細（format_id / delivered_date / destination_key / sha256）と検査種別ごとの件数。sha256 は指紋であって中身ではない（仕様書 §14.3.1.1）。';
+  '納品したファイル 1 件ごとの明細（format_id / delivered_date / destination_key / content_sha256 / delivery_sha256）と検査種別ごとの件数。前回との差分判定に使うのは content_sha256（生成メタ exported_at / diagnostic_id / data.computed_date を除いた本文の指紋）だけで、delivery_sha256（実際に書いた body の指紋）は監査用。どちらも指紋であって中身ではない（仕様書 §14.3.1.1 / §27.1.2 P0-2）。';
+comment on column diagnosis.elith_delivery_runs.triggered_by is
+  'adminIdentity() の HMAC digest（base64url 43 文字）。生 email も素の sha256(email) も入れない（src/lib/admin-identity.ts:93）。';
 comment on column diagnosis.elith_delivery_runs.verified_count is
   '読み戻して SHA256 が一致したファイル数。PutObject の成否ではない（仕様書 §9.6）。';
 comment on column diagnosis.elith_delivery_runs.source is

@@ -42,7 +42,10 @@ import { normalizeCancerRisk } from '../../../../lib/cancer-risk-fix';
 import { consolidateAiPredictionItems } from '../../../../lib/ai-prediction-consolidate';
 import { getS3Config, isS3Configured, putFiles } from '../../../../lib/s3';
 import { makeSubjectResolver } from '../../../../lib/elith-delivery';
-import { isAdditionalTestType, isRealDate, type AdditionalTestType } from '../../../../lib/additional-originals';
+import {
+  isAdditionalTestType, isRealDate, buildAdditionalOriginalKey,
+  type AdditionalTestType,
+} from '../../../../lib/additional-originals';
 import {
   checkAdditionalTarget, isItemsFormat, FORMAT_BY_TEST_TYPE,
   saveAdditionalArtifact, readAdditionalOriginal, linkAdditionalOriginal,
@@ -167,6 +170,32 @@ export const POST: APIRoute = async ({ request }) => {
   if (!original.ok) {
     const status = original.error === 'originals_s3_not_configured' ? 503 : original.error === 'not_found' ? 404 : 400;
     return json({ ok: false, error: original.error, detail: original.detail, key: originalKey }, status);
+  }
+
+  /* ── 3.2: **原本キーが この uid / 検査種別 / 受診日 のものか**（binding 確認）───
+   *
+   * `isAdditionalOriginalKey()` は**形**しか見ないので、
+   * **別の人・別の検査・別の受診日の原本キーをこの body に添えて送れた**。
+   * 通ると `linkAdditionalOriginal()` が **UID-A の PDF を UID-B の artifact へ**
+   * `raw_pdf` として紐付ける（原本は 10 年保管・削除不可）。
+   *
+   * キーはサーバが
+   *   `additional_results/{uid}/{test_type}/{YYYY_MM_DD}/{sha256}.pdf`
+   * という形で採番している（`original-ticket` の `createAdditionalOriginalTicket`）ので、
+   * **S3 から読み戻した実 SHA で組み直して完全一致を見れば binding が確かめられる**。
+   * 自己申告の SHA は使わない（`original.sha256` は S3 の実体から取った値）。
+   *
+   * **DB mutation より前**に置く（P0-3 と同じ理由 — 409 で止めても DB は戻らない）。
+   */
+  const expectedKey = buildAdditionalOriginalKey({
+    uid, testType, testDate, sha256Hex: original.sha256,
+  });
+  if (!expectedKey || expectedKey !== originalKey) {
+    return json({
+      ok: false, error: 'invalid_original_binding',
+      detail: '原本キーが この対象者 / 検査種別 / 受診日 のものではありません。DB は 1 行も変えていません。',
+      key: originalKey,
+    }, 409);
   }
 
   // ── 3.5: 原本の衝突を **DB を変える前に** 見る（P0-3）──────────────────
