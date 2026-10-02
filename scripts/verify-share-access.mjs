@@ -47,6 +47,15 @@ const ok = (label, cond, why) => {
   console.log(`  ${cond ? '✓' : '✗'} ${label}`);
 };
 
+/** コメント行を落とす（文字列版）。固定日時ガードが経緯の説明を拾わないため。 */
+const stripComments = (t) => t.split('\n').filter((ln) => !/^\s*(\*|\/\/|\/\*)/.test(ln)).join('\n');
+
+/**
+ * **テスト開始時刻**。スタブの時計はこれに錨を打つ（ⓠ のガードが見る値）。
+ * 固定の過去日時を書かないための基準点。
+ */
+const T0_RUNTIME = Date.now();
+
 process.env.APP_SESSION_SECRET = 'test-secret-do-not-use-in-production';
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -57,7 +66,22 @@ export const LINKS = [];
 export const SESSIONS = [];
 export const LOGS = [];
 export const USERS = new Set();
-export let NOW = Date.parse('2026-09-30T12:00:00Z');
+/*
+ * **スタブの時計は「テスト開始時の runtime clock」を基準にする。固定の過去日時を書かない。**
+ *
+ * 【なぜ（2026-10-02 の CI 修復）】ここは \`Date.parse('2026-09-30T12:00:00Z')\` で
+ * 固定されていた。ところが **\`src/middleware.ts\` は \`resolveShareSession(cookie)\` を
+ * 第 2 引数なし**で呼ぶ＝既定の \`Date.now()\`（実時計）を使う。
+ * session の期限は「この NOW + TTL」で作られるので、**実時刻が追い越した瞬間から
+ * middleware 経由の検査だけが恒久的に FAIL** していた
+ * （S18 x5 / S18b / S18c / S§26 / LG-3 / LG-4 / KS-3 / KS-4 / 注入⑮ の 13 件）。
+ * 直接呼び出し（S01〜S19 など）は \`db.NOW\` を渡すので緑のまま = **静かに腐る**形だった。
+ *
+ * **別の固定日時に差し替えるのでも、product code に時計を注入するのでもない。**
+ * テスト開始時刻を基準にすれば、相対的な時間旅行（\`setNow(NOW ± n)\`）はそのまま使えて、
+ * 実時計とも必ず噛み合う。固定過去日時を再導入したら下の T0 ガードが落ちる。
+ */
+export let NOW = Date.now();
 export function setNow(t) { NOW = t; }
 export function reset() { LINKS.length = 0; SESSIONS.length = 0; LOGS.length = 0; }
 
@@ -202,6 +226,19 @@ async function enter(token) {
 /* ══════════════════════════════════════════════════════════════════════
  * ① 入場（token → pending → 同意 → session）
  * ════════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════════
+ * ⓠ 時計の健全性（**再腐敗ガード**・2026-10-02）
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\nⓠ 時計の健全性（固定過去日時の再導入ガード）\n');
+{
+  const drift = Math.abs(db.NOW - T0_RUNTIME);
+  ok('T0-1 **スタブの NOW がテスト開始時刻に錨を打っている**（固定過去日時を書いていない）',
+    drift <= 5 * 60 * 1000, `drift=${Math.round(drift / 1000)}s`);
+  // **コメントは見ない**（上の経緯説明に旧コードが載っているので、そこを拾わない）。
+  ok('T0-2 スタブの**コード**に固定日時リテラルが無い',
+    !/Date\.parse\('\d{4}-\d{2}-\d{2}/.test(stripComments(STUB)), '');
+}
+
 console.log('\n① 入場（§16 / §18）\n');
 let SESSION_A = null;
 {
@@ -272,6 +309,16 @@ console.log('\n② 停止・失効・再発行（§27）\n');
   const iss = await issue();
   const s = await enter(iss.token);
   ok('S19 有効なあいだは解決できる', (await sa.resolveShareSession(s, db.NOW)) !== null);
+  /*
+   * **S19-RT: `now` を渡さない経路を名前つきで固定する**（2026-10-02 追加）。
+   *
+   * `src/middleware.ts` は `resolveShareSession(context.cookies.get(SHARE_COOKIE)?.value)` と
+   * **第 2 引数なし**で呼ぶ＝既定の `Date.now()`（実時計）を使う。
+   * ここが腐っても `db.NOW` を渡す検査だけ緑だと**気づけない**
+   * （実際それで 13 件が静かに落ちていた）。**実時計経路を 1 件、明示的に持つ。**
+   */
+  ok('S19-RT **`now` 引数なしでも解決できる（middleware と同じ実時計経路）**',
+    (await sa.resolveShareSession(s)) !== null);
 
   await sa.setShareLinkStatus(iss.id, 'paused');
   ok('S20 paused にすると既存セッションが即座に使えない',
