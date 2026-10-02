@@ -15,6 +15,7 @@
  */
 
 import { getServerSupabase } from './supabase';
+import { DERIVED_HC_BLOOD_IMPORTED_BY } from './blood-subset';
 import { demoFallbackEnabled, demoMetricTrend } from './demo-data';
 import { ALA_PORPHYRIN_LABEL, restrictToLatestAla } from './ala-pds';
 import type { MetricTrendPoint, MetricTrendSeries } from './dashboard-queries';
@@ -153,19 +154,35 @@ function demoLatest(): LatestMeasurements {
  * 失敗したら **throw する**。呼び出し側の catch が「データ無し」を返す
  * = 古い値を出すくらいなら空にする (fail-closed)。
  */
-async function activeArtifactIds(
+async function activeArtifacts(
   sb: NonNullable<ReturnType<typeof getServerSupabase>>,
   diagnosticUserId: string,
-): Promise<string[]> {
+): Promise<{ ids: string[]; importedBy: Map<string, string> }> {
   const { data, error } = await sb
     .schema('diagnosis')
     .from('test_artifacts')
-    .select('id')
+    /*
+     * `imported_by` も引く。**クエリは増えない** (status を絞るためにこの表は元々引いている)。
+     * `measurement_values` は `status` も `imported_by` も持たないので、
+     * 「点ごとの由来」はここでしか取れない (spec §7.3)。
+     */
+    .select('id, imported_by')
     .eq('diagnostic_user_id', diagnosticUserId)
     .eq('status', 'active')
     .limit(2000);
   if (error) throw new Error(`test_artifacts(active) の取得に失敗: ${error.message}`);
-  return ((data ?? []) as unknown as { id: string }[]).map((r) => String(r.id));
+  const rows = (data ?? []) as unknown as { id: string; imported_by: string | null }[];
+  const importedBy = new Map<string, string>();
+  for (const r of rows) importedBy.set(String(r.id), String(r.imported_by ?? ''));
+  return { ids: rows.map((r) => String(r.id)), importedBy };
+}
+
+/** 従来の呼び出し口 (id だけが要る経路)。挙動は変えない。 */
+async function activeArtifactIds(
+  sb: NonNullable<ReturnType<typeof getServerSupabase>>,
+  diagnosticUserId: string,
+): Promise<string[]> {
+  return (await activeArtifacts(sb, diagnosticUserId)).ids;
 }
 
 /** 直近 1 回分の検査値を取得する。無ければ null (テストフェーズはデモへ)。 */
@@ -262,6 +279,31 @@ const SERIES_NAME_ALIASES: Readonly<Record<string, string>> = {
    */
   尿中のポルフィリン量: ALA_PORPHYRIN_LABEL,
   尿中ポルフィリン量: ALA_PORPHYRIN_LABEL,
+  /*
+   * **2026-10-02 に標準マスタへ 3 項目を足したことの後始末** (塩分と同型の系列割れ対策)。
+   *
+   * `canonical_name` は**書き込み時点で確定する** (`measurement-persist.ts`) ので、
+   * マスタに足しても**既存行には遡って付かない**。すると同じ項目が
+   *   古い行 … canonical_name=null → キー = item_name (`中性脂肪(TG)` / `e-GFR` / `BUN`)
+   *   新しい行 … canonical_name が付く → キー = `中性脂肪` / `eGFR` / `尿素窒素`
+   * に割れて、**推移グラフの点が減る**。塩分 (上) で実際に起きた形と同じで、
+   * **線は 1 本描かれるのでエラーも出ない = 目視では気づけない。**
+   *
+   * → 読み出し時だけ**完全一致**で寄せる。**DB の item_name は書き換えない** (上と同じ規律)。
+   *
+   * ⚠️ **`空腹時中性脂肪` / `随時中性脂肪` はここに入れない。** 原本が区別している
+   *    空腹時/随時 を読み出しで潰すことになる (裁定 Q-3)。派生 blood のための統合は
+   *    `blood-subset.ts` の中だけで行う。
+   */
+  '中性脂肪(TG)': '中性脂肪',
+  TG: '中性脂肪',
+  トリグリセライド: '中性脂肪',
+  'e-GFR': 'eGFR',
+  BUN: '尿素窒素',
+  UN: '尿素窒素',
+  血中尿素窒素: '尿素窒素',
+  Alb: 'アルブミン',
+  ALB: 'アルブミン',
 };
 
 function seriesKey(r: { canonical_name: string | null; item_name?: string | null }): string | null {
@@ -368,7 +410,7 @@ export async function getMeasurementTrend(
   try {
     // superseded / withdrawn の回は点として打たない
     // (差し替え前の値が線に残ると「前回はこうだった」という誤った推移になる)。
-    const active = await activeArtifactIds(sb, diagnosticUserId);
+    const { ids: active, importedBy } = await activeArtifacts(sb, diagnosticUserId);
     if (active.length === 0) return [];
     const { data, error } = await sb
       .schema('diagnosis')
@@ -426,20 +468,36 @@ export async function getMeasurementTrend(
       for (const r of sorted) {
         const v = num(r.value_num);
         if (v == null) continue;
+        const derived = importedBy.get(String(r.artifact_id)) === DERIVED_HC_BLOOD_IMPORTED_BY;
         points.push({
           date: String(r.test_date),
           value: v,
           raw: r.value ?? String(v),
           flag: r.flag === 'H' || r.flag === 'L' ? r.flag : null,
+          // 点ごとの由来。**artifact の imported_by が唯一の根拠** (値から推測しない)。
+          ...(derived ? { source: 'health_checkup_scan' as const } : {}),
         });
       }
       if (points.length === 0) continue;
       const last = sorted[sorted.length - 1];
+      /*
+       * **混在している系列では基準線を出さない** (発注者裁定 Q-5 / D-4)。
+       *
+       * 基準値は**系列の最後の行**から取る作りなので、人間ドック由来の点が最新に
+       * なった回だけ「その施設の基準値」が系列全体の基準帯として描かれてしまう。
+       * デメカルで測った点にも他施設の基準値を当てることになり誤解を生む。
+       *
+       * **点ごとの H/L は残す** — `flag` は検査票 / CSV が付けた印で、
+       * アプリが基準値と比較して出したものではない。
+       */
+      const mixedOrigin =
+        points.some((p) => p.source === 'health_checkup_scan') &&
+        points.some((p) => p.source !== 'health_checkup_scan');
       out.push({
         label: name,
         unit: last.unit ?? '',
-        referenceUpper: num(last.ref_high_num) ?? undefined,
-        referenceLower: num(last.ref_low_num) ?? undefined,
+        referenceUpper: mixedOrigin ? undefined : num(last.ref_high_num) ?? undefined,
+        referenceLower: mixedOrigin ? undefined : num(last.ref_low_num) ?? undefined,
         points,
       });
     }

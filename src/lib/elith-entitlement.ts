@@ -26,6 +26,7 @@
  */
 
 import { cfg } from './app-config';
+import { DERIVED_HC_BLOOD_IMPORTED_BY } from './blood-subset';
 import { getBridgeSupabase } from './supabase';
 
 /** Elith の format_id。納品セットの単位 (`elith_s3_data_handoff_spec §2`)。 */
@@ -155,6 +156,33 @@ export interface ReadyCheck {
  * 回 (cycle) の窓で絞る仕組みは契約テーブルが埋まってから (§4.3.1 の cadence)。
  * ここで日付の窓を推測で入れると、**揃っているのに出ない**が黙って起きる。
  */
+/**
+ * **人間ドック由来の派生 blood を「揃った」に数えない** (発注者裁定 Q-4 / D-1)。
+ *
+ * 【なぜ要るか】`BloodTestData` の揃い判定は `test_type='blood'` の active 行の
+ * **有無だけ**を見る。派生をそのまま数えると、**実際のデメカル血液検査が届く前に
+ * 「揃った」と判定され、毎晩 23:00 JST の cron が納品を発火し得る**。
+ * しかも `elith_deliveries` の unique + `skipDelivered` で**同じ bundle_date では
+ * 二度と再送されない**ので、後からデメカルが届いても手遅れになる。
+ *
+ * 業務要件は**年 3 回のデメカル ＋ 人間ドック由来 1 回**であり、
+ * **派生は通常血液検査の代替ではない。**
+ *
+ * ⚠️ **守ること (発注者の明示指示)**
+ *   - 除外は **`imported_by` の完全一致 1 本**。前方一致・部分一致にしない。
+ *   - **`source='user_upload'` 全体を除外しない。** 将来「利用者が血液検査の紙を
+ *     スキャンする」経路ができたとき、それを誤って排除するため。
+ *   - **`blood` 以外の format の判定は 1 文字も変えない**
+ *     (health_checkup / cancer_urine / genetics / ai_prediction / interview)。
+ *   - **納品側からは外さない。** readiness に数えない / 納品に含める、を混同しない。
+ */
+export function countsTowardReadiness(
+  r: { test_type: string; imported_by?: string | null },
+): boolean {
+  if (r.test_type !== 'blood') return true;                       // blood 以外は不変
+  return String(r.imported_by ?? '') !== DERIVED_HC_BLOOD_IMPORTED_BY;
+}
+
 export async function checkFormatsReady(
   uids: string[],
   requiredByUid: Map<string, ElithFormat[] | null>,
@@ -189,11 +217,13 @@ export async function checkFormatsReady(
     if (neededTypes.size) {
       const { data } = await diagnosis
         .from('test_artifacts')
-        .select('diagnostic_user_id, test_type')
+        // imported_by も引く — 人間ドック由来の派生 blood を揃い判定から外すため (下)。
+        .select('diagnostic_user_id, test_type, imported_by')
         .eq('status', 'active')
         .in('test_type', Array.from(neededTypes))
         .in('diagnostic_user_id', clean);
-      for (const r of (data ?? []) as { diagnostic_user_id: string; test_type: string }[]) {
+      for (const r of (data ?? []) as { diagnostic_user_id: string; test_type: string; imported_by: string | null }[]) {
+        if (!countsTowardReadiness(r)) continue;
         have[r.diagnostic_user_id?.toLowerCase()]?.add(r.test_type);
       }
     }

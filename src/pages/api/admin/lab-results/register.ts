@@ -34,6 +34,7 @@ import { isAdminAuthorized } from '../../../../lib/api-auth';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { readUploadedOriginal } from '../../../../lib/originals-upload-ticket';
 import { decideOriginalRegistration, type ExistingOriginalRow } from '../../../../lib/additional-originals';
+import { supersedeDerivedBloodOnSameDate } from '../../../../lib/scan-persist';
 
 export const prerender = false;
 /** S3 から 1 件読み直してハッシュを取るので、既定の 60s では足りないことがある。 */
@@ -271,10 +272,33 @@ export const POST: APIRoute = async ({ request }) => {
     );
   }
 
+  /*
+   * **通常 blood が実在の利用者に紐づいた回は、同じ受診日の派生 blood を降ろす**
+   * (発注者指示 §7 / 裁定 Q-10)。「通常 blood が後から届いた場合も通常が勝つ」。
+   *
+   * **ここに置く理由**: `lab-results/upload.ts` は artifact を `UNASSIGNED_UID` で作るので
+   * (顧客未割当) その時点では誰の血液検査か決まっておらず、呼んでも空振りにしかならない。
+   * 通常 blood が**実在の利用者に紐づく**のはこの register 側なので、優先の適用はここ 1 本。
+   *
+   * **削除ではなく superseded。** 触るのは `imported_by='derived_healthcheck_blood'` の行だけで、
+   * 通常 blood の行には 1 行も触らない。**失敗しても取り込みは成功のまま返す。**
+   */
+  let supersededDerivedBlood = 0;
+  if (target.test_type === 'blood'
+      && target.diagnostic_user_id
+      && target.diagnostic_user_id !== UNASSIGNED_UID) {
+    const r = await supersedeDerivedBloodOnSameDate(
+      sb as never, target.diagnostic_user_id, target.test_date,
+    );
+    supersededDerivedBlood = r.superseded;
+  }
+
   return json({
     ok: true,
     test_artifact_id: target.id,
     artifact_created: created,
+    /** 同日の人間ドック由来 派生 blood を降ろした件数 (0 なら対象なし)。 */
+    superseded_derived_blood: supersededDerivedBlood,
     // **触っていないことを応答で示す** (three_mode が保たれたかを目で確かめられるように)。
     diagnostic_user_id: target.diagnostic_user_id,
     test_type: target.test_type,

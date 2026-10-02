@@ -96,6 +96,11 @@ jobs:
       # 絞り忘れると差し替え前・取り下げ後の値が画面に混ざるが、**エラーは出ない**。
       - run: npm run verify:measurement-status
       - run: npm run verify:trend-series
+      # 人間ドック由来 派生 blood。**ここは静かに壊れる** — 0 補完が混ざっても
+      # 画面はエラーを出さず、`血糖`→`空腹時血糖` の誤マップは「値が出る」形で成功して見える。
+      # readiness の除外が外れるとデメカル到着前に Elith 納品が発火し、
+      # 同じ回は `elith_deliveries` の unique で二度と再送されない。
+      - run: npm run verify:blood-subset
       - run: npm run verify:url-uid-privacy
       # Admin 代理表示 (UID-less)。**ここは静かに壊れる** — 画面は正常に見えるのに
       # 中身が別人、という形で出る。identity 照合・single-use・GET で claim しない、を固定。

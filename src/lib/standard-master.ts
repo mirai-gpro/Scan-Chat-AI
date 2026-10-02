@@ -79,9 +79,22 @@ export const STANDARD_MASTER: StandardItem[] = [
   { canonical_name: '血色素量', synonyms: ['ヘモグロビン', 'Hb', '血色素'], unit: 'g/dL', unit_aliases: ['g/dl'], category: '血液一般', source_std: 'starter' },
   { canonical_name: 'ヘマトクリット', synonyms: ['Ht', 'ヘマトクリット値'], unit: '%', category: '血液一般', source_std: 'starter' },
   { canonical_name: '血小板数', synonyms: ['血小板', 'PLT'], unit: '×10⁴/μL', unit_aliases: ['10^4/μl', '×10^4/μl'], category: '血液一般', source_std: 'starter' },
-  // 脂質（空腹時/随時 は別項目として区別。ambiguous な「中性脂肪」単独は登録しない）
+  /*
+   * 脂質（空腹時/随時 は別項目として区別する）。
+   *
+   * **無修飾の「中性脂肪」は 2026-10-02 に別項目として収録した**（発注者裁定 Q-3）。
+   * 人間ドック原本に `中性脂肪(TG)` と印字される様式が実在する
+   * （`docs/scan/golden/scan_golden_humandock_20240924.md` の 129）ため、
+   * starter の規律（代表ゴールデンに実在する標準項目だけを収録する）に反しない。
+   *
+   * ⚠️ **`空腹時中性脂肪` / `随時中性脂肪` を `中性脂肪` の synonyms にしてはいけない。**
+   * ここで alias にすると `HealthCheckupData` 側の名寄せまで変わり、原本が区別している
+   * 空腹時/随時 の違いが失われる。派生 blood のための統合は
+   * `src/lib/blood-subset.ts` の中だけで行う（統合を知るのはあの 1 ファイルだけ）。
+   */
   { canonical_name: '空腹時中性脂肪', synonyms: ['空腹時TG'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: '随時中性脂肪', synonyms: [], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
+  { canonical_name: '中性脂肪', synonyms: ['TG', '中性脂肪(TG)', 'トリグリセライド'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: '総コレステロール', synonyms: ['TC', 'T-Cho', '総コレステロール(TC)'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: 'HDLコレステロール', synonyms: ['HDL', 'HDL-C'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: 'LDLコレステロール', synonyms: ['LDL', 'LDL-C'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
@@ -97,9 +110,11 @@ export const STANDARD_MASTER: StandardItem[] = [
   { canonical_name: 'γ-GTP', synonyms: ['γGTP', 'ガンマGTP', 'GGT', 'Y-GTP', 'YGTP', 'Y-GTP(γ-GTP)'], unit: 'U/L', unit_aliases: ['u/l', 'iu/l'], category: '肝機能', source_std: 'starter' },
   { canonical_name: 'ALP', synonyms: ['アルカリフォスファターゼ'], unit: 'IU/L', unit_aliases: ['u/l', 'iu/l'], category: '肝機能', source_std: 'starter' },
   { canonical_name: '総蛋白', synonyms: ['TP', '血清総蛋白', '総タンパク'], unit: 'g/dL', unit_aliases: ['g/dl'], category: '肝機能', source_std: 'starter' },
+  { canonical_name: 'アルブミン', synonyms: ['Alb', 'ALB'], unit: 'g/dL', unit_aliases: ['g/dl'], category: '肝機能', source_std: 'starter' },
   // 尿・腎機能
   { canonical_name: 'クレアチニン', synonyms: ['Cr', 'CRE', 'クレアチニン(血清)'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '腎機能', source_std: 'starter' },
-  { canonical_name: 'eGFR', synonyms: ['推算GFR', 'eGFRcreat'], unit: 'mL/min', unit_aliases: ['ml/min'], category: '腎機能', source_std: 'starter' },
+  { canonical_name: 'eGFR', synonyms: ['推算GFR', 'eGFRcreat', 'e-GFR'], unit: 'mL/min', unit_aliases: ['ml/min'], category: '腎機能', source_std: 'starter' },
+  { canonical_name: '尿素窒素', synonyms: ['BUN', 'UN', '血中尿素窒素'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '腎機能', source_std: 'starter' },
   { canonical_name: '尿蛋白', synonyms: ['蛋白', '尿蛋白(定性)'], unit: null, qualitative: true, category: '尿定性', source_std: 'starter' },
   { canonical_name: '尿潜血', synonyms: ['潜血'], unit: null, qualitative: true, category: '尿定性', source_std: 'starter' },
   // 痛風
