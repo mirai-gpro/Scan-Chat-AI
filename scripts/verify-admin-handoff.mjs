@@ -51,6 +51,12 @@ const ok = (label, cond, why) => {
 const eq = (label, got, want) => ok(label, JSON.stringify(got) === JSON.stringify(want),
   `got ${JSON.stringify(got)} / want ${JSON.stringify(want)}`);
 
+/**
+ * **テスト開始時刻**。スタブの時計はこれに錨を打つ（ⓠ のガードが見る値）。
+ * 固定の過去日時を書かないための基準点。
+ */
+const T0_RUNTIME = Date.now();
+
 process.env.APP_SESSION_SECRET = 'test-secret-do-not-use-in-production';
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -60,7 +66,22 @@ const STUB = `
 export const HANDOFFS = [];
 export const SESSIONS = [];
 export const USERS = new Set();
-export let NOW = Date.parse('2026-09-30T12:00:00Z');
+/*
+ * **スタブの時計は「テスト開始時の runtime clock」を基準にする。固定の過去日時を書かない。**
+ *
+ * 【なぜ（2026-10-02 の CI 修復）】ここは \`Date.parse('2026-09-30T12:00:00Z')\` で
+ * 固定されていた。ところが **\`src/middleware.ts\` と
+ * \`resolveImpersonationContext()\` / \`resolveShareSession()\` の既定引数は実時計**を使う。
+ * session の期限は「この NOW + 60 分」で作られるので、
+ * **実時刻が 2026-09-30 13:00Z を過ぎた瞬間から、正常系が恒久的に FAIL** していた
+ * （C-1 / C-9 / C-10 / C-12 / M-1〜M-7 / M-17 / M-18 / X-6 の 14 件）。
+ *
+ * **直し方を間違えないこと**: 「別の固定日時に差し替える」のでも
+ * 「product code に時計を注入する」のでもない。**テスト開始時刻を基準にする**ことで、
+ * 相対的な時間旅行（\`setNow(NOW ± n)\`）はそのまま使えて、実時計とも必ず噛み合う。
+ * 固定過去日時を再導入したら下の T0 ガードが落ちる。
+ */
+export let NOW = Date.now();
 export function setNow(t) { NOW = t; }
 export function reset() { HANDOFFS.length = 0; SESSIONS.length = 0; }
 
@@ -186,6 +207,23 @@ async function issue(uid = UID_A, who = ADMIN1) {
 /* ══════════════════════════════════════════════════════════════════════
  * ① admin_identity — 何であって、何でないか
  * ════════════════════════════════════════════════════════════════════ */
+/* ══════════════════════════════════════════════════════════════════════
+ * ⓪ 時計の健全性（**再腐敗ガード**・2026-10-02）
+ *
+ * スタブの時計が runtime clock に錨を打っていることを**最初に**確かめる。
+ * ここが落ちるのは「固定の過去日時が再導入された」ときだけ。
+ * **現在時刻との差を固定値で成立させない** — 基準は常にテスト開始時刻。
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\nⓠ 時計の健全性（固定過去日時の再導入ガード）\n');
+{
+  const drift = Math.abs(db.NOW - T0_RUNTIME);
+  ok('T0-1 **スタブの NOW がテスト開始時刻に錨を打っている**（固定過去日時を書いていない）',
+    drift <= 5 * 60 * 1000, `drift=${Math.round(drift / 1000)}s`);
+  // **コメントは見ない**（上の経緯説明に旧コードが載っているので、そこを拾わない）。
+  ok('T0-2 スタブの**コード**に固定日時リテラルが無い',
+    !/Date\.parse\('\d{4}-\d{2}-\d{2}/.test(stripComments(STUB)), '');
+}
+
 console.log('\n① admin_identity（§12.4.1）\n');
 {
   ok('A-1 大文字・前後空白を正規化する（同じ人は同じ digest）',
@@ -331,6 +369,16 @@ console.log('\n④ context の解決（本人結合）\n');
   const { ctx } = await imp.consumeHandoff(pending, ADMIN1);
 
   ok('C-1 発行した admin 本人なら解決できる',
+    (await imp.resolveImpersonationContext(ctx, ADMIN1, db.NOW))?.targetUid === UID_A);
+  /*
+   * **C-1b: `now` を渡さない経路を名前つきで固定する**（2026-10-02 追加）。
+   *
+   * `src/middleware.ts` は `resolveImpersonationContext(parsed.ctx, cred.identity)` と
+   * **第 3 引数なし**で呼ぶ＝既定の `Date.now()`（実時計）を使う。
+   * ここが腐っても C-1 のように `now` を渡す検査だけ緑だと**気づけない**
+   * （実際それで 14 件が静かに落ちていた）。**実時計経路を 1 件、明示的に持つ。**
+   */
+  ok('C-1b **`now` 引数なしでも解決できる（middleware と同じ実時計経路）**',
     (await imp.resolveImpersonationContext(ctx, ADMIN1))?.targetUid === UID_A);
   ok('C-2 **別の admin では解決できない（URL を拾っただけでは開けない）**',
     await imp.resolveImpersonationContext(ctx, ADMIN2) === null);
