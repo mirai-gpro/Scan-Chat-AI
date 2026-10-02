@@ -33,7 +33,7 @@
  */
 
 import type { APIRoute } from 'astro';
-import { isAdminAuthorized } from '../../../../lib/api-auth';
+import { checkAdminAuth } from '../../../../lib/api-auth';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { refreshConfig } from '../../../../lib/app-config';
 import {
@@ -102,7 +102,21 @@ function toLean(raw: unknown): LeanMeasurement[] {
 }
 
 export const POST: APIRoute = async ({ request }) => {
-  if (!isAdminAuthorized(request)) return json({ ok: false, error: 'unauthorized' }, 401);
+  /*
+   * **「鍵が違う」と「鍵が設定されていない」を混ぜない。** `isAdminAuthorized()` は
+   * どちらも false にするので、本番で env の入れ忘れがあったときに
+   * 画面には「管理者として認証できませんでした」と出て**原因を追えない**。
+   * `checkAdminAuth()` は理由を返すので、そのまま出す (api-auth.ts の設計どおり)。
+   */
+  const auth = checkAdminAuth(request);
+  if (!auth.ok) {
+    return json(
+      auth.reason === 'server_misconfig'
+        ? { ok: false, error: 'server_misconfig', detail: 'Scan-Chat-AI の ADMIN_API_KEY が未設定です (Vercel の環境変数を確認してください)' }
+        : { ok: false, error: 'unauthorized' },
+      auth.reason === 'server_misconfig' ? 503 : 401,
+    );
+  }
 
   let body: Record<string, unknown> = {};
   try { body = (await request.json()) as Record<string, unknown>; } catch { /* 空でよい */ }
