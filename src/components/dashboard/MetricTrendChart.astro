@@ -1,6 +1,7 @@
 ---
 import AppIcon from '../AppIcon.astro';
 import type { MetricTrendSeries } from '../../lib/dashboard-queries';
+import { DERIVED_HC_BLOOD_LABEL } from '../../lib/blood-subset';
 
 /**
  * 検査値の推移グラフ。カードをクリック (Enter/Space) で拡大モーダルを開く。
@@ -128,6 +129,11 @@ const refLabel = (s: MetricTrendSeries): string => {
               {s.unit && <span class="text-sm text-slate-600">{s.unit}</span>}
             </span>
           </span>
+
+          {/* 最新値が人間ドック由来のときだけ出す (点単位の由来なので最新点に限る)。 */}
+          {d.last.source === 'health_checkup_scan' && (
+            <span class="mb-1.5 block w-full text-sm text-slate-600">{DERIVED_HC_BLOOD_LABEL}</span>
+          )}
 
           <span class="mb-2 flex w-full flex-wrap items-center gap-2">
             {d.last.flag && (
@@ -298,7 +304,17 @@ const refLabel = (s: MetricTrendSeries): string => {
             <tbody>
               {d.rows.map((r) => (
                 <tr class="border-t border-slate-200">
-                  <td class="whitespace-nowrap px-3 py-2.5 text-slate-800">{jpDate(r.date)}</td>
+                  <td class="whitespace-nowrap px-3 py-2.5 text-slate-800">
+                    {jpDate(r.date)}
+                    {/*
+                      由来は**列を増やさず**「検査日」セルの 2 行目に置く。
+                      列を足すと 390px で表が潰れる (CLAUDE.md「.md-region table に w-full を当てない」の同型)。
+                      文言は固定 (v1.1 §11 C1)。
+                    */}
+                    {r.source === 'health_checkup_scan' && (
+                      <span class="mt-0.5 block text-sm font-normal text-slate-600">{DERIVED_HC_BLOOD_LABEL}</span>
+                    )}
+                  </td>
                   <td class="tnum px-3 py-2.5 text-right font-semibold text-slate-900">{r.raw}</td>
                   <td class="tnum px-3 py-2.5 text-right text-slate-700">
                     {r.delta == null ? '—' : `${r.delta > 0 ? '+' : ''}${r.delta.toFixed(d.decimals)}`}

@@ -55,6 +55,7 @@
     "verify:report-batch": "node scripts/verify-report-batch.mjs",
     "verify:measurement-status": "node scripts/verify-measurement-status.mjs",
     "verify:trend-series": "node scripts/verify-trend-series.mjs",
+    "verify:blood-subset": "node scripts/verify-blood-subset.mjs",
     "verify:url-uid-privacy": "node scripts/verify-url-uid-privacy.mjs",
     "verify:admin-handoff": "node scripts/verify-admin-handoff.mjs",
     "verify:share-access": "node scripts/verify-share-access.mjs",
