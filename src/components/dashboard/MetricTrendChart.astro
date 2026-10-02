@@ -1,7 +1,6 @@
 ---
 import AppIcon from '../AppIcon.astro';
 import type { MetricTrendSeries } from '../../lib/dashboard-queries';
-import { DERIVED_HC_BLOOD_LABEL, DERIVED_HC_BLOOD_SOURCE } from '../../lib/blood-subset';
 
 /**
  * 検査値の推移グラフ。カードをクリック (Enter/Space) で拡大モーダルを開く。
@@ -85,12 +84,6 @@ function build(s: MetricTrendSeries) {
   return { mini, big, ticks, last, diff, decimals, hasBand, lo, hi, rows };
 }
 
-/**
- * その点が人間ドック・健康診断のスキャン由来か（`docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §7.3）。
- * 文言は `DERIVED_HC_BLOOD_LABEL`（発注者裁定 Q-7・**変えない**）。
- */
-const isDerivedHc = (p: { source?: string | null }): boolean => p.source === DERIVED_HC_BLOOD_SOURCE;
-
 const charts = series.filter((s) => s.points.length > 0).map((s, i) => ({ s, d: build(s), i }));
 const refLabel = (s: MetricTrendSeries): string => {
   if (s.referenceLower != null && s.referenceUpper != null) return `${s.referenceLower}〜${s.referenceUpper}`;
@@ -142,13 +135,6 @@ const refLabel = (s: MetricTrendSeries): string => {
                 <AppIcon name="watch" size={14} />
                 {d.last.flag === 'H' ? '基準値より高い' : '基準値より低い'}
               </span>
-            )}
-            {/*
-              最新の点が人間ドック・健康診断由来のときだけ出す（spec §7.3）。
-              カード全体が <button> なので入れ子は <span> のまま（<div> を入れない）。
-            */}
-            {isDerivedHc(d.last) && (
-              <span class="text-sm font-medium text-brand-700">{DERIVED_HC_BLOOD_LABEL}</span>
             )}
             {d.diff != null && (
               <span class="tnum inline-flex items-center gap-1 text-sm text-slate-600">
@@ -312,12 +298,7 @@ const refLabel = (s: MetricTrendSeries): string => {
             <tbody>
               {d.rows.map((r) => (
                 <tr class="border-t border-slate-200">
-                  <td class="whitespace-nowrap px-3 py-2.5 text-slate-800">
-                    {jpDate(r.date)}
-                    {isDerivedHc(r) && (
-                      <span class="mt-0.5 block text-sm font-medium text-brand-700">{DERIVED_HC_BLOOD_LABEL}</span>
-                    )}
-                  </td>
+                  <td class="whitespace-nowrap px-3 py-2.5 text-slate-800">{jpDate(r.date)}</td>
                   <td class="tnum px-3 py-2.5 text-right font-semibold text-slate-900">{r.raw}</td>
                   <td class="tnum px-3 py-2.5 text-right text-slate-700">
                     {r.delta == null ? '—' : `${r.delta > 0 ? '+' : ''}${r.delta.toFixed(d.decimals)}`}

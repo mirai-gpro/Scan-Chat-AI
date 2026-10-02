@@ -16,13 +16,6 @@
  */
 
 import { extractExamDate, measurementsFromMarkdown } from './elith-export';
-import {
-  DERIVED_HC_BLOOD_IMPORTED_BY,
-  extractBloodSubset,
-  hasNormalBloodOnDate,
-  type BloodSubsetExclusion,
-  type LeanRow,
-} from './blood-subset';
 import { persistMeasurements, type SchemaClient } from './measurement-persist';
 import { extractAgeSex } from './scan-age';
 import { getServerSupabase } from './supabase';
@@ -50,22 +43,6 @@ export interface SaveScanInput {
   requireReadableDate?: boolean;
 }
 
-/** 派生 blood（人間ドック由来の血液検査データ）の生成結果。**黙って落とさない**ための記録。 */
-export interface DerivedBloodResult {
-  status: 'created' | 'skipped' | 'error';
-  /** skipped / error の理由。画面には出さないが API 応答と admin で見える。 */
-  reason?:
-    | 'no_target_items'        // 対象 15 項目が 1 件も無い（裁定 Q-6 = 何も作らない）
-    | 'normal_blood_exists'    // 同じ受診日に通常 blood が在る（裁定 Q-10 = 通常を優先）
-    | 'supabase_error'
-    | string;
-  artifactId?: string | null;
-  /** 派生に入れた項目数。 */
-  items?: number;
-  /** 値が確定できず落とした項目（裁定 Q-12）。 */
-  excluded?: BloodSubsetExclusion[];
-}
-
 export interface SaveScanResult {
   /** ガードで差し戻したときは null (保存していない)。 */
   artifactId: string | null;
@@ -74,11 +51,6 @@ export interface SaveScanResult {
   measurements: number;
   /** requireReadableDate かつ受診日が読めなかったとき。保存はしていない。 */
   blocked?: 'exam_date_unreadable';
-  /**
-   * 人間ドック由来の血液検査データ（派生 BloodTestData）の生成結果。
-   * **health_checkup 側の保存とは独立**で、ここが失敗しても本体は成功のまま返す。
-   */
-  derivedBlood?: DerivedBloodResult;
 }
 
 /**
@@ -111,35 +83,19 @@ async function replaceSameDateArtifacts(
    * （この関数の中だけ・下の `dsb`）。
    */
   sb: { schema: (name: 'diagnosis') => unknown },
-  q: {
-    diagnosticUserId: string;
-    testType: string;
-    testDate: string;
-    source: string;
-    /**
-     * **任意の 5 つ目の条件**（2026-10-01・派生 blood 用）。渡さなければ従来どおり 4 条件
-     * ＝ 既存 2 呼び出し（ユーザースキャン / admin バッチ）の挙動は 1 ミリも変わらない。
-     *
-     * 派生 blood は `source='user_upload'` を通常の blood と共有し得るので、
-     * `imported_by` まで見ないと**将来の実血液 user upload 経路を巻き込んで消す**
-     * （spec §10.2 / 裁定 Q-4 と同じ理由）。
-     */
-    importedBy?: string;
-  },
+  q: { diagnosticUserId: string; testType: string; testDate: string; source: string },
 ): Promise<{ deleted: number; superseded: number }> {
   const out = { deleted: 0, superseded: 0 };
   try {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const dsb = sb.schema('diagnosis') as any;
-    let sel = dsb
+    const { data: rows } = await dsb
       .from('test_artifacts')
       .select('id')
       .eq('diagnostic_user_id', q.diagnosticUserId)
       .eq('test_type', q.testType)
       .eq('test_date', q.testDate)
       .eq('source', q.source);
-    if (q.importedBy) sel = sel.eq('imported_by', q.importedBy);
-    const { data: rows } = await sel;
     const ids: string[] = (rows ?? []).map((r: { id: string }) => r.id);
     if (ids.length === 0) return out;
 
@@ -281,102 +237,7 @@ export async function saveScanResult(
     measurements = 0;
   }
 
-  /*
-   * **人間ドック由来の血液検査データ（派生 BloodTestData）**
-   * (`docs/specs/healthcheckup_blood_extraction_spec_20261001.md` v2.0)。
-   *
-   * - **再解析しない。** 上で既に読み取り済みの `kept` をそのまま材料にする（v1.1 §3）。
-   * - **health_checkup 側は 1 行も変えない。** 別の artifact 行として作る。
-   * - **投げない。** ここが落ちても本体（検査票の保存）は成功のまま返す
-   *   — 既存の `persistMeasurements` の扱いと同じ規律。
-   */
-  const derivedBlood = await persistDerivedBloodArtifact(sb, {
-    diagnosticUserId: input.diagnosticUserId,
-    testDate,
-    measurements: kept as unknown as LeanRow[],
-  });
-
-  return { artifactId, testDate, dateSource, measurements, blocked: undefined, derivedBlood };
-}
-
-/**
- * **人間ドック・健康診断の読み取り結果から、派生 blood artifact を作る。**
- *
- * 正本: `docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §4.3 / §6.2 / §10.2 / §10.5。
- *
- * 【作らない条件（この 2 つだけ）】
- *   ① 対象 15 項目が **0 件**（裁定 Q-6）… 成立判定ではない。**抽出できる血液値が無いから作らない**
- *   ② 同じ受診日に **通常 blood が在る**（裁定 Q-10）… 通常を優先。派生で上書きしない
- *
- * 【冪等】`(uid, 'blood', test_date, 'user_upload', imported_by=DERIVED_HC_BLOOD_IMPORTED_BY)` の
- *   既存行を片付けてから入れ直す。**`imported_by` まで見る**ので、通常 blood も
- *   将来の実血液 user upload も巻き込まない。
- *
- * **投げない。** 失敗は `status:'error'` で返す。
- */
-export async function persistDerivedBloodArtifact(
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  sb: any,
-  input: { diagnosticUserId: string; testDate: string; measurements: LeanRow[] },
-): Promise<DerivedBloodResult> {
-  try {
-    const { kept, excluded } = extractBloodSubset(input.measurements);
-    // ① 0 件なら何も作らない（artifact も measurement_values も）。
-    if (kept.length === 0) {
-      return { status: 'skipped', reason: 'no_target_items', items: 0, excluded };
-    }
-    // ② 同じ受診日に通常 blood が在れば作らない（通常を優先）。
-    if (await hasNormalBloodOnDate(sb, input.diagnosticUserId, input.testDate)) {
-      return { status: 'skipped', reason: 'normal_blood_exists', items: kept.length, excluded };
-    }
-
-    await replaceSameDateArtifacts(sb, {
-      diagnosticUserId: input.diagnosticUserId,
-      testType: 'blood',
-      testDate: input.testDate,
-      source: 'user_upload',
-      importedBy: DERIVED_HC_BLOOD_IMPORTED_BY,
-    });
-
-    const { data, error } = await sb
-      .schema('diagnosis')
-      .from('test_artifacts')
-      .insert([
-        {
-          diagnostic_user_id: input.diagnosticUserId,
-          source: 'user_upload',
-          test_type: 'blood',
-          test_date: input.testDate,
-          // 検査機関ではないので lab_name は付けない。
-          lab_name: null,
-          schema_version: '1.0',
-          display_mode: 'single',
-          page_count: 1,
-          // **派生の印**（spec §4.3）。既存列・CHECK 無し = migration 不要。
-          imported_by: DERIVED_HC_BLOOD_IMPORTED_BY,
-          status: 'active',
-          // **scan_md は入れない。** 原文は health_checkup 側の artifact に在る（二重に持たない）。
-          notes: '人間ドック・健康診断の既存AIスキャン結果から抽出した血液検査データ（再解析なし）',
-        },
-      ])
-      .select('id');
-    if (error) return { status: 'error', reason: `test_artifacts: ${error.message}`, excluded };
-    const artifactId = data?.[0]?.id;
-    if (!artifactId) return { status: 'error', reason: 'artifact_id_missing', excluded };
-
-    const r = await persistMeasurements(sb as unknown as SchemaClient, {
-      artifactId,
-      diagnosticUserId: input.diagnosticUserId,
-      testType: 'blood',
-      testDate: input.testDate,
-      measurements: kept as never,
-      // 由来の記録。デメカル CSV は 'raw_csv'、こちらはスキャン由来。
-      sourceFileKind: 'scan_md',
-    });
-    return { status: 'created', artifactId, items: r.rows, excluded };
-  } catch (e) {
-    return { status: 'error', reason: e instanceof Error ? e.message : String(e) };
-  }
+  return { artifactId, testDate, dateSource, measurements, blocked: undefined };
 }
 
 /** Elith の format_id → `test_artifacts.test_type`。CHECK の値と 1:1 で対応させる。 */

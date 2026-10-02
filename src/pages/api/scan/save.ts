@@ -107,15 +107,6 @@ export const POST: APIRoute = async (ctx) => {
       test_date: r.testDate,
       date_source: r.dateSource,
       measurements: r.measurements,
-      /*
-       * 人間ドック由来の血液検査データ（派生 BloodTestData）の結果
-       * (`docs/specs/healthcheckup_blood_extraction_spec_20261001.md`)。
-       *
-       * **画面には出さない。** 利用者から見れば「検査票を送った」だけで、
-       * 派生が作れたかどうかは関心事ではない。**黙って落とさない**ために応答へ載せる
-       * （admin の切り分けと `/api/debug/viewer` 相当の用途）。PII は含まない。
-       */
-      derived_blood: r.derivedBlood ?? null,
     });
   } catch (err) {
     return json({ ok: false, error: String(err instanceof Error ? err.message : err) }, 500);

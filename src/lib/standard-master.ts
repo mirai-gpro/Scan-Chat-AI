@@ -82,16 +82,6 @@ export const STANDARD_MASTER: StandardItem[] = [
   // 脂質（空腹時/随時 は別項目として区別。ambiguous な「中性脂肪」単独は登録しない）
   { canonical_name: '空腹時中性脂肪', synonyms: ['空腹時TG'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: '随時中性脂肪', synonyms: [], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
-  /*
-   * **無修飾の中性脂肪**。golden 実在 (humandock_20240924.md:85 「中性脂肪(TG)」)。
-   *
-   * 【重要】synonyms は**無修飾表記だけ**。`空腹時中性脂肪` / `随時中性脂肪` を alias にしない
-   * (発注者裁定 2026-10-01 Q-3)。空腹時/随時 は測っている条件が違うので、グローバルな
-   * 名寄せで 1 つにすると `HealthCheckupData` 側の意味まで変わる。
-   * 空腹時/随時 → 中性脂肪 の統合は **`src/lib/blood-subset.ts` の中だけ**で行う
-   * (派生 BloodTestData 専用。docs/specs/healthcheckup_blood_extraction_spec_20261001.md §5.4)。
-   */
-  { canonical_name: '中性脂肪', synonyms: ['TG', '中性脂肪(TG)', 'トリグリセライド'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: '総コレステロール', synonyms: ['TC', 'T-Cho', '総コレステロール(TC)'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: 'HDLコレステロール', synonyms: ['HDL', 'HDL-C'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: 'LDLコレステロール', synonyms: ['LDL', 'LDL-C'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
@@ -107,15 +97,9 @@ export const STANDARD_MASTER: StandardItem[] = [
   { canonical_name: 'γ-GTP', synonyms: ['γGTP', 'ガンマGTP', 'GGT', 'Y-GTP', 'YGTP', 'Y-GTP(γ-GTP)'], unit: 'U/L', unit_aliases: ['u/l', 'iu/l'], category: '肝機能', source_std: 'starter' },
   { canonical_name: 'ALP', synonyms: ['アルカリフォスファターゼ'], unit: 'IU/L', unit_aliases: ['u/l', 'iu/l'], category: '肝機能', source_std: 'starter' },
   { canonical_name: '総蛋白', synonyms: ['TP', '血清総蛋白', '総タンパク'], unit: 'g/dL', unit_aliases: ['g/dl'], category: '肝機能', source_std: 'starter' },
-  // golden 実在 (humandock_20240924.md:80 / humandock_20250217.md:92)。
-  { canonical_name: 'アルブミン', synonyms: ['Alb', 'ALB'], unit: 'g/dL', unit_aliases: ['g/dl'], category: '肝機能', source_std: 'starter' },
   // 尿・腎機能
   { canonical_name: 'クレアチニン', synonyms: ['Cr', 'CRE', 'クレアチニン(血清)'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '腎機能', source_std: 'starter' },
-  // golden 実在 (humandock_20240924.md:88 / humandock_20250217.md:106)。
-  { canonical_name: '尿素窒素', synonyms: ['BUN', 'UN', '血中尿素窒素'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '腎機能', source_std: 'starter' },
-  // normKey はハイフンを落とさないので 'e-GFR' は 'eGFR' と別キーになる。実測の表記ゆれとして明示登録する
-  // (docs/scan/golden/scan_golden_humandock_20250217.md:106 の alt に実在)。
-  { canonical_name: 'eGFR', synonyms: ['推算GFR', 'eGFRcreat', 'e-GFR'], unit: 'mL/min', unit_aliases: ['ml/min'], category: '腎機能', source_std: 'starter' },
+  { canonical_name: 'eGFR', synonyms: ['推算GFR', 'eGFRcreat'], unit: 'mL/min', unit_aliases: ['ml/min'], category: '腎機能', source_std: 'starter' },
   { canonical_name: '尿蛋白', synonyms: ['蛋白', '尿蛋白(定性)'], unit: null, qualitative: true, category: '尿定性', source_std: 'starter' },
   { canonical_name: '尿潜血', synonyms: ['潜血'], unit: null, qualitative: true, category: '尿定性', source_std: 'starter' },
   // 痛風

@@ -96,8 +96,6 @@ jobs:
       # 絞り忘れると差し替え前・取り下げ後の値が画面に混ざるが、**エラーは出ない**。
       - run: npm run verify:measurement-status
       - run: npm run verify:trend-series
-      # 人間ドック由来 血液検査データ (派生 blood)。spec: docs/specs/healthcheckup_blood_extraction_spec_20261001.md
-      - run: npm run verify:blood-subset
       - run: npm run verify:url-uid-privacy
       # Admin 代理表示 (UID-less)。**ここは静かに壊れる** — 画面は正常に見えるのに
       # 中身が別人、という形で出る。identity 照合・single-use・GET で claim しない、を固定。
