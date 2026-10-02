@@ -41,19 +41,39 @@ const FIXED_UID = '7d49b0b2-1f33-4d4b-ae74-fc033cc81dd8';
 const FIXED_DATE = '2026-09-24';
 
 /**
- * **§11 / §12 の安全ゲート。**
+ * **§11 / §12 の安全ゲート（2026-10-02 に解除）。**
  *
- * PR #288 は**まだ Production へ merge されていない**。Production で動いているコードの
- * `checkFormatsReady()` は `imported_by` を引いておらず、`readinessCountableRows()` も無い
- * (本番 `7251bc8` の `elith-entitlement.ts` を実測)。したがって Production DB に
- * `status='active'` の派生 blood を作ると、**Production 側の readiness がそれを
- * 通常 blood として数える**。夜間 cron (`/api/cron/elith-deliver`・毎日 14:00 UTC) が走る。
+ * PR #288 は **Production へ merge 済み**（本番 HEAD
+ * `6426ae46648c5318c9f53b34c506fb6cf7a7d5fc` = PR #288 の merge commit）。
+ * 本番 HEAD の `elith-entitlement.ts` を実測し、
+ *   - `import { DERIVED_HC_BLOOD_IMPORTED_BY } from './blood-subset'`
+ *   - `isDerivedHealthCheckBlood()` / `readinessCountableRows()`
+ *   - `checkFormatsReady()` が `.select('diagnostic_user_id, test_type, imported_by')` で
+ *     `imported_by` を引き、`readinessCountableRows()` を通している
+ * ことを確認した。= **本番の readiness は `derived_healthcheck_blood` を数えない。**
  *
- * → **PR #288 が Production へ merge されるまで、Production DB への APPLY は実行しない。**
- *   「テストだから数秒だけ active にする」は禁止 (発注者指示 §11)。
- *   merge 後にこの定数を true にすれば APPLY ボタンが出る。
+ * したがって Production DB へ `status='active'` の派生 blood を作っても、夜間 cron
+ * (`/api/cron/elith-deliver`・毎日 14:00 UTC) が BloodTestData 到着済みと誤認しない。
  */
-const PRODUCTION_HAS_READINESS_EXCLUSION = false;
+const PRODUCTION_HAS_READINESS_EXCLUSION = true;
+
+/**
+ * **GitHub の merge だけでは不十分（発注者指示 §1）。**
+ *
+ * 「Production **Vercel deployment** が このコミットを含む状態で READY」かどうかは
+ * **この Preview の Runtime からは観測できない**（自分の sha しか見えない）。旧 deployment が
+ * まだ本番を配信していれば、本番 cron は除外の無いコードで動く。
+ *
+ * → **operator が Vercel ダッシュボードで確認し、APPLY フォームの確認欄にチェックを入れた
+ *   ときだけ** APPLY を実行する。チェックが無ければ POST を拒否する（文章の注意書きで済ませない）。
+ */
+const EXPECTED_PRODUCTION_HEAD = '6426ae46648c5318c9f53b34c506fb6cf7a7d5fc';
+
+/** この deployment 自身の commit（Vercel のシステム env。無ければ '(不明)'）。 */
+const THIS_COMMIT =
+  (import.meta.env.VERCEL_GIT_COMMIT_SHA as string | undefined)
+  ?? process.env.VERCEL_GIT_COMMIT_SHA
+  ?? '(不明)';
 
 /** §6 の期待値。**判定にだけ使う。データを作るために使わない。** */
 const EXPECTED: ReadonlyArray<readonly [string, number]> = [
@@ -205,8 +225,12 @@ if (Astro.request.method === 'POST') {
   const form = await Astro.request.formData().catch(() => null);
   const origin = Astro.request.headers.get('origin');
   const here = new URL(Astro.request.url).origin;
-  // same-origin POST であること (§10)。
-  const sameOrigin = !origin || origin === here;
+  /*
+   * same-origin POST であること (§10)。
+   * **Origin 無しの POST は許可しない**（発注者指示 2026-10-02 §3）。
+   * `!origin ||` を付けると curl や `fetch` の Origin 省略で通ってしまう。
+   */
+  const sameOrigin = origin === here;
   // 実行直前の再確認 — **固定値と完全一致 / DRY-RUN 再成立 / 通常 blood 不在**。
   const confirmUid = String(form?.get('confirm_uid') ?? '');
   const confirmDate = String(form?.get('confirm_test_date') ?? '');
@@ -217,7 +241,10 @@ if (Astro.request.method === 'POST') {
     ['test_date が固定値と完全一致', confirmDate === FIXED_DATE],
     ['DRY-RUN 条件が POST 時にも成立', dryRunPass],
     ['通常 blood が存在しない', normalBlood === false],
-    ['Production readiness 除外が入っている (§11/§12)', PRODUCTION_HAS_READINESS_EXCLUSION],
+    ['Production readiness 除外が本番コードに入っている (§11/§12)', PRODUCTION_HAS_READINESS_EXCLUSION],
+    // §1 — operator が Vercel ダッシュボードで実際に確認したことを要求する。
+    ['Production deployment が最新 HEAD で READY（operator 確認済み）',
+      String(form?.get('prod_deploy_confirmed') ?? '') === EXPECTED_PRODUCTION_HEAD],
   ];
   const bad = gate.filter(([, ok]) => !ok).map(([n]) => n);
   if (bad.length) {
@@ -319,6 +346,8 @@ const mono = 'font-mono text-xs break-all';
         <dt class="text-slate-500">uid (固定)</dt><dd class={mono}>{FIXED_UID}</dd>
         <dt class="text-slate-500">test_date (固定)</dt><dd class={mono}>{FIXED_DATE}</dd>
         <dt class="text-slate-500">demo fallback</dt><dd class={mono}>{demoFallbackEnabled(FIXED_UID) ? 'ON (trend はダミーになる)' : 'OFF'}</dd>
+        <dt class="text-slate-500">この deployment の commit</dt><dd class={mono}>{THIS_COMMIT}</dd>
+        <dt class="text-slate-500">期待する本番 HEAD</dt><dd class={mono}>{EXPECTED_PRODUCTION_HEAD}</dd>
       </dl>
       <p class="mt-2 text-xs text-slate-500">Service Role Key は表示・ログ出力しない。</p>
     </section>
@@ -382,25 +411,29 @@ const mono = 'font-mono text-xs break-all';
 
     <section class="card">
       <h2 class="text-sm font-semibold">APPLY</h2>
-      {!PRODUCTION_HAS_READINESS_EXCLUSION && (
-        <div class="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
-          <p class="font-semibold">Production APPLY は安全上保留 (§11 / §12)。APPLY ボタンを出さない。</p>
-          <p class="mt-1">
-            PR #288 は Production へ未 merge。本番 <code>7251bc8</code> の
-            <code>checkFormatsReady()</code> は <code>imported_by</code> を引かず
-            <code>readinessCountableRows()</code> も無いので、<code>status='active'</code> の
-            派生 blood を作ると**本番側 readiness が通常 blood として数える**。
-            夜間 cron <code>/api/cron/elith-deliver</code> が走る。
-            「数秒だけ active にする」はしない。
-          </p>
-          <p class="mt-1">PR #288 が Production へ merge されたら、このページの
-            <code>PRODUCTION_HAS_READINESS_EXCLUSION</code> を true にして再実行する。</p>
-        </div>
+      {!dryRunPass && !applyOut && (
+        <p class="mt-2 text-xs text-red-700">DRY-RUN FAIL のため APPLY ボタンを出さない。</p>
       )}
       {canShowApply && (
-        <form method="POST" class="mt-3">
+        <form method="POST" class="mt-3 space-y-3">
           <input type="hidden" name="confirm_uid" value={FIXED_UID} />
           <input type="hidden" name="confirm_test_date" value={FIXED_DATE} />
+          <div class="rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+            <p class="font-semibold">押す前に Vercel ダッシュボードで 1 点だけ確認してください (§1)</p>
+            <p class="mt-1">
+              <code>scan-chat-ai</code> の <strong>Production</strong> deployment が
+              <code class="break-all">{EXPECTED_PRODUCTION_HEAD}</code> を含む状態で
+              <strong>Ready</strong> になっていること。
+              旧 deployment がまだ本番を配信している場合、本番 cron は派生除外の無いコードで動くので
+              <strong>押さないでください</strong>。
+              （この Preview の Runtime からは本番 deployment の commit を観測できないため、
+              文章の注意書きではなく**チェック必須**にしています。）
+            </p>
+            <label class="mt-2 flex items-start gap-2">
+              <input type="checkbox" name="prod_deploy_confirmed" value={EXPECTED_PRODUCTION_HEAD} class="mt-0.5" />
+              <span>確認した（Production deployment は上記 commit で Ready）</span>
+            </label>
+          </div>
           <button type="submit" class="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white">
             {FIXED_DATE} の派生BloodTestDataを作成
           </button>
