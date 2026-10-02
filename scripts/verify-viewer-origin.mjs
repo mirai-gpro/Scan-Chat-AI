@@ -87,6 +87,24 @@ if (identSrc.includes('import.meta')) {
 }
 const identPath = emit('verify-viewer-origin-admin-identity.mjs', identSrc);
 
+/*
+ * `write-guard.ts` も**実物を通す**（2026-10-02 の CI 修復）。
+ *
+ * 【なぜ要るか = 実障害】`refresh-admin.ts` は 2026-09-30 の External Share で
+ * `import { denyForShare } from '../../../lib/write-guard'` を足した
+ * （共有相手の操作で端末の持ち主の本人セッションを作らせない・壊させないため）。
+ * ところが下の `apiSrc` の import 差し替えは 4 件しか面倒を見ていなかったので、
+ * `node_modules/.cache/` へ emit した時点で **相対パスが repo の外を指し**、
+ * `ERR_MODULE_NOT_FOUND: /home/user/lib/write-guard` で**実行すらできなくなっていた**。
+ *
+ * 【スタブにしない】`viewer.ts` / `admin-identity.ts` と同じ規律。
+ * `denyForShare` を「常に null」のスタブにすると、**refresh-admin が共有閲覧から
+ * 叩けるようになっても検査が気づかない**。
+ * `write-guard.ts` の import は `import type { Viewer }` の **型だけ**なので、
+ * transpile すれば単体で読み込める（env も実行時 import も無い）。
+ */
+const guardPath = emit('verify-viewer-origin-write-guard.mjs', read('src/lib/write-guard.ts'));
+
 // Supabase と admin 判定はスタブ。**この口は「admin フラグだけ更新」なので、
 // 差し替えても検査したい挙動 (origin の引き継ぎ) は 1 ミリも変わらない。**
 const stubPath = emit(
@@ -106,14 +124,37 @@ let apiSrc = read('src/pages/api/auth/refresh-admin.ts')
   .replace(/import \{ getServerSupabase \} from '[^']*';/, `import { getServerSupabase } from ${JSON.stringify(stubPath)};`)
   .replace(/import \{ isAdminEmailAsync \} from '[^']*';/, `import { isAdminEmailAsync } from ${JSON.stringify(stubPath)};`)
   .replace(/from '\.\.\/\.\.\/\.\.\/lib\/viewer'/, `from ${JSON.stringify(viewerPath)}`)
-  .replace(/from '\.\.\/\.\.\/\.\.\/lib\/admin-identity'/, `from ${JSON.stringify(identPath)}`);
+  .replace(/from '\.\.\/\.\.\/\.\.\/lib\/admin-identity'/, `from ${JSON.stringify(identPath)}`)
+  .replace(/from '\.\.\/\.\.\/\.\.\/lib\/write-guard'/, `from ${JSON.stringify(guardPath)}`);
+/*
+ * **差し替え漏れをここで必ず見る。**
+ * `refresh-admin.ts` に import が 1 本増えただけで「実行できない」まで行くので、
+ * **新しい import を足した人がここで気づけるようにしておく**（2026-10-02）。
+ */
 for (const [label, needle] of [
   ['getServerSupabase', stubPath],
   ['viewer', viewerPath],
   ['admin-identity', identPath],
+  ['write-guard', guardPath],
 ]) {
   if (!apiSrc.includes(needle)) bad(`verify 自体: refresh-admin.ts の import (${label}) を差し替えられなかった`);
 }
+/*
+ * **残った相対 import を 1 本も許さない**（2026-10-02 の恒久ガード）。
+ *
+ * emit 先は `node_modules/.cache/` なので、`../../../lib/...` が 1 本でも残っていると
+ * **repo の外を指して ERR_MODULE_NOT_FOUND になる**。差し替え表に足し忘れたことを
+ * 「実行できない」ではなく**名前のついた FAIL**で知らせる。
+ */
+{
+  const leftover = [...apiSrc.matchAll(/from '(\.\.?\/[^']*)'/g)].map((m) => m[1]);
+  if (leftover.length) {
+    bad('verify 自体: 差し替えていない相対 import が残っている', leftover.join(' / '));
+  } else {
+    ok('verify 自体: refresh-admin.ts の相対 import は全て差し替え済み');
+  }
+}
+
 const apiPath = emit('verify-viewer-origin-api.mjs', apiSrc);
 
 globalThis.__env = { APP_SESSION_SECRET: SECRET };

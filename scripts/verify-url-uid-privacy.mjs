@@ -63,17 +63,52 @@ ok('T-19f', '戻り値は "?" から始まる (呼び出し側で ? を付け直
 console.log('\n② Viewer.uidEntry (T-08 / T-20)');
 {
   const c = code('src/lib/viewer.ts');
-  const returns = [...c.matchAll(/return \{[^}]*uidEntry:\s*(true|false)[^}]*\}/g)].map((m) => m[1]);
   const anon = /const ANONYMOUS: Viewer = \{[^}]*uidEntry: false/.test(c);
   ok('T-08a', 'ANONYMOUS に uidEntry: false がある', anon);
+
   /*
-   * **4 件**。2026-09-30 に **Admin 代理表示 (`/admin-view/<ctx>/…`)** の return が 1 件増えた
-   * (`docs/specs/secure_shared_access_and_admin_impersonation_spec_20260930.md` §13.0 案 B)。
-   * 数を固定しているのは「**どれか 1 つの return だけ uidEntry を落とす**」退行を止めるため
-   * なので、経路が増えたら数も更新する (緩めない)。
+   * **T-08b は「件数」ではなく「契約」を見る**（2026-10-02 の CI 修復）。
+   *
+   * 【なぜ変えたか】ここは `returns.length === 4` と**数を直書き**していた。
+   * 2026-09-30 の External Share で `resolveViewer` の return が 5 本になった結果、
+   * **契約（全 return が uidEntry を持つ）は守られているのにテストだけが落ちる**
+   * 状態になっていた。数を 5 に書き換えるのは同じ腐り方をもう一度仕込むだけなので、
+   * **「object literal の return 総数」と「uidEntry を持つ return の数」の一致**を見る。
+   * → 経路が増えても、契約が守られていればテストの更新は要らない。
+   *   どれか 1 つだけ uidEntry を落とす退行は、総数と一致しなくなるので今までどおり落ちる。
+   *
+   * `return ANONYMOUS;` は object literal ではないので数に入らない（T-08a が別に見ている）。
    */
-  ok('T-08b', 'resolveViewer の全 return が uidEntry を持つ (4 件)', returns.length === 4, `${returns.length} 件`);
-  eq('T-08c', 'true は緊急入場の 1 件だけ', returns.filter((x) => x === 'true').length, 1);
+  /** `resolveViewer` の本体だけを切り出す（このファイルは関数を並べているだけ）。 */
+  const fnStart = c.indexOf('export async function resolveViewer');
+  const fnEnd = c.indexOf('\nexport ', fnStart + 10);
+  const body = fnStart < 0 ? '' : (fnEnd > 0 ? c.slice(fnStart, fnEnd) : c.slice(fnStart));
+  /** `return {` から**対応する** `}` までを切り出す（入れ子の `{}` に耐える）。 */
+  const objectReturns = (text) => {
+    const out = [];
+    const re = /return\s*\{/g;
+    let m;
+    while ((m = re.exec(text)) !== null) {
+      let depth = 0;
+      let i = m.index + m[0].length - 1;        // '{' の位置
+      for (; i < text.length; i++) {
+        if (text[i] === '{') depth += 1;
+        else if (text[i] === '}') { depth -= 1; if (depth === 0) break; }
+      }
+      out.push(text.slice(m.index, i + 1));
+      re.lastIndex = i + 1;
+    }
+    return out;
+  };
+  const objReturns = objectReturns(body);
+  const withUidEntry = objReturns.filter((b) => /\buidEntry\s*:/.test(b));
+  ok('T-08b-0', 'resolveViewer の本体を切り出せている (object literal の return が 1 件以上)',
+    objReturns.length > 0, `${objReturns.length} 件`);
+  ok('T-08b', '**resolveViewer の object literal return は全て uidEntry を持つ (総数と一致)**',
+    objReturns.length > 0 && objReturns.length === withUidEntry.length,
+    `return ${objReturns.length} 件 / uidEntry 付き ${withUidEntry.length} 件`);
+  eq('T-08c', 'true は緊急入場の 1 件だけ',
+    withUidEntry.filter((b) => /\buidEntry\s*:\s*true\b/.test(b)).length, 1);
   // 緊急入場の return は uidEntryAllowed() のブロック内にあること
   const emerg = c.slice(c.indexOf('uidEntryAllowed() && requested'), c.indexOf('return ANONYMOUS'));
   ok('T-08d', 'uidEntry: true は uidEntryAllowed() の中だけ', /uidEntry: true/.test(emerg));
@@ -385,8 +420,24 @@ console.log('\n⑧-2 デバッグ欄の出し分け (T-21〜T-24)');
 console.log('\n⑨ スコープ (spec §6 / §17)');
 ok('SCOPE-1', 'index.astro を変更していない (url.search 転送のまま)',
   /const target = `\/dashboard\$\{url\.search\}`/.test(read('src/pages/index.astro')));
-ok('SCOPE-2', 'live-token.ts が body の uid を受ける形のまま (今回は触らない)',
-  /body\.diagnosticUserId/.test(read('src/pages/api/live-token.ts')));
+/*
+ * **SCOPE-2 は後発仕様を正にする**（2026-10-02 の CI 修復）。
+ *
+ * ここは「`live-token.ts` は今回触らない」という当時のスコープ宣言として
+ * **`body.diagnosticUserId` が残っていること**を要求していた。
+ * その後 `docs/specs/secure_shared_access_and_admin_impersonation_spec_20260930.md`
+ * §19.4 / §21.4 が「**body の uid は読まない**」と決め、実装から撤去された
+ * （`src/pages/api/live-token.ts:16` のコメントと `:54` が実体）。
+ * → 古いスコープ宣言ではなく**後発の仕様**を検査する。緩めてはいない:
+ *   「body を読まない」かつ「`viewer.uid` を使う」の 2 点をどちらも要求する。
+ */
+{
+  const lt = code('src/pages/api/live-token.ts');
+  ok('SCOPE-2a', 'live-token.ts は body の uid を読まない (secure shared access spec §19.4 / §21.4)',
+    !/body\??\.diagnosticUserId/.test(lt));
+  ok('SCOPE-2b', 'live-token.ts は viewer.uid を保存先にしている',
+    /const diagnosticUserId = viewer\.uid;/.test(lt));
+}
 ok('SCOPE-3', 'ALLOW_UID_ENTRY の入場分岐が残っている',
   /uidEntryAllowed\(\) && requested/.test(code('src/lib/viewer.ts')));
 ok('T-24', '代理表示の判定に手を入れていない (viewer.isAdmin の参照が増えただけ)',
