@@ -163,18 +163,6 @@ export const POST: APIRoute = async ({ request }) => {
             // 検査日も artifact に反映しておく (一覧・時系列の横軸に使う)
             await sb.schema('diagnosis').from('test_artifacts')
               .update({ test_date: row.testDate }).eq('id', artifactRow.id);
-            /*
-             * **ここでは派生 blood の supersede をしない**（発注者裁定 2026-10-01 Q-10 /
-             * `docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §10.5）。
-             *
-             * この経路は artifact を **`UNASSIGNED_UID` で作る**（`:105`「顧客未割当」）ので、
-             * **この時点では誰の血液検査か決まっていない**。ここで
-             * `supersedeDerivedBloodOnSameDate(UNASSIGNED_UID, …)` を呼んでも
-             * 対象が 0 件の空振りにしかならない。
-             *
-             * 通常 blood が**実在の利用者に紐づく**のは
-             * `/api/admin/lab-results/register`（顧客割当つき）なので、優先の適用はそちら。
-             */
           } else if (parsed.rows.length > 1) {
             // 1 ファイルに複数人分が入っている。どの artifact が誰の分かは
             // Workflow 1 (顧客自動紐付け) が決めるため、ここでは保存しない。

@@ -34,7 +34,6 @@ import { isAdminAuthorized } from '../../../../lib/api-auth';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { readUploadedOriginal } from '../../../../lib/originals-upload-ticket';
 import { decideOriginalRegistration, type ExistingOriginalRow } from '../../../../lib/additional-originals';
-import { supersedeDerivedBloodOnSameDate } from '../../../../lib/blood-subset';
 
 export const prerender = false;
 /** S3 から 1 件読み直してハッシュを取るので、既定の 60s では足りないことがある。 */
@@ -197,31 +196,6 @@ export const POST: APIRoute = async ({ request }) => {
     created = true;
   }
 
-  /*
-   * **同じ受診日の「人間ドック由来の派生 blood」を superseded に落とす**
-   * (発注者裁定 2026-10-01 Q-10 / `docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §10.5)。
-   *
-   * 通常 blood が常に勝つ。**通常 blood が後から到着した場合も最終的に通常が優先される**
-   * ことを、この 1 本で担保する。
-   *
-   * - **削除しない**（監査のため残す）。`measurement_values` は artifact の status で
-   *   読み分けられるので、グラフと「読み取り結果」からは自動的に消える。
-   * - **触るのは `imported_by='derived_healthcheck_blood'` の行だけ。** 通常 blood には触らない。
-   * - **投げない。** 失敗しても原本の登録は続く。
-   * - `target` が派生そのものだった場合は対象外 — 派生に原本を付ける経路は無いが、
-   *   万一来ても自分を消さないよう `target.id` を除く。
-   */
-  let supersededDerivedBlood = 0;
-  if (target.test_type === 'blood' && target.test_date) {
-    const r = await supersedeDerivedBloodOnSameDate(
-      sb as never,
-      target.diagnostic_user_id,
-      target.test_date,
-      { exceptArtifactId: target.id },
-    );
-    supersededDerivedBlood = r.superseded;
-  }
-
   // ── ③ S3 の実体を読む。存在・サイズ・ハッシュはここで決まる ──────────
   const got = await readUploadedOriginal(key);
   if (!got.ok) {
@@ -304,7 +278,6 @@ export const POST: APIRoute = async ({ request }) => {
     // **触っていないことを応答で示す** (three_mode が保たれたかを目で確かめられるように)。
     diagnostic_user_id: target.diagnostic_user_id,
     test_type: target.test_type,
-    ...(supersededDerivedBlood > 0 ? { superseded_derived_blood: supersededDerivedBlood } : {}),
     test_date: target.test_date,
     display_mode: target.display_mode,
     replaced: prior.length > 0,

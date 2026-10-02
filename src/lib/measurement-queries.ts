@@ -17,7 +17,6 @@
 import { getServerSupabase } from './supabase';
 import { demoFallbackEnabled, demoMetricTrend } from './demo-data';
 import { ALA_PORPHYRIN_LABEL, restrictToLatestAla } from './ala-pds';
-import { DERIVED_HC_BLOOD_IMPORTED_BY, DERIVED_HC_BLOOD_SOURCE } from './blood-subset';
 import type { MetricTrendPoint, MetricTrendSeries } from './dashboard-queries';
 
 /** 1 項目の検査値。値・単位・基準値・判定はすべて検査票由来をそのまま持つ。 */
@@ -158,34 +157,15 @@ async function activeArtifactIds(
   sb: NonNullable<ReturnType<typeof getServerSupabase>>,
   diagnosticUserId: string,
 ): Promise<string[]> {
-  return [...(await activeArtifacts(sb, diagnosticUserId)).keys()];
-}
-
-/**
- * active な artifact の `id → imported_by` を返す。
- *
- * `imported_by` も引くのは、**人間ドック由来の派生 blood を点ごとに見分ける**ため
- * (`docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §7.3・発注者裁定 Q-2/Q-5/Q-7)。
- * `measurement_values` は `imported_by` を持たない（status も持たない）ので、
- * **status と同じやり方で artifact 側から引いてくる**。1 人分なので件数は数十件。
- */
-async function activeArtifacts(
-  sb: NonNullable<ReturnType<typeof getServerSupabase>>,
-  diagnosticUserId: string,
-): Promise<Map<string, string | null>> {
   const { data, error } = await sb
     .schema('diagnosis')
     .from('test_artifacts')
-    .select('id, imported_by')
+    .select('id')
     .eq('diagnostic_user_id', diagnosticUserId)
     .eq('status', 'active')
     .limit(2000);
   if (error) throw new Error(`test_artifacts(active) の取得に失敗: ${error.message}`);
-  const out = new Map<string, string | null>();
-  for (const r of (data ?? []) as unknown as { id: string; imported_by: string | null }[]) {
-    out.set(String(r.id), r.imported_by ?? null);
-  }
-  return out;
+  return ((data ?? []) as unknown as { id: string }[]).map((r) => String(r.id));
 }
 
 /** 直近 1 回分の検査値を取得する。無ければ null (テストフェーズはデモへ)。 */
@@ -388,12 +368,8 @@ export async function getMeasurementTrend(
   try {
     // superseded / withdrawn の回は点として打たない
     // (差し替え前の値が線に残ると「前回はこうだった」という誤った推移になる)。
-    const activeMap = await activeArtifacts(sb, diagnosticUserId);
-    const active = [...activeMap.keys()];
+    const active = await activeArtifactIds(sb, diagnosticUserId);
     if (active.length === 0) return [];
-    /** その点が人間ドック由来の派生 blood か (§7.3 / §7.5)。 */
-    const isDerived = (artifactId: string): boolean =>
-      activeMap.get(artifactId) === DERIVED_HC_BLOOD_IMPORTED_BY;
     const { data, error } = await sb
       .schema('diagnosis')
       .from('measurement_values')
@@ -455,30 +431,15 @@ export async function getMeasurementTrend(
           value: v,
           raw: r.value ?? String(v),
           flag: r.flag === 'H' || r.flag === 'L' ? r.flag : null,
-          // 人間ドック由来の点だけ印を付ける (画面の「人間ドックから抽出」・§7.3)。
-          source: isDerived(r.artifact_id) ? DERIVED_HC_BLOOD_SOURCE : null,
         });
       }
       if (points.length === 0) continue;
       const last = sorted[sorted.length - 1];
-      /*
-       * **出所が混在する系列では基準線を出さない**（発注者裁定 2026-10-01 Q-5 / spec §7.5）。
-       *
-       * 基準値は**系列の最後の行**から取る作りなので、人間ドック由来の点が最新になった回だけ
-       * 「その人間ドックを実施した施設の基準値」が系列全体の基準帯として描かれてしまう。
-       * デメカルで測った点にも当てはめて見せることになり誤解を生む。
-       *
-       * **点ごとの H/L は残す** — `flag` は検査票 / CSV が付けた印で、アプリの判定ではない。
-       * 混在していない系列（全部通常 / 全部派生）は従来どおり。
-       */
-      const mixedOrigin =
-        points.some((pt) => pt.source === DERIVED_HC_BLOOD_SOURCE) &&
-        points.some((pt) => pt.source !== DERIVED_HC_BLOOD_SOURCE);
       out.push({
         label: name,
         unit: last.unit ?? '',
-        referenceUpper: mixedOrigin ? undefined : num(last.ref_high_num) ?? undefined,
-        referenceLower: mixedOrigin ? undefined : num(last.ref_low_num) ?? undefined,
+        referenceUpper: num(last.ref_high_num) ?? undefined,
+        referenceLower: num(last.ref_low_num) ?? undefined,
         points,
       });
     }
