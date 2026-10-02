@@ -1,0 +1,418 @@
+---
+/**
+ * **【一時テスト専用ページ・PR #288 へは merge しない】**
+ *
+ * 人間ドック → 派生 BloodTestData の実データ E2E 確認。
+ * 発注者指示 2026-10-02「PR #288 で実装した実際のサーバ処理を、保存済みの実データに対して動かす」。
+ *
+ * 【このページがやらないこと】
+ *   - **抽出ロジックを書かない。** `extractBloodSubset()` をそのまま呼ぶ。
+ *   - **INSERT を書かない。** `persistDerivedBloodArtifact()` をそのまま呼ぶ
+ *     (= `/api/scan/save` → `saveScanResult()` が通るのと**同一の関数**)。
+ *   - **readiness / trend を再実装しない。** `checkFormatsReady()` / `getMeasurementTrend()` を呼ぶ。
+ *   - **汎用入力 UI にしない。** uid と受診日は下の定数で固定。hidden input から受け取らない。
+ *   - **Service Role Key を表示・ログ出力しない。** 接続先は host (project ref) だけ出す。
+ *
+ * 認可 = 既存の `/admin` と同じ (`resolveViewer` + `viewer.isAdmin` + `notFoundForNonAdmin`)。
+ * 新しい認証方式は作らない。`ADMIN_API_KEY` はブラウザへ出さない。
+ */
+import { createHash } from 'node:crypto';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import { notFoundForNonAdmin } from '../../lib/admin-auth';
+import { resolveViewer } from '../../lib/viewer';
+import { getServerSupabase } from '../../lib/supabase';
+import {
+  extractBloodSubset,
+  hasNormalBloodOnDate,
+  DERIVED_HC_BLOOD_IMPORTED_BY,
+  DERIVED_HC_BLOOD_SOURCE,
+  type LeanRow,
+  type BloodSubsetExclusion,
+} from '../../lib/blood-subset';
+import { persistDerivedBloodArtifact, type DerivedBloodResult } from '../../lib/scan-persist';
+import { checkFormatsReady, type ElithFormat } from '../../lib/elith-entitlement';
+import { getMeasurementTrend } from '../../lib/measurement-queries';
+import { demoFallbackEnabled } from '../../lib/demo-data';
+
+export const prerender = false;
+
+/* ── 固定値。**ここ以外から対象を受け取らない** (発注者指示 §1 / §10) ───────── */
+const FIXED_UID = '7d49b0b2-1f33-4d4b-ae74-fc033cc81dd8';
+const FIXED_DATE = '2026-09-24';
+
+/**
+ * **§11 / §12 の安全ゲート。**
+ *
+ * PR #288 は**まだ Production へ merge されていない**。Production で動いているコードの
+ * `checkFormatsReady()` は `imported_by` を引いておらず、`readinessCountableRows()` も無い
+ * (本番 `7251bc8` の `elith-entitlement.ts` を実測)。したがって Production DB に
+ * `status='active'` の派生 blood を作ると、**Production 側の readiness がそれを
+ * 通常 blood として数える**。夜間 cron (`/api/cron/elith-deliver`・毎日 14:00 UTC) が走る。
+ *
+ * → **PR #288 が Production へ merge されるまで、Production DB への APPLY は実行しない。**
+ *   「テストだから数秒だけ active にする」は禁止 (発注者指示 §11)。
+ *   merge 後にこの定数を true にすれば APPLY ボタンが出る。
+ */
+const PRODUCTION_HAS_READINESS_EXCLUSION = false;
+
+/** §6 の期待値。**判定にだけ使う。データを作るために使わない。** */
+const EXPECTED: ReadonlyArray<readonly [string, number]> = [
+  ['GOT(AST)', 19], ['GPT(ALT)', 20], ['γ-GTP', 26],
+  ['LDLコレステロール', 116], ['HDLコレステロール', 83.2], ['総コレステロール', 196],
+  ['中性脂肪', 54], ['空腹時血糖', 104], ['クレアチニン', 1.03], ['eGFR', 56.9], ['尿酸', 7.8],
+];
+/** §7 の欠損想定。行が作られていないことを見る。 */
+const EXPECTED_MISSING = ['総蛋白', 'アルブミン', 'HbA1c(NGSP)', '尿素窒素'] as const;
+
+const viewer = await resolveViewer(Astro);
+if (!viewer.isAdmin) return notFoundForNonAdmin();
+
+/* ── 接続先。**key は出さない。** host (project ref) だけ ───────────────── */
+const rawUrl = import.meta.env.PUBLIC_SUPABASE_URL as string | undefined;
+let supabaseHost = '(未設定)';
+let projectRef = '(不明)';
+if (rawUrl) {
+  try {
+    supabaseHost = new URL(rawUrl).host;
+    projectRef = supabaseHost.split('.')[0] ?? '(不明)';
+  } catch { supabaseHost = '(解析不能)'; }
+}
+
+const sb = getServerSupabase();
+
+type HcRow = {
+  id: string; test_date: string | null; source: string | null;
+  imported_by: string | null; status: string | null; measurements: unknown;
+};
+type Chk = { label: string; ok: boolean; detail: string };
+
+const checks: Chk[] = [];
+const add = (label: string, ok: boolean, detail = '') => { checks.push({ label, ok, detail }); };
+
+let fatal: string | null = null;
+let hc: HcRow | null = null;
+let hcCount = 0;
+let srcCount = 0;
+let hcHash = '';
+let kept: LeanRow[] = [];
+let excluded: BloodSubsetExclusion[] = [];
+let normalBlood: boolean | null = null;
+let existingDerived: { id: string; status: string | null }[] = [];
+
+if (!sb) {
+  fatal = 'getServerSupabase() が null。PUBLIC_SUPABASE_URL / SUPABASE_SERVICE_ROLE_KEY が Runtime に無い。';
+} else {
+  // ① active な health_checkup を**条件どおり**引く。自動で 1 件を選ばない (§5)。
+  const { data, error } = await (sb as never as { schema: (n: 'diagnosis') => never })
+    .schema('diagnosis')
+    // @ts-expect-error — 生成型に無い列を含むため any 相当で扱う (このページ限定)
+    .from('test_artifacts')
+    .select('id, test_date, source, imported_by, status, measurements')
+    .eq('diagnostic_user_id', FIXED_UID)
+    .eq('test_type', 'health_checkup')
+    .eq('test_date', FIXED_DATE)
+    .eq('status', 'active');
+  if (error) {
+    fatal = `test_artifacts の取得に失敗: ${(error as { message?: string }).message ?? 'unknown'}`;
+  } else {
+    const rows = (data ?? []) as HcRow[];
+    hcCount = rows.length;
+    add('health_checkup が ちょうど 1 件', hcCount === 1, `${hcCount} 件`);
+    if (hcCount !== 1) {
+      fatal = `対象 health_checkup が ${hcCount} 件。**何も変更せず停止**する (§5)。`;
+    } else {
+      hc = rows[0]!;
+      const ms = Array.isArray(hc.measurements) ? (hc.measurements as LeanRow[]) : [];
+      srcCount = ms.length;
+      // §15 — 不変確認のための決定論 hash。
+      hcHash = createHash('sha256').update(JSON.stringify(hc.measurements ?? null)).digest('hex');
+
+      // ② **実装済みの抽出関数そのもの** (§6)。別ロジックを書かない。
+      const r = extractBloodSubset(ms);
+      kept = r.kept; excluded = r.excluded;
+
+      add('extractBloodSubset.kept = 11 件', kept.length === 11, `${kept.length} 件`);
+      add('excluded = 0 件', excluded.length === 0, excluded.length ? JSON.stringify(excluded) : '0 件');
+
+      // 11 項目の name / value が期待値と完全一致 (順序込み)。
+      let allMatch = kept.length === EXPECTED.length;
+      for (let i = 0; i < EXPECTED.length; i += 1) {
+        const [n, v] = EXPECTED[i]!;
+        const got = kept[i];
+        const okRow = !!got && got.name === n && Number(got.value_num) === v;
+        if (!okRow) allMatch = false;
+      }
+      add('11 項目の name / value が期待値と完全一致', allMatch);
+
+      const names = new Set(kept.map((k) => k.name ?? ''));
+      add('欠損 4 項目の行が無い', EXPECTED_MISSING.every((m) => !names.has(m)),
+        EXPECTED_MISSING.filter((m) => names.has(m)).join(', ') || 'なし');
+      add('value_num = 0 / 空の補完行が無い',
+        !kept.some((k) => k.value_num === 0 || k.value === '0' || k.value == null || k.value === ''));
+      add('中性脂肪 に統合されている（空腹時中性脂肪 のままでない）',
+        names.has('中性脂肪') && !names.has('空腹時中性脂肪') && !names.has('随時中性脂肪'));
+
+      // ③ 同じ受診日の通常 blood (実装済みの判定関数を使う)。
+      normalBlood = await hasNormalBloodOnDate(sb as never, FIXED_UID, FIXED_DATE);
+      add('同じ受診日に通常 blood が存在しない', normalBlood === false, normalBlood ? 'YES' : 'NO');
+
+      // 既存の派生 blood (冪等の確認用・read only)。
+      const { data: dv } = await (sb as never as { schema: (n: 'diagnosis') => never })
+        .schema('diagnosis')
+        // @ts-expect-error — 同上
+        .from('test_artifacts')
+        .select('id, status')
+        .eq('diagnostic_user_id', FIXED_UID)
+        .eq('test_type', 'blood')
+        .eq('test_date', FIXED_DATE)
+        .eq('imported_by', DERIVED_HC_BLOOD_IMPORTED_BY);
+      existingDerived = (dv ?? []) as { id: string; status: string | null }[];
+    }
+  }
+}
+
+const dryRunPass = !fatal && checks.length > 0 && checks.every((c) => c.ok);
+
+/* ── APPLY (POST のみ・§10) ──────────────────────────────────────────────── */
+type ApplyOut = {
+  result: DerivedBloodResult;
+  artifact: Record<string, unknown> | null;
+  mvCount: number;
+  mvNames: string[];
+  mvZero: number;
+  hcUnchanged: boolean | null;
+  hcHashAfter: string;
+  readyBlood: boolean | null;
+  trendHit: number;
+  trendDerived: number;
+  trendTotalSeries: number;
+  demoGate: boolean;
+};
+let applyOut: ApplyOut | null = null;
+let applyError: string | null = null;
+
+if (Astro.request.method === 'POST') {
+  const form = await Astro.request.formData().catch(() => null);
+  const origin = Astro.request.headers.get('origin');
+  const here = new URL(Astro.request.url).origin;
+  // same-origin POST であること (§10)。
+  const sameOrigin = !origin || origin === here;
+  // 実行直前の再確認 — **固定値と完全一致 / DRY-RUN 再成立 / 通常 blood 不在**。
+  const confirmUid = String(form?.get('confirm_uid') ?? '');
+  const confirmDate = String(form?.get('confirm_test_date') ?? '');
+  const gate: [string, boolean][] = [
+    ['admin', viewer.isAdmin === true],
+    ['same-origin POST', sameOrigin],
+    ['uid が固定値と完全一致', confirmUid === FIXED_UID],
+    ['test_date が固定値と完全一致', confirmDate === FIXED_DATE],
+    ['DRY-RUN 条件が POST 時にも成立', dryRunPass],
+    ['通常 blood が存在しない', normalBlood === false],
+    ['Production readiness 除外が入っている (§11/§12)', PRODUCTION_HAS_READINESS_EXCLUSION],
+  ];
+  const bad = gate.filter(([, ok]) => !ok).map(([n]) => n);
+  if (bad.length) {
+    applyError = `APPLY を実行しない。未成立: ${bad.join(' / ')}`;
+  } else if (!sb || !hc) {
+    applyError = 'APPLY を実行しない。DB / 対象 artifact が取れていない。';
+  } else {
+    // ④ **実装済みの生成関数そのもの** (§9)。別 INSERT を書かない。
+    const result = await persistDerivedBloodArtifact(sb as never, {
+      diagnosticUserId: FIXED_UID,
+      testDate: FIXED_DATE,
+      measurements: (hc.measurements as LeanRow[]) ?? [],
+    });
+
+    const dg = (sb as never as { schema: (n: 'diagnosis') => never }).schema('diagnosis');
+    // 生成された artifact (§13)
+    // @ts-expect-error — 生成型に無い列を含む
+    const { data: art } = await dg.from('test_artifacts')
+      .select('id, diagnostic_user_id, test_type, test_date, source, imported_by, status')
+      .eq('id', result.artifactId ?? '00000000-0000-0000-0000-000000000000');
+    const artifact = ((art ?? [])[0] ?? null) as Record<string, unknown> | null;
+
+    // measurement_values (§14)
+    // @ts-expect-error — 同上
+    const { data: mv } = await dg.from('measurement_values')
+      .select('item_name, canonical_name, value_num, test_type')
+      .eq('artifact_id', result.artifactId ?? '00000000-0000-0000-0000-000000000000');
+    const mvRows = (mv ?? []) as { item_name: string; canonical_name: string | null; value_num: number | null }[];
+
+    // 元 health_checkup の不変確認 (§15)
+    // @ts-expect-error — 同上
+    const { data: hcAfter } = await dg.from('test_artifacts')
+      .select('id, status, measurements')
+      .eq('id', hc.id);
+    const after = ((hcAfter ?? [])[0] ?? null) as { id: string; status: string | null; measurements: unknown } | null;
+    const hcHashAfter = after ? createHash('sha256').update(JSON.stringify(after.measurements ?? null)).digest('hex') : '';
+    const hcUnchanged = after ? (after.id === hc.id && after.status === 'active' && hcHashAfter === hcHash) : null;
+
+    // readiness (§16) — 実装済みの checkFormatsReady を使う
+    let readyBlood: boolean | null = null;
+    try {
+      const req = new Map<string, ElithFormat[] | null>([[FIXED_UID, ['BloodTestData'] as ElithFormat[]]]);
+      const rc = await checkFormatsReady([FIXED_UID], req);
+      readyBlood = rc[FIXED_UID]?.ready ?? null;
+    } catch { readyBlood = null; }
+
+    // Dashboard trend (§17) — 実装済みの getMeasurementTrend を使う
+    let trendHit = 0; let trendDerived = 0; let trendTotalSeries = 0;
+    try {
+      const series = await getMeasurementTrend(FIXED_UID, EXPECTED.map(([n]) => n), 12, 'blood');
+      trendTotalSeries = series.length;
+      for (const s of series) {
+        const p = s.points.find((x) => x.date === FIXED_DATE);
+        if (p) { trendHit += 1; if (p.source === DERIVED_HC_BLOOD_SOURCE) trendDerived += 1; }
+      }
+    } catch { /* そのまま 0 で出す */ }
+
+    applyOut = {
+      result, artifact,
+      mvCount: mvRows.length,
+      mvNames: mvRows.map((r) => r.canonical_name ?? r.item_name),
+      mvZero: mvRows.filter((r) => r.value_num === 0).length,
+      hcUnchanged, hcHashAfter,
+      readyBlood, trendHit, trendDerived, trendTotalSeries,
+      demoGate: demoFallbackEnabled(FIXED_UID),
+    };
+  }
+}
+
+const canShowApply = dryRunPass && PRODUCTION_HAS_READINESS_EXCLUSION && !applyOut;
+const mono = 'font-mono text-xs break-all';
+---
+
+<BaseLayout title="派生 BloodTestData E2E (一時テスト) | Scan-Chat AI">
+  <main class="flex flex-1 flex-col gap-4 px-5 py-6">
+    <header>
+      <p class="text-xs font-medium uppercase tracking-wider text-red-600/80">ADMIN / 一時テスト専用</p>
+      <h1 class="mt-1 text-xl font-bold tracking-tight">人間ドック → 派生 BloodTestData E2E</h1>
+      <p class="mt-1 text-xs text-slate-600">
+        PR #288 の実装済み関数 (<code>extractBloodSubset</code> /
+        <code>persistDerivedBloodArtifact</code> / <code>checkFormatsReady</code> /
+        <code>getMeasurementTrend</code>) を Vercel Runtime から実データに当てる。
+        このページは PR #288 へ merge しない。
+      </p>
+    </header>
+
+    <section class="card">
+      <h2 class="text-sm font-semibold">接続先 / 対象</h2>
+      <dl class="mt-2 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">
+        <dt class="text-slate-500">Supabase host</dt><dd class={mono}>{supabaseHost}</dd>
+        <dt class="text-slate-500">project ref</dt><dd class={mono}>{projectRef}</dd>
+        <dt class="text-slate-500">uid (固定)</dt><dd class={mono}>{FIXED_UID}</dd>
+        <dt class="text-slate-500">test_date (固定)</dt><dd class={mono}>{FIXED_DATE}</dd>
+        <dt class="text-slate-500">demo fallback</dt><dd class={mono}>{demoFallbackEnabled(FIXED_UID) ? 'ON (trend はダミーになる)' : 'OFF'}</dd>
+      </dl>
+      <p class="mt-2 text-xs text-slate-500">Service Role Key は表示・ログ出力しない。</p>
+    </section>
+
+    {fatal && (
+      <section class="card border border-red-300 bg-red-50">
+        <h2 class="text-sm font-semibold text-red-800">停止</h2>
+        <p class={`mt-1 text-red-900 ${mono}`}>{fatal}</p>
+      </section>
+    )}
+
+    <section class="card">
+      <h2 class="text-sm font-semibold">DRY-RUN</h2>
+      <dl class="mt-2 grid grid-cols-[auto,1fr] gap-x-3 gap-y-1 text-xs">
+        <dt class="text-slate-500">health_checkup 件数</dt><dd class={mono}>{hcCount}</dd>
+        <dt class="text-slate-500">artifact ID</dt><dd class={mono}>{hc?.id ?? '-'}</dd>
+        <dt class="text-slate-500">test_date</dt><dd class={mono}>{hc?.test_date ?? '-'}</dd>
+        <dt class="text-slate-500">source</dt><dd class={mono}>{hc?.source ?? '-'}</dd>
+        <dt class="text-slate-500">imported_by</dt><dd class={mono}>{hc?.imported_by ?? '-'}</dd>
+        <dt class="text-slate-500">status</dt><dd class={mono}>{hc?.status ?? '-'}</dd>
+        <dt class="text-slate-500">元 measurements 件数</dt><dd class={mono}>{srcCount}</dd>
+        <dt class="text-slate-500">measurements sha256</dt><dd class={mono}>{hcHash || '-'}</dd>
+        <dt class="text-slate-500">抽出件数 / excluded</dt><dd class={mono}>{kept.length} / {excluded.length}</dd>
+        <dt class="text-slate-500">通常 blood 存在</dt><dd class={mono}>{normalBlood === null ? '-' : normalBlood ? 'YES' : 'NO'}</dd>
+        <dt class="text-slate-500">既存派生 blood</dt>
+        <dd class={mono}>{existingDerived.length ? existingDerived.map((d) => `${d.id} (${d.status})`).join(', ') : 'NO'}</dd>
+      </dl>
+
+      {kept.length > 0 && (
+        <table class="mt-3 w-max min-w-full text-xs">
+          <thead><tr class="border-b"><th class="px-2 py-1 text-left">#</th><th class="px-2 py-1 text-left">name</th><th class="px-2 py-1 text-right">value</th><th class="px-2 py-1 text-right">value_num</th><th class="px-2 py-1 text-right">期待</th><th class="px-2 py-1 text-left">一致</th></tr></thead>
+          <tbody>
+            {kept.map((k, i) => {
+              const exp = EXPECTED[i];
+              const okRow = !!exp && k.name === exp[0] && Number(k.value_num) === exp[1];
+              return (
+                <tr class="border-b border-slate-100">
+                  <td class="px-2 py-1">{i + 1}</td>
+                  <td class="px-2 py-1 whitespace-nowrap">{k.name}</td>
+                  <td class="px-2 py-1 text-right whitespace-nowrap">{k.value}</td>
+                  <td class="px-2 py-1 text-right whitespace-nowrap">{k.value_num}</td>
+                  <td class="px-2 py-1 text-right whitespace-nowrap">{exp ? `${exp[0]} / ${exp[1]}` : '-'}</td>
+                  <td class="px-2 py-1">{okRow ? 'OK' : 'NG'}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+
+      <ul class="mt-3 space-y-1 text-xs">
+        {checks.map((c) => (
+          <li><span class={c.ok ? 'text-brand-700' : 'text-red-700'}>{c.ok ? 'PASS' : 'FAIL'}</span>{' '}{c.label}{c.detail ? ` — ${c.detail}` : ''}</li>
+        ))}
+      </ul>
+
+      <p class={`mt-3 text-base font-bold ${dryRunPass ? 'text-brand-700' : 'text-red-700'}`}>
+        {dryRunPass ? 'DRY-RUN PASS' : 'DRY-RUN FAIL'}
+      </p>
+    </section>
+
+    <section class="card">
+      <h2 class="text-sm font-semibold">APPLY</h2>
+      {!PRODUCTION_HAS_READINESS_EXCLUSION && (
+        <div class="mt-2 rounded border border-amber-300 bg-amber-50 p-3 text-xs text-amber-900">
+          <p class="font-semibold">Production APPLY は安全上保留 (§11 / §12)。APPLY ボタンを出さない。</p>
+          <p class="mt-1">
+            PR #288 は Production へ未 merge。本番 <code>7251bc8</code> の
+            <code>checkFormatsReady()</code> は <code>imported_by</code> を引かず
+            <code>readinessCountableRows()</code> も無いので、<code>status='active'</code> の
+            派生 blood を作ると**本番側 readiness が通常 blood として数える**。
+            夜間 cron <code>/api/cron/elith-deliver</code> が走る。
+            「数秒だけ active にする」はしない。
+          </p>
+          <p class="mt-1">PR #288 が Production へ merge されたら、このページの
+            <code>PRODUCTION_HAS_READINESS_EXCLUSION</code> を true にして再実行する。</p>
+        </div>
+      )}
+      {canShowApply && (
+        <form method="POST" class="mt-3">
+          <input type="hidden" name="confirm_uid" value={FIXED_UID} />
+          <input type="hidden" name="confirm_test_date" value={FIXED_DATE} />
+          <button type="submit" class="rounded-lg bg-brand-600 px-4 py-2 text-sm font-semibold text-white">
+            {FIXED_DATE} の派生BloodTestDataを作成
+          </button>
+        </form>
+      )}
+      {applyError && <p class={`mt-2 text-red-700 ${mono}`}>{applyError}</p>}
+
+      {applyOut && (
+        <div class="mt-3 text-xs">
+          <dl class="grid grid-cols-[auto,1fr] gap-x-3 gap-y-1">
+            <dt class="text-slate-500">status / reason</dt><dd class={mono}>{applyOut.result.status} / {applyOut.result.reason ?? '-'}</dd>
+            <dt class="text-slate-500">派生 artifact ID</dt><dd class={mono}>{applyOut.result.artifactId ?? '-'}</dd>
+            <dt class="text-slate-500">test_type</dt><dd class={mono}>{String(applyOut.artifact?.test_type ?? '-')}</dd>
+            <dt class="text-slate-500">test_date</dt><dd class={mono}>{String(applyOut.artifact?.test_date ?? '-')}</dd>
+            <dt class="text-slate-500">source</dt><dd class={mono}>{String(applyOut.artifact?.source ?? '-')}</dd>
+            <dt class="text-slate-500">imported_by</dt><dd class={mono}>{String(applyOut.artifact?.imported_by ?? '-')}</dd>
+            <dt class="text-slate-500">status</dt><dd class={mono}>{String(applyOut.artifact?.status ?? '-')}</dd>
+            <dt class="text-slate-500">measurement_values 件数</dt><dd class={mono}>{applyOut.mvCount}</dd>
+            <dt class="text-slate-500">value_num = 0 の行</dt><dd class={mono}>{applyOut.mvZero}</dd>
+            <dt class="text-slate-500">元 health_checkup 不変</dt><dd class={mono}>{applyOut.hcUnchanged === null ? '-' : applyOut.hcUnchanged ? 'PASS' : 'FAIL'}</dd>
+            <dt class="text-slate-500">readiness 除外</dt><dd class={mono}>{applyOut.readyBlood === null ? '-' : applyOut.readyBlood === false ? 'PASS (ready=false)' : 'FAIL (ready=true)'}</dd>
+            <dt class="text-slate-500">trend 11 点 / 派生印</dt><dd class={mono}>{applyOut.trendHit} / {applyOut.trendDerived} (series {applyOut.trendTotalSeries})</dd>
+            <dt class="text-slate-500">demo fallback</dt><dd class={mono}>{applyOut.demoGate ? 'ON' : 'OFF'}</dd>
+          </dl>
+          <p class="mt-2">measurement_values: <span class={mono}>{applyOut.mvNames.join(' / ')}</span></p>
+        </div>
+      )}
+    </section>
+
+    <p class="text-center text-xs text-slate-400">Elith 本番納品は実行しない (§18)。</p>
+  </main>
+</BaseLayout>
