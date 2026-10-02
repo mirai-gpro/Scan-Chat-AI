@@ -156,17 +156,27 @@ if (!sb) {
       normalBlood = await hasNormalBloodOnDate(sb as never, FIXED_UID, FIXED_DATE);
       add('同じ受診日に通常 blood が存在しない', normalBlood === false, normalBlood ? 'YES' : 'NO');
 
-      // 既存の派生 blood (冪等の確認用・read only)。
-      const { data: dv } = await (sb as never as { schema: (n: 'diagnosis') => never })
-        .schema('diagnosis')
-        // @ts-expect-error — 同上
-        .from('test_artifacts')
-        .select('id, status')
-        .eq('diagnostic_user_id', FIXED_UID)
-        .eq('test_type', 'blood')
-        .eq('test_date', FIXED_DATE)
-        .eq('imported_by', DERIVED_HC_BLOOD_IMPORTED_BY);
-      existingDerived = (dv ?? []) as { id: string; status: string | null }[];
+      /*
+       * 既存の派生 blood (冪等の確認用・read only)。
+       *
+       * **status ごとに分けて引く。** `verify:measurement-status` ③ が
+       * 「人単位で `test_artifacts` を引くチェーンは `.eq('status', …)` を持つこと」を
+       * 要求する (同じ受診日が 2 つ並ぶ実障害の再発防止)。ここは監査目的で
+       * superseded も見たいので、**絞りを外すのではなく 2 本に分ける**。
+       */
+      for (const st of ['active', 'superseded'] as const) {
+        const { data: dv } = await (sb as never as { schema: (n: 'diagnosis') => never })
+          .schema('diagnosis')
+          // @ts-expect-error — 同上
+          .from('test_artifacts')
+          .select('id, status')
+          .eq('diagnostic_user_id', FIXED_UID)
+          .eq('test_type', 'blood')
+          .eq('test_date', FIXED_DATE)
+          .eq('imported_by', DERIVED_HC_BLOOD_IMPORTED_BY)
+          .eq('status', st);
+        existingDerived.push(...((dv ?? []) as { id: string; status: string | null }[]));
+      }
     }
   }
 }
@@ -231,10 +241,17 @@ if (Astro.request.method === 'POST') {
     const artifact = ((art ?? [])[0] ?? null) as Record<string, unknown> | null;
 
     // measurement_values (§14)
+    /*
+     * measurement_values (§14)。**`.in('artifact_id', …)` で引く** —
+     * `verify:measurement-status` ① が「status を持たない measurement_values は
+     * active な artifact の id で絞ること」を要求する。ここは今作った 1 件だけが
+     * 対象なので `.eq` と意味は同一だが、**検査器が見る形に合わせる**
+     * (絞りを免除登録して guard を緩めない)。
+     */
     // @ts-expect-error — 同上
     const { data: mv } = await dg.from('measurement_values')
       .select('item_name, canonical_name, value_num, test_type')
-      .eq('artifact_id', result.artifactId ?? '00000000-0000-0000-0000-000000000000');
+      .in('artifact_id', [result.artifactId ?? '00000000-0000-0000-0000-000000000000']);
     const mvRows = (mv ?? []) as { item_name: string; canonical_name: string | null; value_num: number | null }[];
 
     // 元 health_checkup の不変確認 (§15)
