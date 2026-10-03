@@ -464,6 +464,82 @@ export function measurementsFromMarkdown(markdownClean: string): {
   return sanitizeMeasurementsForDelivery(toMeasurements(regions));
 }
 
+/**
+ * **入力単位 (「N枚目」) ごとに measurements を分ける**。
+ *
+ * 正本: `docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §13。
+ *
+ * 【なぜ要るか — 2026-10-03 の実障害】1 件の health_checkup に**独立した健診結果が
+ * 2 通ぶん**入っていることがある (複数枚アップロード・`page_count=2`)。
+ * `measurementsFromMarkdown()` は全体を 1 回分として扱うので、
+ * **1 枚目の LDL 96 と 2 枚目の LDL 102 が「同一検査内の値競合」に見えて**
+ * 派生 blood からほとんどの項目が落ちた (実測: 15 項目のうち 2 項目だけ残った)。
+ *
+ * 【境界は推測しない】`joinPageMarkdown()` が入れる **`## N枚目`**、および
+ * `mergeResults()` が付ける region label の **`N枚目 / …`** を使う。
+ * **値の内容からは一切分割しない。**
+ *
+ * - `1枚目 / ページ2` と `1枚目 / ページ3` は**同じ 1 枚目グループ**
+ *   (内部のページ番号では分けない)。
+ * - `N枚目` の見出しが 1 つも無い (= `page_count=1` で `joinPageMarkdown` が
+ *   付けなかった) ときは **1 グループだけ**返す = 従来と同じ挙動。
+ * - グループ番号は**原本の「N枚目」の数字**をそのまま使う (再実行で同じ番号になる
+ *   = sibling の識別子が安定する)。
+ *
+ * **health_checkup 側の経路 (`measurementsFromMarkdown`) は 1 行も変えていない。**
+ * 整形は同じ `toMeasurements` → `sanitizeMeasurementsForDelivery` を**グループごとに**通すだけ。
+ */
+export interface ScanMeasurementGroup {
+  /** 原本の「N枚目」の番号。見出しが無いときは 1。 */
+  index: number;
+  /** 見出しの文字列 (`1枚目` / `1枚目 / ページ2` の先頭側)。無ければ null。 */
+  label: string | null;
+  /** そのグループだけで整形した lean measurements。 */
+  kept: Record<string, unknown>[];
+  anomalies: MeasurementAnomaly[];
+}
+
+/** `1枚目` / `１枚目 / ページ2` から番号を取る。**全角数字・全角スラッシュも受ける。** */
+const SHEET_LABEL_RE = /^\s*([0-9０-９]{1,3})\s*枚目\s*(?:[/／].*)?$/;
+
+export function sheetGroupNumber(label: string | null | undefined): number | null {
+  if (!label) return null;
+  const m = SHEET_LABEL_RE.exec(String(label).normalize('NFKC'));
+  if (!m) return null;
+  const n = Number(m[1]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+export function measurementGroupsFromMarkdown(markdownClean: string): ScanMeasurementGroup[] {
+  const regions = parseScanRegions(markdownClean);
+  /*
+   * **順次グループ化。** `## 1枚目` の見出し自身は表を持たないことがあるが、
+   * **そこから次の `N枚目` までの region は全部そのグループ**。
+   * label に `N枚目 /` が付いている region は、それ自身でグループを決める。
+   */
+  const order: number[] = [];
+  const byGroup = new Map<number, typeof regions>();
+  let cur: number | null = null;
+  for (const r of regions) {
+    const n = sheetGroupNumber(r.label);
+    if (n != null) cur = n;
+    const key = cur ?? 1;              // 見出し前の前文は 1 グループ目に入れる
+    if (!byGroup.has(key)) { byGroup.set(key, []); order.push(key); }
+    byGroup.get(key)!.push(r);
+  }
+  if (order.length === 0) return [];
+
+  const labelOf = (list: typeof regions): string | null => {
+    for (const r of list) if (sheetGroupNumber(r.label) != null) return r.label;
+    return null;
+  };
+  return order.map((index) => {
+    const list = byGroup.get(index)!;
+    const { kept, anomalies } = sanitizeMeasurementsForDelivery(toMeasurements(list));
+    return { index, label: labelOf(list), kept, anomalies };
+  });
+}
+
 export function sanitizeMeasurementsForDelivery(list: unknown): {
   kept: Record<string, unknown>[];
   anomalies: MeasurementAnomaly[];

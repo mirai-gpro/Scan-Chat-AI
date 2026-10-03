@@ -401,7 +401,7 @@ const HC_ROW = {
   const db = makeDb({ test_artifacts: [{ ...HC_ROW }] });
   sbStub.__setStub(db);
   const r = await PERSIST.persistDerivedBloodArtifact(db, {
-    diagnosticUserId: UID, testDate: DATE, sourceMeasurements: GOLDEN_11,
+    diagnosticUserId: UID, testDate: DATE, parentArtifactId: 'hc-1', sourceMeasurements: GOLDEN_11,
   });
   ok(r.created === true, '派生 artifact を作った', JSON.stringify(r.reason ?? ''));
   ok(r.rows === 11, 'measurement_values が 11 件', String(r.rows));
@@ -431,8 +431,8 @@ const HC_ROW = {
     '   health_checkup 側の 空腹時中性脂肪 は名前のまま (中性脂肪 に書き換えない)');
 
   // 冪等: 2 回流しても増えない
-  await PERSIST.persistDerivedBloodArtifact(db, { diagnosticUserId: UID, testDate: DATE, sourceMeasurements: GOLDEN_11 });
-  await PERSIST.persistDerivedBloodArtifact(db, { diagnosticUserId: UID, testDate: DATE, sourceMeasurements: GOLDEN_11 });
+  await PERSIST.persistDerivedBloodArtifact(db, { diagnosticUserId: UID, testDate: DATE, parentArtifactId: 'hc-1', sourceMeasurements: GOLDEN_11 });
+  await PERSIST.persistDerivedBloodArtifact(db, { diagnosticUserId: UID, testDate: DATE, parentArtifactId: 'hc-1', sourceMeasurements: GOLDEN_11 });
   ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 1,
     '**3 回流しても blood artifact は 1 件** (冪等)',
     String(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length));
@@ -464,7 +464,7 @@ console.log('\n③-1b 冪等キーが派生以外を巻き込まない (裁定 Q
   });
   sbStub.__setStub(db);
   const r = await PERSIST.persistDerivedBloodArtifact(db, {
-    diagnosticUserId: UID, testDate: DATE, sourceMeasurements: GOLDEN_11,
+    diagnosticUserId: UID, testDate: DATE, parentArtifactId: 'hc-1', sourceMeasurements: GOLDEN_11,
   });
   ok(r.created === true, 'active な通常 blood が無いので派生は作られる', JSON.stringify(r.reason ?? ''));
   ok(db.tables.test_artifacts.some((a) => a.id === 'u-sup'),
@@ -483,7 +483,7 @@ console.log('\n③-2 0 件なら何も作らない (裁定 Q-6)');
   const db = makeDb({ test_artifacts: [{ ...HC_ROW, measurements: [m('胸部X線', '所見なし')] }] });
   sbStub.__setStub(db);
   const r = await PERSIST.persistDerivedBloodArtifact(db, {
-    diagnosticUserId: UID, testDate: DATE, sourceMeasurements: [m('胸部X線', '所見なし')],
+    diagnosticUserId: UID, testDate: DATE, parentArtifactId: 'hc-1', sourceMeasurements: [m('胸部X線', '所見なし')],
   });
   ok(r.created === false && r.reason === 'no_items', "created:false / reason:'no_items'", JSON.stringify(r.reason));
   ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 0, '**blood artifact を 1 件も作らない**');
@@ -500,7 +500,7 @@ console.log('\n③-3 同日に通常 blood が在れば作らない (裁定 Q-10
   const db = makeDb({ test_artifacts: [{ ...HC_ROW }, normal] });
   sbStub.__setStub(db);
   const r = await PERSIST.persistDerivedBloodArtifact(db, {
-    diagnosticUserId: UID, testDate: DATE, sourceMeasurements: GOLDEN_11,
+    diagnosticUserId: UID, testDate: DATE, parentArtifactId: 'hc-1', sourceMeasurements: GOLDEN_11,
   });
   ok(r.created === false && r.reason === 'normal_blood_exists',
     "created:false / reason:'normal_blood_exists'", JSON.stringify(r.reason));
@@ -513,7 +513,7 @@ console.log('\n③-3 同日に通常 blood が在れば作らない (裁定 Q-10
   // 別の日なら作る (同日優先は「その日だけ」)
   const db2 = makeDb({ test_artifacts: [{ ...HC_ROW }, { ...normal, test_date: '2026-01-10' }] });
   sbStub.__setStub(db2);
-  const r2 = await PERSIST.persistDerivedBloodArtifact(db2, { diagnosticUserId: UID, testDate: DATE, sourceMeasurements: GOLDEN_11 });
+  const r2 = await PERSIST.persistDerivedBloodArtifact(db2, { diagnosticUserId: UID, testDate: DATE, parentArtifactId: 'hc-1', sourceMeasurements: GOLDEN_11 });
   ok(r2.created === true, '別の日の通常 blood は邪魔しない');
 }
 
@@ -1485,7 +1485,7 @@ console.log('\n⑩-2 ② backfill: 処理済みの照会が落ちたら何も書
     return { status: res.status, json: await res.json() };
   };
   // 派生一覧の select (`test_date` のみ) だけを落とす
-  const DERIVED_COLS = 'test_date';
+  const DERIVED_COLS = 'test_date, external_test_id';
   for (const mode of ['pending', 'one']) {
     const db = makeDb({
       test_artifacts: [{ ...HC_ROW }],
@@ -1541,6 +1541,1136 @@ console.log('\n⑩-3 ③ mode=one でも既存の active 派生は作り直さ�
   const src = readFileSync('src/pages/api/admin/derived-blood/backfill.ts', 'utf8');
   ok(!/\breplace\b/.test(src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')),
     '**`replace` のような再生成の口を作っていない**');
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   ⑪ 入力グループ (「N枚目」) ごとの分割 — 発注者指示 2026-10-03 §3〜§16
+   ══════════════════════════════════════════════════════════════════ */
+
+/**
+ * **本番の 2026-09-17 と同じ構造の fixture** (§16)。
+ * 1 件の health_checkup に**独立した健診結果が 2 通**入っている
+ * (`joinPageMarkdown` が付けた `## 1枚目` / `## 2枚目` が境界)。
+ *
+ * 【ここが壊れていた】2 通をまとめて `extractBloodSubset` に渡すと、
+ * LDL 96 と 102 のように**通ごとに違う値**が「同じ項目の別値」に見えて
+ * `value_conflict` で両方落ち、**15 項目のうち 2 項目しか残らなかった**。
+ *
+ * 1枚目の γ は原本どおり **`γ-GT`** と印字してある (様式ゆれ。マスタの同義語に
+ * 足したので `γ-GTP` に当たるはず = ここが落ちたら同義語が外れたということ)。
+ */
+const MD_TWO_SHEETS = `## 1枚目
+
+### 血液検査
+
+| No | 検査項目 | 検査項目詳細 | 読み取った値 | 単位 | 下限値 | 上限値 | 判定 | 備考 |
+|----|----------|--------------|--------------|------|--------|--------|------|------|
+| 1 | AST | AST(GOT) | 20 | U/L | 13 | 30 | - | - |
+| 2 | ALT | ALT(GPT) | 20 | U/L | 10 | 42 | - | - |
+| 3 | γ-GT | γ-GT | 21 | U/L | 13 | 64 | - | - |
+| 4 | LDL | LDLコレステロール | 96 | mg/dL | 70 | 139 | - | - |
+| 5 | HDL | HDLコレステロール | 75.2 | mg/dL | 40 | 96 | - | - |
+| 6 | 総コレステロール | 総コレステロール | 159 | mg/dL | 142 | 219 | - | - |
+| 7 | 中性脂肪 | 空腹時中性脂肪 | 72 | mg/dL | 30 | 149 | - | - |
+| 8 | 血糖 | 空腹時血糖 | 97 | mg/dL | 73 | 99 | - | - |
+| 9 | クレアチニン | クレアチニン | 1.06 | mg/dL | 0.65 | 1.07 | - | - |
+| 10 | eGFR | eGFR | 55.6 | mL/min | 60 | - | L | - |
+| 11 | 尿酸 | 尿酸 | 7.7 | mg/dL | 3.7 | 7.0 | H | - |
+
+### 身体計測
+
+| No | 検査項目 | 検査項目詳細 | 読み取った値 | 単位 | 下限値 | 上限値 | 判定 | 備考 |
+|----|----------|--------------|--------------|------|--------|--------|------|------|
+| 1 | 身長 | 身長 | 172.4 | cm | - | - | - | - |
+| 2 | 尿検査 | 尿蛋白 | (-) | - | - | - | - | - |
+
+## 2枚目
+
+### 血液検査
+
+| No | 検査項目 | 検査項目詳細 | 読み取った値 | 単位 | 下限値 | 上限値 | 判定 | 備考 |
+|----|----------|--------------|--------------|------|--------|--------|------|------|
+| 1 | AST | AST(GOT) | 19 | U/L | 13 | 30 | - | - |
+| 2 | ALT | ALT(GPT) | 20 | U/L | 10 | 42 | - | - |
+| 3 | γ-GTP | γ-GTP | 26 | U/L | 13 | 64 | - | - |
+| 4 | LDL | LDLコレステロール | 102 | mg/dL | 70 | 139 | - | - |
+| 5 | HDL | HDLコレステロール | 83.2 | mg/dL | 40 | 96 | - | - |
+| 6 | 総コレステロール | 総コレステロール | 196 | mg/dL | 142 | 219 | - | - |
+| 7 | 中性脂肪 | 空腹時中性脂肪 | 54 | mg/dL | 30 | 149 | - | - |
+| 8 | 血糖 | 空腹時血糖 | 104 | mg/dL | 73 | 99 | H | - |
+| 9 | クレアチニン | クレアチニン | 1.03 | mg/dL | 0.65 | 1.07 | H | - |
+| 10 | eGFR | eGFR | 56.9 | mL/min | 60 | - | L | - |
+| 11 | 尿酸 | 尿酸 | 7.8 | mg/dL | 3.7 | 7.0 | H | - |
+`;
+
+/** 「1枚目 / ページ2」「1枚目 / ページ3」= **同じ 1 枚目** (内部ページで割らない)。 */
+const MD_INNER_PAGES = `## 1枚目 / ページ2
+
+| No | 検査項目 | 検査項目詳細 | 読み取った値 | 単位 | 下限値 | 上限値 | 判定 | 備考 |
+|----|----------|--------------|--------------|------|--------|--------|------|------|
+| 1 | AST | AST(GOT) | 20 | U/L | 13 | 30 | - | - |
+
+## 1枚目 / ページ3
+
+| No | 検査項目 | 検査項目詳細 | 読み取った値 | 単位 | 下限値 | 上限値 | 判定 | 備考 |
+|----|----------|--------------|--------------|------|--------|--------|------|------|
+| 1 | 尿酸 | 尿酸 | 7.7 | mg/dL | 3.7 | 7.0 | H | - |
+`;
+
+const EXPECT_A = {
+  'GOT(AST)': 20, 'GPT(ALT)': 20, 'γ-GTP': 21,
+  LDLコレステロール: 96, HDLコレステロール: 75.2, 総コレステロール: 159,
+  中性脂肪: 72, 空腹時血糖: 97, クレアチニン: 1.06, eGFR: 55.6, 尿酸: 7.7,
+};
+const EXPECT_B = {
+  'GOT(AST)': 19, 'GPT(ALT)': 20, 'γ-GTP': 26,
+  LDLコレステロール: 102, HDLコレステロール: 83.2, 総コレステロール: 196,
+  中性脂肪: 54, 空腹時血糖: 104, クレアチニン: 1.03, eGFR: 56.9, 尿酸: 7.8,
+};
+/** 15 項目のうち**この 4 つは原本に無い** → 行ごと作らない (0 補完禁止・推測計算禁止)。 */
+const ABSENT_4 = ['総蛋白', 'アルブミン', 'HbA1c(NGSP)', '尿素窒素'];
+
+console.log('\n⑪-A 分割の境界は「N枚目」だけ (値からは割らない)');
+{
+  const EX = await bundle('src/lib/elith-export.ts', 'bs-export.mjs');
+  const g = EX.measurementGroupsFromMarkdown(MD_TWO_SHEETS);
+  ok(g.length === 2, '**2 通の原本 → 2 グループ**', `n=${g.length}`);
+  ok(g[0]?.index === 1 && g[1]?.index === 2, 'グループ番号は原本の「N枚目」の数字', `${g[0]?.index}/${g[1]?.index}`);
+  ok(/1枚目/.test(String(g[0]?.label)) && /2枚目/.test(String(g[1]?.label)), '見出しの文字列を持っている',
+    `${g[0]?.label} / ${g[1]?.label}`);
+  // 1枚目には身体計測の 2 行が付く = 「見出しの無い region は直前のグループ」
+  const n0 = (g[0]?.kept ?? []).map((x) => String(x.name));
+  ok(n0.includes('身長'), '**`## 1枚目` 配下の別の表も同じグループに入る**', n0.join(','));
+  ok(!(g[1]?.kept ?? []).some((x) => String(x.name) === '身長'), '   2 枚目には混ざらない');
+
+  // 番号の取り方 (全角・内部ページ付き・無関係な見出し)
+  ok(EX.sheetGroupNumber('1枚目') === 1, "'1枚目' → 1");
+  ok(EX.sheetGroupNumber('２枚目') === 2, "全角 '２枚目' → 2");
+  ok(EX.sheetGroupNumber('1枚目 / ページ2') === 1, "'1枚目 / ページ2' → 1");
+  ok(EX.sheetGroupNumber('1枚目／ページ2') === 1, '全角スラッシュでも 1');
+  ok(EX.sheetGroupNumber('血液検査') === null, "'血液検査' は境界ではない");
+  ok(EX.sheetGroupNumber('ページ2') === null, "**'ページ2' は境界ではない** (内部ページで割らない)");
+  ok(EX.sheetGroupNumber('3枚目の所見') === null, "'3枚目の所見' は境界にしない (完全な形だけ)");
+
+  // **1 枚しか無い回は 1 グループ** = 従来と同じ
+  const one = EX.measurementGroupsFromMarkdown(MD);
+  ok(one.length === 1 && one[0]?.index === 1, '**「N枚目」が無い原本 → 1 グループ**', `n=${one.length}`);
+
+  // **`measurementsFromMarkdown` は 1 行も変えていない** = health_checkup 側は不変
+  const whole = EX.measurementsFromMarkdown(MD_TWO_SHEETS);
+  const sum = g.reduce((a, x) => a + x.kept.length, 0);
+  ok(whole.kept.length === sum,
+    '**全グループの合計 = まとめて整形した件数** (分割で取りこぼさない)',
+    `${whole.kept.length} vs ${sum}`);
+}
+
+console.log('\n⑪-B 内部ページ (`ページ2` / `ページ3`) では割らない');
+{
+  const EX = await bundle('src/lib/elith-export.ts', 'bs-export.mjs');
+  const g = EX.measurementGroupsFromMarkdown(MD_INNER_PAGES);
+  ok(g.length === 1, '**`1枚目 / ページ2` と `1枚目 / ページ3` は同じ 1 グループ**', `n=${g.length}`);
+  const names = (g[0]?.kept ?? []).map((x) => String(x.name));
+  ok(names.includes('AST(GOT)') && names.includes('尿酸'), '   両方の表の行が入っている', names.join(','));
+}
+
+console.log('\n⑪-C value_conflict は**グループの中だけ**で見る');
+{
+  const EX = await bundle('src/lib/elith-export.ts', 'bs-export.mjs');
+  // まとめて渡すと LDL 96/102 が競合して落ちる (これが本番で起きていた形)
+  const whole = SUB.extractBloodSubset(EX.measurementsFromMarkdown(MD_TWO_SHEETS).kept);
+  ok(whole.kept.length < 11,
+    '**まとめて渡すと競合で落ちる** (壊れていた形を固定しておく)',
+    `kept=${whole.kept.length} excluded=${(whole.excluded ?? []).length}`);
+  ok((whole.excluded ?? []).some((e) => e.reason === 'value_conflict' && e.name === 'LDLコレステロール'),
+    '   LDL が value_conflict で落ちる', JSON.stringify((whole.excluded ?? []).map((e) => e.name)));
+
+  // グループごとに渡せば 11 項目ずつ残る
+  const g = EX.measurementGroupsFromMarkdown(MD_TWO_SHEETS);
+  const a = SUB.extractBloodSubset(g[0]?.kept ?? []);
+  const b = SUB.extractBloodSubset(g[1]?.kept ?? []);
+  ok(a.kept.length === 11 && b.kept.length === 11,
+    '**グループごとなら 11 項目ずつ** (跨ぎの値は競合にしない)', `${a.kept.length}/${b.kept.length}`);
+  ok((a.excluded ?? []).length === 0 && (b.excluded ?? []).length === 0,
+    '   どちらのグループにも除外が無い',
+    JSON.stringify([...(a.excluded ?? []), ...(b.excluded ?? [])]));
+
+  // **グループの中の競合は従来どおり落とす** (緩めていない)
+  const inGroup = SUB.extractBloodSubset([
+    m('LDLコレステロール', 96, 'mg/dL'), m('LDLコレステロール', 102, 'mg/dL'), m('尿酸', 7.7, 'mg/dL'),
+  ]);
+  ok(!inGroup.kept.some((x) => x.name === 'LDLコレステロール'),
+    '**同じグループの中で値が割れたら従来どおり除外** (捏造ゼロ)',
+    JSON.stringify(inGroup.excluded));
+  ok(inGroup.kept.some((x) => x.name === '尿酸'), '   他の項目は残る');
+}
+
+console.log('\n⑪-D 本番 2026-09-17 と同じ fixture → 派生 blood が 2 件');
+{
+  const db = makeDb({
+    test_artifacts: [{
+      id: 'hc-0917-2', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917,
+      source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD_TWO_SHEETS, measurements: [],
+    }],
+  });
+  sbStub.__setStub(db);
+  const r = await PERSIST.persistDerivedBloodArtifact(db, {
+    diagnosticUserId: UID, testDate: PROD_DATE_0917, parentArtifactId: 'hc-0917-2',
+    sourceGroups: PERSIST.toDerivedBloodGroups({ scanMd: MD_TWO_SHEETS, measurements: [] }),
+  });
+  ok(r.created === true, '作られた', JSON.stringify(r.reason ?? ''));
+  ok(r.groupCount === 2, '**入力グループは 2 件**', String(r.groupCount));
+  ok((r.siblings ?? []).length === 2 && r.siblings.every((s) => s.created),
+    '**sibling 2 件とも作られた**', JSON.stringify((r.siblings ?? []).map((s) => [s.episodeIndex, s.created])));
+  const blood = db.tables.test_artifacts.filter((a) => a.test_type === 'blood');
+  ok(blood.length === 2, '**blood artifact が 2 件**', String(blood.length));
+  ok(blood.every((a) => a.imported_by === DERIVED && a.status === 'active' && a.test_date === PROD_DATE_0917),
+    '   2 件とも marker 付き・active・同じ受診日');
+  ok(new Set(blood.map((a) => a.external_test_id)).size === 2,
+    '**external_test_id が別** (UNIQUE がこれで効く)', JSON.stringify(blood.map((a) => a.external_test_id)));
+  ok(blood.every((a) => SUB.derivedBloodParentId(a.external_test_id) === 'hc-0917-2'),
+    '   どちらも親 artifact を指している');
+  ok(blood.map((a) => SUB.derivedBloodEpisodeIndex(a.external_test_id)).sort().join(',') === '1,2',
+    '   グループ番号は 1 / 2');
+
+  const vals = (gi) => {
+    const art = blood.find((a) => SUB.derivedBloodEpisodeIndex(a.external_test_id) === gi);
+    if (!art) return {};
+    return Object.fromEntries(db.tables.measurement_values
+      .filter((x) => x.artifact_id === art.id).map((x) => [x.item_name, x.value_num]));
+  };
+  const A = vals(1), B = vals(2);
+  ok(Object.keys(A).length === 11, '**A (1枚目) = 11 項目**', String(Object.keys(A).length));
+  ok(Object.keys(B).length === 11, '**B (2枚目) = 11 項目**', String(Object.keys(B).length));
+  for (const [k, v] of Object.entries(EXPECT_A)) ok(A[k] === v, `   A ${k} = ${v}`, `実測 ${A[k]}`);
+  for (const [k, v] of Object.entries(EXPECT_B)) ok(B[k] === v, `   B ${k} = ${v}`, `実測 ${B[k]}`);
+  for (const n of ABSENT_4) {
+    ok(!(n in A) && !(n in B), `   **${n} の行が無い** (0 補完・推測計算をしない)`);
+  }
+  ok(!Object.values(A).includes(0) && !Object.values(B).includes(0), '   value_num=0 の行が 1 件も無い');
+  ok(!('身長' in A) && !('尿蛋白' in A), '   15 項目以外 (身長 / 尿蛋白) は入れない');
+  ok(db.tables.test_artifacts.find((a) => a.id === 'hc-0917-2')?.scan_md === MD_TWO_SHEETS,
+    '**元の health_checkup は不変**');
+}
+
+console.log('\n⑪-E sibling は消し合わない / 冪等');
+{
+  const groups = PERSIST.toDerivedBloodGroups({ scanMd: MD_TWO_SHEETS, measurements: [] });
+  const mk = () => makeDb({
+    test_artifacts: [{
+      id: 'hc-0917-2', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917,
+      source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD_TWO_SHEETS, measurements: [],
+    }],
+  });
+  const db = mk();
+  sbStub.__setStub(db);
+  const call = (only) => PERSIST.persistDerivedBloodArtifact(db, {
+    diagnosticUserId: UID, testDate: PROD_DATE_0917, parentArtifactId: 'hc-0917-2',
+    sourceGroups: groups, ...(only ? { onlyEpisodes: only } : {}),
+  });
+  // episode 1 だけ → 次に episode 2 だけ (backfill の差分補完と同じ形)
+  await call([1]);
+  ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 1, 'episode 1 だけ作ると 1 件');
+  const idG1 = db.tables.test_artifacts.find((a) => a.test_type === 'blood')?.id;
+  await call([2]);
+  const blood = db.tables.test_artifacts.filter((a) => a.test_type === 'blood');
+  ok(blood.length === 2, '**episode 2 を足しても 1 は消えない**', String(blood.length));
+  ok(blood.some((a) => a.id === idG1), '   episode 1 の artifact が残っている');
+  ok(db.tables.measurement_values.length === 22, '   測定値は 11 + 11 = 22 件', String(db.tables.measurement_values.length));
+
+  // 全グループを 3 回流しても 2 件のまま (冪等)
+  const db2 = mk();
+  sbStub.__setStub(db2);
+  for (let i = 0; i < 3; i++) {
+    await PERSIST.persistDerivedBloodArtifact(db2, {
+      diagnosticUserId: UID, testDate: PROD_DATE_0917, parentArtifactId: 'hc-0917-2', sourceGroups: groups,
+    });
+  }
+  ok(db2.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 2,
+    '**3 回流しても blood は 2 件** (冪等)',
+    String(db2.tables.test_artifacts.filter((a) => a.test_type === 'blood').length));
+  ok(db2.tables.measurement_values.length === 22, '   測定値も 22 件のまま', String(db2.tables.measurement_values.length));
+
+  // **親が変わる再送でも増えない** (saveScanResult は id を取り直す)
+  const db3 = mk();
+  sbStub.__setStub(db3);
+  await PERSIST.persistDerivedBloodArtifact(db3, {
+    diagnosticUserId: UID, testDate: PROD_DATE_0917, parentArtifactId: 'hc-old', sourceGroups: groups,
+  });
+  await PERSIST.persistDerivedBloodArtifact(db3, {
+    diagnosticUserId: UID, testDate: PROD_DATE_0917, parentArtifactId: 'hc-new', sourceGroups: groups,
+  });
+  const b3 = db3.tables.test_artifacts.filter((a) => a.test_type === 'blood');
+  ok(b3.length === 2, '**親 id が変わる再送でも 2 件** (前の親の派生が残らない)', String(b3.length));
+  ok(b3.every((a) => SUB.derivedBloodParentId(a.external_test_id) === 'hc-new'),
+    '   新しい親の sibling に入れ替わっている', JSON.stringify(b3.map((a) => a.external_test_id)));
+  ok(db3.tables.measurement_values.length === 22, '   測定値も 22 件 (古い分は cascade で消えた)',
+    String(db3.tables.measurement_values.length));
+}
+
+console.log('\n⑪-F 血液項目を持たないページは episode にならない');
+{
+  const MD_MIXED = `## 1枚目
+
+### 画像所見
+
+| No | 検査項目 | 検査項目詳細 | 読み取った値 | 単位 | 下限値 | 上限値 | 判定 | 備考 |
+|----|----------|--------------|--------------|------|--------|--------|------|------|
+| 1 | 胸部X線 | 胸部X線 | 所見なし | - | - | - | - | - |
+
+## 2枚目
+
+### 血液検査
+
+| No | 検査項目 | 検査項目詳細 | 読み取った値 | 単位 | 下限値 | 上限値 | 判定 | 備考 |
+|----|----------|--------------|--------------|------|--------|--------|------|------|
+| 1 | 尿酸 | 尿酸 | 7.8 | mg/dL | 3.7 | 7.0 | H | - |
+`;
+  const db = makeDb({
+    test_artifacts: [{
+      id: 'hc-mix', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: DATE,
+      source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD_MIXED, measurements: [],
+    }],
+  });
+  sbStub.__setStub(db);
+  const r = await PERSIST.persistDerivedBloodArtifact(db, {
+    diagnosticUserId: UID, testDate: DATE, parentArtifactId: 'hc-mix',
+    sourceGroups: PERSIST.toDerivedBloodGroups({ scanMd: MD_MIXED, measurements: [] }),
+  });
+  /*
+   * **1 枚目 (画像所見) は血液項目が 0 なので episode に属さない** → episode は 1 件だけ。
+   * 旧仕様 (`N枚目 = 1 件`) ではここが 2 件に見えていた。
+   */
+  ok(r.created === true && r.groupCount === 1, '**episode は 1 件**', JSON.stringify([r.created, r.groupCount]));
+  ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 1,
+    '**blood artifact は 1 件だけ**', String(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length));
+  const s1 = (r.siblings ?? []).find((x) => x.episodeIndex === 1);
+  ok(s1?.created === true && JSON.stringify(s1?.groupIndexes) === '[2]',
+    '   その episode は **2 枚目だけ**から成る', JSON.stringify(s1?.groupIndexes));
+  ok(SUB.derivedBloodEpisodeIndex(
+    db.tables.test_artifacts.find((a) => a.test_type === 'blood')?.external_test_id) === 1,
+    '   **`g<N>` は episode 番号なので g1** (「2枚目」ではない)');
+
+  // 両方 0 件なら 1 件も作らない
+  const dbz = makeDb({ test_artifacts: [{ id: 'hc-z', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: DATE, source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD_MIXED.replace('尿酸 | 尿酸 | 7.8', '胸部X線 | 胸部X線 | 所見なし'), measurements: [] }] });
+  sbStub.__setStub(dbz);
+  const rz = await PERSIST.persistDerivedBloodArtifact(dbz, {
+    diagnosticUserId: UID, testDate: DATE, parentArtifactId: 'hc-z',
+    sourceGroups: PERSIST.toDerivedBloodGroups({ scanMd: dbz.tables.test_artifacts[0].scan_md, measurements: [] }),
+  });
+  ok(rz.created === false && rz.reason === 'no_items', "血液項目が 1 つも無ければ reason:'no_items'", JSON.stringify(rz.reason));
+  ok(rz.groupCount === 0, '   episode は 0 件', String(rz.groupCount));
+  ok(dbz.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 0, '   blood artifact 0 件');
+}
+
+console.log('\n⑪-G 同日に通常 blood が在れば**どのグループも**作らない (裁定 Q-10 は不変)');
+{
+  const db = makeDb({
+    test_artifacts: [
+      { id: 'hc-0917-2', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917, source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD_TWO_SHEETS, measurements: [] },
+      { id: 'n-0917', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917, source: 'wellfort_lab', status: 'active', imported_by: 'wellfort_admin_upload' },
+    ],
+  });
+  sbStub.__setStub(db);
+  const r = await PERSIST.persistDerivedBloodArtifact(db, {
+    diagnosticUserId: UID, testDate: PROD_DATE_0917, parentArtifactId: 'hc-0917-2',
+    sourceGroups: PERSIST.toDerivedBloodGroups({ scanMd: MD_TWO_SHEETS, measurements: [] }),
+  });
+  ok(r.created === false && r.reason === 'normal_blood_exists', "reason:'normal_blood_exists'", JSON.stringify(r.reason));
+  ok(db.tables.test_artifacts.filter((a) => a.imported_by === DERIVED).length === 0, '**派生は 1 件も作らない**');
+  ok(db.tables.test_artifacts.find((a) => a.id === 'n-0917')?.status === 'active', '通常 blood は無傷');
+  ok(db.tables.measurement_values.length === 0, '測定値も書いていない');
+
+  // 通常が後から届いたら **sibling 2 件とも** 降りる
+  const db2 = makeDb({
+    test_artifacts: [
+      { id: 'd-g1', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917, source: 'user_upload', status: 'active', imported_by: DERIVED, external_test_id: SUB.derivedBloodExternalTestId('hc-x', 1) },
+      { id: 'd-g2', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917, source: 'user_upload', status: 'active', imported_by: DERIVED, external_test_id: SUB.derivedBloodExternalTestId('hc-x', 2) },
+    ],
+  });
+  sbStub.__setStub(db2);
+  const sup = await PERSIST.supersedeDerivedBloodOnSameDate(db2, UID, PROD_DATE_0917);
+  ok(sup.superseded === 2, '**sibling 2 件とも superseded**', String(sup.superseded));
+  ok(db2.tables.test_artifacts.every((a) => a.status === 'superseded'), '   行は残っている (消さない)');
+}
+
+console.log('\n⑪-H 新規スキャン保存 (saveScanResult) でも 2 件になる');
+{
+  const db = makeDb();
+  sbStub.__setStub(db);
+  const r = await PERSIST.saveScanResult(db, {
+    diagnosticUserId: UID, markdownClean: MD_TWO_SHEETS, examDate: PROD_DATE_0917,
+  });
+  ok(r.artifactId != null, 'health_checkup が保存された');
+  ok(r.derivedBlood?.created === true && r.derivedBlood?.groupCount === 2,
+    '**派生 blood が 2 グループぶん作られた**', JSON.stringify([r.derivedBlood?.created, r.derivedBlood?.groupCount]));
+  const blood = db.tables.test_artifacts.filter((a) => a.test_type === 'blood');
+  ok(blood.length === 2, '   blood artifact 2 件', String(blood.length));
+  ok(blood.every((a) => SUB.derivedBloodParentId(a.external_test_id) === r.artifactId),
+    '   親 = 保存した health_checkup の id');
+  ok(db.tables.measurement_values.filter((x) => x.test_type === 'blood').length === 22,
+    '   blood の測定値 22 行', String(db.tables.measurement_values.filter((x) => x.test_type === 'blood').length));
+  // **health_checkup 側はまとめた 1 件のまま** (分割は派生だけの話)
+  ok(db.tables.test_artifacts.filter((a) => a.test_type === 'health_checkup').length === 1,
+    '**health_checkup は 1 件のまま** (分割しない)');
+  const hcVals = db.tables.measurement_values.filter((x) => x.test_type === 'health_checkup');
+  ok(hcVals.some((x) => x.item_name === '空腹時中性脂肪'),
+    '   health_checkup 側は 空腹時中性脂肪 のまま (書き換えない)');
+  ok(hcVals.filter((x) => x.item_name === 'LDLコレステロール').length === 2,
+    '**health_checkup 側は LDL 96 / 102 の 2 行がそのまま残る** (競合で落とさない)',
+    JSON.stringify(hcVals.filter((x) => x.item_name === 'LDLコレステロール').map((x) => x.value_num)));
+
+  // 再送しても増えない
+  await PERSIST.saveScanResult(db, { diagnosticUserId: UID, markdownClean: MD_TWO_SHEETS, examDate: PROD_DATE_0917 });
+  ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 2,
+    '**再送しても blood は 2 件**', String(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length));
+  ok(db.tables.measurement_values.filter((x) => x.test_type === 'blood').length === 22,
+    '   測定値も 22 行のまま', String(db.tables.measurement_values.filter((x) => x.test_type === 'blood').length));
+}
+
+console.log('\n⑪-I backfill の処理済み判定は episode 単位');
+{
+  const call = async (body) => {
+    const res = await BACKFILL.POST({ request: new Request('http://x/b', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }) });
+    return { status: res.status, json: await res.json() };
+  };
+  const HC2 = {
+    id: 'hc-0917-2', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917,
+    source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD_TWO_SHEETS, measurements: GOLDEN_11,
+  };
+
+  // ① 2 グループとも未処理 → preview がグループごとの内訳を出す
+  {
+    const db = makeDb({ test_artifacts: [{ ...HC2 }] });
+    sbStub.__setStub(db);
+    const p = await call({ diagnosticUserId: UID, mode: 'one', testDate: PROD_DATE_0917 });
+    ok(p.json.targets?.[0]?.episode_count === 2, '**preview が episode 2 件と答える**', String(p.json.targets?.[0]?.episode_count));
+    ok(JSON.stringify(p.json.targets?.[0]?.missing_episodes) === '[1,2]', '   未処理 episode = [1,2]',
+      JSON.stringify(p.json.targets?.[0]?.missing_episodes));
+    const gs = p.json.targets?.[0]?.would_create?.episodes ?? [];
+    ok(gs.length === 2 && gs[0].count === 11 && gs[1].count === 11,
+      '   作る予定は episode ごとに 11 項目', JSON.stringify(gs.map((x) => [x.episode, x.count])));
+    ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 0, '   preview は何も書かない');
+
+    const a = await call({ diagnosticUserId: UID, mode: 'one', testDate: PROD_DATE_0917, confirm: true });
+    ok(a.json.mode === 'applied' && db.tables.test_artifacts.filter((x) => x.test_type === 'blood').length === 2,
+      '**apply で 2 件できる**', String(db.tables.test_artifacts.filter((x) => x.test_type === 'blood').length));
+
+    // もう一度 → already_processed (作り直さない)
+    const again = await call({ diagnosticUserId: UID, mode: 'one', testDate: PROD_DATE_0917, confirm: true });
+    ok(again.json.already_processed === true, '**全グループ済みなら already_processed**', String(again.json.already_processed));
+    ok(db.tables.test_artifacts.filter((x) => x.test_type === 'blood').length === 2, '   2 件のまま');
+  }
+
+  // ② グループ 1 だけ済み → **欠けている 2 だけ**作る
+  {
+    const db = makeDb({
+      test_artifacts: [
+        { ...HC2 },
+        { id: 'd-g1', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917, source: 'user_upload', status: 'active', imported_by: DERIVED, external_test_id: SUB.derivedBloodExternalTestId('hc-0917-2', 1) },
+      ],
+      measurement_values: [
+        { artifact_id: 'd-g1', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917, seq: 0, item_name: '尿酸', canonical_name: '尿酸', value: '7.7', value_num: 7.7 },
+      ],
+    });
+    sbStub.__setStub(db);
+    const p = await call({ diagnosticUserId: UID, mode: 'one', testDate: PROD_DATE_0917 });
+    ok(p.json.already_processed !== true, '**1 件在っても「処理済み」にしない**', String(p.json.already_processed));
+    ok(JSON.stringify(p.json.targets?.[0]?.missing_episodes) === '[2]', '   未処理 episode = [2]',
+      JSON.stringify(p.json.targets?.[0]?.missing_episodes));
+
+    const a = await call({ diagnosticUserId: UID, mode: 'one', testDate: PROD_DATE_0917, confirm: true });
+    ok(a.json.mode === 'applied', 'apply できる');
+    ok(db.tables.test_artifacts.some((x) => x.id === 'd-g1'), '**既にあったグループ 1 を作り直していない**');
+    ok(db.tables.measurement_values.filter((x) => x.artifact_id === 'd-g1').length === 1,
+      '   その測定値も入れ替えていない', String(db.tables.measurement_values.filter((x) => x.artifact_id === 'd-g1').length));
+    ok(db.tables.test_artifacts.filter((x) => x.test_type === 'blood').length === 2, '   blood は 2 件になった');
+
+    // pending も同じ判断
+    const db2 = makeDb({
+      test_artifacts: [
+        { ...HC2 },
+        { id: 'd-g1', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917, source: 'user_upload', status: 'active', imported_by: DERIVED, external_test_id: SUB.derivedBloodExternalTestId('hc-0917-2', 1) },
+      ],
+    });
+    sbStub.__setStub(db2);
+    const pend = await call({ diagnosticUserId: UID, mode: 'pending' });
+    ok((pend.json.targets ?? []).length === 1, "**pending も「欠けたグループがある回」を拾う**",
+      String((pend.json.targets ?? []).length));
+    ok(JSON.stringify(pend.json.targets?.[0]?.missing_episodes) === '[2]', '   未処理 episode = [2]',
+      JSON.stringify(pend.json.targets?.[0]?.missing_episodes));
+  }
+
+  // ③ **旧ロジック由来 (`external_test_id` なし) は自動では触らない**
+  {
+    const db = makeDb({
+      test_artifacts: [
+        { ...HC2 },
+        { id: '9d350c7e-4de7-4cda-b854-5099f9687d06', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917, source: 'user_upload', status: 'active', imported_by: DERIVED, external_test_id: null },
+      ],
+    });
+    sbStub.__setStub(db);
+    const p = await call({ diagnosticUserId: UID, mode: 'one', testDate: PROD_DATE_0917, confirm: true });
+    ok(p.json.already_processed === true && p.json.legacy_derived === true,
+      '**旧ロジック由来は already_processed / legacy_derived**', JSON.stringify([p.json.already_processed, p.json.legacy_derived]));
+    ok(db.tables.test_artifacts.filter((x) => x.test_type === 'blood').length === 1,
+      '   **作り直し・追加をしない** (blood は 1 件のまま)', String(db.tables.test_artifacts.filter((x) => x.test_type === 'blood').length));
+    ok(db.tables.test_artifacts.find((x) => x.id === '9d350c7e-4de7-4cda-b854-5099f9687d06')?.status === 'active',
+      '   既存の行は active のまま (supersede もしない)');
+
+    const pend = await call({ diagnosticUserId: UID, mode: 'pending', confirm: true });
+    ok((pend.json.targets ?? []).length === 0, '   pending も対象にしない', String((pend.json.targets ?? []).length));
+    ok(db.tables.test_artifacts.filter((x) => x.test_type === 'blood').length === 1, '   blood は 1 件のまま');
+  }
+}
+
+console.log('\n⑪-J sibling が増えても Elith 全面除外は不変 (PR #296 を緩めていない)');
+{
+  const sib = (gi, id) => ({
+    id, diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+    source: 'user_upload', status: 'active', imported_by: DERIVED,
+    external_test_id: SUB.derivedBloodExternalTestId('hc-0917-2', gi),
+  });
+  // ① 判定そのもの
+  ok(SUB.isDerivedHealthcheckBlood(sib(1, 'd-g1')) && SUB.isDerivedHealthcheckBlood(sib(2, 'd-g2')),
+    '**sibling 2 件とも派生と判定される** (`imported_by` だけで見る)');
+  ok(!SUB.isDerivedHealthcheckBlood({ test_type: 'blood', imported_by: 'wellfort_admin_upload', external_test_id: SUB.derivedBloodExternalTestId('hc', 1) }),
+    '**`external_test_id` だけが派生の形でも、marker が無ければ派生ではない** (判定は marker 一本)');
+
+  // ② readiness
+  const db = makeDb({ test_artifacts: [sib(1, 'd-g1'), sib(2, 'd-g2')] });
+  sbStub.__setStub(db);
+  const ready = await ENT.checkFormatsReady([UID], new Map([[UID, ['BloodTestData']]]));
+  ok(ready[UID]?.ready === false && (ready[UID]?.missing ?? []).includes('BloodTestData'),
+    '**sibling が 2 件在っても BloodTestData は ready にならない**', JSON.stringify(ready[UID]));
+
+  // ③ 最終関門 (fail-closed)
+  const g1 = await FINALIZE.elithBloodGuard('d-g1', 'blood');
+  const g2 = await FINALIZE.elithBloodGuard('d-g2', 'blood');
+  ok(g1.ok === false && g1.kind === 'derived', '**sibling 1 は関門で止まる**', JSON.stringify(g1));
+  ok(g2.ok === false && g2.kind === 'derived', '**sibling 2 も関門で止まる**', JSON.stringify(g2));
+
+  // ④ 引けなかったら通さない (fail-closed のまま)
+  const dbFail = makeDb({
+    test_artifacts: [sib(1, 'd-g1')],
+    failSelect: (t, c) => t === 'test_artifacts' && String(c).includes('imported_by'),
+  });
+  sbStub.__setStub(dbFail);
+  const gf = await FINALIZE.elithBloodGuard('d-g1', 'blood');
+  ok(gf.ok === false && gf.kind === 'unverifiable', '**確認できなければ通さない**', JSON.stringify(gf));
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   ⑫ 発注者レビュー 2026-10-03 ①②③
+   ══════════════════════════════════════════════════════════════════ */
+const RESULTS = await bundle('src/lib/result-queries.ts', 'bs-results.mjs');
+
+console.log('\n⑫-① backfill の legacy 判定は「旧ロジック由来が在る日」だけ');
+{
+  const call = async (body) => {
+    const res = await BACKFILL.POST({ request: new Request('http://x/b', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }) });
+    return { status: res.status, json: await res.json() };
+  };
+  /*
+   * **同じ受診日に health_checkup が 2 件** (source 違いなので両方 active で居られる)。
+   *   A … 新方式 sibling g1 / g2 が**全部**在る
+   *   B … 派生が 1 件も無い
+   * 旧実装は「その日に派生が在る」= legacy と見ていたので、**B まで触らない**扱いになっていた。
+   */
+  const hc = (id, source) => ({
+    id, diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917,
+    source, status: 'active', imported_by: 'user', scan_md: MD, measurements: GOLDEN_11,
+  });
+  const sib = (id, parent, gi) => ({
+    id, diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+    source: 'user_upload', status: 'active', imported_by: DERIVED,
+    external_test_id: SUB.derivedBloodExternalTestId(parent, gi),
+  });
+  const mk = () => makeDb({
+    test_artifacts: [
+      hc('hc-A', 'user_upload'), hc('hc-B', 'admin_batch'),
+      sib('d-A-g1', 'hc-A', 1), sib('d-A-g2', 'hc-A', 2),
+    ],
+  });
+
+  const db = mk();
+  sbStub.__setStub(db);
+  const pend = await call({ diagnosticUserId: UID, mode: 'pending' });
+  const tB = (pend.json.targets ?? []).find((t) => t.health_checkup_artifact_id === 'hc-B');
+  const tA = (pend.json.targets ?? []).find((t) => t.health_checkup_artifact_id === 'hc-A');
+  ok(tB != null, '**B (派生が無い) は pending の対象になる**', JSON.stringify((pend.json.targets ?? []).map((t) => t.health_checkup_artifact_id)));
+  ok(tB?.legacy_derived === false, '   **B を legacy 扱いしない**', String(tB?.legacy_derived));
+  ok(tA == null, '   A (全グループ済み) は対象外');
+
+  const db2 = mk();
+  sbStub.__setStub(db2);
+  const applied = await call({ diagnosticUserId: UID, mode: 'pending', confirm: true });
+  ok(applied.json.mode === 'applied', 'apply できる', String(applied.json.mode));
+  ok(db2.tables.test_artifacts.some((a) => a.id === 'd-A-g1') && db2.tables.test_artifacts.some((a) => a.id === 'd-A-g2'),
+    '**A の sibling 2 件は作り直されていない**');
+  const bSibs = db2.tables.test_artifacts.filter((a) => SUB.derivedBloodParentId(a.external_test_id) === 'hc-B');
+  ok(bSibs.length === 1, '   B の派生が 1 件できた (MD は 1 グループ)', String(bSibs.length));
+
+  // **旧ロジック由来が在る日は従来どおり触らない** (①の修正で緩めていないこと)
+  const db3 = makeDb({
+    test_artifacts: [
+      hc('hc-A', 'user_upload'), hc('hc-B', 'admin_batch'),
+      sib('d-A-g1', 'hc-A', 1), sib('d-A-g2', 'hc-A', 2),
+      { id: 'd-legacy', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+        source: 'user_upload', status: 'active', imported_by: DERIVED, external_test_id: null },
+    ],
+  });
+  sbStub.__setStub(db3);
+  const pend3 = await call({ diagnosticUserId: UID, mode: 'pending', confirm: true });
+  ok((pend3.json.targets ?? []).length === 0,
+    '**同じ日に旧ロジック由来が在れば、やはり誰も触らない**', String((pend3.json.targets ?? []).length));
+  ok(db3.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 3,
+    '   blood は 3 件のまま', String(db3.tables.test_artifacts.filter((a) => a.test_type === 'blood').length));
+
+  // **解析できない external_test_id も legacy 扱い** (NULL だけではない)
+  const db4 = makeDb({
+    test_artifacts: [
+      hc('hc-B', 'admin_batch'),
+      { id: 'd-odd', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+        source: 'user_upload', status: 'active', imported_by: DERIVED, external_test_id: 'derived_hc:broken' },
+    ],
+  });
+  sbStub.__setStub(db4);
+  const pend4 = await call({ diagnosticUserId: UID, mode: 'pending' });
+  ok((pend4.json.targets ?? []).length === 0,
+    "**`derived_hc:<親>:g<N>` として解析できない行も legacy**", String((pend4.json.targets ?? []).length));
+}
+
+console.log('\n⑫-② 同日 sibling は同じ系列に 2 点。表示名だけで見分ける');
+{
+  // 表示用の文字 (純関数)
+  ok(SUB.derivedBloodMark(1) === '①' && SUB.derivedBloodMark(2) === '②', '丸番号は ① / ②',
+    `${SUB.derivedBloodMark(1)}/${SUB.derivedBloodMark(2)}`);
+  ok(SUB.derivedBloodSuffix(1) === '（抽出1）' && SUB.derivedBloodSuffix(2) === '（抽出2）',
+    '接尾辞は （抽出1） / （抽出2）', `${SUB.derivedBloodSuffix(1)}/${SUB.derivedBloodSuffix(2)}`);
+  ok(SUB.derivedBloodMark(21) === '(21)', '⑳ を超えたら素の形 (作字しない)', SUB.derivedBloodMark(21));
+  ok(SUB.derivedBloodMark(0) === '' && SUB.derivedBloodSuffix(-1) === '', '0 以下は空');
+
+  /*
+   * **9/17① 96 / 9/17② 102 / 9/24 116** が 1 系列 3 点で出ること。
+   * 平均しない・捨てない・別系列に分けない。
+   */
+  const sib = (id, gi) => ({
+    id, diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+    source: 'user_upload', status: 'active', imported_by: DERIVED,
+    external_test_id: SUB.derivedBloodExternalTestId('hc-0917', gi),
+  });
+  const mv = (artifact_id, test_date, value_num) => ({
+    artifact_id, diagnostic_user_id: UID, test_type: 'blood', test_date, seq: 0,
+    item_name: 'LDLコレステロール', canonical_name: 'LDLコレステロール',
+    value: String(value_num), value_num, unit: 'mg/dL',
+    ref_low: null, ref_high: null, ref_low_num: null, ref_high_num: null, flag: null,
+    assessment: null, source_file_kind: 'scan_md',
+  });
+  // **DB が g2 を先に返す**順で seed する (並べ替えが効いているかを見るため)
+  const db = makeDb({
+    test_artifacts: [
+      sib('d-g2', 2), sib('d-g1', 1),
+      { id: 'd-0924', diagnostic_user_id: UID, test_type: 'blood', test_date: DATE,
+        source: 'user_upload', status: 'active', imported_by: DERIVED,
+        external_test_id: SUB.derivedBloodExternalTestId('hc-0924', 1) },
+    ],
+    measurement_values: [
+      mv('d-g2', PROD_DATE_0917, 102), mv('d-g1', PROD_DATE_0917, 96), mv('d-0924', DATE, 116),
+    ],
+  });
+  sbStub.__setStub(db);
+  const series = await QUERIES.getMeasurementTrend(UID, ['LDLコレステロール'], 12, 'blood');
+  ok(series.length === 1, '**系列は 1 本** (別系列に分けない)', String(series.length));
+  const pts = series[0]?.points ?? [];
+  ok(pts.length === 3, '**点は 3 つ** (平均しない・捨てない)', JSON.stringify(pts.map((p) => p.value)));
+  ok(pts.map((p) => p.value).join(',') === '96,102,116',
+    '**並びは 9/17① 96 → 9/17② 102 → 9/24 116**', pts.map((p) => p.value).join(','));
+  ok(pts[0]?.episodeIndex === 1 && pts[1]?.episodeIndex === 2,
+    '   点に表示用の episodeIndex が付く', JSON.stringify([pts[0]?.episodeIndex, pts[1]?.episodeIndex]));
+  ok(pts.every((p) => p.source === 'health_checkup_scan'), '   3 点とも「人間ドックから抽出」');
+
+  // **DB の返す順が逆でも同じ並び** (決定的であること)
+  const dbRev = makeDb({
+    test_artifacts: [
+      sib('d-g1', 1), sib('d-g2', 2),
+      { id: 'd-0924', diagnostic_user_id: UID, test_type: 'blood', test_date: DATE,
+        source: 'user_upload', status: 'active', imported_by: DERIVED,
+        external_test_id: SUB.derivedBloodExternalTestId('hc-0924', 1) },
+    ],
+    measurement_values: [
+      mv('d-g1', PROD_DATE_0917, 96), mv('d-g2', PROD_DATE_0917, 102), mv('d-0924', DATE, 116),
+    ],
+  });
+  sbStub.__setStub(dbRev);
+  const rev = await QUERIES.getMeasurementTrend(UID, ['LDLコレステロール'], 12, 'blood');
+  ok((rev[0]?.points ?? []).map((p) => p.value).join(',') === '96,102,116',
+    '**seed の順を入れ替えても同じ並び** (決定的)', (rev[0]?.points ?? []).map((p) => p.value).join(','));
+
+  // **1 件しか無い日には episodeIndex を出さない表示規則** (= グラフ側の dup 判定)
+  const dup = (s) => {
+    const n = new Map();
+    for (const p of s.points) n.set(p.date, (n.get(p.date) ?? 0) + 1);
+    return new Set([...n.entries()].filter(([, c]) => c >= 2).map(([d]) => d));
+  };
+  const dd = dup(series[0]);
+  ok(dd.has(PROD_DATE_0917) && !dd.has(DATE),
+    '**見分けを付けるのは 9/17 だけ** (9/24 は 1 件なので付けない)', JSON.stringify([...dd]));
+
+  // 表示側の配線 (壊したら落ちる番人)
+  const chart = readFileSync('src/components/dashboard/MetricTrendChart.astro', 'utf8');
+  ok(/derivedBloodMark/.test(chart) && /derivedBloodSuffix/.test(chart),
+    'グラフが表示名の関数を使っている (文言を写していない)');
+  ok(/\{ymd\(p\.date\)\}\{markOf\(p, d\.dup\)\}/.test(chart),
+    '**拡大グラフの X 軸ラベルに ①② が付く**');
+  ok(/\{jpDate\(r\.date\)\}\{suffixOf\(r, d\.dup\)\}/.test(chart),
+    '**履歴テーブルの検査日に （抽出1） が付く**');
+  /*
+   * **`markOf` と `suffixOf` の両方で dup を見ていること**を別々に固定する。
+   * 「どこかに dup の判定がある」だけを見ると、片方を外しても通ってしまう
+   * (実際に退行注入 T-8 がすり抜けた)。
+   */
+  for (const fn of ['markOf', 'suffixOf']) {
+    const body = new RegExp(`const ${fn} = [^;]*?dup\\.has\\(p\\.date\\) && p\\.episodeIndex != null`, 's');
+    ok(body.test(chart), `**${fn} が「同じ日が 2 つ以上」を見ている** (1 件なら付けない)`);
+  }
+}
+
+console.log('\n⑫-③ Dashboard の同日 sibling 順序が決定的・2 件あることが分かる');
+{
+  const sib = (id, gi) => ({
+    id, diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+    source: 'user_upload', status: 'active', imported_by: DERIVED,
+    external_test_id: SUB.derivedBloodExternalTestId('hc-0917', gi),
+  });
+
+  // orderDerivedSiblings そのもの
+  // **純関数なので `blood-subset` が持つ** (読み出し側が取得直後に 1 回通す)。
+  const O = SUB.orderDerivedSiblings;
+  ok(O([sib('d-g2', 2), sib('d-g1', 1)]).map((a) => a.id).join(',') === 'd-g1,d-g2',
+    '**グループ番号の昇順に並べ直す**', O([sib('d-g2', 2), sib('d-g1', 1)]).map((a) => a.id).join(','));
+  ok(O([sib('d-g1', 1), sib('d-g2', 2)]).map((a) => a.id).join(',') === 'd-g1,d-g2',
+    '   既に昇順なら変わらない');
+  // **派生以外の並びは 1 つも動かない**
+  const others = [
+    { id: 'x1', test_type: 'blood', test_date: PROD_DATE_0917, imported_by: 'wellfort_admin_upload' },
+    { id: 'x2', test_type: 'blood', test_date: PROD_DATE_0917, imported_by: 'wellfort_admin_upload' },
+    { id: 'hc', test_type: 'health_checkup', test_date: PROD_DATE_0917, imported_by: 'user' },
+    { id: 'z', test_type: 'blood', test_date: null, imported_by: 'user' },
+  ];
+  ok(O(others).map((a) => a.id).join(',') === 'x1,x2,hc,z',
+    '**派生でない行は位置も相対順も動かさない**', O(others).map((a) => a.id).join(','));
+  const mixedIn = [others[0], sib('d-g2', 2), others[2], sib('d-g1', 1), others[1]];
+  ok(O(mixedIn).map((a) => a.id).join(',') === 'x1,d-g1,hc,d-g2,x2',
+    '**sibling は「元から派生が居た枠」の中だけで入れ替わる**', O(mixedIn).map((a) => a.id).join(','));
+  ok(O([sib('d-g1', 1)]).map((a) => a.id).join(',') === 'd-g1', '1 件だけなら何もしない');
+
+  // loadDashboard 経由 (DB が g2 を先に返す形)
+  const db = makeDb({
+    test_artifacts: [
+      { id: 'hc-0917', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917,
+        source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD, measurements: GOLDEN_11 },
+      sib('d-g2', 2), sib('d-g1', 1),
+    ],
+  });
+  sbStub.__setStub(db);
+  const d = await DASH.loadDashboard(UID);
+  const blood = (d.artifacts ?? []).filter((a) => a.test_type === 'blood');
+  ok(blood.length === 2, 'blood が 2 件', String(blood.length));
+  ok(blood[0]?.id === 'd-g1',
+    '**「データ」で最初に開くのは g1** (mine[0] が決定的)', String(blood[0]?.id));
+  // 画面側 (TestResultsSection) の配線
+  const sec = readFileSync('src/components/dashboard/TestResultsSection.astro', 'utf8');
+  ok(/sameDayDerived/.test(sec) && /DERIVED_HC_BLOOD_LABEL/.test(sec),
+    '検査カードが同日の件数を出している');
+  ok(/c\.sameDayDerived >= 2/.test(sec),
+    '**同日 2 件以上のときだけ「人間ドックから抽出・N件」を出す**');
+  ok(!/\.sort\(/.test(sec), '**画面側で並べ替えていない** (並べるのは 1 か所)');
+
+  /*
+   * 詳細画面の sibling 切替。**`loadResult` は artifact_id に UUID を要求する**
+   * (他人の結果を id 当てで開けないようにしている・`result-queries.ts:180`) ので、
+   * ここだけ実在の形の UUID を使う。
+   */
+  const G1 = '11111111-1111-4111-8111-111111111111';
+  const G2 = '22222222-2222-4222-8222-222222222222';
+  const OTHER = '33333333-3333-4333-8333-333333333333';
+  const uuidSib = (id, gi) => ({ ...sib(id, gi) });
+  sbStub.__setStub(makeDb({
+    test_artifacts: [
+      uuidSib(G2, 2), uuidSib(G1, 1),
+      { id: OTHER, diagnostic_user_id: UID, test_type: 'blood', test_date: DATE,
+        source: 'user_upload', status: 'active', imported_by: DERIVED,
+        external_test_id: SUB.derivedBloodExternalTestId('hc-0924', 1) },
+    ],
+  }));
+  const r = await RESULTS.loadResult(G1, UID);
+  ok(!('error' in r), 'loadResult がエラーを返さない', JSON.stringify(r.error ?? ''));
+  const sibs = r?.siblings ?? [];
+  ok(sibs.length === 3, '**過去データに 3 件 (同日 2 件 + 別日 1 件)**', String(sibs.length));
+  const same = sibs.filter((x) => x.testDate === PROD_DATE_0917);
+  ok(same.length === 2 && same.map((x) => x.id).join(',') === `${G1},${G2}`,
+    '**同日は g1 → g2 の順** (決定的)', same.map((x) => x.id).join(','));
+  ok(same.map((x) => x.episodeIndex).join(',') === '1,2',
+    '   表示用の episodeIndex が付く', same.map((x) => x.episodeIndex).join(','));
+  ok(sibs.some((x) => x.id === G2), '**g1 の画面から g2 へ辿れる** (切替先に居る)');
+  const page = readFileSync('src/pages/result/[id].astro', 'utf8');
+  ok(/siblingLabel\(sib\)/.test(page) && /derivedBloodSuffix/.test(page),
+    '詳細画面が表示名の関数を使っている');
+  ok(/dupSiblingDates\.has/.test(page),
+    '**同じ日が 2 つ以上あるときだけ （抽出1） を添える**');
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   ⑬ 最終グルーピング規則 (blood episode) — 発注者の最終仕様 2026-10-03
+   ══════════════════════════════════════════════════════════════════
+   **`N枚目 = derived blood 1 件` は取り消された。**
+   `N枚目` は分割候補の境界でしかなく、件数は blood episode が決める。
+   閾値 (「11 項目揃っているか」等) も推測も入れない。 */
+
+/** 血液の表を 1 つ作る。`rows` = [項目, 詳細, 値, 単位] の配列。 */
+const bloodTable = (rows) => [
+  '| No | 検査項目 | 検査項目詳細 | 読み取った値 | 単位 | 下限値 | 上限値 | 判定 | 備考 |',
+  '|----|----------|--------------|--------------|------|--------|--------|------|------|',
+  ...rows.map((r, i) => `| ${i + 1} | ${r[0]} | ${r[1]} | ${r[2]} | ${r[3] ?? '-'} | - | - | - | - |`),
+].join('\n');
+
+/** 11 項目 1 式。`v` に値を渡す。 */
+const SET11 = (v) => [
+  ['AST', 'AST(GOT)', v.ast, 'U/L'],
+  ['ALT', 'ALT(GPT)', v.alt, 'U/L'],
+  ['γ-GTP', 'γ-GTP', v.ggt, 'U/L'],
+  ['LDL', 'LDLコレステロール', v.ldl, 'mg/dL'],
+  ['HDL', 'HDLコレステロール', v.hdl, 'mg/dL'],
+  ['総コレステロール', '総コレステロール', v.tc, 'mg/dL'],
+  ['中性脂肪', '空腹時中性脂肪', v.tg, 'mg/dL'],
+  ['血糖', '空腹時血糖', v.fpg, 'mg/dL'],
+  ['クレアチニン', 'クレアチニン', v.cr, 'mg/dL'],
+  ['eGFR', 'eGFR', v.egfr, 'mL/min'],
+  ['尿酸', '尿酸', v.ua, 'mg/dL'],
+];
+const V_A = { ast: 20, alt: 20, ggt: 21, ldl: 96, hdl: 75.2, tc: 159, tg: 72, fpg: 97, cr: 1.06, egfr: 55.6, ua: 7.7 };
+const V_B = { ast: 19, alt: 20, ggt: 26, ldl: 102, hdl: 83.2, tc: 196, tg: 54, fpg: 104, cr: 1.03, egfr: 56.9, ua: 7.8 };
+const V_C = { ast: 22, alt: 24, ggt: 31, ldl: 110, hdl: 70.1, tc: 180, tg: 88, fpg: 101, cr: 1.01, egfr: 58.2, ua: 7.1 };
+const expect11 = (v) => ({
+  'GOT(AST)': v.ast, 'GPT(ALT)': v.alt, 'γ-GTP': v.ggt,
+  LDLコレステロール: v.ldl, HDLコレステロール: v.hdl, 総コレステロール: v.tc,
+  中性脂肪: v.tg, 空腹時血糖: v.fpg, クレアチニン: v.cr, eGFR: v.egfr, 尿酸: v.ua,
+});
+const sheets = (...parts) => parts.map((t, i) => `## ${i + 1}枚目\n\n${t}`).join('\n\n');
+
+/** scan_md を保存済み health_checkup として置き、派生を作る。 */
+const runDerived = async (scanMd, { id = 'hc-x', date = PROD_DATE_0917 } = {}) => {
+  const db = makeDb({
+    test_artifacts: [{
+      id, diagnostic_user_id: UID, test_type: 'health_checkup', test_date: date,
+      source: 'user_upload', status: 'active', imported_by: 'user', scan_md: scanMd, measurements: [],
+    }],
+  });
+  sbStub.__setStub(db);
+  const r = await PERSIST.persistDerivedBloodArtifact(db, {
+    diagnosticUserId: UID, testDate: date, parentArtifactId: id,
+    sourceGroups: PERSIST.toDerivedBloodGroups({ scanMd, measurements: [] }),
+  });
+  const blood = db.tables.test_artifacts
+    .filter((a) => a.test_type === 'blood')
+    .sort((a, b) => (SUB.derivedBloodEpisodeIndex(a.external_test_id) ?? 0) - (SUB.derivedBloodEpisodeIndex(b.external_test_id) ?? 0));
+  // **落ちずに名指しで FAIL させる** ため、artifact が無い回でも空を返す。
+  const valuesOf = (art) => (art == null ? {} : Object.fromEntries(
+    db.tables.measurement_values.filter((x) => x.artifact_id === art.id).map((x) => [x.item_name, x.value_num]),
+  ));
+  return { db, r, blood, valuesOf };
+};
+
+console.log('\n⑬-A Fixture A: 2026-09-17 — 独立した血液一式が 2 つ → 2 件');
+{
+  const md = sheets(bloodTable(SET11(V_A)), bloodTable(SET11(V_B)));
+  const { r, blood, valuesOf } = await runDerived(md);
+  ok(r.created === true && r.groupCount === 2, '**derived blood = 2 件**', JSON.stringify([r.created, r.groupCount]));
+  ok(blood.length === 2, '   artifact も 2 件', String(blood.length));
+  ok(blood.map((a) => a.external_test_id).join(',') === 'derived_hc:hc-x:g1,derived_hc:hc-x:g2',
+    '   `g1` / `g2` (episode 番号)', JSON.stringify(blood.map((a) => a.external_test_id)));
+  ok((r.excluded ?? []).length === 0, '**excluded = 0**', JSON.stringify(r.excluded));
+  const A = valuesOf(blood[0]), B = valuesOf(blood[1]);
+  ok(Object.keys(A).length === 11 && Object.keys(B).length === 11,
+    '**各 11 項目**', `${Object.keys(A).length}/${Object.keys(B).length}`);
+  for (const [k, v] of Object.entries(expect11(V_A))) ok(A[k] === v, `   episode1 ${k} = ${v}`, `実測 ${A[k]}`);
+  for (const [k, v] of Object.entries(expect11(V_B))) ok(B[k] === v, `   episode2 ${k} = ${v}`, `実測 ${B[k]}`);
+  for (const n of ['総蛋白', 'アルブミン', 'HbA1c(NGSP)', '尿素窒素']) {
+    ok(!(n in A) && !(n in B), `   **${n} の行が無い** (0 補完・推測計算をしない)`);
+  }
+}
+
+console.log('\n⑬-B Fixture B: 通常の複数ページ人間ドック → 1 件');
+{
+  /*
+   * 1枚目 身体計測 / 2枚目 肝機能・脂質 / 3枚目 腎機能・血糖 / 4枚目 その他。
+   * **重複する canonical 項目が無い**ので全部 1 つの episode に結合される (規則 A)。
+   */
+  const md = sheets(
+    bloodTable([['身長', '身長', 172.4, 'cm'], ['体重', '体重', 71.2, 'kg']]),
+    bloodTable([
+      ['AST', 'AST(GOT)', 20, 'U/L'], ['ALT', 'ALT(GPT)', 20, 'U/L'], ['γ-GTP', 'γ-GTP', 21, 'U/L'],
+      ['LDL', 'LDLコレステロール', 96, 'mg/dL'], ['HDL', 'HDLコレステロール', 75.2, 'mg/dL'],
+      ['中性脂肪', '空腹時中性脂肪', 72, 'mg/dL'],
+    ]),
+    bloodTable([
+      ['クレアチニン', 'クレアチニン', 1.06, 'mg/dL'], ['eGFR', 'eGFR', 55.6, 'mL/min'],
+      ['尿酸', '尿酸', 7.7, 'mg/dL'], ['血糖', '空腹時血糖', 97, 'mg/dL'],
+    ]),
+    bloodTable([['胸部X線', '胸部X線', '所見なし', '-'], ['尿検査', '尿蛋白', '(-)', '-']]),
+  );
+  const { r, blood, valuesOf } = await runDerived(md, { id: 'hc-b' });
+  ok(r.created === true && r.groupCount === 1, '**derived blood = 1 件**', JSON.stringify([r.created, r.groupCount]));
+  ok(blood.length === 1, '   artifact も 1 件', String(blood.length));
+  const s1 = (r.siblings ?? [])[0];
+  ok(JSON.stringify(s1?.groupIndexes) === '[2,3]',
+    '**血液項目は 2枚目 + 3枚目 を統合** (身体計測・画像のページは入らない)', JSON.stringify(s1?.groupIndexes));
+  const A = valuesOf(blood[0]);
+  ok(Object.keys(A).length === 10, '   10 項目 (2枚目 6 + 3枚目 4)', String(Object.keys(A).length));
+  ok(A['GOT(AST)'] === 20 && A['LDLコレステロール'] === 96 && A['クレアチニン'] === 1.06 && A['空腹時血糖'] === 97,
+    '   2 枚目と 3 枚目の値が 1 件に入っている');
+  ok(!('身長' in A) && !('尿蛋白' in A), '   15 項目以外は入れない');
+  ok((r.excluded ?? []).length === 0, '   excluded = 0', JSON.stringify(r.excluded));
+}
+
+console.log('\n⑬-C Fixture C: 同一値の重複記載 → 1 件・1 行');
+{
+  const md = sheets(
+    bloodTable([['ALT', 'ALT(GPT)', 20, 'U/L'], ['AST', 'AST(GOT)', 19, 'U/L']]),
+    bloodTable([['ALT', 'ALT(GPT)', 20, 'U/L'], ['尿酸', '尿酸', 7.8, 'mg/dL']]),
+  );
+  const { db, r, blood, valuesOf } = await runDerived(md, { id: 'hc-c' });
+  ok(r.created === true && r.groupCount === 1, '**derived blood = 1 件** (同値なので結合)', JSON.stringify([r.created, r.groupCount]));
+  const A = valuesOf(blood[0]);
+  ok(Object.keys(A).length === 3, '   3 項目 (ALT / AST / 尿酸)', JSON.stringify(Object.keys(A)));
+  ok(db.tables.measurement_values.filter((x) => x.item_name === 'GPT(ALT)').length === 1,
+    '**ALT の行は 1 行** (同値は畳む)',
+    String(db.tables.measurement_values.filter((x) => x.item_name === 'GPT(ALT)').length));
+  ok(A['GPT(ALT)'] === 20, '   ALT = 20', String(A['GPT(ALT)']));
+  ok((r.excluded ?? []).length === 0, '   value_conflict にしない', JSON.stringify(r.excluded));
+}
+
+console.log('\n⑬-C2 11 項目が丸ごと同値で 2 ページ → それでも 1 件 (閾値を作っていない)');
+{
+  /*
+   * **ここが「件数の閾値を作っていない」ことの番人。**
+   * 「11 項目揃っていたら新しい episode」のようなヒューリスティックを入れると、
+   * **同じ検査内容が 2 ページに重複印字された回**が 2 件に割れる。
+   * 規則は「重複項目の値が違うか」だけで、項目数は見ない。
+   */
+  const md = sheets(bloodTable(SET11(V_A)), bloodTable(SET11(V_A)));
+  const { db, r, blood, valuesOf } = await runDerived(md, { id: 'hc-c2' });
+  ok(r.groupCount === 1, '**derived blood = 1 件** (同値なので結合)', String(r.groupCount));
+  ok(blood.length === 1, '   artifact も 1 件', String(blood.length));
+  ok(JSON.stringify((r.siblings ?? [])[0]?.groupIndexes) === '[1,2]',
+    '   1枚目 + 2枚目 が 1 件に統合されている', JSON.stringify((r.siblings ?? [])[0]?.groupIndexes));
+  const A = valuesOf(blood[0]);
+  ok(Object.keys(A).length === 11, '   11 項目 (重複は畳む)', String(Object.keys(A).length));
+  ok(db.tables.measurement_values.length === 11, '   測定値も 11 行', String(db.tables.measurement_values.length));
+  ok((r.excluded ?? []).length === 0, '   value_conflict にしない', JSON.stringify(r.excluded));
+}
+
+console.log('\n⑬-D Fixture D: 同一トップレベル group の中の競合 → 分割しない');
+{
+  const md = `## 1枚目\n\n${bloodTable([
+    ['LDL', 'LDLコレステロール', 96, 'mg/dL'],
+    ['LDL', 'LDLコレステロール', 102, 'mg/dL'],
+    ['尿酸', '尿酸', 7.7, 'mg/dL'],
+  ])}`;
+  const { r, blood, valuesOf } = await runDerived(md, { id: 'hc-d' });
+  ok(r.groupCount === 1, '**episode は分割しない** (1 件)', String(r.groupCount));
+  ok(blood.length === 1, '   artifact も 1 件', String(blood.length));
+  const A = valuesOf(blood[0]);
+  ok(!('LDLコレステロール' in A), '**LDL だけ除外される**', JSON.stringify(Object.keys(A)));
+  ok((r.excluded ?? []).some((e) => e.name === 'LDLコレステロール' && e.reason === 'value_conflict'),
+    "   理由は value_conflict", JSON.stringify(r.excluded));
+  ok(A['尿酸'] === 7.7, '   他の項目は通常どおり出る', String(A['尿酸']));
+}
+
+console.log('\n⑬-E Fixture E: 3 episode → g1 / g2 / g3');
+{
+  const md = sheets(bloodTable(SET11(V_A)), bloodTable(SET11(V_B)), bloodTable(SET11(V_C)));
+  const { r, blood, valuesOf } = await runDerived(md, { id: 'hc-e' });
+  ok(r.groupCount === 3, '**derived blood = 3 件**', String(r.groupCount));
+  ok(blood.map((a) => SUB.derivedBloodEpisodeIndex(a.external_test_id)).join(',') === '1,2,3',
+    '**g1 / g2 / g3 が安定して付く**', JSON.stringify(blood.map((a) => a.external_test_id)));
+  const vals = blood.map(valuesOf);
+  ok(vals.length === 3 && vals.every((v) => Object.keys(v ?? {}).length === 11),
+    '   3 件とも 11 項目', JSON.stringify(vals.map((v) => Object.keys(v ?? {}).length)));
+  ok(vals[0]?.['LDLコレステロール'] === 96 && vals[1]?.['LDLコレステロール'] === 102 && vals[2]?.['LDLコレステロール'] === 110,
+    '   LDL は 96 / 102 / 110 の順', JSON.stringify(vals.map((v) => v?.['LDLコレステロール'])));
+  ok((r.excluded ?? []).length === 0, '   excluded = 0', JSON.stringify(r.excluded));
+}
+
+console.log('\n⑬-F Fixture F: 冪等 — 3 回流しても episode 数を超えない');
+{
+  const md = sheets(bloodTable(SET11(V_A)), bloodTable(SET11(V_B)));
+  const db = makeDb({
+    test_artifacts: [{
+      id: 'hc-f', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917,
+      source: 'user_upload', status: 'active', imported_by: 'user', scan_md: md, measurements: [],
+    }],
+  });
+  sbStub.__setStub(db);
+  const groups = PERSIST.toDerivedBloodGroups({ scanMd: md, measurements: [] });
+  for (let i = 0; i < 3; i++) {
+    await PERSIST.persistDerivedBloodArtifact(db, {
+      diagnosticUserId: UID, testDate: PROD_DATE_0917, parentArtifactId: 'hc-f', sourceGroups: groups,
+    });
+  }
+  const blood = db.tables.test_artifacts.filter((a) => a.test_type === 'blood');
+  ok(blood.length === 2, '**3 回流しても 2 件**', String(blood.length));
+  ok(db.tables.measurement_values.length === 22, '   測定値も 11 + 11 = 22 件', String(db.tables.measurement_values.length));
+  ok(new Set(blood.map((a) => a.external_test_id)).size === 2, '   external_test_id も 2 種類');
+  // **差分補完 (onlyEpisodes) を混ぜても増えない**
+  await PERSIST.persistDerivedBloodArtifact(db, {
+    diagnosticUserId: UID, testDate: PROD_DATE_0917, parentArtifactId: 'hc-f',
+    sourceGroups: groups, onlyEpisodes: [2],
+  });
+  ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 2,
+    '   onlyEpisodes を混ぜても 2 件',
+    String(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length));
+}
+
+console.log('\n⑬-G 境界判定そのもの (buildBloodEpisodes・純関数)');
+{
+  const g = (index, rows) => ({ index, label: `${index}枚目`, measurements: rows });
+  const E = SUB.buildBloodEpisodes;
+  // 規則 A: 重複なし → 結合
+  ok(E([g(1, [m('AST(GOT)', 20)]), g(2, [m('尿酸', 7.7)])]).length === 1, '規則 A 重複なし → 1 件');
+  // 規則 B: 重複ありだが同値 → 結合
+  ok(E([g(1, [m('AST(GOT)', 20)]), g(2, [m('AST(GOT)', 20), m('尿酸', 7.7)])]).length === 1,
+    '規則 B 重複あり・同値 → 1 件');
+  // 規則 C: 重複の値が違う → 分割
+  ok(E([g(1, [m('AST(GOT)', 20)]), g(2, [m('AST(GOT)', 19)])]).length === 2,
+    '規則 C 重複の値が違う → 2 件');
+  // 血液項目を持たないページは境界に関わらない
+  const skip = E([g(1, [m('身長', 172)]), g(2, [m('AST(GOT)', 20)]), g(3, [m('胸部X線', '所見なし')]), g(4, [m('尿酸', 7.7)])]);
+  ok(skip.length === 1 && JSON.stringify(skip[0].groupIndexes) === '[2,4]',
+    '血液の無いページは episode に入らない', JSON.stringify(skip.map((e) => e.groupIndexes)));
+  // 文字列値 (定性) も同値判定に乗る
+  ok(E([g(1, [m('AST(GOT)', 20)]), g(2, [m('AST(GOT)', '20')])]).length === 1,
+    '"20" と 20 は同値 (value_num で見る)');
+  // episode 番号は 1 から連番 (N枚目 の番号ではない)
+  const nums = E([g(3, [m('AST(GOT)', 20)]), g(7, [m('AST(GOT)', 19)])]);
+  ok(nums.map((e) => e.index).join(',') === '1,2',
+    '**episode 番号は 1 から連番** (「N枚目」の番号ではない)', nums.map((e) => e.index).join(','));
+  ok(nums[0].groupIndexes.join(',') === '3' && nums[1].groupIndexes.join(',') === '7',
+    '   由来の「N枚目」は groupIndexes に残る');
+  // 空入力
+  ok(E([]).length === 0 && E([g(1, [])]).length === 0, '空入力は 0 件');
+  // **TG の表記ゆれを跨いだ同値判定** (空腹時中性脂肪 と 中性脂肪 は同じ概念)
+  ok(E([g(1, [m('空腹時中性脂肪', 72)]), g(2, [m('中性脂肪', 72)])]).length === 1,
+    'TG は統合後の概念で見る (空腹時 72 と 中性脂肪 72 は同値)');
+  ok(E([g(1, [m('空腹時中性脂肪', 72)]), g(2, [m('中性脂肪', 54)])]).length === 2,
+    '   値が違えば分割される');
+}
+
+console.log('\n⑬-H2 backfill も episode 単位で数える (「N枚目」の数ではない)');
+{
+  /*
+   * **Fixture B の形** (1枚目 身体計測 / 2・3枚目 血液 / 4枚目 その他) を backfill に通す。
+   * 「N枚目」で数えると未処理 4 件 (または 2 件) になるが、**正解は episode 1 件**。
+   */
+  const MD_B = sheets(
+    bloodTable([['身長', '身長', 172.4, 'cm']]),
+    bloodTable([['AST', 'AST(GOT)', 20, 'U/L'], ['ALT', 'ALT(GPT)', 20, 'U/L']]),
+    bloodTable([['尿酸', '尿酸', 7.7, 'mg/dL'], ['eGFR', 'eGFR', 55.6, 'mL/min']]),
+    bloodTable([['胸部X線', '胸部X線', '所見なし', '-']]),
+  );
+  const call = async (body) => {
+    const res = await BACKFILL.POST({ request: new Request('http://x/b', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }) });
+    return { status: res.status, json: await res.json() };
+  };
+  const db = makeDb({
+    test_artifacts: [{
+      id: 'hc-h2', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917,
+      source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD_B, measurements: [],
+    }],
+  });
+  sbStub.__setStub(db);
+  const p1 = await call({ diagnosticUserId: UID, mode: 'one', testDate: PROD_DATE_0917 });
+  const t = p1.json.targets?.[0];
+  ok(t?.group_count === 4, '   入力グループは 4 件 (原本の「N枚目」)', String(t?.group_count));
+  ok(t?.episode_count === 1, '**episode は 1 件**', String(t?.episode_count));
+  ok(JSON.stringify(t?.missing_episodes) === '[1]', '**未処理 episode = [1]**', JSON.stringify(t?.missing_episodes));
+  const eps = t?.would_create?.episodes ?? [];
+  ok(eps.length === 1 && JSON.stringify(eps[0]?.groups) === '[2,3]',
+    '**その episode は 2枚目 + 3枚目 から成る**', JSON.stringify(eps.map((x) => [x.episode, x.groups])));
+  ok(eps[0]?.count === 4, '   4 項目 (AST / ALT / eGFR / 尿酸)', String(eps[0]?.count));
+
+  const a1 = await call({ diagnosticUserId: UID, mode: 'one', testDate: PROD_DATE_0917, confirm: true });
+  ok(a1.json.mode === 'applied', 'apply できる', String(a1.json.mode));
+  ok(db.tables.test_artifacts.filter((x) => x.test_type === 'blood').length === 1,
+    '**blood artifact は 1 件だけ**', String(db.tables.test_artifacts.filter((x) => x.test_type === 'blood').length));
+  ok(db.tables.measurement_values.filter((x) => x.test_type === 'blood').length === 4,
+    '   測定値は 4 行 (2枚目 + 3枚目 を統合)',
+    String(db.tables.measurement_values.filter((x) => x.test_type === 'blood').length));
+  const again = await call({ diagnosticUserId: UID, mode: 'one', testDate: PROD_DATE_0917, confirm: true });
+  ok(again.json.already_processed === true, '   もう一度叩くと already_processed', String(again.json.already_processed));
+  ok(db.tables.test_artifacts.filter((x) => x.test_type === 'blood').length === 1, '   1 件のまま');
+}
+
+console.log('\n⑬-H グラフのボタンは「異なる受診日が 2 日以上」');
+{
+  /*
+   * 発注者裁定 §8。件数で見ると**同じ受診日の sibling 2 件だけ**でもボタンが出てしまう。
+   * `getTrendCandidates()` の「日付の違う点が 2 つ以上」と一致させる。
+   */
+  const sec = readFileSync('src/components/dashboard/TestResultsSection.astro', 'utf8');
+  ok(/const dates = new Set\(mine\.map\(\(a\) => String\(a\.test_date \?\? ''\)\)\.filter\(Boolean\)\)/.test(sec),
+    '**受診日の集合を数えている**');
+  ok(/canGraph: t\.trend && dates\.size >= 2/.test(sec), '**canGraph = 受診日 2 日以上**');
+  ok(!/canGraph: t\.trend && mine\.length >= 2/.test(sec), '   件数判定が残っていない');
+  ok(/記録 \$\{c\.distinctDates\} 回分/.test(sec), '   添え書きも受診日の数で言う');
+
+  // 実データで突き合わせ: 同日 2 件だけ → 候補 0 / 別日が足されると候補あり
+  const sib = (id, gi, date) => ({
+    id, diagnostic_user_id: UID, test_type: 'blood', test_date: date,
+    source: 'user_upload', status: 'active', imported_by: DERIVED,
+    external_test_id: SUB.derivedBloodExternalTestId('hc-0917', gi),
+  });
+  const mv = (artifact_id, test_date, value_num) => ({
+    artifact_id, diagnostic_user_id: UID, test_type: 'blood', test_date, seq: 0,
+    item_name: 'LDLコレステロール', canonical_name: 'LDLコレステロール',
+    value: String(value_num), value_num, unit: 'mg/dL',
+    ref_low: null, ref_high: null, ref_low_num: null, ref_high_num: null, flag: null,
+    assessment: null, source_file_kind: 'scan_md',
+  });
+  const sameDay = makeDb({
+    test_artifacts: [sib('d-g1', 1, PROD_DATE_0917), sib('d-g2', 2, PROD_DATE_0917)],
+    measurement_values: [mv('d-g1', PROD_DATE_0917, 96), mv('d-g2', PROD_DATE_0917, 102)],
+  });
+  sbStub.__setStub(sameDay);
+  const candSame = await QUERIES.getTrendCandidates(UID, 'blood');
+  ok(candSame.length === 0,
+    '**9/17① + 9/17② だけ → 候補 0 (グラフ無効)**', JSON.stringify(candSame));
+  const d1 = new Set(sameDay.tables.test_artifacts.map((a) => a.test_date));
+  ok(d1.size === 1, '   受診日は 1 日', String(d1.size));
+
+  const twoDays = makeDb({
+    test_artifacts: [
+      sib('d-g1', 1, PROD_DATE_0917), sib('d-g2', 2, PROD_DATE_0917),
+      { id: 'd-0924', diagnostic_user_id: UID, test_type: 'blood', test_date: DATE,
+        source: 'user_upload', status: 'active', imported_by: DERIVED,
+        external_test_id: SUB.derivedBloodExternalTestId('hc-0924', 1) },
+    ],
+    measurement_values: [
+      mv('d-g1', PROD_DATE_0917, 96), mv('d-g2', PROD_DATE_0917, 102), mv('d-0924', DATE, 116),
+    ],
+  });
+  sbStub.__setStub(twoDays);
+  const candTwo = await QUERIES.getTrendCandidates(UID, 'blood');
+  ok(candTwo.includes('LDLコレステロール'),
+    '**9/17① + 9/17② + 9/24 → 候補あり (グラフ有効)**', JSON.stringify(candTwo));
+  const d2 = new Set(twoDays.tables.test_artifacts.map((a) => a.test_date));
+  ok(d2.size === 2, '   受診日は 2 日', String(d2.size));
 }
 
 /* ── 結果 ────────────────────────────────────────────────────────── */

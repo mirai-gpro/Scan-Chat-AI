@@ -1,7 +1,7 @@
 ---
 import AppIcon from '../AppIcon.astro';
 import type { MetricTrendSeries } from '../../lib/dashboard-queries';
-import { DERIVED_HC_BLOOD_LABEL } from '../../lib/blood-subset';
+import { DERIVED_HC_BLOOD_LABEL, derivedBloodMark, derivedBloodSuffix } from '../../lib/blood-subset';
 
 /**
  * 検査値の推移グラフ。カードをクリック (Enter/Space) で拡大モーダルを開く。
@@ -40,6 +40,30 @@ const ymd = (iso: string): string => {
   if (Number.isNaN(d.getTime())) return iso;
   return `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()}`;
 };
+
+/*
+ * ── 同じ受診日が 2 つ以上あるときだけ見分けを足す (発注者裁定 2026-10-03 ②) ──────
+ *
+ * 人間ドック 1 件に独立した健診結果が 2 通入っていた回は、**同じ受診日の点が 2 つ**になる。
+ * **両方そのまま出す** (平均しない・捨てない・別系列にも分けない) ので、
+ * どちらがどちらかを**ラベルだけ**で見分けられるようにする。
+ *
+ *   詳細・履歴 … `2026年9月17日（抽出1）`
+ *   グラフの狭いラベル … `9/17①`
+ *
+ * **1 件しか無い日には付けない** — 見分ける相手がいないのに「（抽出1）」と出すと、
+ * 利用者には何かが欠けているように見える。
+ */
+const dupDates = (s: MetricTrendSeries): Set<string> => {
+  const n = new Map<string, number>();
+  for (const p of s.points) n.set(p.date, (n.get(p.date) ?? 0) + 1);
+  return new Set([...n.entries()].filter(([, c]) => c >= 2).map(([d]) => d));
+};
+type Marked = { date: string; episodeIndex?: number };
+const markOf = (p: Marked, dup: Set<string>): string =>
+  dup.has(p.date) && p.episodeIndex != null ? derivedBloodMark(p.episodeIndex) : '';
+const suffixOf = (p: Marked, dup: Set<string>): string =>
+  dup.has(p.date) && p.episodeIndex != null ? derivedBloodSuffix(p.episodeIndex) : '';
 
 function build(s: MetricTrendSeries) {
   const vals = s.points.map((p) => p.value);
@@ -82,7 +106,7 @@ function build(s: MetricTrendSeries) {
     return { ...p, delta: before ? p.value - before.value : null };
   });
 
-  return { mini, big, ticks, last, diff, decimals, hasBand, lo, hi, rows };
+  return { mini, big, ticks, last, diff, decimals, hasBand, lo, hi, rows, dup: dupDates(s) };
 }
 
 const charts = series.filter((s) => s.points.length > 0).map((s, i) => ({ s, d: build(s), i }));
@@ -151,7 +175,7 @@ const refLabel = (s: MetricTrendSeries): string => {
           </span>
 
           <svg viewBox={`0 0 ${W} ${H}`} class="h-auto w-full" role="img"
-               aria-label={`${s.label} の推移。最新 ${d.last.raw}${s.unit}（${jpDate(d.last.date)}）`}>
+               aria-label={`${s.label} の推移。最新 ${d.last.raw}${s.unit}（${jpDate(d.last.date)}${suffixOf(d.last, d.dup)}）`}>
             {d.hasBand && (
               <rect x={PAD_L} y={d.mini.top} width={W - PAD_L - PAD_R}
                     height={Math.max(0, d.mini.bottom - d.mini.top)} class="fill-status-ok-bg" />
@@ -172,9 +196,9 @@ const refLabel = (s: MetricTrendSeries): string => {
                       class={p.flag ? 'fill-status-watch' : 'fill-brand-600'} />
             ))}
             <text x={d.mini.pts[0].x} y={H - PAD_B + 15} text-anchor="start"
-                  class="fill-slate-600" style="font-size:11px">{shortDate(d.mini.pts[0].date)}</text>
+                  class="fill-slate-600" style="font-size:11px">{shortDate(d.mini.pts[0].date)}{markOf(d.mini.pts[0], d.dup)}</text>
             <text x={d.mini.pts[d.mini.pts.length - 1].x} y={H - PAD_B + 15} text-anchor="end"
-                  class="fill-slate-600" style="font-size:11px">{shortDate(d.last.date)}</text>
+                  class="fill-slate-600" style="font-size:11px">{shortDate(d.last.date)}{markOf(d.last, d.dup)}</text>
             <text x={PAD_L - 6} y={PAD_T + 4} text-anchor="end" class="fill-slate-500"
                   style="font-size:11px">{d.hi.toFixed(d.decimals)}</text>
             <text x={PAD_L - 6} y={H - PAD_B + 4} text-anchor="end" class="fill-slate-500"
@@ -182,7 +206,7 @@ const refLabel = (s: MetricTrendSeries): string => {
           </svg>
 
           <span class="mt-1 text-sm text-slate-600">
-            {ymd(d.mini.pts[0].date)} 〜 {ymd(d.last.date)} ・ {s.points.length} 回
+            {ymd(d.mini.pts[0].date)}{markOf(d.mini.pts[0], d.dup)} 〜 {ymd(d.last.date)}{markOf(d.last, d.dup)} ・ {s.points.length} 回
             {d.hasBand && <> ／ 基準値 <span class="tnum">{refLabel(s)}</span></>}
           </span>
         </button>
@@ -238,7 +262,7 @@ const refLabel = (s: MetricTrendSeries): string => {
               前回比 {d.diff > 0 ? '+' : ''}{d.diff.toFixed(d.decimals)} {s.unit}
             </span>
           )}
-          <span class="text-sm text-slate-600">最新 {jpDate(d.last.date)}</span>
+          <span class="text-sm text-slate-600">最新 {jpDate(d.last.date)}{suffixOf(d.last, d.dup)}</span>
         </div>
 
         <div class="rounded-xl border border-slate-200 bg-white p-4">
@@ -285,7 +309,7 @@ const refLabel = (s: MetricTrendSeries): string => {
             ))}
             {d.big.pts.map((p) => (
               <text x={p.x} y={MH - MB + 22} text-anchor="middle" class="fill-slate-600"
-                    style="font-size:13px">{ymd(p.date)}</text>
+                    style="font-size:13px">{ymd(p.date)}{markOf(p, d.dup)}</text>
             ))}
           </svg>
         </div>
@@ -305,7 +329,7 @@ const refLabel = (s: MetricTrendSeries): string => {
               {d.rows.map((r) => (
                 <tr class="border-t border-slate-200">
                   <td class="whitespace-nowrap px-3 py-2.5 text-slate-800">
-                    {jpDate(r.date)}
+                    {jpDate(r.date)}{suffixOf(r, d.dup)}
                     {/*
                       由来は**列を増やさず**「検査日」セルの 2 行目に置く。
                       列を足すと 390px で表が潰れる (CLAUDE.md「.md-region table に w-full を当てない」の同型)。

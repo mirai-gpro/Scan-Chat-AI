@@ -15,7 +15,7 @@
  */
 
 import { getServerSupabase } from './supabase';
-import { DERIVED_HC_BLOOD_IMPORTED_BY } from './blood-subset';
+import { DERIVED_HC_BLOOD_IMPORTED_BY, derivedBloodEpisodeIndex } from './blood-subset';
 import { demoFallbackEnabled, demoMetricTrend } from './demo-data';
 import { ALA_PORPHYRIN_LABEL, restrictToLatestAla } from './ala-pds';
 import type { MetricTrendPoint, MetricTrendSeries } from './dashboard-queries';
@@ -157,7 +157,7 @@ function demoLatest(): LatestMeasurements {
 async function activeArtifacts(
   sb: NonNullable<ReturnType<typeof getServerSupabase>>,
   diagnosticUserId: string,
-): Promise<{ ids: string[]; importedBy: Map<string, string> }> {
+): Promise<{ ids: string[]; importedBy: Map<string, string>; episodeIndex: Map<string, number> }> {
   const { data, error } = await sb
     .schema('diagnosis')
     .from('test_artifacts')
@@ -165,16 +165,25 @@ async function activeArtifacts(
      * `imported_by` も引く。**クエリは増えない** (status を絞るためにこの表は元々引いている)。
      * `measurement_values` は `status` も `imported_by` も持たないので、
      * 「点ごとの由来」はここでしか取れない (spec §7.3)。
+     *
+     * `external_test_id` は**同日 sibling の表示用の識別子**を取るため (§13.9・裁定 ②)。
+     * **系列を分けるためではない** — 同じ検査項目の同じ系列に 2 点出す。
      */
-    .select('id, imported_by')
+    .select('id, imported_by, external_test_id')
     .eq('diagnostic_user_id', diagnosticUserId)
     .eq('status', 'active')
     .limit(2000);
   if (error) throw new Error(`test_artifacts(active) の取得に失敗: ${error.message}`);
-  const rows = (data ?? []) as unknown as { id: string; imported_by: string | null }[];
+  const rows = (data ?? []) as unknown as
+    { id: string; imported_by: string | null; external_test_id?: string | null }[];
   const importedBy = new Map<string, string>();
-  for (const r of rows) importedBy.set(String(r.id), String(r.imported_by ?? ''));
-  return { ids: rows.map((r) => String(r.id)), importedBy };
+  const episodeIndex = new Map<string, number>();
+  for (const r of rows) {
+    importedBy.set(String(r.id), String(r.imported_by ?? ''));
+    const gi = derivedBloodEpisodeIndex(r.external_test_id);
+    if (gi != null) episodeIndex.set(String(r.id), gi);
+  }
+  return { ids: rows.map((r) => String(r.id)), importedBy, episodeIndex };
 }
 
 /** 従来の呼び出し口 (id だけが要る経路)。挙動は変えない。 */
@@ -304,6 +313,14 @@ const SERIES_NAME_ALIASES: Readonly<Record<string, string>> = {
   血中尿素窒素: '尿素窒素',
   Alb: 'アルブミン',
   ALB: 'アルブミン',
+  /*
+   * **2026-10-03 に `γ-GT` をマスタの同義語へ足したことの後始末** (上と同型)。
+   * 人間ドックの原本が `γ-GT` と印字する様式があり、足す前に書かれた行は
+   * canonical_name=null のままなので、読み出し時だけ `γ-GTP` へ寄せる。
+   * `γ-GTP` は `DEFAULT_TREND_ITEMS` に入っているので、寄せないと**既定のグラフが割れる**。
+   */
+  'γ-GT': 'γ-GTP',
+  'γGT': 'γ-GTP',
 };
 
 function seriesKey(r: { canonical_name: string | null; item_name?: string | null }): string | null {
@@ -410,7 +427,7 @@ export async function getMeasurementTrend(
   try {
     // superseded / withdrawn の回は点として打たない
     // (差し替え前の値が線に残ると「前回はこうだった」という誤った推移になる)。
-    const { ids: active, importedBy } = await activeArtifacts(sb, diagnosticUserId);
+    const { ids: active, importedBy, episodeIndex } = await activeArtifacts(sb, diagnosticUserId);
     if (active.length === 0) return [];
     const { data, error } = await sb
       .schema('diagnosis')
@@ -460,9 +477,19 @@ export async function getMeasurementTrend(
     for (const name of canonicalNames) {
       const list = byName.get(name);
       if (!list || list.length === 0) continue;
+      /*
+       * **同じ受診日が 2 つ以上あるとき (= 派生 blood の sibling) の並びを決定的にする**
+       * (発注者レビュー 2026-10-03 ③)。`test_date` だけで並べると
+       * **DB の返した順** = 実行ごとに入れ替わり得るので、グラフの ① と ② が入れ替わる。
+       * 第 2 キー = グループ番号の昇順、第 3 キー = artifact_id (番号を持たない行の保険)。
+       */
+      const giOf = (r: Row): number => episodeIndex.get(String(r.artifact_id)) ?? 0;
       const sorted = list
         .slice()
-        .sort((a, b) => String(a.test_date).localeCompare(String(b.test_date)))
+        .sort((a, b) =>
+          String(a.test_date).localeCompare(String(b.test_date))
+          || giOf(a) - giOf(b)
+          || String(a.artifact_id).localeCompare(String(b.artifact_id)))
         .slice(-maxPoints);
       const points: MetricTrendPoint[] = [];
       for (const r of sorted) {
@@ -476,6 +503,14 @@ export async function getMeasurementTrend(
           flag: r.flag === 'H' || r.flag === 'L' ? r.flag : null,
           // 点ごとの由来。**artifact の imported_by が唯一の根拠** (値から推測しない)。
           ...(derived ? { source: 'health_checkup_scan' as const } : {}),
+          /*
+           * **同日 sibling の表示用の識別子だけ** (裁定 ②)。
+           * 系列は分けない・平均しない・捨てない。**出すかどうかは表示側が
+           * 「同じ日が 2 つ以上あるか」で決める** (1 件のときは付けない)。
+           */
+          ...(derived && episodeIndex.has(String(r.artifact_id))
+            ? { episodeIndex: episodeIndex.get(String(r.artifact_id)) as number }
+            : {}),
         });
       }
       if (points.length === 0) continue;

@@ -43,7 +43,7 @@ import { consolidateAiPredictionItems } from '../../../../lib/ai-prediction-cons
 import { getS3Config, isS3Configured, putFiles } from '../../../../lib/s3';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { makeSubjectResolver } from '../../../../lib/elith-delivery';
-import { persistDerivedBloodArtifact, supersedeDerivedBloodOnSameDate } from '../../../../lib/scan-persist';
+import { persistDerivedBloodArtifact, supersedeDerivedBloodOnSameDate, toDerivedBloodGroups } from '../../../../lib/scan-persist';
 import { isDerivedHealthcheckBlood, DERIVED_HC_BLOOD_ELITH_BLOCK } from '../../../../lib/blood-subset';
 import {
   isAdditionalTestType, isRealDate, buildAdditionalOriginalKey,
@@ -322,7 +322,9 @@ export const POST: APIRoute = async ({ request }) => {
       derivedBlood = await persistDerivedBloodArtifact(sbForDerived as never, {
         diagnosticUserId: uid,
         testDate,
-        sourceMeasurements: measurements as never,
+        parentArtifactId: saved.artifactId,
+        // 入力単位 (「N枚目」) ごとに分ける (§13)。1 枚なら 1 グループ = 従来どおり。
+        sourceGroups: toDerivedBloodGroups({ scanMd: markdownClean, measurements: measurements as never }),
       });
     }
   } else if (testType === 'blood') {
