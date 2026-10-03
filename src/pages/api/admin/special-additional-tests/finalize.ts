@@ -41,7 +41,10 @@ import { dedupObservations } from '../../../../lib/observation-dedup';
 import { normalizeCancerRisk } from '../../../../lib/cancer-risk-fix';
 import { consolidateAiPredictionItems } from '../../../../lib/ai-prediction-consolidate';
 import { getS3Config, isS3Configured, putFiles } from '../../../../lib/s3';
+import { getServerSupabase } from '../../../../lib/supabase';
 import { makeSubjectResolver } from '../../../../lib/elith-delivery';
+import { persistDerivedBloodArtifact, supersedeDerivedBloodOnSameDate } from '../../../../lib/scan-persist';
+import { isDerivedHealthcheckBlood, DERIVED_HC_BLOOD_ELITH_BLOCK } from '../../../../lib/blood-subset';
 import {
   isAdditionalTestType, isRealDate, buildAdditionalOriginalKey,
   type AdditionalTestType,
@@ -75,6 +78,65 @@ function utf8Bytes(s: string): number {
 /** LAiF だけ検査機関名が決まっている（`elith-genetic-merge.ts` と同じ）。 */
 function labNameOf(testType: AdditionalTestType): string | null {
   return testType === 'ai_prediction' ? 'LAiF' : null;
+}
+
+
+/**
+ * **Elith へ出す前の最後の関門** (発注者指示 2026-10-03 ①)。
+ *
+ * ══════════════════════════════════════════════════════════════════
+ * **`test_type='blood'` のときは fail-closed。**
+ * ══════════════════════════════════════════════════════════════════
+ * 「取得できて、かつ `imported_by != derived_healthcheck_blood` と**確認できた**とき」だけ
+ * 通す。Supabase が無い / query が失敗 / 行が無い / 例外 — **確認できない場合は通さない**。
+ *
+ * 【なぜ fail-open では駄目か】最上位仕様は「派生 blood は Elith へ**絶対に**送らない」。
+ * 「確認できなかったから通した」は、その絶対を条件付きに変えてしまう。
+ * DB が一時的に引けないだけなら**管理者がやり直せば通る**ので、止める側の損失は小さい。
+ *
+ * **blood 以外にはこの fail-closed を適用しない** — 検診・がん・遺伝子・AI疾病予測は
+ * そもそも派生 blood になり得ないので、ここで止めると**無関係な登録が DB の瞬断で落ちる**。
+ */
+type BloodGuard =
+  | { ok: true }
+  | { ok: false; kind: 'derived'; detail: string }
+  | { ok: false; kind: 'unverifiable'; detail: string };
+
+/*
+ * **検査のために export してある。** 候補除外 (`resolveAdditionalArtifact`) と
+ * 書き込み禁止 (`persistIntoExistingArtifact`) が効いているので、
+ * **`derived` の枝は API 経由では構造上到達しない** = 多重防御が働いている証拠だが、
+ * それだと「規則の本体」が一度も動かないまま緑になる。だから直接呼べるようにしている。
+ * Astro は HTTP メソッド名と `prerender` / `config` 以外の export を route として扱わない。
+ */
+export async function elithBloodGuard(artifactId: string, testType: AdditionalTestType): Promise<BloodGuard> {
+  // blood 以外は従来どおり (fail-closed にしない)。
+  if (testType !== 'blood') return { ok: true };
+  const unverifiable = (why: string): BloodGuard => ({
+    ok: false, kind: 'unverifiable',
+    detail: `派生 blood でないことを確認できませんでした (${why})。`
+      + ' Elith へは出していません。時間をおいてやり直してください。',
+  });
+  let data: unknown;
+  try {
+    const sb = getServerSupabase();
+    if (!sb) return unverifiable('Supabase に接続できない');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const r = await (sb.schema('diagnosis') as any)
+      .from('test_artifacts')
+      .select('test_type, imported_by')
+      .eq('id', artifactId)
+      .maybeSingle();
+    if (r?.error) return unverifiable(`照会に失敗: ${String(r.error.message ?? r.error)}`);
+    data = r?.data;
+  } catch (e) {
+    return unverifiable(`例外: ${e instanceof Error ? e.message : String(e)}`);
+  }
+  if (!data) return unverifiable('artifact を取得できない');
+  if (isDerivedHealthcheckBlood(data as { test_type?: string; imported_by?: string })) {
+    return { ok: false, kind: 'derived', detail: DERIVED_HC_BLOOD_ELITH_BLOCK };
+  }
+  return { ok: true };
 }
 
 export const POST: APIRoute = async ({ request }) => {
@@ -236,6 +298,41 @@ export const POST: APIRoute = async ({ request }) => {
     return json({ ok: false, error: saved.error, detail: saved.detail }, status);
   }
 
+  /*
+   * ── 5b: 人間ドック由来 派生 blood の後処理 ─────────────────────────────
+   * 正本 `docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §9 / §11。
+   *
+   * ① **検診・人間ドックを登録したとき**は、ここで派生 blood を作る
+   *    (発注者指示 2026-10-03 §11)。この経路は `saveScanResult()` を通らないので、
+   *    利用者のアプリ内スキャンと違って**自動では作られない**。
+   *    **呼ぶのは共通関数 1 本だけ**。スペシャル専用の血液抽出ロジックは作らない。
+   *    材料は**いま保存した measurements そのまま** = 再解析ゼロ。
+   *
+   * ② **血液検査を登録したとき**は、同じ受診日の派生 blood を降ろす
+   *    (通常 blood 優先・§8)。`resolveAdditionalArtifact()` が派生を候補から
+   *    外しているので、ここは**同日に 2 件並べない**ための後始末。
+   *
+   * **どちらも失敗しても登録は成功のまま返す** (既存の fail-safe の流儀)。
+   */
+  let derivedBlood: unknown = null;
+  let supersededDerivedBlood = 0;
+  if (testType === 'health_checkup') {
+    const sbForDerived = getServerSupabase();
+    if (sbForDerived) {
+      derivedBlood = await persistDerivedBloodArtifact(sbForDerived as never, {
+        diagnosticUserId: uid,
+        testDate,
+        sourceMeasurements: measurements as never,
+      });
+    }
+  } else if (testType === 'blood') {
+    const sbForSupersede = getServerSupabase();
+    if (sbForSupersede) {
+      const r = await supersedeDerivedBloodOnSameDate(sbForSupersede as never, uid, testDate);
+      supersededDerivedBlood = r.superseded;
+    }
+  }
+
   // ── 6: 原本の紐付け。**違う中身が既に在れば止める**（§21）──────────────
   const linked = await linkAdditionalOriginal({ artifactId: saved.artifactId, original });
   if (!linked.ok) {
@@ -265,6 +362,15 @@ export const POST: APIRoute = async ({ request }) => {
     page_count: parts.length,
     rows: saved.rows, // items 形式の 0 は正常
     item_count: deliverItems.length,
+    /*
+     * 人間ドック由来 派生 blood の後処理の結果 (§9 / §11 / §8)。**黙らせない** —
+     * 「検診を登録したのに Dashboard の血液が増えない」が静かに起きないように、
+     * 作ったか / 作らなかった理由を応答に出す。
+     * `derived_blood` は検診を登録したときだけ非 null。
+     * `superseded_derived_blood` は血液を登録したときに降ろした派生の件数。
+     */
+    derived_blood: derivedBlood,
+    superseded_derived_blood: supersededDerivedBlood,
     original: {
       key: originalKey,
       already_registered: linked.alreadyRegistered,
@@ -274,6 +380,30 @@ export const POST: APIRoute = async ({ request }) => {
       content_type: linked.contentType,
     },
   };
+
+  /*
+   * ── 6b: **Elith へ出す前の関門**（発注者指示 2026-10-03 ①）─────────────
+   *
+   * ★ **source JSON を書く前に置く。** ここが要点 —
+   * 中間 source prefix に置いた `BloodTestData_*.json` は
+   * `inventoryElithSource()` → `assembleElithDeliverySet()` が**キー名で拾う**ので、
+   * **source へ書いた時点で「将来の納品対象」になってしまう**。
+   * 「`deliverAdditionalJson()` の直前」では遅い (`deliver:false` でも source は書くため)。
+   *
+   * **blood だけ fail-closed** (上の `elithBloodGuard`)。確認できなければ
+   * **S3 に 1 バイトも書かずに** 503 で返す。
+   */
+  const guard = await elithBloodGuard(saved.artifactId, testType);
+  if (!guard.ok) {
+    return json(
+      guard.kind === 'derived'
+        ? { ...base, ok: false, error: 'derived_blood_not_deliverable', detail: guard.detail, delivered: false,
+            note: 'S3 には 1 バイトも書いていません。' }
+        : { ...base, ok: false, error: 'elith_guard_unverifiable', detail: guard.detail, delivered: false,
+            note: 'S3 には 1 バイトも書いていません。DB の登録は済んでいます。' },
+      guard.kind === 'derived' ? 409 : 503,
+    );
+  }
 
   // ── 7: source JSON（中間・監査層）────────────────────────────────────
   const cfg = getS3Config();
@@ -329,7 +459,6 @@ export const POST: APIRoute = async ({ request }) => {
     });
   }
 
-  // ── Elith 本番納品 + 読戻し（§24 / §29）────────────────────────────
   const subject = await makeSubjectResolver()(uid).catch(() => null);
   const d = await deliverAdditionalJson({ sourceKey, uid, subject });
 

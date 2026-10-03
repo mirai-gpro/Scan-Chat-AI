@@ -18,7 +18,9 @@
 import { extractExamDate, measurementsFromMarkdown } from './elith-export';
 import {
   extractBloodSubset,
+  isDerivedHealthcheckBlood,
   DERIVED_HC_BLOOD_IMPORTED_BY,
+  DERIVED_HC_BLOOD_ELITH_BLOCK,
   type BloodSubsetExclusion,
 } from './blood-subset';
 import { persistMeasurements, type SchemaClient, type LeanMeasurement } from './measurement-persist';
@@ -639,13 +641,35 @@ export async function persistIntoExistingArtifact(input: {
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const { data, error } = await (sb.schema('diagnosis') as any)
     .from('test_artifacts')
-    .select('id, diagnostic_user_id, test_type, test_date, status, source, display_mode')
+    // `imported_by` も引く — 人間ドック由来の派生 blood を上書きさせないため (下)。
+    .select('id, diagnostic_user_id, test_type, test_date, status, source, display_mode, imported_by')
     .eq('id', input.artifactId)
     .maybeSingle();
   if (error) return { artifactId: null, rows: 0, reason: `test_artifacts 照会失敗: ${error.message}` };
   if (!data) return { artifactId: null, rows: 0, mismatch: `artifact が見つかりません: ${input.artifactId}` };
 
-  const a = data as { id: string; diagnostic_user_id: string; test_type: string; test_date: string | null };
+  const a = data as {
+    id: string; diagnostic_user_id: string; test_type: string;
+    test_date: string | null; imported_by?: string | null;
+  };
+
+  /*
+   * ★ **人間ドック由来の派生 blood には絶対に書き込まない** (発注者指示 2026-10-03 §15/§16)。
+   *
+   * 【なぜ要るか — 静かに壊れる形】この関数は `uid` / `test_type` / `test_date` しか
+   * 照合していなかったので、**同じ受診日に派生 blood が在ると、検査機関の本物の血液検査が
+   * その行へ上書きされ得た**。列は `scan_md` と測定値だけ更新されるので
+   * **`imported_by='derived_healthcheck_blood'` が残り**、結果:
+   *   ① 本物の血液検査が Elith の揃い判定・納品から**黙って外れる** (§16 違反)
+   *   ② 画面には他人の様式の「人間ドックから抽出」が付く (由来の偽り)
+   * どちらもエラーにならないので目視では守れない。
+   *
+   * 止め方は既存の `mismatch` に合わせる — 呼び出し側 (`elith-scan.ts` /
+   * `special-additional-tests`) は既に 409 へ変換して**DB を書かずに**返す。
+   */
+  if (isDerivedHealthcheckBlood(a)) {
+    return { artifactId: null, rows: 0, mismatch: DERIVED_HC_BLOOD_ELITH_BLOCK };
+  }
   if (a.diagnostic_user_id.toLowerCase() !== input.diagnosticUserId.toLowerCase()) {
     return { artifactId: null, rows: 0, mismatch: 'この artifact は別の利用者のものです' };
   }

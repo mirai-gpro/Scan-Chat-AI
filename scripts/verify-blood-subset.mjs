@@ -21,7 +21,8 @@
  * 期待値 (11 件・4 項目は行ごと無し) をここで固定する。
  */
 import { build } from 'esbuild';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 
 const CACHE = 'node_modules/.cache';
 mkdirSync(CACHE, { recursive: true });
@@ -34,6 +35,10 @@ const ok = (cond, label, extra = '') => {
 };
 
 /* ── インメモリの偽 Supabase ──────────────────────────────────────── */
+/**
+ * `seed.failSelect(table, cols)` が true を返す select だけ **error を返す**。
+ * fail-closed の検査に要る — 「引けなかったときに通してしまう」を捕まえるため。
+ */
 function makeDb(seed = {}) {
   const tables = {
     test_artifacts: [...(seed.test_artifacts ?? [])],
@@ -52,6 +57,9 @@ function makeDb(seed = {}) {
       : true);
     const run = () => {
       const rows = () => tables[name] ?? (tables[name] = []);
+      if (st.op === 'select' && seed.failSelect?.(name, st.cols)) {
+        return { data: null, error: { message: 'injected db error' } };
+      }
       if (st.op === 'insert') {
         const added = st.insertRows.map((r) => ({ ...r, id: r.id ?? `gen-${name}-${++gen}` }));
         tables[name] = rows().concat(added);
@@ -81,7 +89,7 @@ function makeDb(seed = {}) {
       return { data: rows().filter(match).map((r) => ({ ...r })), error: null };
     };
     const api = {
-      select() { return api; },
+      select(cols) { st.cols = cols; return api; },
       insert(r) { st.op = 'insert'; st.insertRows = Array.isArray(r) ? r : [r]; return api; },
       update(v) { st.op = 'update'; st.values = v; return api; },
       delete() { st.op = 'delete'; return api; },
@@ -92,6 +100,7 @@ function makeDb(seed = {}) {
       order() { return api; },
       limit() { return api; },
       single() { const r = run(); return Promise.resolve({ data: r.data?.[0] ?? null, error: r.error }); },
+      maybeSingle() { const r = run(); return Promise.resolve({ data: r.data?.[0] ?? null, error: r.error }); },
       then(res, rej) { return Promise.resolve(run()).then(res, rej); },
     };
     return api;
@@ -108,19 +117,109 @@ export function getBridgeSupabase() { return null; }
 export function isBridgeConfigured() { return false; }
 export function getStagingBridgeEndpoint() { return null; }
 `);
+/*
+ * 追加検査経路 (`special-additional-tests.ts`) と backfill の API を**実際に動かす**ための
+ * スタブ。どちらも AWS SDK を間接に引くので、原本まわりの 2 モジュールは差し替える。
+ * **認可は通す** — 検査したいのは認可ではなく mode の扱い (認可は `verify:intake-scope` 等が見る)。
+ */
+writeFileSync(`${CACHE}/bs-orig-stub.mjs`, `let _ok = false;
+export function __setOk(v) { _ok = v; }
+export function readUploadedOriginal() {
+  return Promise.resolve(_ok
+    ? { ok: true, sha256: 'a'.repeat(64), sizeBytes: 1234, contentType: 'application/pdf', storageUrl: 's3://stub/k', body: new Uint8Array([1, 2, 3]) }
+    : { ok: false, error: 'stub' });
+}
+export const MAX_ORIGINAL_BYTES = 50 * 1024 * 1024;
+export const PRESIGN_EXPIRES_SEC = 900;
+export function isSha256Base64() { return true; }
+export function signOriginalPut() { return Promise.resolve(null); }
+`);
+writeFileSync(`${CACHE}/bs-ost-stub.mjs`, `import { createHash } from 'node:crypto';
+export function getOriginalsS3Config() { return null; }
+export function putOriginal() { return Promise.resolve(null); }
+export function signedOriginalUrl() { return Promise.resolve(null); }
+export function getOriginalSignedUrl() { return Promise.resolve(null); }
+// **本物と同じ計算**にする (指紋の比較を伴う経路を通すため)。
+export function sha256Hex(bytes) { return createHash('sha256').update(bytes).digest('hex'); }
+`);
+writeFileSync(`${CACHE}/bs-special-stub.mjs`, `export let _special = true;
+export function __setSpecial(v) { _special = v; }
+export function isSpecialAccount() { return _special; }
+export function listSpecialAccounts() { return { rows: [], emails: [], configRaw: '', emailsRaw: '', deniedRaw: '', dobRaw: '' }; }
+export function specialSubjectByUid() { return null; }
+export function linkSpecialEmail() { return null; }
+`);
+writeFileSync(`${CACHE}/bs-auth-stub.mjs`, `export function checkAdminAuth() { return { ok: true }; }
+export function isAdminAuthorized() { return true; }
+export function adminApiKey() { return 'stub'; }
+`);
+
+/*
+ * S3 のスタブ。**AWS SDK は ESM へバンドルできない** (`Dynamic require of "buffer"`) ので、
+ * `elith-delivery.ts` を動かすには差し替えが要る。
+ * 書こうとしたキーを記録するだけ — **検査では「何を書こうとしたか」こそが見たいもの**。
+ */
+writeFileSync(`${CACHE}/bs-s3-stub.mjs`, `
+/*
+ * **インメモリの S3。** put したものが list / get で読めるので、
+ * materialize → inventory → assemble の**通し**がこの中だけで回る。
+ * (最初は put を記録するだけのスタブにしていたが、それでは
+ *  \`buildDeliveryPlan\` が body を読めずに落ち、**検査が空振り**していた。)
+ */
+export const _written = [];
+export const _store = new Map();
+export function __reset() { _written.length = 0; _store.clear(); }
+export function __seed(key, body) { _store.set(key, body); }
+function keep(files) {
+  for (const f of files ?? []) {
+    _written.push(f.key);
+    const b = f.body;
+    _store.set(f.key, typeof b === 'string' ? b : new TextDecoder().decode(b));
+  }
+}
+export function putFiles(files) { keep(files); return Promise.resolve((files ?? []).map((f) => ({ key: f.key, ok: true }))); }
+export function putVerified(files) { keep(files); return Promise.resolve((files ?? []).map((f) => ({ key: f.key, verified: true }))); }
+export function unverified(rs) { return (rs ?? []).filter((r) => !r.verified); }
+export function getS3Config() { return { bucket: 'stub', prefix: '', region: 'ap-northeast-1' }; }
+export function isS3Configured() { return true; }
+export function listObjects(prefix) {
+  const out = [];
+  for (const k of _store.keys()) if (!prefix || k.startsWith(prefix)) out.push({ key: k, size: 100 });
+  return Promise.resolve(out);
+}
+export function getObjectText(key) { return Promise.resolve(_store.has(key) ? _store.get(key) : null); }
+export function makeS3Client() { return null; }
+`);
 writeFileSync(`${CACHE}/bs-demo-stub.mjs`, `export function demoFallbackEnabled() { return false; }
 export function demoMetricTrend() { return []; }
 export function demoLatest() { return null; }
 export function demoArtifacts() { return []; }
 export function demoReport() { return null; }
+export function buildDemoDashboard() { return null; }
+export function buildDemoNotices() { return []; }
+export function demoUnreadImportant() { return 0; }
 export const DEFAULT_USER = '00000000-0000-0000-0000-000000000001';
 `);
 
 const stubPlugin = {
   name: 'stub',
   setup(b) {
-    b.onResolve({ filter: /(^|\/)supabase$/ }, () => ({ path: './bs-supabase-stub.mjs', external: true }));
-    b.onResolve({ filter: /(^|\/)demo-data$/ }, () => ({ path: './bs-demo-stub.mjs', external: true }));
+    /*
+     * **差し替えるのは自分のコード (`src/`) からの import だけ。**
+     * node_modules の中にも `./s3` のような相対 import が在り、巻き込むと
+     * 別物のスタブが当たって壊れる (実際に `DOT_PATTERN` で踏んだ)。
+     */
+    const ours = (a) => a.importer.includes('/src/');
+    const rel = (n) => new RegExp('^\\.{1,2}/(?:.*/)?' + n + '$');
+    const sub = (n, to) => b.onResolve({ filter: rel(n) }, (a) => (ours(a) ? { path: to, external: true } : undefined));
+    sub('supabase', './bs-supabase-stub.mjs');
+    sub('demo-data', './bs-demo-stub.mjs');
+    sub('s3', './bs-s3-stub.mjs');
+    sub('s3-verified-put', './bs-s3-stub.mjs');
+    sub('originals-upload-ticket', './bs-orig-stub.mjs');
+    sub('originals-storage', './bs-ost-stub.mjs');
+    sub('api-auth', './bs-auth-stub.mjs');
+    sub('special-accounts', './bs-special-stub.mjs');
   },
 };
 async function bundle(entry, out) {
@@ -136,6 +235,13 @@ const SM = await bundle('src/lib/standard-master.ts', 'bs-master.mjs');
 const PERSIST = await bundle('src/lib/scan-persist.ts', 'bs-persist.mjs');
 const QUERIES = await bundle('src/lib/measurement-queries.ts', 'bs-queries.mjs');
 const ENT = await bundle('src/lib/elith-entitlement.ts', 'bs-entitlement.mjs');
+const DELIVERY = await bundle('src/lib/elith-delivery.ts', 'bs-delivery.mjs');
+const SAT = await bundle('src/lib/special-additional-tests.ts', 'bs-sat.mjs');
+const BACKFILL = await bundle('src/pages/api/admin/derived-blood/backfill.ts', 'bs-backfill.mjs');
+const DASH = await bundle('src/lib/dashboard-queries.ts', 'bs-dash.mjs');
+const FINALIZE = await bundle('src/pages/api/admin/special-additional-tests/finalize.ts', 'bs-finalize.mjs');
+const MANUAL = await bundle('src/lib/elith-manual-delivery.ts', 'bs-manual.mjs');
+const ASSEMBLE = await bundle('src/lib/elith-assemble.ts', 'bs-assemble.mjs');
 const sbStub = await import(`../${CACHE}/bs-supabase-stub.mjs`);
 
 const DERIVED = SUB.DERIVED_HC_BLOOD_IMPORTED_BY;
@@ -424,11 +530,13 @@ console.log('\n③-4 通常 blood が後から届いたら派生を降ろす (�
   sbStub.__setStub(db);
   const r = await PERSIST.supersedeDerivedBloodOnSameDate(db, UID, DATE);
   ok(r.superseded === 1, '同日の派生 1 件を降ろした', String(r.superseded));
-  ok(db.tables.test_artifacts.find((a) => a.id === 'd1').status === 'superseded', "派生が 'superseded' (削除ではない)");
-  ok(db.tables.test_artifacts.some((a) => a.id === 'd1'), '**行は残っている** (監査のため消さない)');
-  ok(db.tables.test_artifacts.find((a) => a.id === 'n1').status === 'active', '**通常 blood には触っていない**');
-  ok(db.tables.test_artifacts.find((a) => a.id === 'd-other').status === 'active', '別の日の派生には触っていない');
-  ok(db.tables.test_artifacts.find((a) => a.id === 'hc-1').status === 'active', 'health_checkup には触っていない');
+  const at = (id) => db.tables.test_artifacts.find((a) => a.id === id);
+  ok(db.tables.test_artifacts.some((a) => a.id === 'd1'),
+    '**行は残っている** (監査のため消さない)', at('d1') ? 'あり' : '**消えている**');
+  ok(at('d1')?.status === 'superseded', "派生が 'superseded' (削除ではない)", String(at('d1')?.status));
+  ok(at('n1')?.status === 'active', '**通常 blood には触っていない**', String(at('n1')?.status));
+  ok(at('d-other')?.status === 'active', '別の日の派生には触っていない', String(at('d-other')?.status));
+  ok(at('hc-1')?.status === 'active', 'health_checkup には触っていない', String(at('hc-1')?.status));
 }
 
 /* ══════════════════════════════════════════════════════════════════
@@ -650,6 +758,789 @@ console.log('\n⑦ マスタ追加で既存系列が割れないこと (塩分�
     '**空腹時/随時 を読み出しで 中性脂肪 に潰していない** (裁定 Q-3)',
     JSON.stringify(mixed.map((x) => x.label)));
   ok(mixed.length === 2, '   空腹時 / 随時 は 2 系列のまま', String(mixed.length));
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   ⑧ 【最上位ルール】派生 blood は Elith の入力にならない
+      発注者指示 2026-10-03 §0 / §15 / §16 / §18(9〜15)
+   ══════════════════════════════════════════════════════════════════ */
+console.log('\n⑧-1 判定そのもの (isDerivedHealthcheckBlood)');
+{
+  const D = SUB.isDerivedHealthcheckBlood;
+  ok(D({ test_type: 'blood', imported_by: DERIVED }) === true, '派生 blood = true');
+  ok(D({ test_type: 'blood', imported_by: 'wellfort_admin_upload' }) === false, 'デメカル由来 = false');
+  ok(D({ test_type: 'blood', imported_by: 'user' }) === false, '**将来の実血液 user upload = false** (source で見ていない)');
+  ok(D({ test_type: 'blood', imported_by: 'admin' }) === false, 'admin バッチ = false');
+  ok(D({ test_type: 'blood', imported_by: null }) === false, 'imported_by 無し = false');
+  ok(D({ test_type: 'blood', imported_by: `${DERIVED}_x` }) === false, '前方一致では true にしない');
+  ok(D({ test_type: 'blood', imported_by: ` ${DERIVED}` }) === false, '前後に空白が付いたら true にしない (完全一致)');
+  for (const t of ['health_checkup', 'cancer_urine', 'genetics', 'ai_prediction']) {
+    ok(D({ test_type: t, imported_by: DERIVED }) === false, `**${t} では常に false** (他種別の判定を変えない)`);
+  }
+  ok(D(null) === false && D(undefined) === false, 'null / undefined で落ちない');
+  ok(typeof SUB.DERIVED_HC_BLOOD_ELITH_BLOCK === 'string' && SUB.DERIVED_HC_BLOOD_ELITH_BLOCK.length > 20,
+    '禁止理由の文言が 1 か所に在る');
+}
+
+console.log('\n⑧-2 §18-15 readiness: 派生は required BloodTestData を満たさない');
+{
+  // ⑤ で網羅済みなので、ここでは「同じ 1 つの判定関数に委ねている」ことを見る。
+  const ent = ENT.countsTowardReadiness;
+  ok(ent({ test_type: 'blood', imported_by: DERIVED }) === false
+     && SUB.isDerivedHealthcheckBlood({ test_type: 'blood', imported_by: DERIVED }) === true,
+    'readiness の除外が isDerivedHealthcheckBlood と一致する');
+  ok(ENT.decideReady(['BloodTestData'], new Set([]), false).ready === false, '派生だけでは ready:false');
+}
+
+console.log('\n⑧-3 §18-9/11 既存 artifact への書き込みを派生で乗っ取らせない');
+{
+  /*
+   * **最大の穴だった箇所。** `persistIntoExistingArtifact()` は uid / test_type /
+   * test_date しか照合していなかったので、同じ受診日に派生 blood が在ると
+   * **検査機関の本物の血液検査がその行へ上書きされ**、`imported_by` が派生のまま残って
+   * ① 本物が Elith から黙って外れ ② 画面に「人間ドックから抽出」が付く。
+   */
+  const db = makeDb({
+    test_artifacts: [
+      { id: 'd1', diagnostic_user_id: UID, test_type: 'blood', test_date: DATE, source: 'user_upload', status: 'active', imported_by: DERIVED },
+      { id: 'n1', diagnostic_user_id: UID, test_type: 'blood', test_date: '2026-01-10', source: 'wellfort_lab', status: 'active', imported_by: 'wellfort_admin_upload' },
+      { id: 'h1', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: DATE, source: 'user_upload', status: 'active', imported_by: 'user' },
+    ],
+  });
+  sbStub.__setStub(db);
+  const blocked = await PERSIST.persistIntoExistingArtifact({
+    artifactId: 'd1', diagnosticUserId: UID, testType: 'blood',
+    markdownClean: '## 検査機関の本物の血液検査', measurements: [m('尿酸', 9.9)], testDate: DATE,
+  });
+  ok(blocked.mismatch != null, '**派生 blood への書き込みは mismatch で止まる**', String(blocked.mismatch).slice(0, 40));
+  ok(blocked.artifactId === null && blocked.rows === 0, '   artifactId も rows も返さない');
+  ok(db.tables.measurement_values.length === 0, '   **測定値を 1 行も書いていない**');
+  ok(db.tables.test_artifacts.find((a) => a.id === 'd1').scan_md == null, '   scan_md も書き換えていない');
+
+  // 通常 blood へは従来どおり書ける (§16)
+  const okWrite = await PERSIST.persistIntoExistingArtifact({
+    artifactId: 'n1', diagnosticUserId: UID, testType: 'blood',
+    markdownClean: '## 本物', measurements: [m('尿酸', 6.1)], testDate: '2026-01-10',
+  });
+  ok(okWrite.artifactId === 'n1' && okWrite.rows === 1,
+    '**通常 blood への書き込みは従来どおり通る** (§16)', JSON.stringify(okWrite.mismatch ?? ''));
+  // health_checkup へも従来どおり
+  const okHc = await PERSIST.persistIntoExistingArtifact({
+    artifactId: 'h1', diagnosticUserId: UID, testType: 'health_checkup',
+    markdownClean: '## 検診', measurements: [m('尿酸', 7.8)], testDate: DATE,
+  });
+  ok(okHc.artifactId === 'h1', 'health_checkup への書き込みも従来どおり通る');
+}
+
+console.log('\n⑧-4 §18-10 Elith の検診 materialize に派生 blood が混ざらない');
+{
+  /*
+   * cron 納品 (`deliverReadySpecialAccounts`) と手動納品 (`buildDeliveryPlan`) は
+   * どちらも `materializeHealthCheckups()` + **S3 inventory** だけを材料にする。
+   * ここで派生 blood が混ざらないこと = DB 側からは何も漏れないことを実測する。
+   */
+  const db = makeDb({
+    test_artifacts: [
+      { id: 'h1', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: DATE, status: 'active', source: 'user_upload', imported_by: 'user', scan_md: MD, measurements: GOLDEN_11 },
+      { id: 'd1', diagnostic_user_id: UID, test_type: 'blood', test_date: DATE, status: 'active', source: 'user_upload', imported_by: DERIVED, scan_md: null, measurements: [] },
+    ],
+  });
+  sbStub.__setStub(db);
+  const s3 = await import(`../${CACHE}/bs-s3-stub.mjs`);
+  s3.__reset();
+  const mats = await DELIVERY.materializeHealthCheckups(UID, 'src/');
+  ok(mats.length === 1, '検診 1 件だけが materialize される', `n=${mats.length}`);
+  const keys = [...s3._written, ...mats.map((x) => String(x.hcKey ?? ''))];
+  ok(keys.length > 0, 'S3 へ書こうとしたキーを捕まえられている', JSON.stringify(keys));
+  ok(keys.every((k) => k.includes('HealthCheckupData')),
+    '書こうとしたキーは HealthCheckupData だけ', JSON.stringify(keys));
+  ok(!keys.some((k) => k.includes('BloodTestData')),
+    '**BloodTestData のキーが 1 本も作られない** (§18-9)', JSON.stringify(keys));
+}
+
+console.log('\n⑧-5 §18-9/12/13/14 「派生 → Elith」の経路が増えたら落ちる番人');
+{
+  /*
+   * ここは**構造の検査**。§0 は「派生 blood そのものが Elith 向け JSON 生成・納品対象に
+   * 絶対にならないことをコード上で保証する」ことを求めている。
+   *
+   * ⚠️ **「違反が 0 件」を数える形にしてはいけない。** 最初そう書いたら、
+   * **該当モジュールが 1 本も無くて常に緑**になった (= 関門を全部外しても通る)。
+   * そこで**名簿を固定する形**にした: `blood` の artifact を触るモジュールの一覧が
+   * 変わったら落ちる。新しい経路が足されたら、**人がここへ来て分類するしかない。**
+   *
+   * 保証の形はこの 3 つの組み合わせ:
+   *   ① 納品の材料は `materializeHealthCheckups()` (検診のみ・⑧-4 で実測) と
+   *      **S3 の inventory** だけ = DB の blood は納品の材料に**なっていない**
+   *   ② DB の blood artifact を触る経路は下の名簿で固定 = 増えたら落ちる
+   *   ③ 名簿のうち Elith へ繋がる 3 本には関門が在る (下で 1 本ずつ確かめる)
+   */
+  const SRC = 'src';
+  const files = [];
+  (function walk(dir) {
+    for (const n of readdirSync(dir)) {
+      const fp = join(dir, n);
+      if (statSync(fp).isDirectory()) walk(fp);
+      else if (/\.(ts|astro)$/.test(n)) files.push(fp.split('\\').join('/'));
+    }
+  })(SRC);
+  const strip = (t) => t.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const text = new Map(files.map((f) => [f, strip(readFileSync(f, 'utf8'))]));
+
+  /**
+   * **`blood` を名指しして `test_artifacts` を触るモジュールの名簿**。
+   * 右側は「Elith へ繋がるか」= 関門が要るか。
+   */
+  const ROSTER = {
+    'src/lib/account-progress.ts': 'dashboard',                       // 進捗の件数カウント
+    'src/lib/dashboard-queries.ts': 'dashboard',                      // ダッシュボードの検査カード
+    'src/lib/measurement-queries.ts': 'dashboard',                    // 推移グラフ
+    'src/pages/api/debug/viewer.ts': 'dashboard',                     // 切り分け用の自己診断
+    'src/pages/api/admin/lab-results/upload.ts': 'dashboard',         // UNASSIGNED_UID で作るだけ
+    'src/pages/api/admin/derived-blood/backfill.ts': 'dashboard',     // 派生を作る口 (S3 へ書かない)
+    'src/pages/api/admin/lab-results/register.ts': 'supersede',       // 通常到着 → 派生を降ろす
+    'src/lib/elith-entitlement.ts': 'elith',                          // 揃い判定
+    'src/lib/scan-persist.ts': 'elith',                               // 既存 artifact への書き込み
+    'src/pages/api/admin/special-additional-tests/finalize.ts': 'elith', // 追加検査の納品
+  };
+  const found = files.filter((f) => {
+    const t = text.get(f) ?? '';
+    return /from\(\s*['"`]test_artifacts['"`]\s*\)/.test(t) && /['"`]blood['"`]/.test(t);
+  }).sort();
+  const expected = Object.keys(ROSTER).sort();
+  const added = found.filter((f) => !expected.includes(f));
+  const gone = expected.filter((f) => !found.includes(f));
+  ok(added.length === 0,
+    '**blood の artifact を触るモジュールが増えていない** (増えたら Elith へ繋がるか分類すること)',
+    JSON.stringify(added));
+  ok(gone.length === 0, '名簿のモジュールが消えていない (検出器の腐り防止)', JSON.stringify(gone));
+  ok(found.length === expected.length && found.length === 10,
+    `名簿は 10 本 (実測 ${found.length} 本)`, String(found.length));
+
+  /*
+   * ③ Elith へ繋がる 3 本に関門が在ること。**1 本ずつ名前を出して確かめる**
+   * (まとめて数えると、どれが外れたのか分からない)。
+   */
+  const sp = text.get('src/lib/scan-persist.ts') ?? '';
+  ok(/isDerivedHealthcheckBlood\(a\)/.test(sp) && /mismatch: DERIVED_HC_BLOOD_ELITH_BLOCK/.test(sp),
+    'scan-persist: 既存 artifact への書き込みで派生を弾いている');
+  const sat = text.get('src/lib/special-additional-tests.ts') ?? '';
+  ok(/isDerivedHealthcheckBlood/.test(sat) && /derivedSkipped/.test(sat),
+    'special-additional-tests: artifact 候補から派生を外している');
+  const ent = text.get('src/lib/elith-entitlement.ts') ?? '';
+  ok(/isDerivedHealthcheckBlood\(r\)/.test(ent), 'elith-entitlement: 揃い判定から派生を外している');
+
+  /*
+   * **関門は納品の「前」に在ること。** 後ろにあると、書いてから止めることになる。
+   * 位置を見るのが要点 — 存在だけなら下へ移しても緑のままになる。
+   */
+  const fin = text.get('src/pages/api/admin/special-additional-tests/finalize.ts') ?? '';
+  const iGuard = fin.indexOf('elithBloodGuard(saved.artifactId, testType)');
+  const iDeliver = fin.indexOf('deliverAdditionalJson(');
+  const iSourcePut = fin.indexOf('putFiles([{ key: sourceKey');
+  ok(iGuard > 0 && iDeliver > 0 && iGuard < iDeliver,
+    'finalize: 関門は deliverAdditionalJson より前に在る', `guard=${iGuard} deliver=${iDeliver}`);
+  /*
+   * **source JSON を書く前**であることが本質。中間 source prefix の
+   * `BloodTestData_*.json` は inventory がキー名で拾うので、
+   * **source へ書いた時点で将来の納品対象**になる (`deliver:false` でも source は書く)。
+   */
+  ok(iSourcePut > 0 && iGuard < iSourcePut,
+    '**finalize: 関門は source JSON の putFiles より前に在る**', `guard=${iGuard} sourcePut=${iSourcePut}`);
+  ok(/derived_blood_not_deliverable/.test(fin), 'finalize: 止めたときの理由を返している');
+  ok(/elith_guard_unverifiable/.test(fin), '**finalize: 確認不能のときの理由も在る** (fail-closed)');
+  ok(/isDerivedHealthcheckBlood/.test(fin), 'finalize: 判定は共通関数に委ねている');
+  ok(/testType !== 'blood'\) return \{ ok: true \}/.test(fin),
+    '**finalize: fail-closed は blood だけ** (他種別は従来どおり)');
+
+  /*
+   * **§11 の配線**: スペシャルの検診 Admin 登録から派生を作っていること。
+   * `finalize.ts` は原本の S3 読み出しを伴うので POST を丸ごと動かせない
+   * (スタブでは step 3 で返る)。**位置関係だけは機械で固定する** —
+   * 「検診を登録したのに Dashboard の血液が増えない」「保存前に派生を作る」の両方を捕まえる。
+   */
+  const iSave = fin.indexOf('await saveAdditionalArtifact(');
+  const iDerive = fin.indexOf('persistDerivedBloodArtifact(');
+  const iSup = fin.indexOf('supersedeDerivedBloodOnSameDate(');
+  ok(iDerive > 0, '**finalize: 検診登録から派生を作っている** (§11)', `idx=${iDerive}`);
+  ok(iSave > 0 && iDerive > iSave,
+    '**派生を作るのは health_checkup を保存し終えた後** (§10.3)', `save=${iSave} derive=${iDerive}`);
+  ok(/testType === 'health_checkup'[\s\S]{0,400}?persistDerivedBloodArtifact\(/.test(fin),
+    "   検診のときだけ呼んでいる (testType === 'health_checkup' の内側)");
+  ok(iSup > 0 && iSup > iSave, 'finalize: 血液登録で同日の派生を降ろしている (§8)', `sup=${iSup}`);
+  ok(/testType === 'blood'[\s\S]{0,300}?supersedeDerivedBloodOnSameDate\(/.test(fin),
+    "   血液のときだけ降ろしている (testType === 'blood' の内側)");
+  ok(/derived_blood:/.test(fin) && /superseded_derived_blood:/.test(fin),
+    '   結果を応答に出している (黙らせない)');
+
+  /** ① 派生 blood から BloodTestData JSON を作る関数が**存在しない**こと。 */
+  const anyWriter = files.filter((f) => /materializeDerivedBlood|derivedBloodTestData|buildDerivedBloodJson/i.test(text.get(f) ?? ''));
+  ok(anyWriter.length === 0,
+    '**派生 blood から BloodTestData JSON を作る関数が 1 つも無い** (§0)', JSON.stringify(anyWriter));
+}
+
+console.log('\n⑧-5b 追加検査の候補から派生が外れていること (実際に動かす)');
+{
+  /*
+   * ⑧-5 の名簿検査は**文字列を見るだけ**なので、`isDerivedHealthcheckBlood` を
+   * import したまま filter を外す退行を捕まえられなかった (実測)。
+   * → `resolveAdditionalArtifact()` を**実際に動かして**候補を数える。
+   */
+  const base = (id, imported_by, test_type = 'blood') => ({
+    id, diagnostic_user_id: UID, test_type, test_date: DATE,
+    source: imported_by === DERIVED ? 'user_upload' : 'wellfort_lab',
+    status: 'active', imported_by, display_mode: 'single',
+  });
+
+  // ① 派生だけ在る → 候補 0 件 (= 新しい artifact を作る側へ進む)
+  sbStub.__setStub(makeDb({ test_artifacts: [base('d1', DERIVED)] }));
+  const r1 = await SAT.resolveAdditionalArtifact({ uid: UID, testType: 'blood', testDate: DATE });
+  ok(r1.kind === 'none', '**派生だけ → 候補なし** (本物の血液検査の入れ先にしない)', JSON.stringify(r1.kind));
+  ok(r1.derivedSkipped === 1, '   外した件数を返す (黙って消さない)', String(r1.derivedSkipped));
+
+  // ② 通常だけ在る → 従来どおり 1 件 (§16)
+  sbStub.__setStub(makeDb({ test_artifacts: [base('n1', 'wellfort_admin_upload')] }));
+  const r2 = await SAT.resolveAdditionalArtifact({ uid: UID, testType: 'blood', testDate: DATE });
+  ok(r2.kind === 'one' && r2.artifactId === 'n1',
+    '**通常 blood は従来どおり候補になる** (§16)', JSON.stringify(r2.kind));
+
+  // ③ 通常 + 派生 → 通常だけが候補 (ambiguous にしない)
+  sbStub.__setStub(makeDb({ test_artifacts: [base('n1', 'wellfort_admin_upload'), base('d1', DERIVED)] }));
+  const r3 = await SAT.resolveAdditionalArtifact({ uid: UID, testType: 'blood', testDate: DATE });
+  ok(r3.kind === 'one' && r3.artifactId === 'n1',
+    '**通常 + 派生 → 通常だけが候補** (曖昧扱いにしない)', JSON.stringify(r3.kind));
+
+  // ④ health_checkup では 1 行も挙動が変わらない (marker が付いていても候補に出る)
+  sbStub.__setStub(makeDb({ test_artifacts: [base('h1', DERIVED, 'health_checkup')] }));
+  const r4 = await SAT.resolveAdditionalArtifact({ uid: UID, testType: 'health_checkup', testDate: DATE });
+  ok(r4.kind === 'one' && r4.artifactId === 'h1',
+    '**health_checkup の候補は 1 行も変わらない** (blood 以外は不変)', JSON.stringify(r4.kind));
+}
+
+console.log('\n⑧-5c backfill は範囲を明示しないと動かない (§12 / §13)');
+{
+  /*
+   * **「受診日を空欄にすると全件」という暗黙の操作を廃止した**ことを実際に叩いて見る。
+   * ここが緩むと、1 件だけ直すつもりの操作で**その人の全ての回**が書き換わる。
+   */
+  const call = async (body) => {
+    const res = await BACKFILL.POST({ request: new Request('http://x/api/admin/derived-blood/backfill', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }) });
+    return { status: res.status, json: await res.json() };
+  };
+  sbStub.__setStub(makeDb({ test_artifacts: [{ ...HC_ROW }] }));
+
+  const noMode = await call({ diagnosticUserId: UID });
+  ok(noMode.status === 400 && noMode.json.error === 'invalid_mode',
+    '**mode 未指定は 400** (既定で全件にしない)', `${noMode.status} ${noMode.json.error}`);
+
+  const badMode = await call({ diagnosticUserId: UID, mode: 'all' });
+  ok(badMode.status === 400 && badMode.json.error === 'invalid_mode',
+    "未知の mode ('all') も 400 (allow-list)", `${badMode.status} ${badMode.json.error}`);
+
+  const oneNoDate = await call({ diagnosticUserId: UID, mode: 'one' });
+  ok(oneNoDate.status === 400 && oneNoDate.json.error === 'test_date_required',
+    "**mode='one' で受診日が空なら 400** (空欄=全件にしない)", `${oneNoDate.status} ${oneNoDate.json.error}`);
+
+  const pendingWithDate = await call({ diagnosticUserId: UID, mode: 'pending', testDate: DATE });
+  ok(pendingWithDate.status === 400 && pendingWithDate.json.error === 'test_date_not_allowed',
+    "mode='pending' に受診日を付けたら 400 (どちらのつもりか聞き返す)", `${pendingWithDate.status} ${pendingWithDate.json.error}`);
+
+  const badUid = await call({ diagnosticUserId: 'not-a-uuid', mode: 'one', testDate: DATE });
+  ok(badUid.status === 400 && badUid.json.error === 'invalid_diagnostic_user_id', 'UUID でない uid は 400');
+
+  // preview は書かない
+  const db = makeDb({ test_artifacts: [{ ...HC_ROW }] });
+  sbStub.__setStub(db);
+  const prev = await call({ diagnosticUserId: UID, mode: 'one', testDate: DATE });
+  ok(prev.status === 200 && prev.json.mode === 'preview', 'confirm 無しは preview', JSON.stringify(prev.json.mode));
+  ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 0,
+    '**preview は blood artifact を 1 件も作らない**');
+  ok(db.tables.measurement_values.length === 0, '   measurement_values も 0 件');
+  ok(prev.json.targets?.[0]?.would_create?.count === 11, '   作る予定は 11 項目', String(prev.json.targets?.[0]?.would_create?.count));
+
+  // apply で 1 件作る
+  const applied = await call({ diagnosticUserId: UID, mode: 'one', testDate: DATE, confirm: true });
+  ok(applied.status === 200 && applied.json.mode === 'applied', 'confirm:true で applied');
+  ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood' && a.imported_by === DERIVED).length === 1,
+    '派生 blood が 1 件できた');
+  ok(db.tables.measurement_values.filter((x) => x.test_type === 'blood').length === 11, '測定値 11 件');
+
+  // mode='pending' は処理済みの回を触らない
+  const pend = await call({ diagnosticUserId: UID, mode: 'pending', confirm: true });
+  ok(pend.status === 200 && (pend.json.targets ?? []).length === 0,
+    "**mode='pending' は処理済みの回を対象にしない**", JSON.stringify((pend.json.targets ?? []).length));
+  ok((pend.json.already_done_dates ?? []).includes(DATE), '   処理済みの受診日を返す', JSON.stringify(pend.json.already_done_dates));
+  ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 1, '   blood artifact は 1 件のまま');
+}
+
+console.log('\n⑧-6 §18-11 同日に通常と派生が在るとき、Elith へ行くのは通常だけ');
+{
+  const db = makeDb({
+    test_artifacts: [
+      { id: 'n1', diagnostic_user_id: UID, test_type: 'blood', test_date: DATE, source: 'wellfort_lab', status: 'active', imported_by: 'wellfort_admin_upload' },
+      { id: 'd1', diagnostic_user_id: UID, test_type: 'blood', test_date: DATE, source: 'user_upload', status: 'active', imported_by: DERIVED },
+    ],
+  });
+  sbStub.__setStub(db);
+  // readiness は通常 blood で満たされる (= 通常は従来どおり Elith の対象)。
+  const rows = db.tables.test_artifacts.map((a) => ({ test_type: a.test_type, imported_by: a.imported_by }));
+  const countable = rows.filter((r) => ENT.countsTowardReadiness(r));
+  ok(countable.length === 1 && countable[0].imported_by === 'wellfort_admin_upload',
+    '数えられるのは通常 blood の 1 件だけ', JSON.stringify(countable));
+  // 通常が届いたら派生は降りる (同日に 2 件並べない)。
+  const r = await PERSIST.supersedeDerivedBloodOnSameDate(db, UID, DATE);
+  ok(r.superseded === 1 && db.tables.test_artifacts.find((a) => a.id === 'n1').status === 'active',
+    '派生だけが降り、通常は active のまま');
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   ⑨ **Production に既に在る派生 artifact** が、将来どの Elith 経路からも流れない
+      発注者指示 2026-10-03。**「新しく作らない」だけでは不十分。**
+
+   本番の実データ (発注者確認済み・**削除も作り直しもしない**):
+     2026-09-17  derived_healthcheck_blood   2 項目
+     2026-09-24  derived_healthcheck_blood  11 項目
+                 artifact id = 98bb8668-c794-452a-9529-594fbc540a44
+   以下の検査はこの 2 件を**既存行として seed** して走らせる (新規作成はしない)。
+   ══════════════════════════════════════════════════════════════════ */
+const PROD_ART_0924 = '98bb8668-c794-452a-9529-594fbc540a44';
+const PROD_DATE_0917 = '2026-09-17';
+
+/** 本番に在るのと同じ形の「既存の派生 artifact」2 件 + 元の検診 2 件。 */
+function seedProduction(extra = []) {
+  const mv = (artifact_id, test_date, seq, item_name, value_num) => ({
+    artifact_id, diagnostic_user_id: UID, test_type: 'blood', test_date, seq,
+    item_name, canonical_name: item_name, value: String(value_num), value_num,
+    unit: 'mg/dL', ref_low: null, ref_high: null, ref_low_num: null, ref_high_num: null,
+    flag: null, assessment: null, source_file_kind: 'scan_md',
+  });
+  return makeDb({
+    test_artifacts: [
+      // 元の検診 (**不変であることも確かめる**)
+      { id: 'hc-0917', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917, source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD, measurements: GOLDEN_11 },
+      { id: 'hc-0924', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: DATE, source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD, measurements: GOLDEN_11 },
+      // **既に本番に在る派生 blood 2 件**
+      { id: 'derived-0917', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917, source: 'user_upload', status: 'active', imported_by: DERIVED, scan_md: null, measurements: [] },
+      { id: PROD_ART_0924, diagnostic_user_id: UID, test_type: 'blood', test_date: DATE, source: 'user_upload', status: 'active', imported_by: DERIVED, scan_md: null, measurements: [] },
+      ...extra,
+    ],
+    measurement_values: [
+      mv('derived-0917', PROD_DATE_0917, 0, '尿酸', 7.2),
+      mv('derived-0917', PROD_DATE_0917, 1, 'eGFR', 58.1),
+      ...Object.entries(EXPECTED_11).map(([n, v], i) => mv(PROD_ART_0924, DATE, i, n, v)),
+    ],
+  });
+}
+
+console.log('\n⑨-1 既存の派生は **Dashboard では従来どおり取得される**');
+{
+  const db = seedProduction();
+  sbStub.__setStub(db);
+  const d = await DASH.loadDashboard(UID);
+  ok(!('error' in d), 'loadDashboard がエラーを返さない', JSON.stringify(d.error ?? ''));
+  const blood = (d.artifacts ?? []).filter((a) => a.test_type === 'blood');
+  ok(blood.length === 2, '**血液検査の artifact が 2 件とも取得される**', String(blood.length));
+  ok(blood.some((a) => a.id === PROD_ART_0924), `   2026-09-24 の ${PROD_ART_0924} が入っている`);
+  ok(blood.some((a) => a.test_date === PROD_DATE_0917), '   2026-09-17 も入っている');
+  // 検査カードの「グラフ」ボタン (TestResultsSection の canGraph = 件数 >= 2)
+  ok(blood.length >= 2, '   グラフのボタンが出る件数 (>=2) を満たす');
+
+  const cand = await QUERIES.getTrendCandidates(UID, 'blood');
+  ok(cand.length > 0, '**推移グラフの候補に出る**', JSON.stringify(cand.slice(0, 4)));
+  const series = await QUERIES.getMeasurementTrend(UID, ['尿酸', 'eGFR'], 12, 'blood');
+  ok(series.length === 2, '尿酸 / eGFR の 2 系列が返る', String(series.length));
+  const pts = series.flatMap((x) => x.points);
+  ok(pts.length === 4, '   点は 4 つ (2 回 × 2 項目)', String(pts.length));
+  ok(pts.every((pt) => pt.source === 'health_checkup_scan'),
+    '**全ての点に「人間ドックから抽出」の印が付く**', JSON.stringify(pts.map((pt) => pt.source)));
+  ok(series.every((x) => x.referenceUpper === undefined),
+    '   派生だけの系列なので基準線は原本どおり (ここでは ref 無しなので undefined)');
+}
+
+console.log('\n⑨-2 既存の派生は **Elith readiness に数えられない**');
+{
+  const db = seedProduction();
+  sbStub.__setStub(db);
+  const r = await ENT.checkFormatsReady([UID], new Map([[UID, ['BloodTestData']]]));
+  const me = r[UID];
+  ok(me != null && me.ready === false,
+    '**既存の派生 2 件が在っても ready:false**', JSON.stringify(me?.ready));
+  ok((me?.missing ?? []).includes('BloodTestData'),
+    '   missing に BloodTestData が入る', JSON.stringify(me?.missing));
+
+  // 通常 blood を 1 件足すと ready:true (= §16 通常は従来どおり)
+  const db2 = seedProduction([
+    { id: 'n1', diagnostic_user_id: UID, test_type: 'blood', test_date: '2026-01-10', source: 'wellfort_lab', status: 'active', imported_by: 'wellfort_admin_upload' },
+  ]);
+  sbStub.__setStub(db2);
+  const r2 = await ENT.checkFormatsReady([UID], new Map([[UID, ['BloodTestData']]]));
+  ok(r2[UID]?.ready === true,
+    '**通常 blood が 1 件在れば ready:true** (§16 を壊していない)', JSON.stringify(r2[UID]?.ready));
+}
+
+console.log('\n⑨-3 既存の派生は **BloodTestData JSON の生成対象にならない**');
+{
+  const db = seedProduction();
+  sbStub.__setStub(db);
+  const s3 = await import(`../${CACHE}/bs-s3-stub.mjs`);
+  s3.__reset();
+  const mats = await DELIVERY.materializeHealthCheckups(UID, 'src/');
+  ok(mats.length === 2, '検診 2 年ぶんが materialize される', String(mats.length));
+  ok(s3._written.length > 0, 'S3 へ書こうとしたキーを捕まえられている', String(s3._written.length));
+  ok(!s3._written.some((k) => k.includes('BloodTestData')),
+    '**BloodTestData のキーが 1 本も書かれない**', JSON.stringify(s3._written.filter((k) => k.includes('Blood'))));
+  ok(s3._written.every((k) => k.includes('HealthCheckupData')),
+    '   書かれるのは HealthCheckupData だけ');
+  // **元の検診は不変**
+  ok(db.tables.test_artifacts.find((a) => a.id === 'hc-0924')?.measurements === GOLDEN_11,
+    '   元の検診 artifact は不変');
+  ok(db.tables.test_artifacts.find((a) => a.id === PROD_ART_0924)?.status === 'active',
+    '   **既存の派生 artifact を触っていない** (status も measurements も)',
+    String(db.tables.test_artifacts.find((a) => a.id === PROD_ART_0924)?.status));
+  ok(db.tables.measurement_values.filter((x) => x.artifact_id === PROD_ART_0924).length === 11,
+    '   既存の派生の測定値 11 件もそのまま');
+}
+
+console.log('\n⑨-4 既存の派生は **manual delivery の対象にならない**');
+{
+  const db = seedProduction();
+  sbStub.__setStub(db);
+  const s3 = await import(`../${CACHE}/bs-s3-stub.mjs`);
+  s3.__reset();
+  const plan = await MANUAL.buildDeliveryPlan({
+    uid: UID, sourcePrefix: 'src/', deliveryPrefix: 'dst/',
+  });
+  const formats = (plan.files ?? []).map((f) => String(f.formatId));
+  ok(!formats.includes('BloodTestData'),
+    '**納品予定に BloodTestData が 1 件も入らない**', JSON.stringify(formats));
+  ok(!(plan.files ?? []).some((f) => String(f.key ?? '').includes('BloodTestData')),
+    '   納品キーにも BloodTestData が出ない');
+  ok(!s3._written.some((k) => k.includes('BloodTestData')),
+    '   確認 (preview) の副作用でも BloodTestData を書かない');
+  ok(db.tables.test_artifacts.find((a) => a.id === PROD_ART_0924)?.status === 'active',
+    '   既存の派生 artifact は無傷');
+}
+
+console.log('\n⑨-5 / ⑨-6 **cron / 自動納品・再納品の対象にならない**');
+{
+  /*
+   * **cron (`deliverReadySpecialAccounts`) の入口は、このスタブでは母集団が空になる**
+   * (スペシャルは設計どおり cron から外され、契約者は `app_bridge` の subscription と
+   *  `elith.plan_formats` が要る)。入口を叩いて「何も書かれなかった」と言っても
+   * **空振りを緑と見間違える**ので、cron の**合成の仕組みそのもの**を検査する。
+   *
+   * cron は materialize → inventory → `manualMapping{HealthCheckupData, Lifestyle}` →
+   * `assembleElithDeliverySet` という順で納品物を決める。したがって保証は 2 つ:
+   *   (a) **manualMapping に BloodTestData が無い** (構造)
+   *   (b) **その manualMapping では、source に BloodTestData が在っても納品されない** (挙動)
+   * (b) は「mapping に載せれば納品される」ことも同時に確かめ、**空振りでないこと**を示す。
+   */
+  const s3 = await import(`../${CACHE}/bs-s3-stub.mjs`);
+
+  // (a) cron が組む manualMapping — **コメントを外してから**見る
+  const srcRaw = readFileSync('src/lib/elith-delivery.ts', 'utf8');
+  const src = srcRaw.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1');
+  const mm = /manualMapping\[uid\]\s*=\s*\{([\s\S]*?)\};/.exec(src);
+  ok(mm != null, 'cron の manualMapping を取り出せている (コメント除去後)');
+  ok(mm != null && mm[1].trim().length > 0, '   中身が空でない (コメントだけを掴んでいない)',
+    String(mm?.[1] ?? '').replace(/\s+/g, ' ').slice(0, 70));
+  ok(mm != null && !/BloodTestData/.test(mm[1]),
+    '**cron の manualMapping に BloodTestData が無い**', String(mm?.[1] ?? '').replace(/\s+/g, ' ').slice(0, 70));
+  ok(mm != null && /HealthCheckupData/.test(mm[1]) && /LifestyleQuestionnaireData/.test(mm[1]),
+    '   入っているのは検診と問診だけ (従来どおり)');
+
+  /*
+   * (b) **デメカル由来の BloodTestData が source に在る**状態で assemble を回す。
+   * これは実在する状況 — `elith-blood-csv.ts` が admin の CSV 取り込みで書く。
+   */
+  const hcKey = `src/user/${UID}/date/2026_09_24/HealthCheckupData_date_2026_09_24_user_${UID}.json`;
+  const btKey = `src/user/${UID}/date/2026_01_10/BloodTestData_date_2026_01_10_user_${UID}.json`;
+  const body = (formatId, date) => JSON.stringify({
+    format_id: formatId, schema_version: '1.0', client_id: UID, diagnostic_id: UID,
+    test_date: date, data: { measurements: [{ name: '尿酸', value: '6.1', value_num: 6.1 }] },
+  });
+  const seedSource = () => {
+    s3.__reset();
+    s3.__seed(hcKey, body('HealthCheckupData', '2026-09-24'));
+    s3.__seed(btKey, body('BloodTestData', '2026-01-10'));
+  };
+  const deliveredFormats = async (mapping) => {
+    const r = await ASSEMBLE.assembleElithDeliverySet({
+      sourcePrefix: 'src/', deliveryPrefix: 'dst/', bundleDate: '2026_09_24',
+      manualMapping: { [UID]: mapping },
+    });
+    return (r.users ?? []).flatMap((u) => (u.files ?? []).map((f) => String(f.key)));
+  };
+
+  seedSource();
+  const cronShape = await deliveredFormats({ HealthCheckupData: hcKey });
+  ok(cronShape.length > 0, '納品ファイルが作られている (空振りでない)', String(cronShape.length));
+  ok(cronShape.some((k) => k.includes('HealthCheckupData')), '   検診は納品される');
+  ok(!cronShape.some((k) => k.includes('BloodTestData')),
+    '**cron の mapping では source の BloodTestData が納品されない**',
+    JSON.stringify(cronShape.filter((k) => k.includes('Blood'))));
+
+  seedSource();
+  const withBlood = await deliveredFormats({ HealthCheckupData: hcKey, BloodTestData: btKey });
+  ok(withBlood.some((k) => k.includes('BloodTestData')),
+    '**mapping に載せれば BloodTestData は納品される** (= 上の検査は空振りでない / §16 も成立)',
+    JSON.stringify(withBlood.filter((k) => k.includes('Blood'))));
+
+  /*
+   * ⑨-6 **再納品 (retry / re-delivery)**。同じ source をもう一度 assemble しても、
+   * 納品物は同じ = 派生が後から混ざることはない。
+   */
+  seedSource();
+  const again = await deliveredFormats({ HealthCheckupData: hcKey });
+  ok(again.join('|') === cronShape.join('|'),
+    '**2 回目 (再納品) も納品物が同じ** — 派生は何度やっても混ざらない',
+    `1st=${cronShape.length} 2nd=${again.length}`);
+
+  /*
+   * **DB に既存の派生が在っても、納品物は 1 バイトも変わらない**ことを差分で見る。
+   * これが #3〜#6 の核心 — 「派生が在る / 無い」で結果が動かない。
+   */
+  const dbWith = seedProduction();
+  sbStub.__setStub(dbWith);
+  seedSource();
+  const planWith = await deliveredFormats({ HealthCheckupData: hcKey });
+  const dbWithout = makeDb({
+    test_artifacts: [{ id: 'hc-0924', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: DATE, source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD, measurements: GOLDEN_11 }],
+  });
+  sbStub.__setStub(dbWithout);
+  seedSource();
+  const planWithout = await deliveredFormats({ HealthCheckupData: hcKey });
+  ok(planWith.join('|') === planWithout.join('|'),
+    '**既存の派生が在っても納品物は同一** (派生は納品に 1 件も寄与しない)',
+    `with=${planWith.length} without=${planWithout.length}`);
+  ok(dbWith.tables.test_artifacts.find((a) => a.id === PROD_ART_0924)?.status === 'active',
+    '   既存の派生 artifact は無傷');
+}
+
+console.log('\n⑨-7 同日に派生が在っても **通常 blood の登録は成功する** (発注者の期待動作)');
+{
+  /*
+   * 期待動作:
+   *   同日 derived あり + 後から通常 blood 到着
+   *     → 通常 blood は**正常に新規/正規 artifact として保存**
+   *     → derived は superseded
+   *     → 通常 blood は Elith 対象
+   *
+   * **「派生への書き込みを拒否した結果、通常 blood の登録そのものが失敗する」ことがない**
+   * ことを確かめるのがここの主眼。finalize.ts と同じ順序で 2 つを呼ぶ。
+   */
+  const db = seedProduction();
+  sbStub.__setStub(db);
+  const before = db.tables.test_artifacts.length;
+
+  // ① finalize と同じ: 候補解決 → 保存
+  const res = await SAT.resolveAdditionalArtifact({ uid: UID, testType: 'blood', testDate: DATE });
+  ok(res.kind === 'none' && res.derivedSkipped === 1,
+    '候補は 0 件 (既存の派生は入れ先にしない)', JSON.stringify(res.kind));
+  const saved = await SAT.saveAdditionalArtifact({
+    uid: UID, testType: 'blood', testDate: DATE,
+    markdownClean: '## 検査機関の血液検査', measurements: [m('尿酸', 6.4, 'mg/dL'), m('GOT(AST)', 22, 'U/L')],
+  });
+  ok(saved.ok === true, '**通常 blood の登録が成功する** (拒否で失敗しない)', JSON.stringify(saved.error ?? ''));
+  ok(saved.created === true, '   **新しい artifact として作られる** (派生を使い回さない)', String(saved.created));
+  ok(saved.artifactId !== PROD_ART_0924, '   既存の派生とは別の id', String(saved.artifactId));
+  ok(saved.rows === 2, '   測定値 2 件が入る', String(saved.rows));
+  ok(saved.ok !== false, '   (上が落ちたら以降は参考値)', String(saved.ok));
+  ok(db.tables.test_artifacts.length === before + 1, '   artifact は 1 件だけ増えた');
+
+  // ② finalize と同じ: 同日の派生を降ろす
+  const sup = await PERSIST.supersedeDerivedBloodOnSameDate(db, UID, DATE);
+  ok(sup.superseded === 1, '**同日の派生が superseded になる**', String(sup.superseded));
+  const derivedRow = db.tables.test_artifacts.find((a) => a.id === PROD_ART_0924);
+  ok(derivedRow != null, '   **削除ではない** (行は残る = 監査できる)', derivedRow ? 'あり' : '**消えている**');
+  ok(derivedRow?.status === 'superseded', '   status が superseded', String(derivedRow?.status));
+  const normal = db.tables.test_artifacts.find((a) => a.id === saved.artifactId);
+  ok(normal != null, '   通常 blood の行が在る', normal ? 'あり' : 'なし');
+  ok(normal?.status === 'active' && normal?.imported_by !== DERIVED,
+    '   通常 blood は active・派生の marker は付かない', String(normal?.imported_by));
+  // 別の日 (2026-09-17) の派生には触っていない
+  ok(db.tables.test_artifacts.find((a) => a.id === 'derived-0917')?.status === 'active',
+    '   **2026-09-17 の派生には触っていない**',
+    String(db.tables.test_artifacts.find((a) => a.id === 'derived-0917')?.status));
+
+  // ③ 通常 blood は Elith 対象になる
+  const r = await ENT.checkFormatsReady([UID], new Map([[UID, ['BloodTestData']]]));
+  ok(r[UID]?.ready === true,
+    '**通常 blood が入ったので ready:true** (= Elith 対象)', JSON.stringify(r[UID]?.ready));
+
+  // ④ グラフは通常の値に差し替わる (派生は superseded なので点にならない)
+  const series = await QUERIES.getMeasurementTrend(UID, ['尿酸'], 12, 'blood');
+  const onDate = (series[0]?.points ?? []).filter((pt) => pt.date === DATE);
+  ok(onDate.length === 1 && onDate[0].value === 6.4,
+    `   ${DATE} の点は通常 blood の値 (6.4)`, JSON.stringify(onDate));
+  ok(onDate[0]?.source == null, '   その点に「人間ドックから抽出」は付かない');
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   ⑩ **fail-closed** (発注者レビュー 2026-10-03 ①②③)
+      「確認できなかったから通した」を潰す。
+   ══════════════════════════════════════════════════════════════════ */
+console.log('\n⑩-1 ① Elith の最終関門は blood で fail-closed');
+{
+  /*
+   * **blood + artifact 照会が DB error** のとき:
+   *   → `deliverAdditionalJson()` が呼ばれない
+   *   → **S3 write 0**
+   *   → 503 `elith_guard_unverifiable` / `delivered:false`
+   *
+   * ⚠️ 関門は **source JSON を書く前**に置いてある。中間 source prefix の
+   * `BloodTestData_*.json` は `inventoryElithSource()` がキー名で拾うので、
+   * **source へ書いた時点で将来の納品対象**になる。
+   * 「`deliverAdditionalJson` の直前」では遅い (`deliver:false` でも source は書く)。
+   */
+  const s3 = await import(`../${CACHE}/bs-s3-stub.mjs`);
+  const orig = await import(`../${CACHE}/bs-orig-stub.mjs`);
+  const GUARD_COLS = 'test_type, imported_by';   // 関門の select だけを狙い撃つ
+  const PARTS = [{ page: 1, raw_markdown: '## 血液', measurements: [{ name: '尿酸', value: '6.4', value_num: 6.4, unit: 'mg/dL' }] }];
+  /*
+   * **原本キーは `buildAdditionalOriginalKey()` と同じ形にする** — 違うと
+   * 手前の `invalid_original_binding` (409) で止まり、**関門に到達しないまま緑**になる
+   * (実際にそれで空振りした)。sha256 はスタブが返す 'a'×64。
+   */
+  const SHA = 'a'.repeat(64);
+  const okey = (testType, date) => `additional_results/${UID}/${testType}/${date.replace(/-/g, '_')}/${SHA}.pdf`;
+
+  const callFinalize = async (body) => {
+    const res = await FINALIZE.POST({ request: new Request('http://x/api/admin/special-additional-tests/finalize', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }) });
+    return { status: res.status, json: await res.json() };
+  };
+
+  // (a) 関門の照会だけが落ちる → 503・S3 write 0
+  orig.__setOk(true);
+  const dbErr = makeDb({
+    test_artifacts: [{ id: 'hc-x', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: DATE, status: 'active', source: 'user_upload', imported_by: 'user' }],
+    failSelect: (t, c) => t === 'test_artifacts' && String(c) === GUARD_COLS,
+  });
+  sbStub.__setStub(dbErr);
+  s3.__reset();
+  const r1 = await callFinalize({ diagnosticUserId: UID, testType: 'blood', testDate: DATE, originalKey: okey('blood', DATE), parts: PARTS, deliver: true });
+  ok(r1.status === 503, '**503 を返す**', String(r1.status));
+  ok(r1.json.error === 'elith_guard_unverifiable', "error = 'elith_guard_unverifiable'", String(r1.json.error));
+  ok(r1.json.delivered === false, 'delivered = false', String(r1.json.delivered));
+  ok(s3._written.length === 0, '**S3 write が 0** (source JSON も書いていない)', JSON.stringify(s3._written));
+  ok(!s3._written.some((k) => k.includes('BloodTestData')), '   BloodTestData のキーも当然 0');
+
+  // (b) Supabase そのものが引けない → 503
+  sbStub.__setStub(null);
+  s3.__reset();
+  const r2 = await callFinalize({ diagnosticUserId: UID, testType: 'blood', testDate: DATE, originalKey: okey('blood', DATE), parts: PARTS, deliver: true });
+  ok(r2.status >= 400, 'Supabase 無しでも Elith へ出さない', String(r2.status));
+  ok(!s3._written.some((k) => k.includes('BloodTestData')), '   S3 に BloodTestData を書かない', JSON.stringify(s3._written));
+
+  // (c) **派生 artifact と確認できた** → 409 / S3 write 0
+  const dbDerived = makeDb({
+    test_artifacts: [
+      { id: 'hc-y', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: DATE, status: 'active', source: 'user_upload', imported_by: 'user' },
+      { id: PROD_ART_0924, diagnostic_user_id: UID, test_type: 'blood', test_date: DATE, status: 'active', source: 'user_upload', imported_by: DERIVED },
+    ],
+  });
+  sbStub.__setStub(dbDerived);
+  s3.__reset();
+  /*
+   * **候補除外と書き込み禁止が効くので、derived の枝は API 経由では到達しない**
+   * (= 多重防御が働いている証拠)。それだと規則の本体が一度も動かないので直接呼ぶ。
+   */
+  const gDerived = await FINALIZE.elithBloodGuard(PROD_ART_0924, 'blood');
+  ok(gDerived.ok === false && gDerived.kind === 'derived',
+    '**派生と確認できたら derived で止まる** (409 の枝)', JSON.stringify(gDerived));
+  const gNormal = await FINALIZE.elithBloodGuard('n-ok', 'blood');
+  ok(gNormal.ok === false, '(先に通常 blood の行を置いていないので止まる)', JSON.stringify(gNormal.kind));
+  dbDerived.tables.test_artifacts.push({ id: 'n-ok', diagnostic_user_id: UID, test_type: 'blood', test_date: '2026-01-10', status: 'active', source: 'wellfort_lab', imported_by: 'wellfort_admin_upload' });
+  const gNormal2 = await FINALIZE.elithBloodGuard('n-ok', 'blood');
+  ok(gNormal2.ok === true, '**通常 blood は関門を通る** (§16 を壊していない)', JSON.stringify(gNormal2));
+  const gHc = await FINALIZE.elithBloodGuard('missing-id', 'health_checkup');
+  ok(gHc.ok === true, '**blood 以外は照会せずに通す** (存在しない id でも通る)', JSON.stringify(gHc));
+  const gMissing = await FINALIZE.elithBloodGuard('missing-id', 'blood');
+  ok(gMissing.ok === false && gMissing.kind === 'unverifiable',
+    '**blood で行が無ければ unverifiable** (fail-closed)', JSON.stringify(gMissing));
+
+  // (d) **blood 以外には fail-closed を適用しない** — 照会が落ちても止めない
+  orig.__setOk(true);
+  const dbErrHc = makeDb({
+    test_artifacts: [{ id: 'hc-z', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: DATE, status: 'active', source: 'user_upload', imported_by: 'user' }],
+    failSelect: (t, c) => t === 'test_artifacts' && String(c) === GUARD_COLS,
+  });
+  sbStub.__setStub(dbErrHc);
+  s3.__reset();
+  const r4 = await callFinalize({ diagnosticUserId: UID, testType: 'health_checkup', testDate: DATE, originalKey: okey('health_checkup', DATE), parts: PARTS, deliver: true });
+  ok(r4.json.error !== 'elith_guard_unverifiable',
+    '**health_checkup は fail-closed の対象外** (DB の瞬断で無関係な登録を落とさない)', String(r4.json.error ?? 'なし'));
+}
+
+console.log('\n⑩-2 ② backfill: 処理済みの照会が落ちたら何も書かない');
+{
+  const call = async (body) => {
+    const res = await BACKFILL.POST({ request: new Request('http://x/b', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }) });
+    return { status: res.status, json: await res.json() };
+  };
+  // 派生一覧の select (`test_date` のみ) だけを落とす
+  const DERIVED_COLS = 'test_date';
+  for (const mode of ['pending', 'one']) {
+    const db = makeDb({
+      test_artifacts: [{ ...HC_ROW }],
+      failSelect: (t, c) => t === 'test_artifacts' && String(c) === DERIVED_COLS,
+    });
+    sbStub.__setStub(db);
+    const r = await call({ diagnosticUserId: UID, mode, ...(mode === 'one' ? { testDate: DATE } : {}), confirm: true });
+    ok(r.status === 500 && r.json.error === 'db_error',
+      `**mode='${mode}': 500 db_error で終わる** (未処理 0 件として扱わない)`, `${r.status} ${r.json.error}`);
+    ok(db.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 0,
+      '   **persistDerivedBloodArtifact を 1 回も呼んでいない** (blood artifact 0 件)');
+    ok(db.tables.measurement_values.length === 0, '   measurement_values も 0 件');
+  }
+}
+
+console.log('\n⑩-3 ③ mode=one でも既存の active 派生は作り直さない');
+{
+  const call = async (body) => {
+    const res = await BACKFILL.POST({ request: new Request('http://x/b', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }) });
+    return { status: res.status, json: await res.json() };
+  };
+  // **本番と同じ 2 件**を seed する
+  const db = seedProduction();
+  sbStub.__setStub(db);
+  const idsBefore = db.tables.test_artifacts.map((a) => a.id).join(',');
+  const mvBefore = db.tables.measurement_values.filter((x) => x.artifact_id === PROD_ART_0924).length;
+
+  for (const [date, label] of [[DATE, '2026-09-24'], [PROD_DATE_0917, '2026-09-17']]) {
+    const r = await call({ diagnosticUserId: UID, mode: 'one', testDate: date, confirm: true });
+    ok(r.status === 200 && r.json.already_processed === true,
+      `**${label}: already_processed で何も書かない**`, `${r.status} ${JSON.stringify(r.json.already_processed)}`);
+    ok((r.json.targets ?? []).length === 0, '   対象 0 件');
+  }
+  ok(db.tables.test_artifacts.map((a) => a.id).join(',') === idsBefore,
+    '**artifact の id が 1 つも増減していない** (作り直し・置換なし)',
+    `before=${idsBefore.split(',').length} after=${db.tables.test_artifacts.length}`);
+  ok(db.tables.test_artifacts.find((a) => a.id === PROD_ART_0924)?.status === 'active',
+    `   ${PROD_ART_0924} は active のまま`);
+  ok(db.tables.measurement_values.filter((x) => x.artifact_id === PROD_ART_0924).length === mvBefore,
+    `   その測定値も ${mvBefore} 件のまま (入れ替えていない)`);
+
+  // **superseded の派生は「処理済み」に数えない** = 通常 blood に差し替わった回は再処理できる
+  const db2 = seedProduction();
+  db2.tables.test_artifacts.find((a) => a.id === PROD_ART_0924).status = 'superseded';
+  sbStub.__setStub(db2);
+  const r3 = await call({ diagnosticUserId: UID, mode: 'one', testDate: DATE, confirm: false });
+  ok(r3.json.already_processed !== true,
+    'superseded の派生は処理済みに数えない (再処理できる)', String(r3.json.already_processed));
+
+  // **再生成の口が無い**こと
+  const src = readFileSync('src/pages/api/admin/derived-blood/backfill.ts', 'utf8');
+  ok(!/\breplace\b/.test(src.replace(/\/\*[\s\S]*?\*\//g, '').replace(/(^|[^:])\/\/[^\n]*/g, '$1')),
+    '**`replace` のような再生成の口を作っていない**');
 }
 
 /* ── 結果 ────────────────────────────────────────────────────────── */
