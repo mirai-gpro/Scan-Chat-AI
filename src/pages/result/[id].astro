@@ -6,6 +6,7 @@ import { loadResult } from '../../lib/result-queries';
 import { testTypeLabel, formatJpDate } from '../../lib/dashboard-queries';
 import { renderReportMarkdown } from '../../lib/report-view';
 import { AI_PREVENTION_REPORT_LABEL } from '../../lib/display-names';
+import { derivedBloodSuffix } from '../../lib/blood-subset';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../../lib/viewer';
 import { noStore } from '../../lib/http-cache';
 
@@ -75,6 +76,25 @@ function md(text: string): string {
  */
 const siblings = data?.siblings ?? [];
 const hasPast = siblings.length > 1;
+/*
+ * **同じ受診日が 2 つ以上あるときだけ「（抽出1）」を添える** (裁定 2026-10-03 ②)。
+ * 人間ドック 1 件に独立した健診結果が 2 通入っていた回は、
+ * 日付だけだと**同じ名前の行が 2 つ並んで区別できない**。
+ * 1 件しか無い日には付けない (見分ける相手がいない)。
+ */
+const dupSiblingDates = new Set(
+  Object.entries(
+    siblings.reduce<Record<string, number>>((acc, sib) => {
+      const key = String(sib.testDate ?? '');
+      if (key) acc[key] = (acc[key] ?? 0) + 1;
+      return acc;
+    }, {}),
+  ).filter(([, n]) => n >= 2).map(([d]) => d),
+);
+const siblingLabel = (sib: { testDate: string | null; groupIndex?: number }): string =>
+  formatJpDate(sib.testDate)
+  + (dupSiblingDates.has(String(sib.testDate ?? '')) && sib.groupIndex != null
+    ? derivedBloodSuffix(sib.groupIndex) : '');
 const siblingHref = (sid: string) => {
   const qs = new URLSearchParams(linkQuery.replace(/^\?/, ''));
   if (mode !== 'summary') qs.set('mode', mode);
@@ -139,7 +159,7 @@ const pdfSrcWithPage = data?.samplePdfUrl
                     {current ? (
                       <span class="flex min-h-touch items-center gap-2 rounded-lg bg-mist px-3 text-base font-semibold text-navy-800">
                         <AppIcon name="check" size={18} />
-                        <span class="tnum">{formatJpDate(sib.testDate)}</span>
+                        <span class="tnum">{siblingLabel(sib)}</span>
                         <span class="ml-auto text-sm font-medium text-slate-700">表示中</span>
                       </span>
                     ) : (
@@ -147,7 +167,7 @@ const pdfSrcWithPage = data?.samplePdfUrl
                         href={siblingHref(sib.id)}
                         class="flex min-h-touch items-center gap-2 rounded-lg px-3 text-base text-slate-800 hover:bg-brand-50"
                       >
-                        <span class="tnum">{formatJpDate(sib.testDate)}</span>
+                        <span class="tnum">{siblingLabel(sib)}</span>
                         <AppIcon name="next" size={18} class="ml-auto text-slate-600" />
                       </a>
                     )}

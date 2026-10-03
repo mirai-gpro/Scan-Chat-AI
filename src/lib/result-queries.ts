@@ -16,6 +16,7 @@ import type { TestArtifact, DiagnosisResult } from '../types/supabase';
 import { findSection, type ElithSection } from './elith-parser';
 import { demoArtifacts, demoFallbackEnabled } from './demo-data';
 import { AI_PREDICTION_REPORT_LABEL } from './display-names';
+import { derivedBloodGroupIndex, orderDerivedSiblings } from './blood-subset';
 
 export interface ResultData {
   artifact: TestArtifact;
@@ -40,7 +41,13 @@ export interface ResultData {
    * 「過去データ」の切替に使う。ダッシュボードには置かず、
    * 「データ」を押した先のこのページに置く (発注者指示 2026-08)。
    */
-  siblings: { id: string; testDate: string | null }[];
+  /**
+   * 同一種別の他の回。**同じ受診日に派生 blood の sibling が並ぶ**ことがあるので
+   * (人間ドック 1 件に独立した健診結果が 2 通入っていた回・裁定 2026-10-03 ②)、
+   * 表示用の `groupIndex` も返す。**同じ日が 2 つ以上あるときだけ**画面が
+   * `（抽出1）` を添える (1 件なら添えない)。
+   */
+  siblings: { id: string; testDate: string | null; groupIndex?: number }[];
   /**
    * **検査票から読み取った測定値**（`test_artifacts.measurements` の jsonb）。
    *
@@ -244,13 +251,27 @@ export async function loadResult(
   const { data: siblingRows } = await sb
     .schema('diagnosis')
     .from('test_artifacts')
-    .select('id, test_date')
+    .select('id, test_date, imported_by, external_test_id')
     .eq('diagnostic_user_id', artifact.diagnostic_user_id)
     .eq('test_type', artifact.test_type)
     .eq('status', 'active')
     .order('test_date', { ascending: false })
     .limit(24);
-  const siblings = (siblingRows ?? []).map((r) => ({ id: r.id, testDate: r.test_date }));
+  /*
+   * **同じ受診日の派生 sibling はグループ番号の昇順**に並べ直す (裁定 ③)。
+   * `test_date` だけだと DB の返した順 = 実行ごとに入れ替わり、
+   * 「過去データ」の 2 行の上下が毎回変わる。並べ替えるのは sibling 同士だけで、
+   * 他の行の位置は 1 つも動かない (`orderDerivedSiblings`)。
+   */
+  const siblings = orderDerivedSiblings(
+    (siblingRows ?? []) as unknown as {
+      id: string; test_date: string | null;
+      imported_by?: string | null; external_test_id?: string | null;
+    }[],
+  ).map((r) => {
+    const gi = derivedBloodGroupIndex(r.external_test_id);
+    return { id: r.id, testDate: r.test_date, ...(gi != null ? { groupIndex: gi } : {}) };
+  });
 
   const original = await resolveOriginal(sb, artifact.id);
   /*

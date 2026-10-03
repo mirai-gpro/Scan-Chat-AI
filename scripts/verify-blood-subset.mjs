@@ -2056,6 +2056,269 @@ console.log('\n⑪-J sibling が増えても Elith 全面除外は不変 (PR #29
   ok(gf.ok === false && gf.kind === 'unverifiable', '**確認できなければ通さない**', JSON.stringify(gf));
 }
 
+/* ══════════════════════════════════════════════════════════════════
+   ⑫ 発注者レビュー 2026-10-03 ①②③
+   ══════════════════════════════════════════════════════════════════ */
+const RESULTS = await bundle('src/lib/result-queries.ts', 'bs-results.mjs');
+
+console.log('\n⑫-① backfill の legacy 判定は「旧ロジック由来が在る日」だけ');
+{
+  const call = async (body) => {
+    const res = await BACKFILL.POST({ request: new Request('http://x/b', {
+      method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify(body),
+    }) });
+    return { status: res.status, json: await res.json() };
+  };
+  /*
+   * **同じ受診日に health_checkup が 2 件** (source 違いなので両方 active で居られる)。
+   *   A … 新方式 sibling g1 / g2 が**全部**在る
+   *   B … 派生が 1 件も無い
+   * 旧実装は「その日に派生が在る」= legacy と見ていたので、**B まで触らない**扱いになっていた。
+   */
+  const hc = (id, source) => ({
+    id, diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917,
+    source, status: 'active', imported_by: 'user', scan_md: MD, measurements: GOLDEN_11,
+  });
+  const sib = (id, parent, gi) => ({
+    id, diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+    source: 'user_upload', status: 'active', imported_by: DERIVED,
+    external_test_id: SUB.derivedBloodExternalTestId(parent, gi),
+  });
+  const mk = () => makeDb({
+    test_artifacts: [
+      hc('hc-A', 'user_upload'), hc('hc-B', 'admin_batch'),
+      sib('d-A-g1', 'hc-A', 1), sib('d-A-g2', 'hc-A', 2),
+    ],
+  });
+
+  const db = mk();
+  sbStub.__setStub(db);
+  const pend = await call({ diagnosticUserId: UID, mode: 'pending' });
+  const tB = (pend.json.targets ?? []).find((t) => t.health_checkup_artifact_id === 'hc-B');
+  const tA = (pend.json.targets ?? []).find((t) => t.health_checkup_artifact_id === 'hc-A');
+  ok(tB != null, '**B (派生が無い) は pending の対象になる**', JSON.stringify((pend.json.targets ?? []).map((t) => t.health_checkup_artifact_id)));
+  ok(tB?.legacy_derived === false, '   **B を legacy 扱いしない**', String(tB?.legacy_derived));
+  ok(tA == null, '   A (全グループ済み) は対象外');
+
+  const db2 = mk();
+  sbStub.__setStub(db2);
+  const applied = await call({ diagnosticUserId: UID, mode: 'pending', confirm: true });
+  ok(applied.json.mode === 'applied', 'apply できる', String(applied.json.mode));
+  ok(db2.tables.test_artifacts.some((a) => a.id === 'd-A-g1') && db2.tables.test_artifacts.some((a) => a.id === 'd-A-g2'),
+    '**A の sibling 2 件は作り直されていない**');
+  const bSibs = db2.tables.test_artifacts.filter((a) => SUB.derivedBloodParentId(a.external_test_id) === 'hc-B');
+  ok(bSibs.length === 1, '   B の派生が 1 件できた (MD は 1 グループ)', String(bSibs.length));
+
+  // **旧ロジック由来が在る日は従来どおり触らない** (①の修正で緩めていないこと)
+  const db3 = makeDb({
+    test_artifacts: [
+      hc('hc-A', 'user_upload'), hc('hc-B', 'admin_batch'),
+      sib('d-A-g1', 'hc-A', 1), sib('d-A-g2', 'hc-A', 2),
+      { id: 'd-legacy', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+        source: 'user_upload', status: 'active', imported_by: DERIVED, external_test_id: null },
+    ],
+  });
+  sbStub.__setStub(db3);
+  const pend3 = await call({ diagnosticUserId: UID, mode: 'pending', confirm: true });
+  ok((pend3.json.targets ?? []).length === 0,
+    '**同じ日に旧ロジック由来が在れば、やはり誰も触らない**', String((pend3.json.targets ?? []).length));
+  ok(db3.tables.test_artifacts.filter((a) => a.test_type === 'blood').length === 3,
+    '   blood は 3 件のまま', String(db3.tables.test_artifacts.filter((a) => a.test_type === 'blood').length));
+
+  // **解析できない external_test_id も legacy 扱い** (NULL だけではない)
+  const db4 = makeDb({
+    test_artifacts: [
+      hc('hc-B', 'admin_batch'),
+      { id: 'd-odd', diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+        source: 'user_upload', status: 'active', imported_by: DERIVED, external_test_id: 'derived_hc:broken' },
+    ],
+  });
+  sbStub.__setStub(db4);
+  const pend4 = await call({ diagnosticUserId: UID, mode: 'pending' });
+  ok((pend4.json.targets ?? []).length === 0,
+    "**`derived_hc:<親>:g<N>` として解析できない行も legacy**", String((pend4.json.targets ?? []).length));
+}
+
+console.log('\n⑫-② 同日 sibling は同じ系列に 2 点。表示名だけで見分ける');
+{
+  // 表示用の文字 (純関数)
+  ok(SUB.derivedBloodMark(1) === '①' && SUB.derivedBloodMark(2) === '②', '丸番号は ① / ②',
+    `${SUB.derivedBloodMark(1)}/${SUB.derivedBloodMark(2)}`);
+  ok(SUB.derivedBloodSuffix(1) === '（抽出1）' && SUB.derivedBloodSuffix(2) === '（抽出2）',
+    '接尾辞は （抽出1） / （抽出2）', `${SUB.derivedBloodSuffix(1)}/${SUB.derivedBloodSuffix(2)}`);
+  ok(SUB.derivedBloodMark(21) === '(21)', '⑳ を超えたら素の形 (作字しない)', SUB.derivedBloodMark(21));
+  ok(SUB.derivedBloodMark(0) === '' && SUB.derivedBloodSuffix(-1) === '', '0 以下は空');
+
+  /*
+   * **9/17① 96 / 9/17② 102 / 9/24 116** が 1 系列 3 点で出ること。
+   * 平均しない・捨てない・別系列に分けない。
+   */
+  const sib = (id, gi) => ({
+    id, diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+    source: 'user_upload', status: 'active', imported_by: DERIVED,
+    external_test_id: SUB.derivedBloodExternalTestId('hc-0917', gi),
+  });
+  const mv = (artifact_id, test_date, value_num) => ({
+    artifact_id, diagnostic_user_id: UID, test_type: 'blood', test_date, seq: 0,
+    item_name: 'LDLコレステロール', canonical_name: 'LDLコレステロール',
+    value: String(value_num), value_num, unit: 'mg/dL',
+    ref_low: null, ref_high: null, ref_low_num: null, ref_high_num: null, flag: null,
+    assessment: null, source_file_kind: 'scan_md',
+  });
+  // **DB が g2 を先に返す**順で seed する (並べ替えが効いているかを見るため)
+  const db = makeDb({
+    test_artifacts: [
+      sib('d-g2', 2), sib('d-g1', 1),
+      { id: 'd-0924', diagnostic_user_id: UID, test_type: 'blood', test_date: DATE,
+        source: 'user_upload', status: 'active', imported_by: DERIVED,
+        external_test_id: SUB.derivedBloodExternalTestId('hc-0924', 1) },
+    ],
+    measurement_values: [
+      mv('d-g2', PROD_DATE_0917, 102), mv('d-g1', PROD_DATE_0917, 96), mv('d-0924', DATE, 116),
+    ],
+  });
+  sbStub.__setStub(db);
+  const series = await QUERIES.getMeasurementTrend(UID, ['LDLコレステロール'], 12, 'blood');
+  ok(series.length === 1, '**系列は 1 本** (別系列に分けない)', String(series.length));
+  const pts = series[0]?.points ?? [];
+  ok(pts.length === 3, '**点は 3 つ** (平均しない・捨てない)', JSON.stringify(pts.map((p) => p.value)));
+  ok(pts.map((p) => p.value).join(',') === '96,102,116',
+    '**並びは 9/17① 96 → 9/17② 102 → 9/24 116**', pts.map((p) => p.value).join(','));
+  ok(pts[0]?.groupIndex === 1 && pts[1]?.groupIndex === 2,
+    '   点に表示用の groupIndex が付く', JSON.stringify([pts[0]?.groupIndex, pts[1]?.groupIndex]));
+  ok(pts.every((p) => p.source === 'health_checkup_scan'), '   3 点とも「人間ドックから抽出」');
+
+  // **DB の返す順が逆でも同じ並び** (決定的であること)
+  const dbRev = makeDb({
+    test_artifacts: [
+      sib('d-g1', 1), sib('d-g2', 2),
+      { id: 'd-0924', diagnostic_user_id: UID, test_type: 'blood', test_date: DATE,
+        source: 'user_upload', status: 'active', imported_by: DERIVED,
+        external_test_id: SUB.derivedBloodExternalTestId('hc-0924', 1) },
+    ],
+    measurement_values: [
+      mv('d-g1', PROD_DATE_0917, 96), mv('d-g2', PROD_DATE_0917, 102), mv('d-0924', DATE, 116),
+    ],
+  });
+  sbStub.__setStub(dbRev);
+  const rev = await QUERIES.getMeasurementTrend(UID, ['LDLコレステロール'], 12, 'blood');
+  ok((rev[0]?.points ?? []).map((p) => p.value).join(',') === '96,102,116',
+    '**seed の順を入れ替えても同じ並び** (決定的)', (rev[0]?.points ?? []).map((p) => p.value).join(','));
+
+  // **1 件しか無い日には groupIndex を出さない表示規則** (= グラフ側の dup 判定)
+  const dup = (s) => {
+    const n = new Map();
+    for (const p of s.points) n.set(p.date, (n.get(p.date) ?? 0) + 1);
+    return new Set([...n.entries()].filter(([, c]) => c >= 2).map(([d]) => d));
+  };
+  const dd = dup(series[0]);
+  ok(dd.has(PROD_DATE_0917) && !dd.has(DATE),
+    '**見分けを付けるのは 9/17 だけ** (9/24 は 1 件なので付けない)', JSON.stringify([...dd]));
+
+  // 表示側の配線 (壊したら落ちる番人)
+  const chart = readFileSync('src/components/dashboard/MetricTrendChart.astro', 'utf8');
+  ok(/derivedBloodMark/.test(chart) && /derivedBloodSuffix/.test(chart),
+    'グラフが表示名の関数を使っている (文言を写していない)');
+  ok(/\{ymd\(p\.date\)\}\{markOf\(p, d\.dup\)\}/.test(chart),
+    '**拡大グラフの X 軸ラベルに ①② が付く**');
+  ok(/\{jpDate\(r\.date\)\}\{suffixOf\(r, d\.dup\)\}/.test(chart),
+    '**履歴テーブルの検査日に （抽出1） が付く**');
+  /*
+   * **`markOf` と `suffixOf` の両方で dup を見ていること**を別々に固定する。
+   * 「どこかに dup の判定がある」だけを見ると、片方を外しても通ってしまう
+   * (実際に退行注入 T-8 がすり抜けた)。
+   */
+  for (const fn of ['markOf', 'suffixOf']) {
+    const body = new RegExp(`const ${fn} = [^;]*?dup\\.has\\(p\\.date\\) && p\\.groupIndex != null`, 's');
+    ok(body.test(chart), `**${fn} が「同じ日が 2 つ以上」を見ている** (1 件なら付けない)`);
+  }
+}
+
+console.log('\n⑫-③ Dashboard の同日 sibling 順序が決定的・2 件あることが分かる');
+{
+  const sib = (id, gi) => ({
+    id, diagnostic_user_id: UID, test_type: 'blood', test_date: PROD_DATE_0917,
+    source: 'user_upload', status: 'active', imported_by: DERIVED,
+    external_test_id: SUB.derivedBloodExternalTestId('hc-0917', gi),
+  });
+
+  // orderDerivedSiblings そのもの
+  // **純関数なので `blood-subset` が持つ** (読み出し側が取得直後に 1 回通す)。
+  const O = SUB.orderDerivedSiblings;
+  ok(O([sib('d-g2', 2), sib('d-g1', 1)]).map((a) => a.id).join(',') === 'd-g1,d-g2',
+    '**グループ番号の昇順に並べ直す**', O([sib('d-g2', 2), sib('d-g1', 1)]).map((a) => a.id).join(','));
+  ok(O([sib('d-g1', 1), sib('d-g2', 2)]).map((a) => a.id).join(',') === 'd-g1,d-g2',
+    '   既に昇順なら変わらない');
+  // **派生以外の並びは 1 つも動かない**
+  const others = [
+    { id: 'x1', test_type: 'blood', test_date: PROD_DATE_0917, imported_by: 'wellfort_admin_upload' },
+    { id: 'x2', test_type: 'blood', test_date: PROD_DATE_0917, imported_by: 'wellfort_admin_upload' },
+    { id: 'hc', test_type: 'health_checkup', test_date: PROD_DATE_0917, imported_by: 'user' },
+    { id: 'z', test_type: 'blood', test_date: null, imported_by: 'user' },
+  ];
+  ok(O(others).map((a) => a.id).join(',') === 'x1,x2,hc,z',
+    '**派生でない行は位置も相対順も動かさない**', O(others).map((a) => a.id).join(','));
+  const mixedIn = [others[0], sib('d-g2', 2), others[2], sib('d-g1', 1), others[1]];
+  ok(O(mixedIn).map((a) => a.id).join(',') === 'x1,d-g1,hc,d-g2,x2',
+    '**sibling は「元から派生が居た枠」の中だけで入れ替わる**', O(mixedIn).map((a) => a.id).join(','));
+  ok(O([sib('d-g1', 1)]).map((a) => a.id).join(',') === 'd-g1', '1 件だけなら何もしない');
+
+  // loadDashboard 経由 (DB が g2 を先に返す形)
+  const db = makeDb({
+    test_artifacts: [
+      { id: 'hc-0917', diagnostic_user_id: UID, test_type: 'health_checkup', test_date: PROD_DATE_0917,
+        source: 'user_upload', status: 'active', imported_by: 'user', scan_md: MD, measurements: GOLDEN_11 },
+      sib('d-g2', 2), sib('d-g1', 1),
+    ],
+  });
+  sbStub.__setStub(db);
+  const d = await DASH.loadDashboard(UID);
+  const blood = (d.artifacts ?? []).filter((a) => a.test_type === 'blood');
+  ok(blood.length === 2, 'blood が 2 件', String(blood.length));
+  ok(blood[0]?.id === 'd-g1',
+    '**「データ」で最初に開くのは g1** (mine[0] が決定的)', String(blood[0]?.id));
+  // 画面側 (TestResultsSection) の配線
+  const sec = readFileSync('src/components/dashboard/TestResultsSection.astro', 'utf8');
+  ok(/sameDayDerived/.test(sec) && /DERIVED_HC_BLOOD_LABEL/.test(sec),
+    '検査カードが同日の件数を出している');
+  ok(/c\.sameDayDerived >= 2/.test(sec),
+    '**同日 2 件以上のときだけ「人間ドックから抽出・N件」を出す**');
+  ok(!/\.sort\(/.test(sec), '**画面側で並べ替えていない** (並べるのは 1 か所)');
+
+  /*
+   * 詳細画面の sibling 切替。**`loadResult` は artifact_id に UUID を要求する**
+   * (他人の結果を id 当てで開けないようにしている・`result-queries.ts:180`) ので、
+   * ここだけ実在の形の UUID を使う。
+   */
+  const G1 = '11111111-1111-4111-8111-111111111111';
+  const G2 = '22222222-2222-4222-8222-222222222222';
+  const OTHER = '33333333-3333-4333-8333-333333333333';
+  const uuidSib = (id, gi) => ({ ...sib(id, gi) });
+  sbStub.__setStub(makeDb({
+    test_artifacts: [
+      uuidSib(G2, 2), uuidSib(G1, 1),
+      { id: OTHER, diagnostic_user_id: UID, test_type: 'blood', test_date: DATE,
+        source: 'user_upload', status: 'active', imported_by: DERIVED,
+        external_test_id: SUB.derivedBloodExternalTestId('hc-0924', 1) },
+    ],
+  }));
+  const r = await RESULTS.loadResult(G1, UID);
+  ok(!('error' in r), 'loadResult がエラーを返さない', JSON.stringify(r.error ?? ''));
+  const sibs = r?.siblings ?? [];
+  ok(sibs.length === 3, '**過去データに 3 件 (同日 2 件 + 別日 1 件)**', String(sibs.length));
+  const same = sibs.filter((x) => x.testDate === PROD_DATE_0917);
+  ok(same.length === 2 && same.map((x) => x.id).join(',') === `${G1},${G2}`,
+    '**同日は g1 → g2 の順** (決定的)', same.map((x) => x.id).join(','));
+  ok(same.map((x) => x.groupIndex).join(',') === '1,2',
+    '   表示用の groupIndex が付く', same.map((x) => x.groupIndex).join(','));
+  ok(sibs.some((x) => x.id === G2), '**g1 の画面から g2 へ辿れる** (切替先に居る)');
+  const page = readFileSync('src/pages/result/[id].astro', 'utf8');
+  ok(/siblingLabel\(sib\)/.test(page) && /derivedBloodSuffix/.test(page),
+    '詳細画面が表示名の関数を使っている');
+  ok(/dupSiblingDates\.has/.test(page),
+    '**同じ日が 2 つ以上あるときだけ （抽出1） を添える**');
+}
+
 /* ── 結果 ────────────────────────────────────────────────────────── */
 console.log(`\n${'='.repeat(60)}\nPASS ${pass} / FAIL ${fails.length}`);
 if (fails.length) { for (const f of fails) console.log(`  ✗ ${f}`); process.exit(1); }
