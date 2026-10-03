@@ -251,7 +251,14 @@ export async function loadResult(
   const { data: siblingRows } = await sb
     .schema('diagnosis')
     .from('test_artifacts')
-    .select('id, test_date, imported_by, external_test_id')
+    /*
+     * **`test_type` も引く。** `isDerivedHealthcheckBlood()` は
+     * `test_type === 'blood'` も見るので、**引かないと派生と判定されず
+     * 並べ替えが無言で効かない** (実障害 2026-10-03: 本番の「過去データ」で
+     * 9/17 の 抽出2 が 抽出1 より上に出た)。`.eq()` で絞っていても
+     * **select に無い列は応答に入らない**。
+     */
+    .select('id, test_type, test_date, imported_by, external_test_id')
     .eq('diagnostic_user_id', artifact.diagnostic_user_id)
     .eq('test_type', artifact.test_type)
     .eq('status', 'active')

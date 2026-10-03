@@ -39,6 +39,16 @@ const ok = (cond, label, extra = '') => {
  * `seed.failSelect(table, cols)` が true を返す select だけ **error を返す**。
  * fail-closed の検査に要る — 「引けなかったときに通してしまう」を捕まえるため。
  */
+/** `select('a, b, c')` の列名を取り出す。`*` やネストが混ざれば全列を返す。 */
+function project(row, cols) {
+  const spec = String(cols ?? '').trim();
+  if (!spec || spec.includes('*') || spec.includes('(')) return { ...row };
+  const names = spec.split(',').map((c) => c.trim().split(':').pop().trim()).filter(Boolean);
+  const out = {};
+  for (const n of names) out[n] = row[n];
+  return out;
+}
+
 function makeDb(seed = {}) {
   const tables = {
     test_artifacts: [...(seed.test_artifacts ?? [])],
@@ -86,7 +96,16 @@ function makeDb(seed = {}) {
         }
         return { data: null, error: null };
       }
-      return { data: rows().filter(match).map((r) => ({ ...r })), error: null };
+      /*
+       * **select() で指定した列だけを返す (PostgREST と同じ)。**
+       *
+       * 【なぜ要るか・実障害 2026-10-03】全列を返す偽物だと、
+       * **本番では引いていない列を使っているコード**が検査では動いてしまう。
+       * 実際 `result-queries.loadResult` の sibling 並べ替えが
+       * `test_type` を select していないのに `isDerivedHealthcheckBlood` へ渡しており、
+       * **本番だけ並べ替えが無言で効かない**状態だった (検査は緑のまま)。
+       */
+      return { data: rows().filter(match).map((r) => project(r, st.cols)), error: null };
     };
     const api = {
       select(cols) { st.cols = cols; return api; },
@@ -2309,6 +2328,15 @@ console.log('\n⑫-③ Dashboard の同日 sibling 順序が決定的・2 件あ
   }));
   const r = await RESULTS.loadResult(G1, UID);
   ok(!('error' in r), 'loadResult がエラーを返さない', JSON.stringify(r.error ?? ''));
+  /*
+   * **並べ替えに要る列を select しているか** (実障害 2026-10-03)。
+   * `.eq()` で絞っていても **select に無い列は応答に入らない**ので、
+   * `test_type` を落とすと `isDerivedHealthcheckBlood` が false になり
+   * **本番だけ並べ替えが無言で効かなくなる**。偽 DB も列を射影するようにしてある。
+   */
+  const rqSrc = readFileSync('src/lib/result-queries.ts', 'utf8');
+  ok(/\.select\('id, test_type, test_date, imported_by, external_test_id'\)/.test(rqSrc),
+    '**sibling の select に test_type / imported_by / external_test_id が入っている**');
   const sibs = r?.siblings ?? [];
   ok(sibs.length === 3, '**過去データに 3 件 (同日 2 件 + 別日 1 件)**', String(sibs.length));
   const same = sibs.filter((x) => x.testDate === PROD_DATE_0917);
