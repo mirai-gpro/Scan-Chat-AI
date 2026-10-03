@@ -4,7 +4,7 @@
 |---|---|
 | 文書 ID | `healthcheckup_blood_extraction_spec_20261001` |
 | 業務仕様の正 | Wellfort「人間ドック・健康診断由来 血液検査データ連携仕様書 v1.1 (2026-10-01)」(発注者支給) |
-| 版 | **v3.0 (2026-10-02・綺麗な baseline `7251bc8` から作り直したもの)** |
+| 版 | **v4.0 (2026-10-03・Elith 納品からの全面除外を確定)** |
 | 状態 | **確定仕様＋実装済み** |
 
 > **v1.x / v2.x は 2026-10-02 に全て revert 済み** (PR #288 / #290 / #291 / #292 → PR #293)。
@@ -12,6 +12,72 @@
 > 本番へ入ってしまったこと。**裁定 Q-1〜Q-14 (§10) はそのまま有効**で、v3.0 はそれを満たす。
 >
 > 本文の `file:line` はすべて `7251bc8` (= PR #293 merge 後の本番) 時点の実コードで確認したもの。
+
+---
+
+## 0. 最上位ルール (2026-10-03 発注者指示・**これが最優先**)
+
+> ## **人間ドック・健康診断由来の派生 blood (`imported_by='derived_healthcheck_blood'`) は
+> ## Dashboard 表示専用であり、Elith 納品用 `BloodTestData` ではない。**
+
+**なぜ禁止か**: 人間ドック・健康診断の血液部分は、既に `HealthCheckupData` として Elith の診断に
+使われている。それを `BloodTestData` として**もう一度**送ると**同一検査情報の二重納品**になる。
+
+| | Dashboard | Elith |
+|---|---|---|
+| 通常の血液検査 (デメカル等・`test_type='blood'`) | **出す** | **従来どおり納品する** |
+| 人間ドック由来 派生 blood | **出す** | **禁止** |
+
+**「readiness 判定から除外する」だけでは不十分。** 次の全経路から外す:
+
+- `BloodTestData` JSON 生成 / Elith 向け S3 配置 / 自動納品 / cron 納品 / 手動納品 / 再納品 /
+  delivery assemble / manual mapping / その他すべての Elith 納品経路
+
+**判定は 1 本に集約してある**: `isDerivedHealthcheckBlood()` (`src/lib/blood-subset.ts`)。
+`imported_by` の**完全一致**で、`test_type='blood'` のときしか true にならない
+(他の検査種別の判定は 1 文字も変わらない)。各経路が独自に文字列比較を書かない。
+
+### 0.0 Production の現状 (**発注者確認済み・2026-10-03。触らない**)
+
+既存の人間ドックからの過去データ backfill は**正式機能**なので、下の 2 件が Dashboard 用データとして
+存在していて**問題ない**。**削除・`withdrawn`・作り直しをしない。**
+
+| 受診日 | `imported_by` | 項目数 | artifact id |
+|---|---|---|---|
+| `2026-09-17` | `derived_healthcheck_blood` | 2 | (確認済・id は未記録) |
+| `2026-09-24` | `derived_healthcheck_blood` | 11 | **`98bb8668-c794-452a-9529-594fbc540a44`** |
+
+今回の修正は**この既存 2 件についても** 次を保証するもの (§12.1 ⑨):
+
+1. Dashboard では従来どおり取得される
+2. Elith readiness に数えられない
+3. `BloodTestData` JSON 生成の対象にならない
+4. manual delivery の対象にならない
+5. cron / 自動納品の対象にならない
+6. retry / 再納品の対象にならない
+
+> **「新しく派生を作らない」だけでは足りない。** 既に Production DB に在る派生 artifact が
+> 将来どの Elith 経路からも流れないことを保証する。
+
+### 0.1 保証の形 (3 段)
+
+| 段 | 内容 | 検査 |
+|---|---|---|
+| ① | **納品の材料に DB の blood が入っていない** — 納品は `materializeHealthCheckups()` (検診のみ) と **S3 の inventory** だけを材料にする。**派生 blood から `BloodTestData` JSON を作る関数は 1 つも存在しない** | ⑧-4 / ⑧-5 |
+| ② | **DB の blood artifact を触る経路を名簿で固定** — 増えたら落ちる (人が「Elith へ繋がるか」を分類するしかない) | ⑧-5 |
+| ③ | **Elith へ繋がる 3 本に関門** — 揃い判定 / 既存 artifact への書き込み / 追加検査の納品 | ⑧-2 / ⑧-3 / ⑧-5b |
+
+### 0.2 ② が要る理由 (実際に在った穴)
+
+`persistIntoExistingArtifact()` は `uid` / `test_type` / `test_date` しか照合していなかったので、
+**同じ受診日に派生 blood が在ると、検査機関の本物の血液検査がその行へ上書きされ得た**。
+更新されるのは `scan_md` と測定値だけなので **`imported_by='derived_healthcheck_blood'` が残り**:
+
+1. 本物の血液検査が Elith の揃い判定・納品から**黙って外れる** (§0 の表の下段と逆)
+2. 画面に「人間ドックから抽出」が付く (由来の偽り)
+
+**どちらもエラーにならない。** → 関門を入れ、`resolveAdditionalArtifact()` では
+そもそも派生を候補に出さないようにした。
 
 ---
 
@@ -38,12 +104,10 @@ Dashboard の推移グラフへ反映する。
 - **wellfort-site の血液 CSV 経路**・**デメカル取り込み処理**・**AI スキャンのプロンプト**。
 - **admin バッチ経路** (`/api/admin/elith-scan` / `elith-hc-merge`)。**裁定 Q-13 で明示的に対象外。**
   `persistAdminBatchArtifact` の挙動を 1 バイトも変えない (検査で固定・§9 ④-2)。
-- **Elith への `BloodTestData` JSON 書き出し (`materializeDerivedBloodTests`)。**
-  **意図的に先送りしている** — 発注者指示「Dashboard 表示確認が終わるまで Elith 本番納品を
-  実行しない」を守るため。実装すると**毎晩 23:00 JST の既存 cron** (`vercel.json` の
-  `0 14 * * *` → `api/cron/elith-deliver.ts`) が派生を納品し得る。
-  今回入れた変更は readiness の**除外**だけなので、**この変更で納品が増えることは構造的に起きない**
-  (増えるのでなく減る方向にしか効かない)。Dashboard 確認後に別 PR で入れる。
+- **Elith への `BloodTestData` JSON 書き出し (`materializeDerivedBloodTests` 等)。**
+  **先送りではなく「禁止」** (2026-10-03 発注者指示・§0)。
+  **作らない。** 同一検査情報の二重納品になるため。
+  以前の版には「Dashboard 確認後に別 PR で入れる」と書いてあったが、**その予定は取り消された。**
 
 ---
 
@@ -149,13 +213,17 @@ Dashboard の推移グラフへ反映する。
 
 ---
 
-## 8. Elith readiness から外す (裁定 Q-4 / D-1・最重要)
+## 8. Elith から外す (裁定 Q-4 / D-1 → **2026-10-03 に全経路へ拡大**)
 
 `checkFormatsReady()` は blood の active 行の**有無だけ**を見るので、派生をそのまま数えると
 **デメカル到着前に納品が発火**し、`elith_deliveries` の unique + `skipDelivered` で
 **同じ回は二度と再送されない**。
 
-> **確定: 派生 blood は readiness に数えない。納品データには含める。** この 2 つを混同しない。
+> **確定 (2026-10-03 改訂): 派生 blood は readiness に数えない。納品データにも含めない。**
+>
+> **旧版の「納品データには含める」は取り消された** (§0)。
+> 人間ドックの血液部分は `HealthCheckupData` として既に納品されているので、
+> `BloodTestData` として再送すると**同一検査情報の二重納品**になる。
 
 実装は `countsTowardReadiness()` (`src/lib/elith-entitlement.ts`) 1 か所。
 
@@ -179,11 +247,28 @@ Dashboard の推移グラフへ反映する。
 | 7 | `src/components/dashboard/MetricTrendChart.astro` | 「人間ドックから抽出」(履歴テーブルの検査日セル 2 行目 + 最新点のミニカード) |
 | 8 | `src/pages/api/admin/lab-results/register.ts` | 通常 blood 到着時の supersede |
 | 9 | `src/pages/api/admin/derived-blood/backfill.ts` (新規) | **正式な server-side admin backfill** (§11) |
-| 10 | `scripts/verify-blood-subset.mjs` (新規) | 回帰 **150 件**。CI の `static-required` |
+| 10 | `scripts/verify-blood-subset.mjs` (新規) | 回帰 **264 件**。CI の `static-required` |
+| 11 | `src/lib/special-additional-tests.ts` | 追加検査の artifact 候補から**派生を外す** (§0.2) |
+| 12 | `src/pages/api/admin/special-additional-tests/finalize.ts` | 検診登録で**派生を 1 回だけ作る** (§11) / 血液登録で同日の派生を降ろす / **納品の直前の関門** |
 
 **派生処理は 1 か所しかない。** 新規スキャン (`saveScanResult` の後段) と backfill
 (`/api/admin/derived-blood/backfill`) が **`persistDerivedBloodArtifact()` という同じ関数**を通る
 (発注者指示 §11)。抽出ロジックを 2 本持たない。
+
+### 9.0 派生を作る経路 (**共通関数 1 本・2026-10-03 調査で確定**)
+
+| # | 入口 | 経路 | 派生の生成 |
+|---|---|---|---|
+| A | 利用者のアプリ内スキャン | `/scan` → `POST /api/scan/save` → `saveScanResult()` | **組み込み済み** (後段で 1 回) |
+| A' | 送信後の背景ジョブ | `GET /api/cron/scan-worker` → **同じ `saveScanResult()`** | **組み込み済み** (A と同じ 1 か所) |
+| B | スペシャルアカウントの複数年アップロード | **A と同じ** `/scan` → `/api/scan/save` (`requireReadableDate` が立つだけ) | **組み込み済み** (追加実装は不要) |
+| B' | スペシャルアカウントの **検診・人間ドック Admin 登録** | `/admin/special-additional-tests` → `finalize.ts` → `saveAdditionalArtifact()` | **`saveScanResult()` を通らない** → **ここに 1 回だけ足した** (§11) |
+| C | 既存データの backfill | `POST /api/admin/derived-blood/backfill` | 同じ `persistDerivedBloodArtifact()` |
+| D | admin バッチ (`elith-scan` / `elith-hc-merge`) | — | **対象外** (裁定 Q-13。拡張しない) |
+
+**抽出ロジックは `persistDerivedBloodArtifact()` 1 本だけ。** スペシャル専用の血液抽出は作らない。
+**二重呼び出しは足していない** — A/A'/B は `saveScanResult()` の 1 か所を共有しており、
+B' だけが別経路なので、そこへ 1 回だけ追加した。
 
 ### 9.1 冪等
 
@@ -236,7 +321,7 @@ active な行なら §7 の優先判定が先に止めるが、**superseded / wi
 | Q-1 | デメカル CSV の実ヘッダ | v1.1 添付の 15 項目を業務仕様上の正とする。**未確認の名称を「デメカル実ヘッダ」と書かない**。実ヘッダとの一致確認は merge 前の受入条件 |
 | Q-2 | 標準マスタへの追加 | アルブミン / 尿素窒素 / `e-GFR` alias を追加してよい (golden に実在) |
 | Q-3 | 中性脂肪 | **派生の中だけ**で `中性脂肪` へ統一。`HealthCheckupData` は不変。**マスタで 空腹時=随時 の alias を作らない** |
-| Q-4 | Elith 揃い判定 | **派生を readiness に数えない。** marker は `imported_by`。**`source` 全体を除外しない。** 納品セットには含める |
+| Q-4 | Elith 揃い判定 | **派生を readiness に数えない。** marker は `imported_by`。**`source` 全体を除外しない。** ~~納品セットには含める~~ → **2026-10-03 に取り消し: 納品にも含めない (§0)** |
 | Q-5 | 基準値・グラフ | **混在系列では基準線を表示しない。** 点ごとの H/L は保持。互いの基準値を当てはめるのを禁止 |
 | Q-6 | 0 件のとき | artifact も JSON もグラフも作らない。**成立判定ではない** |
 | Q-7 | 由来表示 | **「人間ドックから抽出」固定** |
@@ -263,6 +348,7 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 | 画面 | **UI は wellfort-site `/admin/derived-blood-backfill`** (CLAUDE.md「UI=wellfort-site / 処理=Scan-Chat-AI」)。**Scan-Chat-AI 側に admin 画面を作らない** |
 | 鍵 | wellfort-site の中継がサーバ側 env `SCAN_CHAT_AI_API_KEY` で付ける。**ブラウザへ鍵を出さない** |
 | 既定 | **`confirm` 無しは preview。DB にも S3 にも 1 行も書かない** (読み取りだけ) |
+| 範囲 | **`mode` で明示する** (2026-10-03 §12 / §13)。`'one'` = 受診日を 1 つ指定 (受診日は**必須**) / `'pending'` = **その uid の未処理すべて** (= 同じ受診日に派生がまだ無い回だけ)。**「受診日を空欄にすると全件」という暗黙の操作は廃止**。未指定・未知の値・`'one'` で日付が空・`'pending'` に日付あり は**すべて 400**。**全ユーザー一括は実装しない** |
 | cron | **載せない** |
 | 材料 | `test_artifacts.measurements` (jsonb)。**Gemini も PDF も S3 も触らない** |
 | 読み戻し | **Dashboard / 推移グラフ / readiness が本番で使う同じ関数**を通して結果を返す (`loadDashboard` / `getTrendCandidates` / `getMeasurementTrend` / `checkFormatsReady`)。独自クエリで「入っているはず」を作らない |
@@ -273,7 +359,7 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 
 ## 12. 検証
 
-### 12.1 `npm run verify:blood-subset` — **150 件**・CI の `static-required`
+### 12.1 `npm run verify:blood-subset` — **264 件**・CI の `static-required`
 
 サーバも鍵もブラウザも要らない。Supabase は**インメモリの偽物**
 (`on delete cascade` まで再現してある)。`demo-data` は通さない。
@@ -287,6 +373,20 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 | ⑤ readiness | 派生は数えない / デメカル・admin・`imported_by='user'` は数える / 前方一致で外さない / **他 4 種別の判定は不変** |
 | ⑥ グラフ | 4 点 / **派生の点にだけ `source`** / **混在で基準線なし** / 派生だけなら基準線あり / superseded は点にならない / **health_checkup のグラフが汚染されない** |
 | ⑦ 系列割れ | マスタ追加の前後に書かれた行が **1 系列 2 点**になる (5 表記) / **空腹時・随時 は 2 系列のまま** |
+| ⑧-1 | 判定そのもの — 完全一致 / 前後空白 / 前方一致 / **他 4 種別では常に false** |
+| ⑧-2 | §18-15 readiness が同じ判定関数に委ねている |
+| ⑧-3 | §18-9/11 **派生 artifact への書き込みが止まる** (測定値も scan_md も書かない) / **通常 blood と health_checkup へは従来どおり通る** |
+| ⑧-4 | §18-10 検診 materialize が書くキーは `HealthCheckupData` だけ・**`BloodTestData` が 1 本も作られない** |
+| ⑧-5 | §18-9/12/13/14 **blood artifact を触るモジュールの名簿が増えたら落ちる** / 関門 3 本の実在 / **関門は納品より前に在る** / **§11 の配線 (検診→派生) と §8 の配線 (血液→supersede) の位置** / 派生→JSON を作る関数が存在しない |
+| ⑧-5b | 追加検査の候補から**実際に**派生が外れる (派生だけ→0 件 / 通常→1 件 / 両方→通常だけ / health_checkup は不変) |
+| ⑧-5c | **backfill は範囲を明示しないと動かない** (mode 未指定・未知・日付の過不足で 400) / preview は書かない / apply で 11 件 / pending は処理済みを触らない |
+| ⑧-6 | §18-11 同日に通常と派生 → 数えるのは通常だけ・派生だけが降りる |
+| **⑨-1** | **既存の派生 2 件** (本番と同じ形で seed) が `loadDashboard` で**2 件とも取得される** / グラフの候補・系列に出る / **全点に「人間ドックから抽出」** |
+| **⑨-2** | 既存の派生 2 件が在っても `checkFormatsReady` が **ready:false** / 通常 blood を 1 件足すと **ready:true** (§16) |
+| **⑨-3** | `materializeHealthCheckups` が書くキーは HealthCheckupData だけ / **元の検診も既存の派生も無傷** |
+| **⑨-4** | `buildDeliveryPlan` (manual) が **BloodTestData を 1 件も納品予定に入れない** (実際に 2 ファイル作られる = 空振りでない) |
+| **⑨-5/6** | cron の `manualMapping` に BloodTestData が無い (**コメント除去後**に確認) / **その mapping では source の BloodTestData が納品されない** / **mapping に載せれば納品される** (= 空振りでない・§16) / **再納品でも同じ** / **派生が在る/無いで納品物が同一** |
+| **⑨-7** | 同日に派生が在っても **通常 blood の登録が成功**し**新しい artifact** になる / 派生は **superseded (削除ではない)** / 別日の派生は無傷 / **通常 blood で ready:true** / グラフの点が通常の値に差し替わる |
 
 **②-2 の fixture は本番の対象検体そのもの** — `docs/scan/golden/scan_golden_healthcheckup_20250123.md`
 の実測値で、**15 項目のうち 11 項目だけが在る**。期待値 11 件
@@ -294,7 +394,7 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 `空腹時血糖`=104 / `クレアチニン`=1.03 / `eGFR`=56.9 / `尿酸`=7.8) と、
 **行を作らない 4 項目** (総蛋白 / アルブミン / HbA1c(NGSP) / 尿素窒素) を固定している。
 
-### 12.2 退行注入 (**16 種とも名指しで落ちることを確認済み**・2026-10-02)
+### 12.2 退行注入 (**31 種とも名指しで落ちることを確認済み**・2026-10-02 / 10-03)
 
 | # | 壊し方 | 結果 |
 |---|---|---|
@@ -314,6 +414,43 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 | R-14 | 15 項目マスタに `随時血糖` を足す | FAIL 3 |
 | R-15 | 読み出しエイリアスを 1 件外す (系列が割れる) | FAIL 2 |
 | R-16 | `空腹時中性脂肪` / `随時中性脂肪` を読み出しで `中性脂肪` へ潰す | FAIL 3 |
+
+**2026-10-03 追加 (Elith 除外・§0)**
+
+| # | 壊し方 | 結果 |
+|---|---|---|
+| E-1 | 既存 artifact への書き込みの関門を外す | FAIL 4 |
+| E-2 | 追加検査の候補から派生を外さない | FAIL 3 |
+| E-3 | `finalize` の関門を納品の**後ろ**へ動かす | FAIL 1 |
+| E-4 | 判定を前方一致に緩める | FAIL 2 |
+| E-5 | 判定が `blood` 以外にも効くようにする | FAIL 9 |
+| E-6 | backfill の `mode` を既定 `'pending'` にする (暗黙の全件) | FAIL 1 |
+| E-7 | `mode='one'` で受診日が空でも通す | FAIL 1 |
+| E-8 | `mode='pending'` が処理済みの回も対象にする | FAIL 1 |
+| E-9 | readiness の除外を消す | FAIL 4 |
+| E-10 | `finalize` の検診登録から派生の生成を消す | FAIL 3 |
+| E-11 | `finalize` の血液登録から supersede を消す | FAIL 2 |
+| F-1 | cron の `manualMapping` に `BloodTestData` を足す | FAIL 1 |
+| F-2 | supersede を `delete` にする (行を消す) | FAIL 4 |
+| F-3 | 候補解決が派生を返す | FAIL 13 |
+| F-4 | supersede が**別の日**の派生も降ろす | FAIL 4 |
+
+> **⑨ でも空振りを 2 件踏んだ (2026-10-03・記録)**: `buildDeliveryPlan` は
+> 「スペシャルアカウントとして登録されていません」で早期 return し、
+> `deliverReadySpecialAccounts` は母集団が空で、**どちらも何も実行せずに緑**だった。
+> → S3 スタブを**インメモリの実装**に変えて materialize→inventory→assemble を通し、
+> cron は**合成の仕組み** (`manualMapping` ＋ `assembleElithDeliverySet`) を直接検査する形にした。
+> **「mapping に載せれば納品される」ことも併せて確かめ**、空振りでないことを示している。
+>
+> **注入そのものを間違えた例も記録しておく**: 最初 `void f(x)` の形で潰そうとしたが、
+> **`void f(x)` は f を呼ぶ**ので挙動は変わらず、検査が緑のままだった (= 検査の穴ではない)。
+> 退行注入は「本当に壊れているか」を先に確かめること。
+
+> **E-2 と E-6 は最初の版では落ちなかった** (文字列の有無しか見ていなかった / 検査が無かった)。
+> `resolveAdditionalArtifact()` と backfill の `POST` を**実際に動かす**検査 (⑧-5b / ⑧-5c) を
+> 足して捕まえた。**⑧-5 の名簿検査も、最初は「違反 0 件」を数える形にしたら
+> 該当モジュールが 1 本も無くて常に緑だった** (= 関門を全部外しても通る) ので、
+> **名簿を固定する形**に変えてある。
 
 > **注意**: ⑥ の「混在系列の基準線」は、**派生の点を系列の最新に置かないと検知できない**。
 > 基準値は `sorted` の最後の行から取る作りなので、派生を途中の日付に置くと

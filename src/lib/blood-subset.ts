@@ -45,6 +45,39 @@ export const DERIVED_HC_BLOOD_IMPORTED_BY = 'derived_healthcheck_blood';
 /** 利用者画面に出す由来の文言。**変更しない** (v1.1 §11 C1 / 裁定 Q-7)。 */
 export const DERIVED_HC_BLOOD_LABEL = '人間ドックから抽出';
 
+/* ════════════════════════════════════════════════════════════════════
+ * 【最上位ルール】派生 blood は **Dashboard 表示専用**。Elith の入力ではない。
+ * ════════════════════════════════════════════════════════════════════
+ * 発注者指示 2026-10-03 (§0 / §15 / §16)。
+ *
+ * **なぜ禁止か**: 人間ドック・健康診断の血液部分は、既に `HealthCheckupData` として
+ * Elith の診断に使われている。それを `BloodTestData` として**もう一度**送ると
+ * **同一検査情報の二重納品**になる。
+ *
+ *   通常の血液検査 (デメカル等) … Dashboard ＋ **Elith**
+ *   人間ドック由来 派生 blood   … Dashboard **のみ**。Elith は**禁止**
+ *
+ * 「readiness に数えない」だけでは足りない。**JSON 生成・S3 配置・自動納品・cron 納品・
+ * 手動納品・再納品・delivery assemble・manual mapping の全経路**から外す。
+ *
+ * 判定は**この関数 1 本**で行う (`imported_by` の完全一致。前方一致・部分一致にしない)。
+ * 各経路がそれぞれ文字列比較を書くと、片方だけ直して静かに食い違う。
+ */
+export function isDerivedHealthcheckBlood(
+  row: { test_type?: string | null; imported_by?: string | null } | null | undefined,
+): boolean {
+  if (!row) return false;
+  // **blood 以外は対象外。** 他の検査種別の判定を 1 文字も変えないため。
+  if (String(row.test_type ?? '') !== 'blood') return false;
+  return String(row.imported_by ?? '') === DERIVED_HC_BLOOD_IMPORTED_BY;
+}
+
+/** 上の禁止を破ろうとしたときに各経路が返す理由。文言を 1 か所に持つ。 */
+export const DERIVED_HC_BLOOD_ELITH_BLOCK =
+  '人間ドック由来の派生 blood (imported_by=derived_healthcheck_blood) は Dashboard 表示専用で、'
+  + 'Elith 納品用 BloodTestData ではありません (HealthCheckupData として既に納品済みの'
+  + '同一検査情報を二重に送らないため)。';
+
 /**
  * 対象 15 項目 (`standard-master.ts` の `canonical_name`)。
  * 業務仕様 v1.1 §4 の 15 項目を、**実際に `findByAlias()` を通して得た canonical_name** で書く。

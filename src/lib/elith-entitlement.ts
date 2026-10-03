@@ -26,7 +26,7 @@
  */
 
 import { cfg } from './app-config';
-import { DERIVED_HC_BLOOD_IMPORTED_BY } from './blood-subset';
+import { isDerivedHealthcheckBlood } from './blood-subset';
 import { getBridgeSupabase } from './supabase';
 
 /** Elith の format_id。納品セットの単位 (`elith_s3_data_handoff_spec §2`)。 */
@@ -179,8 +179,8 @@ export interface ReadyCheck {
 export function countsTowardReadiness(
   r: { test_type: string; imported_by?: string | null },
 ): boolean {
-  if (r.test_type !== 'blood') return true;                       // blood 以外は不変
-  return String(r.imported_by ?? '') !== DERIVED_HC_BLOOD_IMPORTED_BY;
+  // 判定は `isDerivedHealthcheckBlood()` 1 本に委ねる (文字列比較を複製しない)。
+  return !isDerivedHealthcheckBlood(r);
 }
 
 export async function checkFormatsReady(

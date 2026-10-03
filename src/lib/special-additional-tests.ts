@@ -39,6 +39,7 @@
  */
 
 import { getServerSupabase } from './supabase';
+import { isDerivedHealthcheckBlood } from './blood-subset';
 import {
   persistAdminBatchArtifact, persistIntoExistingArtifact,
   TEST_TYPE_BY_FORMAT, type ArtifactTestType,
@@ -134,7 +135,8 @@ export interface ArtifactCandidate {
 }
 
 export type ArtifactResolution =
-  | { kind: 'none' }
+  /** `derivedSkipped` = 候補から外した人間ドック由来 派生 blood の件数 (監査用・0 が通常)。 */
+  | { kind: 'none'; derivedSkipped?: number }
   | { kind: 'one'; artifactId: string; candidate: ArtifactCandidate }
   | { kind: 'ambiguous'; candidates: ArtifactCandidate[] }
   | { kind: 'error'; detail: string };
@@ -154,7 +156,8 @@ export async function resolveAdditionalArtifact(input: {
 
   const { data, error } = await db(sb)
     .from('test_artifacts')
-    .select('id, test_date, status, source, display_mode')
+    // `imported_by` も引く — 人間ドック由来の派生 blood を候補から外すため (下)。
+    .select('id, test_date, status, source, display_mode, imported_by')
     .eq('diagnostic_user_id', input.uid)
     .eq('test_type', input.testType)
     .eq('test_date', input.testDate)
@@ -164,14 +167,31 @@ export async function resolveAdditionalArtifact(input: {
   // 本番 DB に偶然その列が在ることを前提にしない。
   if (error) return { kind: 'error', detail: error.message };
 
-  const rows = ((data ?? []) as Array<Record<string, unknown>>).map((r): ArtifactCandidate => ({
-    id: String(r.id),
-    test_date: typeof r.test_date === 'string' ? r.test_date.slice(0, 10) : null,
-    source: String(r.source ?? ''),
-    display_mode: String(r.display_mode ?? ''),
-  }));
+  /*
+   * ★ **人間ドック由来の派生 blood を候補から外す** (発注者指示 2026-10-03 §8 / §15 / §16)。
+   *
+   * 派生 blood は Dashboard 表示専用なので、**検査機関の本物の血液検査の入れ先にしない**。
+   * 外さないと 1 件ヒットして `persistIntoExistingArtifact()` へ渡り、
+   * そこで止まる (409) ため**管理者が先へ進めなくなる**。候補から外せば
+   * 「0 件 → 新しい artifact を作る」へ進み、同日の派生は
+   * `supersedeDerivedBloodOnSameDate()` が降ろす (通常 blood 優先・§8)。
+   *
+   * **blood 以外の種別は 1 行も挙動が変わらない** (`isDerivedHealthcheckBlood` が
+   * test_type='blood' のときしか true にならない)。
+   */
+  const all = ((data ?? []) as Array<Record<string, unknown>>);
+  const derivedSkipped = all.filter((r) =>
+    isDerivedHealthcheckBlood({ test_type: input.testType, imported_by: r.imported_by as string | null })).length;
+  const rows = all
+    .filter((r) => !isDerivedHealthcheckBlood({ test_type: input.testType, imported_by: r.imported_by as string | null }))
+    .map((r): ArtifactCandidate => ({
+      id: String(r.id),
+      test_date: typeof r.test_date === 'string' ? r.test_date.slice(0, 10) : null,
+      source: String(r.source ?? ''),
+      display_mode: String(r.display_mode ?? ''),
+    }));
 
-  if (rows.length === 0) return { kind: 'none' };
+  if (rows.length === 0) return { kind: 'none', derivedSkipped };
   if (rows.length === 1) return { kind: 'one', artifactId: rows[0].id, candidate: rows[0] };
   // **勝手に最新 1 件を選ばない。** 候補を返して人に決めさせる。
   return { kind: 'ambiguous', candidates: rows };

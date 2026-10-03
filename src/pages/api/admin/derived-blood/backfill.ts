@@ -2,7 +2,16 @@
  * **保存済みの人間ドック・健康診断から 派生 blood を作る (backfill)。**
  *
  *   POST /api/admin/derived-blood/backfill      (Bearer ADMIN_API_KEY)
- *     body: { diagnosticUserId, testDate?, confirm?: boolean }
+ *     body: { diagnosticUserId, mode: 'one' | 'pending', testDate?, confirm?: boolean }
+ *
+ * ── 対象の選び方は **mode で明示する**（発注者指示 2026-10-03 §12 / §13）─────
+ *   `mode:'one'`     … `testDate` で指定した 1 回だけ。**testDate は必須**
+ *   `mode:'pending'` … その uid の**未処理**の検診・人間ドックすべて
+ *                      (= 同じ受診日に派生 blood が未だ無い回だけ)
+ *
+ * **「受診日を空欄にすると全件」という暗黙の操作は廃止した。** 空欄は 400 で弾く。
+ * 誤操作で意図しない複数の回を書き換えないため。
+ * **全ユーザー一括は実装しない**（§12 C は将来の余地として残すだけ）。
  *
  * 正本: `docs/specs/healthcheckup_blood_extraction_spec_20261001.md` §10.6 (裁定 Q-11)
  *
@@ -124,11 +133,35 @@ export const POST: APIRoute = async ({ request }) => {
   const uid = String(body.diagnosticUserId ?? '').trim().toLowerCase();
   if (!UUID_RE.test(uid)) return json({ ok: false, error: 'invalid_diagnostic_user_id' }, 400);
 
-  const testDate = body.testDate == null || String(body.testDate).trim() === ''
-    ? null : String(body.testDate).trim();
-  if (testDate != null && !DATE_RE.test(testDate)) {
-    return json({ ok: false, error: 'invalid_test_date', detail: 'YYYY-MM-DD で指定してください' }, 400);
+  /*
+   * **mode は必須。** 既定値を置かない — 「指定し忘れたら全件」が最も危ない。
+   * 未知の値も弾く (allow-list)。
+   */
+  const mode = String(body.mode ?? '');
+  if (mode !== 'one' && mode !== 'pending') {
+    return json({
+      ok: false, error: 'invalid_mode',
+      detail: "mode は 'one' (受診日を 1 つ指定) か 'pending' (このUIDの未処理すべて) を明示してください",
+    }, 400);
   }
+
+  const testDateRaw = body.testDate == null ? '' : String(body.testDate).trim();
+  if (mode === 'one') {
+    if (testDateRaw === '') {
+      return json({ ok: false, error: 'test_date_required', detail: "mode='one' では受診日 (YYYY-MM-DD) が必須です" }, 400);
+    }
+    if (!DATE_RE.test(testDateRaw)) {
+      return json({ ok: false, error: 'invalid_test_date', detail: 'YYYY-MM-DD で指定してください' }, 400);
+    }
+  } else if (testDateRaw !== '') {
+    // **黙って無視しない。** 「全部処理」を選んだのに日付が入っていたら、どちらの
+    // つもりだったのか分からない。止めて選び直させる。
+    return json({
+      ok: false, error: 'test_date_not_allowed',
+      detail: "mode='pending' では受診日を指定できません (このUIDの未処理すべてを対象にします)",
+    }, 400);
+  }
+  const testDate = mode === 'one' ? testDateRaw : null;
   const confirm = body.confirm === true;
 
   const sb = getServerSupabase();
@@ -149,13 +182,47 @@ export const POST: APIRoute = async ({ request }) => {
   if (testDate) q = q.eq('test_date', testDate);
   const { data: hcRaw, error: hcErr } = await q;
   if (hcErr) return json({ ok: false, error: 'db_error', detail: String(hcErr.message ?? hcErr) }, 500);
-  const hc = (hcRaw ?? []) as HcRow[];
+  let hc = (hcRaw ?? []) as HcRow[];
+
+  /*
+   * `mode:'pending'` は**未処理だけ**。同じ受診日に派生 blood (active) が既に在る回は外す。
+   * **冪等なので流しても壊れない**が、「未処理すべて」と言って処理済みまで触るのは約束違反。
+   * `mode:'one'` では外さない — 日付を명示した回は「作り直したい」ことがあるため
+   * (冪等なので増えない)。
+   */
+  let alreadyDone: string[] = [];
+  if (mode === 'pending') {
+    const { data: derivedRaw } = await dsb
+      .from('test_artifacts')
+      .select('test_date')
+      .eq('diagnostic_user_id', uid)
+      .eq('test_type', 'blood')
+      .eq('status', 'active')
+      .eq('imported_by', DERIVED_HC_BLOOD_IMPORTED_BY);
+    const done = new Set(
+      ((derivedRaw ?? []) as { test_date: string | null }[])
+        .map((r) => String(r.test_date ?? '').slice(0, 10))
+        .filter(Boolean),
+    );
+    alreadyDone = [...done].sort();
+    hc = hc.filter((r) => !done.has(String(r.test_date ?? '').slice(0, 10)));
+    if (hc.length === 0) {
+      return json({
+        ok: true, mode: confirm ? 'applied' : 'preview', selection: 'pending',
+        note: '未処理の検診・人間ドックはありません (すべて派生 blood が作られています)。何も書いていません。',
+        diagnostic_user_id: uid, test_date: null,
+        already_done_dates: alreadyDone,
+        targets: [], verification: await readBack(dsb, uid),
+      });
+    }
+  }
+
   if (hc.length === 0) {
     return json({
       ok: false, error: 'health_checkup_not_found',
       detail: testDate
         ? `active な health_checkup (${testDate}) が見つかりません`
-        : 'active な health_checkup が見つかりません',
+        : 'active な health_checkup が 1 件も見つかりません',
       diagnostic_user_id: uid, test_date: testDate,
     }, 404);
   }
@@ -205,6 +272,8 @@ export const POST: APIRoute = async ({ request }) => {
   return json({
     ok: true,
     mode: confirm ? 'applied' : 'preview',
+    selection: mode,
+    already_done_dates: alreadyDone,
     note: confirm
       ? '派生 blood を作成しました。元の health_checkup には触っていません。Elith への納品 (S3) はこの API では行いません。'
       : 'preview です。DB にも S3 にも 1 行も書いていません。実行するには confirm:true を付けてください。',
