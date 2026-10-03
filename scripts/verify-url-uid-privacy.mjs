@@ -328,6 +328,16 @@ const demoFallbackEnabled = () => globalThis.__demo === true;
 const demoArtifacts = () => globalThis.__demoArts ?? [];
 const findSection = () => null;
 const AI_PREDICTION_REPORT_LABEL = 'AI疾病予測報告書';
+/*
+ * 派生 blood の sibling 表示 (2026-10-03)。**この検査は所有者の分離だけを見る**ので、
+ * 並び順とグループ番号の中身は関係しない。**本物は npm run verify:blood-subset が検査している**
+ * (⑫-③)。ここでは「呼べる」ことだけを満たす最小の実装を置く。
+ */
+const orderDerivedSiblings = (rows) => [...rows];
+const derivedBloodGroupIndex = (x) => {
+  const m = /^derived_hc:(.+):g(\d+)$/.exec(String(x ?? ''));
+  return m ? Number(m[2]) : null;
+};
 ` + src;
   const mod = await load(src);
 

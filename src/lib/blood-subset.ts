@@ -110,6 +110,74 @@ export function derivedBloodParentId(externalTestId: string | null | undefined):
   return m ? m[1] : null;
 }
 
+/*
+ * ── 同日 sibling の**表示用**の名前 (発注者裁定 2026-10-03 ②) ───────────────────
+ *
+ * 同じ受診日に sibling が 2 件並ぶときの見分け方。**両方残す・平均しない・捨てない・
+ * 別系列にも分けない**ので、ここで作るのは**表示上の識別子だけ**。
+ * `g1` / `g2` は医学的な別項目ではなく、**同じ検査項目の同じ系列の 2 点**である。
+ *
+ *   詳細・履歴 … `2026年9月17日（抽出1）`
+ *   グラフの狭いラベル … `9/17①`
+ *
+ * **1 つしか無いときは付けない** — 見分ける相手がいないのに「（抽出1）」と出すと、
+ * 利用者には何かが欠けているように見える。付けるかどうかは**呼び出し側が
+ * 「同じ日が 2 つ以上あるか」で決める** (この関数は番号を文字にするだけ)。
+ */
+const CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
+
+/** 丸番号。`①`〜`⑳`。範囲外は `(21)` のように素の形で返す (作字しない)。 */
+export function derivedBloodMark(groupIndex: number): string {
+  const n = Number(groupIndex);
+  if (!Number.isInteger(n) || n < 1) return '';
+  return n <= CIRCLED.length ? CIRCLED[n - 1] : `(${n})`;
+}
+
+/** 詳細・履歴に添える接尾辞。`（抽出1）`。 */
+export function derivedBloodSuffix(groupIndex: number): string {
+  const n = Number(groupIndex);
+  if (!Number.isInteger(n) || n < 1) return '';
+  return `（抽出${n}）`;
+}
+
+/**
+ * **同じ受診日に並ぶ派生 blood (sibling) の順序を決定的にする**
+ * (発注者レビュー 2026-10-03 ③)。**純関数。** 読み出し側 (`dashboard-queries` /
+ * `result-queries`) が取得直後に 1 回通す。**2 か所で並べ替えない。**
+ *
+ * 【なぜ要るか】取得は `order('test_date', desc)` だけなので、**同じ受診日の 2 件は
+ * DB が返した順**になる = 実行ごとに入れ替わり得る。`TestResultsSection` は
+ * `mine[0]` を「最新」として扱い「データ」のリンク先にするので、
+ * **押すたびに開く回が変わる**ことになる。
+ *
+ * **並べ替えるのは派生 sibling 同士だけ。** 他の行は**位置も相対順も 1 つも動かさない** —
+ * 同じ枠に書き戻すので、受診日が null の行の扱いや他種別の並びは DB のまま。
+ */
+export function orderDerivedSiblings<T extends {
+  id?: string | null; test_type?: string | null; test_date?: string | null;
+  imported_by?: string | null; external_test_id?: string | null;
+}>(rows: readonly T[]): T[] {
+  const out = [...rows];
+  // 受診日ごとに「派生 sibling が居る位置」を集める。
+  const slots = new Map<string, number[]>();
+  out.forEach((r, i) => {
+    if (!isDerivedHealthcheckBlood(r)) return;
+    const d = String(r.test_date ?? '');
+    if (!d) return;
+    const list = slots.get(d) ?? [];
+    list.push(i);
+    slots.set(d, list);
+  });
+  for (const idx of slots.values()) {
+    if (idx.length < 2) continue;              // 1 件なら並べ替える相手がいない
+    const picked = idx.map((i) => out[i]).sort((a, b) =>
+      (derivedBloodGroupIndex(a.external_test_id) ?? 0) - (derivedBloodGroupIndex(b.external_test_id) ?? 0)
+      || String(a.id ?? '').localeCompare(String(b.id ?? '')));
+    idx.forEach((i, k) => { out[i] = picked[k]; });
+  }
+  return out;
+}
+
 /** 上の禁止を破ろうとしたときに各経路が返す理由。文言を 1 か所に持つ。 */
 export const DERIVED_HC_BLOOD_ELITH_BLOCK =
   '人間ドック由来の派生 blood (imported_by=derived_healthcheck_blood) は Dashboard 表示専用で、'

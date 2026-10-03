@@ -221,8 +221,20 @@ export const POST: APIRoute = async ({ request }) => {
   const derivedRows = (derivedRaw ?? []) as { test_date: string | null; external_test_id: string | null }[];
   /** 親 artifact id → 済んでいるグループ番号。 */
   const doneByParent = new Map<string, Set<number>>();
-  /** 受診日 → その日に派生が 1 件以上在るか (旧ロジックで作られた `external_test_id=null` も拾う)。 */
+  /** 受診日 → その日に active な派生が 1 件以上在る (表示用。`already_done_dates`)。 */
   const doneDates = new Set<string>();
+  /**
+   * **受診日 → その日に「旧ロジック由来の派生」が在る** (発注者レビュー 2026-10-03 ①)。
+   *
+   * ここに入れるのは **`external_test_id` が NULL か、`derived_hc:<親>:g<N>` として
+   * 解析できない** active な派生が在る日付**だけ**。
+   *
+   * 【なぜ分けたか】以前は `doneDates`(= その日に派生が 1 件でも在る) を legacy の根拠に
+   * していたので、**同じ受診日に別の親の新方式 sibling が在るだけで**、まだ派生が無い
+   * health_checkup まで「旧ロジックの行が在る日」と誤認して `already_processed` にしていた。
+   * 新方式の sibling はグループ番号が分かるので、legacy の根拠にしてはいけない。
+   */
+  const legacyDates = new Set<string>();
   for (const r of derivedRows) {
     const d = String(r.test_date ?? '').slice(0, 10);
     if (d) doneDates.add(d);
@@ -232,6 +244,9 @@ export const POST: APIRoute = async ({ request }) => {
       const set = doneByParent.get(parent) ?? new Set<number>();
       set.add(gi);
       doneByParent.set(parent, set);
+    } else if (d) {
+      // 解析できない = グループ番号が分からない行。この日付だけを legacy とする。
+      legacyDates.add(d);
     }
   }
   const alreadyDone = [...doneDates].sort();
@@ -239,17 +254,20 @@ export const POST: APIRoute = async ({ request }) => {
   /*
    * 各 health_checkup について「どのグループが未処理か」を出す。
    *
-   * ⚠️ **`external_test_id` を持たない派生 (= 旧ロジックで作られた行)** は
+   * ⚠️ **`external_test_id` を持たない / 解析できない派生 (= 旧ロジックで作られた行)** は
    * グループ番号が分からないので、**その受診日は「処理済み」として扱い自動では触らない**
    * (本番の `2026-09-17` 2 項目 / `2026-09-24` 11 項目がこれ)。
    * **置き換えは発注者の指示を受けてから**なので、ここで勝手に作り直さない (§11)。
+   *
+   * 根拠は **`legacyDates`** (旧ロジック由来が在る日付) **だけ**。`doneDates` を使うと
+   * 同日・別の親の新方式 sibling まで legacy の根拠にしてしまう (レビュー ①)。
    */
   const planOf = (row: HcRow): { groups: DerivedBloodSourceGroup[]; missing: number[]; legacy: boolean } => {
     const groups = toDerivedBloodGroups({ scanMd: row.scan_md, measurements: toLean(row.measurements) });
     const date = String(row.test_date ?? '').slice(0, 10);
     const doneGroups = doneByParent.get(row.id) ?? new Set<number>();
-    // この受診日に派生が在るのに、この親の sibling として記録が無い = 旧ロジック由来。
-    const legacy = doneDates.has(date) && doneGroups.size === 0;
+    // この受診日に**旧ロジック由来**が在り、かつこの親の sibling が 1 つも無い。
+    const legacy = legacyDates.has(date) && doneGroups.size === 0;
     const missing = groups.filter((g) => !doneGroups.has(g.index)).map((g) => g.index);
     return { groups, missing, legacy };
   };

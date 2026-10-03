@@ -22,6 +22,7 @@ import type { SupabaseClient } from '@supabase/supabase-js';
 import type { Database } from '../types/supabase';
 import { extractMetricCards, type ElithSection, type MetricCard } from './elith-parser';
 import { AI_PREDICTION_REPORT_LABEL } from './display-names';
+import { orderDerivedSiblings } from './blood-subset';
 
 export interface MetricTrendPoint {
   date: string;       // ISO date
@@ -39,6 +40,16 @@ export interface MetricTrendPoint {
    * **`measurement_values` の中身から推測はしない**（発注者指示 §9）。
    */
   source?: 'health_checkup_scan';
+  /**
+   * 同じ受診日に複数の派生 blood (sibling) が在るときの**表示用の識別子**
+   * (発注者裁定 2026-10-03 ②)。原本の「N枚目」の番号。
+   *
+   * **医学的な別系列ではない。** 同じ検査項目の同じ系列に 2 点出す
+   * (両方残す・平均しない・捨てない)。
+   * **出すかどうかは表示側が「同じ日が 2 つ以上あるか」で決める** —
+   * 1 件しか無い日に「（抽出1）」と出すと、何かが欠けているように見える。
+   */
+  groupIndex?: number;
 }
 
 export interface MetricTrendSeries {
@@ -171,7 +182,7 @@ export async function loadDashboard(
       return buildDemoDashboard(uid, appUser?.display_name_cache ?? null);
     }
 
-    const artifacts = artifactsRaw ?? [];
+    const artifacts = orderDerivedSiblings(artifactsRaw ?? []);
     const results = resultsRaw ?? [];
     const resultUid = uid;
     const usingDemoData = false;
