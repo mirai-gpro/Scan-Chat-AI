@@ -334,7 +334,7 @@ const AI_PREDICTION_REPORT_LABEL = 'AI疾病予測報告書';
  * (⑫-③)。ここでは「呼べる」ことだけを満たす最小の実装を置く。
  */
 const orderDerivedSiblings = (rows) => [...rows];
-const derivedBloodGroupIndex = (x) => {
+const derivedBloodEpisodeIndex = (x) => {
   const m = /^derived_hc:(.+):g(\d+)$/.exec(String(x ?? ''));
   return m ? Number(m[2]) : null;
 };

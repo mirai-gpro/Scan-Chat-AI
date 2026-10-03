@@ -59,11 +59,11 @@ const dupDates = (s: MetricTrendSeries): Set<string> => {
   for (const p of s.points) n.set(p.date, (n.get(p.date) ?? 0) + 1);
   return new Set([...n.entries()].filter(([, c]) => c >= 2).map(([d]) => d));
 };
-type Marked = { date: string; groupIndex?: number };
+type Marked = { date: string; episodeIndex?: number };
 const markOf = (p: Marked, dup: Set<string>): string =>
-  dup.has(p.date) && p.groupIndex != null ? derivedBloodMark(p.groupIndex) : '';
+  dup.has(p.date) && p.episodeIndex != null ? derivedBloodMark(p.episodeIndex) : '';
 const suffixOf = (p: Marked, dup: Set<string>): string =>
-  dup.has(p.date) && p.groupIndex != null ? derivedBloodSuffix(p.groupIndex) : '';
+  dup.has(p.date) && p.episodeIndex != null ? derivedBloodSuffix(p.episodeIndex) : '';
 
 function build(s: MetricTrendSeries) {
   const vals = s.points.map((p) => p.value);

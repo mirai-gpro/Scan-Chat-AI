@@ -51,9 +51,10 @@ import {
   type DerivedBloodOutcome,
   type DerivedBloodSourceGroup,
 } from '../../../../lib/scan-persist';
+import { buildBloodEpisodes, type BloodEpisode } from '../../../../lib/blood-subset';
 import {
   extractBloodSubset,
-  derivedBloodGroupIndex,
+  derivedBloodEpisodeIndex,
   derivedBloodParentId,
   DERIVED_HC_BLOOD_IMPORTED_BY,
   BLOOD_SUBSET_ITEMS,
@@ -239,7 +240,7 @@ export const POST: APIRoute = async ({ request }) => {
     const d = String(r.test_date ?? '').slice(0, 10);
     if (d) doneDates.add(d);
     const parent = derivedBloodParentId(r.external_test_id);
-    const gi = derivedBloodGroupIndex(r.external_test_id);
+    const gi = derivedBloodEpisodeIndex(r.external_test_id);
     if (parent && gi != null) {
       const set = doneByParent.get(parent) ?? new Set<number>();
       set.add(gi);
@@ -252,43 +253,50 @@ export const POST: APIRoute = async ({ request }) => {
   const alreadyDone = [...doneDates].sort();
 
   /*
-   * 各 health_checkup について「どのグループが未処理か」を出す。
+   * 各 health_checkup について「どの **blood episode** が未処理か」を出す。
+   *
+   * ⚠️ **`N枚目` の数ではなく episode の数で見る** (発注者の訂正 2026-10-03)。
+   * 同じ人間ドックの続きページは 1 件に統合されるので、`buildBloodEpisodes()` を
+   * 通した結果が「作るべき件数」になる。
    *
    * ⚠️ **`external_test_id` を持たない / 解析できない派生 (= 旧ロジックで作られた行)** は
-   * グループ番号が分からないので、**その受診日は「処理済み」として扱い自動では触らない**
+   * episode 番号が分からないので、**その受診日は「処理済み」として扱い自動では触らない**
    * (本番の `2026-09-17` 2 項目 / `2026-09-24` 11 項目がこれ)。
    * **置き換えは発注者の指示を受けてから**なので、ここで勝手に作り直さない (§11)。
    *
    * 根拠は **`legacyDates`** (旧ロジック由来が在る日付) **だけ**。`doneDates` を使うと
    * 同日・別の親の新方式 sibling まで legacy の根拠にしてしまう (レビュー ①)。
    */
-  const planOf = (row: HcRow): { groups: DerivedBloodSourceGroup[]; missing: number[]; legacy: boolean } => {
+  const planOf = (row: HcRow): {
+    groups: DerivedBloodSourceGroup[]; episodes: BloodEpisode[]; missing: number[]; legacy: boolean;
+  } => {
     const groups = toDerivedBloodGroups({ scanMd: row.scan_md, measurements: toLean(row.measurements) });
+    const episodes = buildBloodEpisodes(groups);
     const date = String(row.test_date ?? '').slice(0, 10);
-    const doneGroups = doneByParent.get(row.id) ?? new Set<number>();
+    const doneEpisodes = doneByParent.get(row.id) ?? new Set<number>();
     // この受診日に**旧ロジック由来**が在り、かつこの親の sibling が 1 つも無い。
-    const legacy = legacyDates.has(date) && doneGroups.size === 0;
-    const missing = groups.filter((g) => !doneGroups.has(g.index)).map((g) => g.index);
-    return { groups, missing, legacy };
+    const legacy = legacyDates.has(date) && doneEpisodes.size === 0;
+    const missing = episodes.filter((e) => !doneEpisodes.has(e.index)).map((e) => e.index);
+    return { groups, episodes, missing, legacy };
   };
 
   /*
    * ── ③ **`mode:'one'` でも処理済みなら作り直さない** ──────────────────────
-   * **全グループが済んでいる / 旧ロジック由来の行が在る** なら何も書かない。
-   * 一部のグループだけ欠けているときは**欠けている分だけ**作る (§12)。
+   * **全 episode が済んでいる / 旧ロジック由来の行が在る** なら何も書かない。
+   * 一部の episode だけ欠けているときは**欠けている分だけ**作る (§12)。
    */
   if (mode === 'one' && testDate) {
     const row = hc[0];
     if (row) {
-      const { groups, missing, legacy } = planOf(row);
-      if (legacy || (groups.length > 0 && missing.length === 0)) {
+      const { episodes, missing, legacy } = planOf(row);
+      if (legacy || (episodes.length > 0 && missing.length === 0)) {
         return json({
           ok: true, mode: 'preview', selection: 'one', already_processed: true,
           note: legacy
-            ? `${testDate} には既に派生 blood が在ります (グループ識別子を持たない旧ロジック由来)。置き換えは指示を受けてから行うので、ここでは何も書いていません。`
-            : `${testDate} の入力グループ ${groups.length} 件はすべて派生 blood が作られています。作り直しはしないので何も書いていません。`,
+            ? `${testDate} には既に派生 blood が在ります (episode 識別子を持たない旧ロジック由来)。置き換えは指示を受けてから行うので、ここでは何も書いていません。`
+            : `${testDate} の blood episode ${episodes.length} 件はすべて派生 blood が作られています。作り直しはしないので何も書いていません。`,
           diagnostic_user_id: uid, test_date: testDate,
-          group_count: groups.length, missing_groups: missing, legacy_derived: legacy,
+          episode_count: episodes.length, missing_episodes: missing, legacy_derived: legacy,
           already_done_dates: alreadyDone,
           targets: [], verification: await readBack(dsb, uid),
         });
@@ -297,15 +305,15 @@ export const POST: APIRoute = async ({ request }) => {
   }
 
   if (mode === 'pending') {
-    // **未処理のグループが 1 つ以上ある回だけ**を対象にする (旧ロジック由来は触らない)。
+    // **未処理の episode が 1 つ以上ある回だけ**を対象にする (旧ロジック由来は触らない)。
     hc = hc.filter((r) => {
-      const { groups, missing, legacy } = planOf(r);
-      return !legacy && groups.length > 0 && missing.length > 0;
+      const { episodes, missing, legacy } = planOf(r);
+      return !legacy && episodes.length > 0 && missing.length > 0;
     });
     if (hc.length === 0) {
       return json({
         ok: true, mode: confirm ? 'applied' : 'preview', selection: 'pending',
-        note: '未処理の入力グループはありません (すべて派生 blood が作られているか、旧ロジック由来のため触りません)。何も書いていません。',
+        note: '未処理の blood episode はありません (すべて派生 blood が作られているか、旧ロジック由来のため触りません)。何も書いていません。',
         diagnostic_user_id: uid, test_date: null,
         already_done_dates: alreadyDone,
         targets: [], verification: await readBack(dsb, uid),
@@ -328,15 +336,20 @@ export const POST: APIRoute = async ({ request }) => {
     health_checkup_artifact_id: string;
     test_date: string | null;
     source_measurements: number;
-    /** 原本から見つけた入力グループ (「N枚目」) の数。 */
+    /** 原本から見つけた入力グループ (「N枚目」) の数。**件数ではない**。 */
     group_count?: number;
-    /** まだ派生が無いグループ番号。 */
-    missing_groups?: number[];
+    /** **blood episode の数** = 作る派生 blood の件数。 */
+    episode_count?: number;
+    /** まだ派生が無い episode 番号。 */
+    missing_episodes?: number[];
     /** `external_test_id` を持たない旧ロジック由来の派生が同日に在る。 */
     legacy_derived?: boolean;
     would_create?: {
       items: string[]; count: number;
-      groups?: { group: number; label: string | null; items: string[]; count: number; excluded?: unknown; skipped?: number }[];
+      episodes?: {
+        episode: number; groups: number[]; label: string | null;
+        items: string[]; count: number; excluded?: unknown; skipped?: number;
+      }[];
     };
     outcome?: DerivedBloodOutcome;
     excluded?: unknown;
@@ -353,24 +366,25 @@ export const POST: APIRoute = async ({ request }) => {
       });
       continue;
     }
-    const { groups, missing, legacy } = planOf(row);
+    const { groups, episodes, missing, legacy } = planOf(row);
+    const todo = episodes.filter((e) => missing.includes(e.index));
     if (!confirm) {
-      // **preview は読み取りだけ。** `extractBloodSubset` は純関数。
+      // **preview は読み取りだけ。** `buildBloodEpisodes` / `extractBloodSubset` は純関数。
       targets.push({
         health_checkup_artifact_id: row.id, test_date: date, source_measurements: lean.length,
-        group_count: groups.length, missing_groups: missing, legacy_derived: legacy,
+        group_count: groups.length, episode_count: episodes.length,
+        missing_episodes: missing, legacy_derived: legacy,
         would_create: {
-          // **グループごとの内訳**を出す (1 グループなら従来と同じ見え方)。
-          groups: groups
-            .filter((g) => missing.includes(g.index))
-            .map((g) => {
-              const { kept, excluded, skipped } = extractBloodSubset(g.measurements);
-              return { group: g.index, label: g.label ?? null, items: kept.map((m) => String(m.name)), count: kept.length, excluded, skipped };
-            }),
-          items: groups.filter((g) => missing.includes(g.index))
-            .flatMap((g) => extractBloodSubset(g.measurements).kept.map((m) => String(m.name))),
-          count: groups.filter((g) => missing.includes(g.index))
-            .reduce((a, g) => a + extractBloodSubset(g.measurements).kept.length, 0),
+          // **episode ごとの内訳**を出す (1 件なら従来と同じ見え方)。
+          episodes: todo.map((e) => {
+            const { kept, excluded, skipped } = extractBloodSubset(e.measurements);
+            return {
+              episode: e.index, groups: e.groupIndexes, label: e.label ?? null,
+              items: kept.map((m) => String(m.name)), count: kept.length, excluded, skipped,
+            };
+          }),
+          items: todo.flatMap((e) => extractBloodSubset(e.measurements).kept.map((m) => String(m.name))),
+          count: todo.reduce((a, e) => a + extractBloodSubset(e.measurements).kept.length, 0),
         },
       });
       continue;
@@ -379,12 +393,13 @@ export const POST: APIRoute = async ({ request }) => {
       diagnosticUserId: uid, testDate: date,
       parentArtifactId: row.id,
       sourceGroups: groups,
-      // **欠けているグループだけ**作る (冪等・§12)。
-      onlyGroups: missing,
+      // **欠けている episode だけ**作る (冪等・§12)。
+      onlyEpisodes: missing,
     });
     targets.push({
       health_checkup_artifact_id: row.id, test_date: date, source_measurements: lean.length,
-      group_count: groups.length, missing_groups: missing, legacy_derived: legacy, outcome,
+      group_count: groups.length, episode_count: episodes.length,
+      missing_episodes: missing, legacy_derived: legacy, outcome,
     });
   }
 

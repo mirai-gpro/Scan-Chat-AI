@@ -15,7 +15,7 @@
  */
 
 import { getServerSupabase } from './supabase';
-import { DERIVED_HC_BLOOD_IMPORTED_BY, derivedBloodGroupIndex } from './blood-subset';
+import { DERIVED_HC_BLOOD_IMPORTED_BY, derivedBloodEpisodeIndex } from './blood-subset';
 import { demoFallbackEnabled, demoMetricTrend } from './demo-data';
 import { ALA_PORPHYRIN_LABEL, restrictToLatestAla } from './ala-pds';
 import type { MetricTrendPoint, MetricTrendSeries } from './dashboard-queries';
@@ -157,7 +157,7 @@ function demoLatest(): LatestMeasurements {
 async function activeArtifacts(
   sb: NonNullable<ReturnType<typeof getServerSupabase>>,
   diagnosticUserId: string,
-): Promise<{ ids: string[]; importedBy: Map<string, string>; groupIndex: Map<string, number> }> {
+): Promise<{ ids: string[]; importedBy: Map<string, string>; episodeIndex: Map<string, number> }> {
   const { data, error } = await sb
     .schema('diagnosis')
     .from('test_artifacts')
@@ -177,13 +177,13 @@ async function activeArtifacts(
   const rows = (data ?? []) as unknown as
     { id: string; imported_by: string | null; external_test_id?: string | null }[];
   const importedBy = new Map<string, string>();
-  const groupIndex = new Map<string, number>();
+  const episodeIndex = new Map<string, number>();
   for (const r of rows) {
     importedBy.set(String(r.id), String(r.imported_by ?? ''));
-    const gi = derivedBloodGroupIndex(r.external_test_id);
-    if (gi != null) groupIndex.set(String(r.id), gi);
+    const gi = derivedBloodEpisodeIndex(r.external_test_id);
+    if (gi != null) episodeIndex.set(String(r.id), gi);
   }
-  return { ids: rows.map((r) => String(r.id)), importedBy, groupIndex };
+  return { ids: rows.map((r) => String(r.id)), importedBy, episodeIndex };
 }
 
 /** 従来の呼び出し口 (id だけが要る経路)。挙動は変えない。 */
@@ -427,7 +427,7 @@ export async function getMeasurementTrend(
   try {
     // superseded / withdrawn の回は点として打たない
     // (差し替え前の値が線に残ると「前回はこうだった」という誤った推移になる)。
-    const { ids: active, importedBy, groupIndex } = await activeArtifacts(sb, diagnosticUserId);
+    const { ids: active, importedBy, episodeIndex } = await activeArtifacts(sb, diagnosticUserId);
     if (active.length === 0) return [];
     const { data, error } = await sb
       .schema('diagnosis')
@@ -483,7 +483,7 @@ export async function getMeasurementTrend(
        * **DB の返した順** = 実行ごとに入れ替わり得るので、グラフの ① と ② が入れ替わる。
        * 第 2 キー = グループ番号の昇順、第 3 キー = artifact_id (番号を持たない行の保険)。
        */
-      const giOf = (r: Row): number => groupIndex.get(String(r.artifact_id)) ?? 0;
+      const giOf = (r: Row): number => episodeIndex.get(String(r.artifact_id)) ?? 0;
       const sorted = list
         .slice()
         .sort((a, b) =>
@@ -508,8 +508,8 @@ export async function getMeasurementTrend(
            * 系列は分けない・平均しない・捨てない。**出すかどうかは表示側が
            * 「同じ日が 2 つ以上あるか」で決める** (1 件のときは付けない)。
            */
-          ...(derived && groupIndex.has(String(r.artifact_id))
-            ? { groupIndex: groupIndex.get(String(r.artifact_id)) as number }
+          ...(derived && episodeIndex.has(String(r.artifact_id))
+            ? { episodeIndex: episodeIndex.get(String(r.artifact_id)) as number }
             : {}),
         });
       }

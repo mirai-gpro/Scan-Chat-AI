@@ -23,6 +23,8 @@ import {
   DERIVED_HC_BLOOD_IMPORTED_BY,
   DERIVED_HC_BLOOD_ELITH_BLOCK,
   type BloodSubsetExclusion,
+  buildBloodEpisodes,
+  type BloodEpisodeSourceGroup,
 } from './blood-subset';
 import { persistMeasurements, type SchemaClient, type LeanMeasurement } from './measurement-persist';
 import { extractAgeSex } from './scan-age';
@@ -66,10 +68,12 @@ export interface SaveScanResult {
   derivedBlood?: DerivedBloodOutcome;
 }
 
-/** 入力グループ (「N枚目」) 1 つぶんの結果。 */
+/** blood episode 1 つぶん (= 派生 blood 1 件) の結果。 */
 export interface DerivedBloodSibling {
-  /** 原本の「N枚目」の番号。 */
-  groupIndex: number;
+  /** **episode 番号** (原本順に 1, 2, 3…)。`external_test_id` の `g<N>`。 */
+  episodeIndex: number;
+  /** この episode に束ねた入力グループ (「N枚目」) の番号。 */
+  groupIndexes: number[];
   /** `external_test_id` に入れた sibling 識別子。 */
   externalTestId: string;
   created: boolean;
@@ -103,11 +107,11 @@ export interface DerivedBloodOutcome {
   skipped?: number;
   detail?: string;
   /**
-   * **入力グループごとの結果** (2026-10-03 §3)。1 グループなら 1 件。
-   * `created`/`rows`/`items` は**全グループの合計 / 連結**で、内訳はここを見る。
+   * **blood episode ごとの結果**。`created`/`rows`/`items` は
+   * **全 episode の合計 / 連結**で、内訳はここを見る。
    */
   siblings?: DerivedBloodSibling[];
-  /** 原本から見つけた入力グループの数 (「N枚目」の数)。 */
+  /** **blood episode の数** (= 作る派生 blood の件数)。「N枚目」の数ではない。 */
   groupCount?: number;
 }
 
@@ -430,14 +434,14 @@ export async function supersedeDerivedBloodOnSameDate(
   }
 }
 
-/** 入力グループ 1 つぶんの材料。 */
-export interface DerivedBloodSourceGroup {
-  /** 原本の「N枚目」の番号 (`measurementGroupsFromMarkdown` の `index`)。 */
-  index: number;
-  label?: string | null;
-  /** そのグループだけの lean measurements。 */
-  measurements: readonly LeanMeasurement[];
-}
+/**
+ * 入力グループ 1 つぶんの材料 (= 原本の「N枚目」1 つ)。
+ *
+ * ⚠️ **1 グループ = 派生 blood 1 件ではない** (発注者の訂正 2026-10-03)。
+ * グループは**分割候補の境界**で、実際の 1 件は `buildBloodEpisodes()` が決める
+ * blood episode。
+ */
+export type DerivedBloodSourceGroup = BloodEpisodeSourceGroup;
 
 /**
  * 材料を**入力グループの配列**に揃える。
@@ -477,9 +481,11 @@ export function toDerivedBloodGroups(input: {
 /**
  * **人間ドック・健康診断の既存 measurements から派生 blood を作る。**
  *
- * **入力グループ (「N枚目」) ごとに 1 件**作る (2026-10-03 §3)。
- * 1 件の health_checkup に独立した健診結果が 2 通ぶん入っていれば **derived blood 2 件**。
- * 入力グループが 1 つだけなら**従来どおり 1 件**。
+ * **blood episode ごとに 1 件**作る (発注者の最終仕様 2026-10-03・§13.2)。
+ * episode の境界は `buildBloodEpisodes()` が決める決定論ルール —
+ * 同じ人間ドックの続きページ (重複なし / 重複しても同値) は**1 件へ統合**し、
+ * 独立した血液結果 (重複項目の値が違う) は**別の件**にする。
+ * **`N枚目` の数 = 件数ではない。**
  *
  * 入力は `sanitizeMeasurementsForDelivery()` を通した後の lean measurement。
  * **OCR / Gemini / PDF 解析は 1 度も呼ばない** (v1.1 §3「再解析しない」)。
@@ -499,53 +505,59 @@ export async function persistDerivedBloodArtifact(
      * (`external_test_id = derived_hc:<親>:g<N>`)。
      */
     parentArtifactId: string;
-    /** 入力グループごとの材料 (推奨)。 */
+    /** 入力グループ (「N枚目」) ごとの材料 (推奨)。episode への束ね方はここで決めない。 */
     sourceGroups?: readonly DerivedBloodSourceGroup[];
     /** 後方互換: グループに割れない呼び出し。1 グループとして扱う。 */
     sourceMeasurements?: readonly LeanMeasurement[] | null;
-    /** このグループ番号だけを作る (backfill の差分補完用)。空なら全グループ。 */
-    onlyGroups?: readonly number[];
+    /** この **episode 番号**だけを作る (backfill の差分補完用)。空なら全 episode。 */
+    onlyEpisodes?: readonly number[];
     sourceFileKind?: string | null;
   },
 ): Promise<DerivedBloodOutcome> {
   const groups: DerivedBloodSourceGroup[] = input.sourceGroups
     ? [...input.sourceGroups]
     : toDerivedBloodGroups({ measurements: input.sourceMeasurements ?? [] });
+  /*
+   * **ここで件数が決まる。** 入力グループ (「N枚目」) を決定論ルールで blood episode に
+   * 束ねる (`buildBloodEpisodes`)。同じ人間ドックの続きページは 1 件へ統合され、
+   * 独立した血液結果は別の件になる。**閾値も推測も入れない。**
+   */
+  const episodes = buildBloodEpisodes(groups);
 
   if (!input.parentArtifactId) {
-    return { created: false, reason: 'error', detail: '親の health_checkup artifact id が要ります', groupCount: groups.length };
+    return { created: false, reason: 'error', detail: '親の health_checkup artifact id が要ります', groupCount: episodes.length };
   }
 
   /*
-   * 裁定 Q-10: 同日に通常 blood が在れば**どのグループも作らない** (通常 blood 優先)。
-   * 引けなければ作らない (fail-closed)。**グループ単位ではなく受診日単位の判断**
+   * 裁定 Q-10: 同日に通常 blood が在れば**どの episode も作らない** (通常 blood 優先)。
+   * 引けなければ作らない (fail-closed)。**episode 単位ではなく受診日単位の判断**
    * — 同じ日に通常と派生を並べない、という規則なので。
    */
   const normal = await findNormalBloodOnDate(sb, input.diagnosticUserId, input.testDate);
   if (normal == null) {
-    return { created: false, reason: 'error', groupCount: groups.length, detail: '同日の通常 blood を確認できませんでした (作成を見送りました)' };
+    return { created: false, reason: 'error', groupCount: episodes.length, detail: '同日の通常 blood を確認できませんでした (作成を見送りました)' };
   }
   if (normal.length > 0) {
     return {
-      created: false, reason: 'normal_blood_exists', groupCount: groups.length,
+      created: false, reason: 'normal_blood_exists', groupCount: episodes.length,
       detail: `同じ受診日に通常 blood が ${normal.length} 件あるため派生は作りません`,
     };
   }
 
-  const only = input.onlyGroups && input.onlyGroups.length > 0 ? new Set(input.onlyGroups) : null;
+  const only = input.onlyEpisodes && input.onlyEpisodes.length > 0 ? new Set(input.onlyEpisodes) : null;
   const siblings: DerivedBloodSibling[] = [];
 
   /*
-   * ── 片付けの範囲は「全グループを作り直すのか」で変える ────────────────────
+   * ── 片付けの範囲は「全 episode を作り直すのか」で変える ──────────────────
    *
-   * **全グループ (`onlyGroups` 無し) = その受診日の派生を作り直す**ので、
+   * **全 episode (`onlyEpisodes` 無し) = その受診日の派生を作り直す**ので、
    * **`external_test_id` を問わず**同じ日の派生を先に 1 回片付ける。
    * 【なぜ必要か・実測 2026-10-03】`saveScanResult` で同じ回を送り直すと
    * **health_checkup の id が変わる** (古い行を片付けて insert し直すため) ので、
    * sibling 識別子 (`derived_hc:<親>:g<N>`) も変わる。
    * `external_test_id` 完全一致だけで片付けると**前の親の派生が残って 2 倍に増える**。
    *
-   * **一部だけ (`onlyGroups` 指定 = backfill の差分補完) は、そのグループだけ**を
+   * **一部だけ (`onlyEpisodes` 指定 = backfill の差分補完) は、その episode だけ**を
    * `external_test_id` 完全一致で片付ける。隣の sibling を巻き込まない。
    */
   if (!only) {
@@ -558,19 +570,25 @@ export async function persistDerivedBloodArtifact(
     });
   }
 
-  for (const g of groups) {
-    if (only && !only.has(g.index)) continue;
-    const externalTestId = derivedBloodExternalTestId(input.parentArtifactId, g.index);
-    const { kept, excluded, skipped } = extractBloodSubset(g.measurements);
+  for (const ep of episodes) {
+    if (only && !only.has(ep.index)) continue;
+    const externalTestId = derivedBloodExternalTestId(input.parentArtifactId, ep.index);
+    /*
+     * **最終値はここで 1 回だけ作る** (発注者の最終仕様 §3)。
+     * episode に属する**全入力グループの元 measurements を結合**して
+     * `extractBloodSubset()` を通す → 同値の重複は 1 行に畳まれ、
+     * 同一グループ内の別値は `value_conflict` で除外される。
+     */
+    const { kept, excluded, skipped } = extractBloodSubset(ep.measurements);
 
-    // 裁定 Q-6: そのグループから 0 件なら、そのグループは作らない。
+    // 裁定 Q-6: その episode から 0 件なら、その episode は作らない。
     if (kept.length === 0) {
-      siblings.push({ groupIndex: g.index, externalTestId, created: false, reason: 'no_items', excluded, skipped, rows: 0, items: [] });
+      siblings.push({ episodeIndex: ep.index, groupIndexes: ep.groupIndexes, externalTestId, created: false, reason: 'no_items', excluded, skipped, rows: 0, items: [] });
       continue;
     }
     try {
       /*
-       * 差分補完のときだけ、**このグループの `external_test_id` 完全一致**で片付ける
+       * 差分補完のときだけ、**この episode の `external_test_id` 完全一致**で片付ける
        * (6 つ目の条件)。これが無いと**sibling B を作るときに sibling A を消す**。
        * 全グループのときは上で 1 回片付けてあるので、ここでは何もしない。
        */
@@ -604,17 +622,17 @@ export async function persistDerivedBloodArtifact(
             external_test_id: externalTestId,
             status: 'active',
             scan_md: null,
-            notes: `人間ドック・健康診断の既存AIスキャン結果から血液検査値を抽出（再解析なし / ${g.label ?? `${g.index}枚目`}）`,
+            notes: `人間ドック・健康診断の既存AIスキャン結果から血液検査値を抽出（再解析なし / 第${ep.index}検査 / ${ep.groupIndexes.map((n) => `${n}枚目`).join('+')}）`,
           },
         ])
         .select('id');
       if (error) {
-        siblings.push({ groupIndex: g.index, externalTestId, created: false, reason: 'error', excluded, skipped, detail: String(error.message ?? error) });
+        siblings.push({ episodeIndex: ep.index, groupIndexes: ep.groupIndexes, externalTestId, created: false, reason: 'error', excluded, skipped, detail: String(error.message ?? error) });
         continue;
       }
       const artifactId = (data?.[0] as { id?: string } | undefined)?.id;
       if (!artifactId) {
-        siblings.push({ groupIndex: g.index, externalTestId, created: false, reason: 'error', excluded, skipped, detail: 'test_artifacts の id を取得できませんでした' });
+        siblings.push({ episodeIndex: ep.index, groupIndexes: ep.groupIndexes, externalTestId, created: false, reason: 'error', excluded, skipped, detail: 'test_artifacts の id を取得できませんでした' });
         continue;
       }
 
@@ -627,11 +645,11 @@ export async function persistDerivedBloodArtifact(
         sourceFileKind: input.sourceFileKind ?? 'scan_md',
       });
       siblings.push({
-        groupIndex: g.index, externalTestId, created: true, artifactId,
+        episodeIndex: ep.index, groupIndexes: ep.groupIndexes, externalTestId, created: true, artifactId,
         rows: r.rows, items: kept.map((m) => String(m.name)), excluded, skipped,
       });
     } catch (e) {
-      siblings.push({ groupIndex: g.index, externalTestId, created: false, reason: 'error', excluded, skipped, detail: e instanceof Error ? e.message : String(e) });
+      siblings.push({ episodeIndex: ep.index, groupIndexes: ep.groupIndexes, externalTestId, created: false, reason: 'error', excluded, skipped, detail: e instanceof Error ? e.message : String(e) });
     }
   }
 
@@ -641,7 +659,7 @@ export async function persistDerivedBloodArtifact(
     return {
       created: false,
       reason: allNoItems || siblings.length === 0 ? 'no_items' : 'error',
-      groupCount: groups.length, siblings,
+      groupCount: episodes.length, siblings,
       excluded: siblings.flatMap((x) => x.excluded ?? []),
       skipped: siblings.reduce((a, x) => a + (x.skipped ?? 0), 0),
       rows: 0, items: [],
@@ -649,7 +667,7 @@ export async function persistDerivedBloodArtifact(
     };
   }
   return {
-    created: true, groupCount: groups.length, siblings,
+    created: true, groupCount: episodes.length, siblings,
     artifactId: made[0].artifactId ?? null,
     rows: made.reduce((a, x) => a + (x.rows ?? 0), 0),
     items: made.flatMap((x) => x.items ?? []),

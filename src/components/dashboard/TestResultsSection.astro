@@ -106,14 +106,23 @@ const cards = visibleTypes.map((t) => {
   const sameDayDerived = newest
     ? mine.filter((a) => a.test_date === newest.test_date && isDerivedHealthcheckBlood(a)).length
     : 0;
+  /*
+   * **グラフは「異なる受診日が 2 日以上」で出す** (発注者裁定 2026-10-03 §8)。
+   *
+   * 件数で見ると、**同じ受診日の派生 sibling 2 件だけ**でもボタンが出てしまう。
+   * それは「推移」ではない (同じ日の 2 点に線を引いても時間軸が無い)。
+   * `getTrendCandidates()` も「日付の違う点が 2 つ以上」で候補を数えているので、
+   * **判定をそちらと一致させる** — ずれると「グラフ」を押した先が空になる。
+   */
+  const dates = new Set(mine.map((a) => String(a.test_date ?? '')).filter(Boolean));
   return {
     ...t,
     icon: testTypeLabel(t.type).icon,
     newest,
     count: mine.length,
     sameDayDerived,
-    // 推移は 2 回目の検査から。1 回分しか無いと線が引けない。
-    canGraph: t.trend && mine.length >= 2,
+    distinctDates: dates.size,
+    canGraph: t.trend && dates.size >= 2,
   };
 });
 const gridCls = GRID_BY_COUNT[Math.min(cards.length, 5)] ?? GRID_BY_COUNT[5];
@@ -178,11 +187,15 @@ const gridCls = GRID_BY_COUNT[Math.min(cards.length, 5)] ?? GRID_BY_COUNT[5];
         </div>
 
         <span class="text-sm text-slate-600">
+          {/*
+            件数ではなく**受診日の数**で言う (§8)。同じ日の派生 sibling 2 件を
+            「2 回分」と書くと、グラフが出ないことと食い違う。
+          */}
           {!c.trend
             ? 'グラフ表示なし（判定のみの検査）'
             : c.canGraph
-              ? `推移グラフ：記録 ${c.count} 回分`
-              : c.count === 1
+              ? `推移グラフ：記録 ${c.distinctDates} 回分`
+              : c.distinctDates === 1
                 ? '推移グラフは 2 回目の検査から'
                 : '推移グラフはまだありません'}
         </span>

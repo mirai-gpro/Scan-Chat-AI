@@ -16,7 +16,7 @@ import type { TestArtifact, DiagnosisResult } from '../types/supabase';
 import { findSection, type ElithSection } from './elith-parser';
 import { demoArtifacts, demoFallbackEnabled } from './demo-data';
 import { AI_PREDICTION_REPORT_LABEL } from './display-names';
-import { derivedBloodGroupIndex, orderDerivedSiblings } from './blood-subset';
+import { derivedBloodEpisodeIndex, orderDerivedSiblings } from './blood-subset';
 
 export interface ResultData {
   artifact: TestArtifact;
@@ -44,10 +44,10 @@ export interface ResultData {
   /**
    * 同一種別の他の回。**同じ受診日に派生 blood の sibling が並ぶ**ことがあるので
    * (人間ドック 1 件に独立した健診結果が 2 通入っていた回・裁定 2026-10-03 ②)、
-   * 表示用の `groupIndex` も返す。**同じ日が 2 つ以上あるときだけ**画面が
+   * 表示用の `episodeIndex` も返す。**同じ日が 2 つ以上あるときだけ**画面が
    * `（抽出1）` を添える (1 件なら添えない)。
    */
-  siblings: { id: string; testDate: string | null; groupIndex?: number }[];
+  siblings: { id: string; testDate: string | null; episodeIndex?: number }[];
   /**
    * **検査票から読み取った測定値**（`test_artifacts.measurements` の jsonb）。
    *
@@ -269,8 +269,8 @@ export async function loadResult(
       imported_by?: string | null; external_test_id?: string | null;
     }[],
   ).map((r) => {
-    const gi = derivedBloodGroupIndex(r.external_test_id);
-    return { id: r.id, testDate: r.test_date, ...(gi != null ? { groupIndex: gi } : {}) };
+    const gi = derivedBloodEpisodeIndex(r.external_test_id);
+    return { id: r.id, testDate: r.test_date, ...(gi != null ? { episodeIndex: gi } : {}) };
   });
 
   const original = await resolveOriginal(sb, artifact.id);

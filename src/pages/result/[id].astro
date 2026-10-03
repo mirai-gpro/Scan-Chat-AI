@@ -91,10 +91,10 @@ const dupSiblingDates = new Set(
     }, {}),
   ).filter(([, n]) => n >= 2).map(([d]) => d),
 );
-const siblingLabel = (sib: { testDate: string | null; groupIndex?: number }): string =>
+const siblingLabel = (sib: { testDate: string | null; episodeIndex?: number }): string =>
   formatJpDate(sib.testDate)
-  + (dupSiblingDates.has(String(sib.testDate ?? '')) && sib.groupIndex != null
-    ? derivedBloodSuffix(sib.groupIndex) : '');
+  + (dupSiblingDates.has(String(sib.testDate ?? '')) && sib.episodeIndex != null
+    ? derivedBloodSuffix(sib.episodeIndex) : '');
 const siblingHref = (sid: string) => {
   const qs = new URLSearchParams(linkQuery.replace(/^\?/, ''));
   if (mode !== 'summary') qs.set('mode', mode);

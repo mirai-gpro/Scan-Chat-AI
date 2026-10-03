@@ -91,13 +91,18 @@ export function isDerivedHealthcheckBlood(
  */
 export const DERIVED_HC_BLOOD_EXTERNAL_PREFIX = 'derived_hc:';
 
-/** `derived_hc:<親 artifact id>:g<グループ番号>`。 */
-export function derivedBloodExternalTestId(parentArtifactId: string, groupIndex: number): string {
-  return `${DERIVED_HC_BLOOD_EXTERNAL_PREFIX}${String(parentArtifactId).trim()}:g${groupIndex}`;
+/**
+ * `derived_hc:<親 artifact id>:g<episode 番号>`。
+ *
+ * ⚠️ **`g<N>` の N は「N枚目」ではなく blood episode 番号** (発注者の訂正 2026-10-03)。
+ * 原本順に `g1` / `g2` / `g3`… と決まる。形式は据え置き = **migration は要らない**。
+ */
+export function derivedBloodExternalTestId(parentArtifactId: string, episodeIndex: number): string {
+  return `${DERIVED_HC_BLOOD_EXTERNAL_PREFIX}${String(parentArtifactId).trim()}:g${episodeIndex}`;
 }
 
-/** `external_test_id` から派生 sibling のグループ番号を読む。派生でなければ null。 */
-export function derivedBloodGroupIndex(externalTestId: string | null | undefined): number | null {
+/** `external_test_id` から派生 sibling の **episode 番号**を読む。派生でなければ null。 */
+export function derivedBloodEpisodeIndex(externalTestId: string | null | undefined): number | null {
   const m = /^derived_hc:(.+):g(\d+)$/.exec(String(externalTestId ?? ''));
   if (!m) return null;
   const n = Number(m[2]);
@@ -127,17 +132,119 @@ export function derivedBloodParentId(externalTestId: string | null | undefined):
 const CIRCLED = '①②③④⑤⑥⑦⑧⑨⑩⑪⑫⑬⑭⑮⑯⑰⑱⑲⑳';
 
 /** 丸番号。`①`〜`⑳`。範囲外は `(21)` のように素の形で返す (作字しない)。 */
-export function derivedBloodMark(groupIndex: number): string {
-  const n = Number(groupIndex);
+export function derivedBloodMark(episodeIndex: number): string {
+  const n = Number(episodeIndex);
   if (!Number.isInteger(n) || n < 1) return '';
   return n <= CIRCLED.length ? CIRCLED[n - 1] : `(${n})`;
 }
 
 /** 詳細・履歴に添える接尾辞。`（抽出1）`。 */
-export function derivedBloodSuffix(groupIndex: number): string {
-  const n = Number(groupIndex);
+export function derivedBloodSuffix(episodeIndex: number): string {
+  const n = Number(episodeIndex);
   if (!Number.isInteger(n) || n < 1) return '';
   return `（抽出${n}）`;
+}
+
+/*
+ * ══════════════════════════════════════════════════════════════════════════
+ * blood episode — **派生 blood 1 件の単位** (発注者による最終仕様の訂正 2026-10-03)
+ * ══════════════════════════════════════════════════════════════════════════
+ *
+ * 【取り消された考え方】`N枚目 = derived blood 1 件`。
+ * `N枚目` は**入力ページ / 入力ファイルの出所情報**でしかない。既存仕様では
+ * **1 回の送信 = 1 回分の人間ドック**で、1 回の人間ドックは 4〜10 枚になるので、
+ *
+ *     1枚目 身体計測 / 2枚目 肝機能・脂質 / 3枚目 腎機能
+ *
+ * は**本来 derived blood 1 件**。一方 2026-09-17 の検体は
+ * **入力グループ 1 にも 2 にも血液一式 (別値)** が在るので **2 件**が正しい。
+ *
+ * 【規則 — 決定論のみ。閾値も推測も作らない】
+ * `N枚目` は「**分割候補の境界**」としてだけ使う。件数 (11 項目揃っているか等) や
+ * 項目の種類で判断しない。原本順にトップレベル入力グループを見て、
+ *
+ *   A. 現在の episode と**重複する canonical 項目が無い**
+ *      → 同じ人間ドックの続きページ。**現在の episode へ結合**
+ *   B. 重複はあるが**値が全部同じ**
+ *      → 同じ検査内容の重複記載。**現在の episode へ結合** (最後の
+ *        `extractBloodSubset()` が 1 行に畳む)
+ *   C. 重複する canonical 項目のうち**1 つでも値が異なる**
+ *      → **そのグループから新しい episode を開始**
+ *
+ * **ページ途中では分割しない。** 同一トップレベルグループの中に別値が在る場合は
+ * 従来どおりその項目だけ `value_conflict` で除外する (§6)。
+ *
+ * **血液項目を 1 つも持たないグループは episode に属さない** (身体計測・画像所見の
+ * ページ)。結合しても結果は変わらないが、episode の境界判定に関わらせない。
+ *
+ * 【最終値】episode が確定したら、**属する全入力グループの元 measurements を結合して
+ * `extractBloodSubset()` を 1 回だけ通す**。これで同一人間ドックの複数ページは 1 件へ
+ * 統合され、独立した複数の血液結果は複数件になる。
+ * **OCR / Gemini / PDF の再解析はしない** — 材料は保存済みの Markdown / measurements だけ。
+ */
+export interface BloodEpisodeSourceGroup {
+  /** 原本の「N枚目」の番号。 */
+  index: number;
+  label?: string | null;
+  measurements: readonly LeanMeasurement[];
+}
+
+export interface BloodEpisode {
+  /** **episode 番号** (原本順に 1, 2, 3…)。`external_test_id` の `g<N>` はこれ。 */
+  index: number;
+  /** この episode に属する入力グループの「N枚目」番号 (原本順)。 */
+  groupIndexes: number[];
+  /** 先頭の入力グループの見出し (監査用)。 */
+  label: string | null;
+  /** 属する全入力グループの元 measurements を結合したもの (整形前)。 */
+  measurements: LeanMeasurement[];
+}
+
+/** canonical 項目名 → その episode で確定している値 (結合判定用)。 */
+type EpisodeValues = Map<string, LeanMeasurement>;
+
+export function buildBloodEpisodes(
+  groups: readonly BloodEpisodeSourceGroup[],
+): BloodEpisode[] {
+  const out: BloodEpisode[] = [];
+  let cur: BloodEpisode | null = null;
+  let curValues: EpisodeValues = new Map();
+
+  for (const g of groups) {
+    // そのグループの 15 対象項目 (canonical item / value)。**ここで閾値は見ない。**
+    const { kept } = extractBloodSubset(g.measurements);
+    if (kept.length === 0) continue;            // 血液項目を持たないページは境界に関わらせない
+
+    const mine: EpisodeValues = new Map();
+    for (const m of kept) mine.set(String(m.name), m);
+
+    if (cur == null) {
+      cur = { index: out.length + 1, groupIndexes: [g.index], label: g.label ?? null, measurements: [...g.measurements] };
+      curValues = mine;
+      out.push(cur);
+      continue;
+    }
+
+    // 重複する canonical 項目のうち、値が異なるものが 1 つでもあるか (規則 C)。
+    let differs = false;
+    for (const [name, m] of mine) {
+      const prev = curValues.get(name);
+      if (prev && !sameValue(prev, m)) { differs = true; break; }
+    }
+
+    if (differs) {
+      cur = { index: out.length + 1, groupIndexes: [g.index], label: g.label ?? null, measurements: [...g.measurements] };
+      curValues = mine;
+      out.push(cur);
+      continue;
+    }
+
+    // 規則 A (重複なし) / B (重複あり・値は全部同じ) → 現在の episode へ結合。
+    cur.groupIndexes.push(g.index);
+    cur.measurements.push(...g.measurements);
+    for (const [name, m] of mine) if (!curValues.has(name)) curValues.set(name, m);
+  }
+  return out;
 }
 
 /**
@@ -171,7 +278,7 @@ export function orderDerivedSiblings<T extends {
   for (const idx of slots.values()) {
     if (idx.length < 2) continue;              // 1 件なら並べ替える相手がいない
     const picked = idx.map((i) => out[i]).sort((a, b) =>
-      (derivedBloodGroupIndex(a.external_test_id) ?? 0) - (derivedBloodGroupIndex(b.external_test_id) ?? 0)
+      (derivedBloodEpisodeIndex(a.external_test_id) ?? 0) - (derivedBloodEpisodeIndex(b.external_test_id) ?? 0)
       || String(a.id ?? '').localeCompare(String(b.id ?? '')));
     idx.forEach((i, k) => { out[i] = picked[k]; });
   }
