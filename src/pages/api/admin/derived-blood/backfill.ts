@@ -185,26 +185,58 @@ export const POST: APIRoute = async ({ request }) => {
   let hc = (hcRaw ?? []) as HcRow[];
 
   /*
-   * `mode:'pending'` は**未処理だけ**。同じ受診日に派生 blood (active) が既に在る回は外す。
-   * **冪等なので流しても壊れない**が、「未処理すべて」と言って処理済みまで触るのは約束違反。
-   * `mode:'one'` では外さない — 日付を명示した回は「作り直したい」ことがあるため
-   * (冪等なので増えない)。
+   * ── 処理済み (= 既に active な派生 blood が在る受診日) を引く ──────────────
+   *
+   * **fail-closed** (発注者指示 2026-10-03 ②)。引けなかったら 500 で終わり、
+   * `persistDerivedBloodArtifact()` を **1 回も呼ばない**。
+   * 「DB エラーを未処理 0 件として扱う」と、**既に在る派生を作り直してしまう**
+   * (本番の `2026-09-17` / `2026-09-24` がその対象になる)。
+   *
+   * **mode に関わらず引く** — `'one'` でも処理済みなら何も書かない (下・③)。
    */
-  let alreadyDone: string[] = [];
+  const { data: derivedRaw, error: derivedErr } = await dsb
+    .from('test_artifacts')
+    .select('test_date')
+    .eq('diagnostic_user_id', uid)
+    .eq('test_type', 'blood')
+    .eq('status', 'active')
+    .eq('imported_by', DERIVED_HC_BLOOD_IMPORTED_BY);
+  if (derivedErr) {
+    return json({
+      ok: false, error: 'db_error',
+      detail: `既存の派生 blood を照会できませんでした: ${String(derivedErr.message ?? derivedErr)}`,
+      note: '処理済みの回を判定できないため、何も書いていません (作り直しを避けるため)。',
+      diagnostic_user_id: uid, test_date: testDate,
+    }, 500);
+  }
+  const done = new Set(
+    ((derivedRaw ?? []) as { test_date: string | null }[])
+      .map((r) => String(r.test_date ?? '').slice(0, 10))
+      .filter(Boolean),
+  );
+  const alreadyDone = [...done].sort();
+
+  /*
+   * ── ③ **`mode:'one'` でも処理済みなら作り直さない** (発注者指示 2026-10-03) ──
+   *
+   * この機能は「**未処理**の人間ドックから Dashboard 用 blood を生成する」ためのもの。
+   * **再生成・置換はしない** (`replace:true` のような口も作らない)。
+   * 本番に在る `2026-09-17` / `2026-09-24` を作り直さないための歯止め。
+   *
+   * superseded / withdrawn の派生は `done` に入らない (上の query が active 限定) ので、
+   * 通常 blood に差し替わった回は改めて処理できる。
+   */
+  if (mode === 'one' && testDate && done.has(testDate)) {
+    return json({
+      ok: true, mode: 'preview', selection: 'one', already_processed: true,
+      note: `${testDate} には既に active な派生 blood が在ります。作り直しはしないので何も書いていません。`,
+      diagnostic_user_id: uid, test_date: testDate,
+      already_done_dates: alreadyDone,
+      targets: [], verification: await readBack(dsb, uid),
+    });
+  }
+
   if (mode === 'pending') {
-    const { data: derivedRaw } = await dsb
-      .from('test_artifacts')
-      .select('test_date')
-      .eq('diagnostic_user_id', uid)
-      .eq('test_type', 'blood')
-      .eq('status', 'active')
-      .eq('imported_by', DERIVED_HC_BLOOD_IMPORTED_BY);
-    const done = new Set(
-      ((derivedRaw ?? []) as { test_date: string | null }[])
-        .map((r) => String(r.test_date ?? '').slice(0, 10))
-        .filter(Boolean),
-    );
-    alreadyDone = [...done].sort();
     hc = hc.filter((r) => !done.has(String(r.test_date ?? '').slice(0, 10)));
     if (hc.length === 0) {
       return json({

@@ -82,29 +82,61 @@ function labNameOf(testType: AdditionalTestType): string | null {
 
 
 /**
- * **納品の直前の関門**: この artifact が人間ドック由来の派生 blood なら理由を返す。
- * 派生でなければ `null`（通常どおり納品する = §16 の「通常 blood は従来どおり」）。
+ * **Elith へ出す前の最後の関門** (発注者指示 2026-10-03 ①)。
  *
- * 引けなかったときは `null` を返す（= 止めない）。ここで止めると、DB が一時的に
- * 引けないだけで**正規の血液検査の納品まで落ちる**。構造上の保証は手前の 2 つ
- * （候補除外・書き込み禁止）が担っており、ここは最後の念押し。
+ * ══════════════════════════════════════════════════════════════════
+ * **`test_type='blood'` のときは fail-closed。**
+ * ══════════════════════════════════════════════════════════════════
+ * 「取得できて、かつ `imported_by != derived_healthcheck_blood` と**確認できた**とき」だけ
+ * 通す。Supabase が無い / query が失敗 / 行が無い / 例外 — **確認できない場合は通さない**。
+ *
+ * 【なぜ fail-open では駄目か】最上位仕様は「派生 blood は Elith へ**絶対に**送らない」。
+ * 「確認できなかったから通した」は、その絶対を条件付きに変えてしまう。
+ * DB が一時的に引けないだけなら**管理者がやり直せば通る**ので、止める側の損失は小さい。
+ *
+ * **blood 以外にはこの fail-closed を適用しない** — 検診・がん・遺伝子・AI疾病予測は
+ * そもそも派生 blood になり得ないので、ここで止めると**無関係な登録が DB の瞬断で落ちる**。
  */
-async function assertNotDerivedBlood(artifactId: string): Promise<string | null> {
+type BloodGuard =
+  | { ok: true }
+  | { ok: false; kind: 'derived'; detail: string }
+  | { ok: false; kind: 'unverifiable'; detail: string };
+
+/*
+ * **検査のために export してある。** 候補除外 (`resolveAdditionalArtifact`) と
+ * 書き込み禁止 (`persistIntoExistingArtifact`) が効いているので、
+ * **`derived` の枝は API 経由では構造上到達しない** = 多重防御が働いている証拠だが、
+ * それだと「規則の本体」が一度も動かないまま緑になる。だから直接呼べるようにしている。
+ * Astro は HTTP メソッド名と `prerender` / `config` 以外の export を route として扱わない。
+ */
+export async function elithBloodGuard(artifactId: string, testType: AdditionalTestType): Promise<BloodGuard> {
+  // blood 以外は従来どおり (fail-closed にしない)。
+  if (testType !== 'blood') return { ok: true };
+  const unverifiable = (why: string): BloodGuard => ({
+    ok: false, kind: 'unverifiable',
+    detail: `派生 blood でないことを確認できませんでした (${why})。`
+      + ' Elith へは出していません。時間をおいてやり直してください。',
+  });
+  let data: unknown;
   try {
     const sb = getServerSupabase();
-    if (!sb) return null;
+    if (!sb) return unverifiable('Supabase に接続できない');
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const { data } = await (sb.schema('diagnosis') as any)
+    const r = await (sb.schema('diagnosis') as any)
       .from('test_artifacts')
       .select('test_type, imported_by')
       .eq('id', artifactId)
       .maybeSingle();
-    return isDerivedHealthcheckBlood(data as { test_type?: string; imported_by?: string } | null)
-      ? DERIVED_HC_BLOOD_ELITH_BLOCK
-      : null;
-  } catch {
-    return null;
+    if (r?.error) return unverifiable(`照会に失敗: ${String(r.error.message ?? r.error)}`);
+    data = r?.data;
+  } catch (e) {
+    return unverifiable(`例外: ${e instanceof Error ? e.message : String(e)}`);
   }
+  if (!data) return unverifiable('artifact を取得できない');
+  if (isDerivedHealthcheckBlood(data as { test_type?: string; imported_by?: string })) {
+    return { ok: false, kind: 'derived', detail: DERIVED_HC_BLOOD_ELITH_BLOCK };
+  }
+  return { ok: true };
 }
 
 export const POST: APIRoute = async ({ request }) => {
@@ -349,6 +381,30 @@ export const POST: APIRoute = async ({ request }) => {
     },
   };
 
+  /*
+   * ── 6b: **Elith へ出す前の関門**（発注者指示 2026-10-03 ①）─────────────
+   *
+   * ★ **source JSON を書く前に置く。** ここが要点 —
+   * 中間 source prefix に置いた `BloodTestData_*.json` は
+   * `inventoryElithSource()` → `assembleElithDeliverySet()` が**キー名で拾う**ので、
+   * **source へ書いた時点で「将来の納品対象」になってしまう**。
+   * 「`deliverAdditionalJson()` の直前」では遅い (`deliver:false` でも source は書くため)。
+   *
+   * **blood だけ fail-closed** (上の `elithBloodGuard`)。確認できなければ
+   * **S3 に 1 バイトも書かずに** 503 で返す。
+   */
+  const guard = await elithBloodGuard(saved.artifactId, testType);
+  if (!guard.ok) {
+    return json(
+      guard.kind === 'derived'
+        ? { ...base, ok: false, error: 'derived_blood_not_deliverable', detail: guard.detail, delivered: false,
+            note: 'S3 には 1 バイトも書いていません。' }
+        : { ...base, ok: false, error: 'elith_guard_unverifiable', detail: guard.detail, delivered: false,
+            note: 'S3 には 1 バイトも書いていません。DB の登録は済んでいます。' },
+      guard.kind === 'derived' ? 409 : 503,
+    );
+  }
+
   // ── 7: source JSON（中間・監査層）────────────────────────────────────
   const cfg = getS3Config();
   const sourceKey = buildAdditionalSourceKey({ prefix: cfg?.prefix ?? '', uid, testDate, formatId });
@@ -401,24 +457,6 @@ export const POST: APIRoute = async ({ request }) => {
       ...base, ok: true, configured: true, source_key: sourceKey, delivery: null, delivered: false,
       note: 'Elith 本番へは出していません。納品は「スペシャルアカウント」画面の［Elith納品］から実行してください。',
     });
-  }
-
-  /*
-   * ── Elith 本番納品 + 読戻し（§24 / §29）────────────────────────────
-   *
-   * ★ **多重防御**: 人間ドック由来の派生 blood は Elith 納品の対象にしない
-   * (発注者指示 2026-10-03 §0 / §15)。`resolveAdditionalArtifact()` が派生を候補から
-   * 外し、`persistIntoExistingArtifact()` も派生への書き込みを止めているので
-   * **ここへ派生 artifact が来ることは構造上起こらない**が、
-   * 「JSON 生成・S3 配置の直前で必ず確かめる」関門を 1 つ置いておく。
-   * 将来この手前の経路が変わっても、**納品だけは絶対に通らない。**
-   */
-  const guard = await assertNotDerivedBlood(saved.artifactId);
-  if (guard) {
-    return json({
-      ...base, ok: false, error: 'derived_blood_not_deliverable', detail: guard,
-      source_key: sourceKey, delivered: false,
-    }, 409);
   }
 
   const subject = await makeSubjectResolver()(uid).catch(() => null);

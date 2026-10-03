@@ -4,7 +4,7 @@
 |---|---|
 | 文書 ID | `healthcheckup_blood_extraction_spec_20261001` |
 | 業務仕様の正 | Wellfort「人間ドック・健康診断由来 血液検査データ連携仕様書 v1.1 (2026-10-01)」(発注者支給) |
-| 版 | **v4.0 (2026-10-03・Elith 納品からの全面除外を確定)** |
+| 版 | **v4.1 (2026-10-03・レビュー指摘で fail-closed 3 点を追加)** |
 | 状態 | **確定仕様＋実装済み** |
 
 > **v1.x / v2.x は 2026-10-02 に全て revert 済み** (PR #288 / #290 / #291 / #292 → PR #293)。
@@ -58,6 +58,23 @@
 
 > **「新しく派生を作らない」だけでは足りない。** 既に Production DB に在る派生 artifact が
 > 将来どの Elith 経路からも流れないことを保証する。
+
+### 0.0.1 fail-closed (**発注者レビュー 2026-10-03 ①②③**)
+
+「確認できなかったから通した」を 3 か所で潰した。**最上位仕様は「絶対に送らない」**なので、
+確認不能を許可側に倒すと絶対が条件付きになる。DB の瞬断なら**やり直せば通る**ので止める損失は小さい。
+
+| # | 箇所 | 以前 | いま |
+|---|---|---|---|
+| ① | `finalize.ts` の Elith 最終関門 | Supabase 無し / query 失敗 / 例外 / 行が無い → **`null` を返して納品を許可** | **`test_type='blood'` のときは、取得できて `imported_by != derived` と確認できたときだけ通す。** 確認不能 → **503 `elith_guard_unverifiable` / `delivered:false` / S3 write 0**。派生と確認 → 409 `derived_blood_not_deliverable`。**blood 以外には適用しない** |
+| ② | backfill の処理済み照会 | `error` を見ておらず、**DB エラーを「未処理 0 件」として扱っていた** | **500 `db_error` で終了**。`persistDerivedBloodArtifact()` を **1 回も呼ばない** |
+| ③ | `mode:'one'` | 指定日に active な派生が在っても**作り直していた** | **`already_processed` で何も書かない。** 再生成・置換の口 (`replace:true` 等) は**作らない** |
+
+> **① は「関門の位置」も直した。** 以前は `deliverAdditionalJson()` の直前に置いていたが、
+> **その手前で中間 source prefix へ `BloodTestData_*.json` を書いていた**。
+> source の JSON は `inventoryElithSource()` がキー名で拾い `assembleElithDeliverySet()` が納品するので、
+> **source へ書いた時点で「将来の納品対象」**になる (しかも `deliver:false` でも source は書く)。
+> → 関門を **source JSON の `putFiles` より前**へ移した。検査が位置を固定している。
 
 ### 0.1 保証の形 (3 段)
 
@@ -247,7 +264,7 @@ Dashboard の推移グラフへ反映する。
 | 7 | `src/components/dashboard/MetricTrendChart.astro` | 「人間ドックから抽出」(履歴テーブルの検査日セル 2 行目 + 最新点のミニカード) |
 | 8 | `src/pages/api/admin/lab-results/register.ts` | 通常 blood 到着時の supersede |
 | 9 | `src/pages/api/admin/derived-blood/backfill.ts` (新規) | **正式な server-side admin backfill** (§11) |
-| 10 | `scripts/verify-blood-subset.mjs` (新規) | 回帰 **264 件**。CI の `static-required` |
+| 10 | `scripts/verify-blood-subset.mjs` (新規) | 回帰 **295 件**。CI の `static-required` |
 | 11 | `src/lib/special-additional-tests.ts` | 追加検査の artifact 候補から**派生を外す** (§0.2) |
 | 12 | `src/pages/api/admin/special-additional-tests/finalize.ts` | 検診登録で**派生を 1 回だけ作る** (§11) / 血液登録で同日の派生を降ろす / **納品の直前の関門** |
 
@@ -348,6 +365,7 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 | 画面 | **UI は wellfort-site `/admin/derived-blood-backfill`** (CLAUDE.md「UI=wellfort-site / 処理=Scan-Chat-AI」)。**Scan-Chat-AI 側に admin 画面を作らない** |
 | 鍵 | wellfort-site の中継がサーバ側 env `SCAN_CHAT_AI_API_KEY` で付ける。**ブラウザへ鍵を出さない** |
 | 既定 | **`confirm` 無しは preview。DB にも S3 にも 1 行も書かない** (読み取りだけ) |
+| 再生成 | **しない。** `mode:'one'` でも指定日に **active な派生が在れば `already_processed` で何も書かない**。`replace:true` のような口は作らない |
 | 範囲 | **`mode` で明示する** (2026-10-03 §12 / §13)。`'one'` = 受診日を 1 つ指定 (受診日は**必須**) / `'pending'` = **その uid の未処理すべて** (= 同じ受診日に派生がまだ無い回だけ)。**「受診日を空欄にすると全件」という暗黙の操作は廃止**。未指定・未知の値・`'one'` で日付が空・`'pending'` に日付あり は**すべて 400**。**全ユーザー一括は実装しない** |
 | cron | **載せない** |
 | 材料 | `test_artifacts.measurements` (jsonb)。**Gemini も PDF も S3 も触らない** |
@@ -359,7 +377,7 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 
 ## 12. 検証
 
-### 12.1 `npm run verify:blood-subset` — **264 件**・CI の `static-required`
+### 12.1 `npm run verify:blood-subset` — **295 件**・CI の `static-required`
 
 サーバも鍵もブラウザも要らない。Supabase は**インメモリの偽物**
 (`on delete cascade` まで再現してある)。`demo-data` は通さない。
@@ -387,6 +405,9 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 | **⑨-4** | `buildDeliveryPlan` (manual) が **BloodTestData を 1 件も納品予定に入れない** (実際に 2 ファイル作られる = 空振りでない) |
 | **⑨-5/6** | cron の `manualMapping` に BloodTestData が無い (**コメント除去後**に確認) / **その mapping では source の BloodTestData が納品されない** / **mapping に載せれば納品される** (= 空振りでない・§16) / **再納品でも同じ** / **派生が在る/無いで納品物が同一** |
 | **⑨-7** | 同日に派生が在っても **通常 blood の登録が成功**し**新しい artifact** になる / 派生は **superseded (削除ではない)** / 別日の派生は無傷 / **通常 blood で ready:true** / グラフの点が通常の値に差し替わる |
+| **⑩-1** | ① **blood + 照会 DB error → 503 / S3 write 0** (source JSON も書かない) / Supabase 無しでも出さない / **派生と確認 → derived (409)** / **通常 blood は通る** / **blood 以外は照会せず通す** / blood で行が無ければ unverifiable |
+| **⑩-2** | ② 派生一覧の照会が落ちたら **`mode` を問わず 500 `db_error`** / **blood artifact 0 件・測定値 0 件** (1 回も呼ばない) |
+| **⑩-3** | ③ **本番の 2 件 (`2026-09-17` / `2026-09-24` `98bb8668…`) を `mode:'one'` で叩いても `already_processed`** / id の増減ゼロ / 測定値 11 件のまま / superseded は処理済みに数えない / **`replace` の口が無い** |
 
 **②-2 の fixture は本番の対象検体そのもの** — `docs/scan/golden/scan_golden_healthcheckup_20250123.md`
 の実測値で、**15 項目のうち 11 項目だけが在る**。期待値 11 件
@@ -394,7 +415,7 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 `空腹時血糖`=104 / `クレアチニン`=1.03 / `eGFR`=56.9 / `尿酸`=7.8) と、
 **行を作らない 4 項目** (総蛋白 / アルブミン / HbA1c(NGSP) / 尿素窒素) を固定している。
 
-### 12.2 退行注入 (**31 種とも名指しで落ちることを確認済み**・2026-10-02 / 10-03)
+### 12.2 退行注入 (**37 種とも名指しで落ちることを確認済み**・2026-10-02 / 10-03)
 
 | # | 壊し方 | 結果 |
 |---|---|---|
@@ -434,6 +455,17 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 | F-2 | supersede を `delete` にする (行を消す) | FAIL 4 |
 | F-3 | 候補解決が派生を返す | FAIL 13 |
 | F-4 | supersede が**別の日**の派生も降ろす | FAIL 4 |
+
+**レビュー指摘の fail-closed (①②③)**
+
+| # | 壊し方 | 結果 |
+|---|---|---|
+| G-1 | 関門を fail-open に戻す (確認不能→通す) | FAIL 7 |
+| G-2 | 関門を source JSON の**後ろ**へ動かす | FAIL 3 |
+| G-3 | fail-closed を blood 以外にも広げる | FAIL 3 |
+| G-4 | 派生一覧の `error` を無視する | FAIL 6 |
+| G-5 | `mode:'one'` の `already_processed` を外す | FAIL 7 |
+| G-6 | superseded も「処理済み」に数える | FAIL 1 |
 
 > **⑨ でも空振りを 2 件踏んだ (2026-10-03・記録)**: `buildDeliveryPlan` は
 > 「スペシャルアカウントとして登録されていません」で早期 return し、
