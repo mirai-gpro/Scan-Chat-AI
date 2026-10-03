@@ -304,6 +304,14 @@ const SERIES_NAME_ALIASES: Readonly<Record<string, string>> = {
   血中尿素窒素: '尿素窒素',
   Alb: 'アルブミン',
   ALB: 'アルブミン',
+  /*
+   * **2026-10-03 に `γ-GT` をマスタの同義語へ足したことの後始末** (上と同型)。
+   * 人間ドックの原本が `γ-GT` と印字する様式があり、足す前に書かれた行は
+   * canonical_name=null のままなので、読み出し時だけ `γ-GTP` へ寄せる。
+   * `γ-GTP` は `DEFAULT_TREND_ITEMS` に入っているので、寄せないと**既定のグラフが割れる**。
+   */
+  'γ-GT': 'γ-GTP',
+  'γGT': 'γ-GTP',
 };
 
 function seriesKey(r: { canonical_name: string | null; item_name?: string | null }): string | null {

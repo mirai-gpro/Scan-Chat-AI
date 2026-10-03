@@ -211,6 +211,12 @@ Dashboard の推移グラフへ反映する。
 | 15 項目が 1 件も取れない | **artifact も測定値も作らない** (裁定 Q-6)。health_checkup 側は通常どおり保存される |
 | 同一項目に**別値**が複数 (例 空腹時 54 と 随時 221 / 尿酸 5.9 と UA 7.2) | **その項目だけ除外**し理由を返す (裁定 Q-12)。推測で片方を選ばない。**他の項目は通常どおり出す** |
 | 同一項目に**同値**が別名で複数 | 1 件に畳む (競合にしない) |
+| 同一項目の別値が**別の入力グループ** (別の「N枚目」) に在る | **競合にしない。** グループごとに別の派生 blood を作る (§13)。2026-09-17 の LDL 96 / 102 がこれ |
+
+> **競合の判定は「同じ入力グループの中」だけ** (2026-10-03 §13)。
+> 1 件の health_checkup に独立した健診結果が 2 通入っている回で、**通ごとに違う値**を
+> 「同じ項目の別値」と見ると、15 項目のほとんどが `value_conflict` で落ちる
+> (実測 2026-09-17: **11 項目 → 1 項目**)。グループの**中**の競合は従来どおり除外する。
 
 ---
 
@@ -255,16 +261,17 @@ Dashboard の推移グラフへ反映する。
 
 | # | 実体 | 中身 |
 |---|---|---|
-| 1 | `src/lib/standard-master.ts` | ★4 件 (アルブミン / 尿素窒素 / 中性脂肪 / `e-GFR` alias)。**空腹時/随時 は alias にしない** |
-| 2 | `src/lib/blood-subset.ts` (新規) | **I/O 無しの純関数だけ。** 15 項目マスタ・抽出・TG 統合・競合除外・marker・固定文言 |
-| 3 | `src/lib/scan-persist.ts` | `replaceSameDateArtifacts` に任意 `importedBy` / `persistDerivedBloodArtifact()` / `supersedeDerivedBloodOnSameDate()` / `saveScanResult` の後段から呼ぶ |
+| 1 | `src/lib/standard-master.ts` | ★4 件 (アルブミン / 尿素窒素 / 中性脂肪 / `e-GFR` alias) ＋ **`γ-GT` / `γGT` を `γ-GTP` の同義語へ (§13.8)**。**空腹時/随時 は alias にしない** |
+| 2 | `src/lib/blood-subset.ts` (新規) | **I/O 無しの純関数だけ。** 15 項目マスタ・抽出・TG 統合・競合除外・marker・固定文言 ＋ **sibling 識別子** (`derivedBloodExternalTestId` / `…ParentId` / `…GroupIndex`・§13.4) |
+| 3 | `src/lib/scan-persist.ts` | `replaceSameDateArtifacts` に任意 `importedBy` / **`externalTestId`** / `persistDerivedBloodArtifact()` (**グループごとに 1 件・`onlyGroups`**) / **`toDerivedBloodGroups()`** / `supersedeDerivedBloodOnSameDate()` / `saveScanResult` の後段から呼ぶ |
 | 4 | `src/lib/elith-entitlement.ts` | `countsTowardReadiness()` |
 | 5 | `src/lib/measurement-queries.ts` | `activeArtifacts()` が `imported_by` も返す / 点に `source` / 混在系列の基準線抑止 / **`SERIES_NAME_ALIASES` にマスタ追加の後始末 (§9.4)** |
 | 6 | `src/lib/dashboard-queries.ts` | `MetricTrendPoint.source` の型 |
+| 6' | `src/lib/elith-export.ts` | **`measurementGroupsFromMarkdown()` / `sheetGroupNumber()`** (入力グループの境界・§13.2)。**`measurementsFromMarkdown()` は 1 行も変えていない** |
 | 7 | `src/components/dashboard/MetricTrendChart.astro` | 「人間ドックから抽出」(履歴テーブルの検査日セル 2 行目 + 最新点のミニカード) |
 | 8 | `src/pages/api/admin/lab-results/register.ts` | 通常 blood 到着時の supersede |
 | 9 | `src/pages/api/admin/derived-blood/backfill.ts` (新規) | **正式な server-side admin backfill** (§11) |
-| 10 | `scripts/verify-blood-subset.mjs` (新規) | 回帰 **295 件**。CI の `static-required` |
+| 10 | `scripts/verify-blood-subset.mjs` (新規) | 回帰 **413 件**。CI の `static-required` |
 | 11 | `src/lib/special-additional-tests.ts` | 追加検査の artifact 候補から**派生を外す** (§0.2) |
 | 12 | `src/pages/api/admin/special-additional-tests/finalize.ts` | 検診登録で**派生を 1 回だけ作る** (§11) / 血液登録で同日の派生を降ろす / **納品の直前の関門** |
 
@@ -289,8 +296,9 @@ B' だけが別経路なので、そこへ 1 回だけ追加した。
 
 ### 9.1 冪等
 
-`replaceSameDateArtifacts` に **5 条件** `(uid, 'blood', test_date, 'user_upload', imported_by=marker)`。
-**何度叩いても artifact は増えない。** `measurement_values` も artifact 単位の総入れ替え。
+`replaceSameDateArtifacts` に **5 条件** `(uid, 'blood', test_date, 'user_upload', imported_by=marker)`
+＋ **6 つ目の任意条件 `external_test_id`** (sibling を消し合わせないため・§13.5)。
+**何度叩いても artifact はグループ数を超えて増えない。** `measurement_values` も artifact 単位の総入れ替え。
 
 `imported_by` を 5 つ目に足すのは、`source='user_upload'` を他の経路と共有するため。
 active な行なら §7 の優先判定が先に止めるが、**superseded / withdrawn の行はそこを通らない**ので
@@ -356,7 +364,7 @@ active な行なら §7 の優先判定が先に止めるが、**superseded / wi
 
 ```
 POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
-  body: { diagnosticUserId, testDate?, confirm?: boolean }
+  body: { diagnosticUserId, mode: 'one' | 'pending', testDate?, confirm?: boolean }
 ```
 
 | 条件 | 内容 |
@@ -365,10 +373,11 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 | 画面 | **UI は wellfort-site `/admin/derived-blood-backfill`** (CLAUDE.md「UI=wellfort-site / 処理=Scan-Chat-AI」)。**Scan-Chat-AI 側に admin 画面を作らない** |
 | 鍵 | wellfort-site の中継がサーバ側 env `SCAN_CHAT_AI_API_KEY` で付ける。**ブラウザへ鍵を出さない** |
 | 既定 | **`confirm` 無しは preview。DB にも S3 にも 1 行も書かない** (読み取りだけ) |
-| 再生成 | **しない。** `mode:'one'` でも指定日に **active な派生が在れば `already_processed` で何も書かない**。`replace:true` のような口は作らない |
+| 再生成 | **しない。** `mode:'one'` でも **全グループ済みなら `already_processed` で何も書かない**。`replace:true` のような口は作らない。**処理済みの判定はグループ単位** (§13.7) |
 | 範囲 | **`mode` で明示する** (2026-10-03 §12 / §13)。`'one'` = 受診日を 1 つ指定 (受診日は**必須**) / `'pending'` = **その uid の未処理すべて** (= 同じ受診日に派生がまだ無い回だけ)。**「受診日を空欄にすると全件」という暗黙の操作は廃止**。未指定・未知の値・`'one'` で日付が空・`'pending'` に日付あり は**すべて 400**。**全ユーザー一括は実装しない** |
 | cron | **載せない** |
-| 材料 | `test_artifacts.measurements` (jsonb)。**Gemini も PDF も S3 も触らない** |
+| 材料 | `test_artifacts.measurements` (jsonb) ＋ **入力グループの境界だけ `scan_md` から読む** (§13.3)。**Gemini も PDF も S3 も触らない** |
+| 旧ロジック由来 | **`external_test_id` を持たない派生が同日に在る回は自動では触らない** (`legacy_derived:true`)。本番の `9d350c7e…` がこれ。置き換えは発注者の指示を受けてから (§13.7) |
 | 読み戻し | **Dashboard / 推移グラフ / readiness が本番で使う同じ関数**を通して結果を返す (`loadDashboard` / `getTrendCandidates` / `getMeasurementTrend` / `checkFormatsReady`)。独自クエリで「入っているはず」を作らない |
 
 **一時 E2E ページ・固定 UID のページ・テスト専用の本番ページは作らない** (v2.x の失敗の直接の対策)。
@@ -377,7 +386,7 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 
 ## 12. 検証
 
-### 12.1 `npm run verify:blood-subset` — **295 件**・CI の `static-required`
+### 12.1 `npm run verify:blood-subset` — **413 件**・CI の `static-required`
 
 サーバも鍵もブラウザも要らない。Supabase は**インメモリの偽物**
 (`on delete cascade` まで再現してある)。`demo-data` は通さない。
@@ -407,6 +416,7 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 | **⑨-7** | 同日に派生が在っても **通常 blood の登録が成功**し**新しい artifact** になる / 派生は **superseded (削除ではない)** / 別日の派生は無傷 / **通常 blood で ready:true** / グラフの点が通常の値に差し替わる |
 | **⑩-1** | ① **blood + 照会 DB error → 503 / S3 write 0** (source JSON も書かない) / Supabase 無しでも出さない / **派生と確認 → derived (409)** / **通常 blood は通る** / **blood 以外は照会せず通す** / blood で行が無ければ unverifiable |
 | **⑩-2** | ② 派生一覧の照会が落ちたら **`mode` を問わず 500 `db_error`** / **blood artifact 0 件・測定値 0 件** (1 回も呼ばない) |
+| **⑪-A〜J** | **入力グループごとの分割** (§13)。境界は「N枚目」だけ / `ページN` では割らない / 1 枚なら 1 グループ / **2026-09-17 と同じ fixture で A・B 11 項目ずつ** / 競合はグループ内だけ / sibling は消し合わない / 冪等 (3 回でも 2 件) / **親 id が変わる再送でも 2 件** / 片方 0 件なら片方だけ / 同日通常 blood で全グループ中止 / `saveScanResult` でも 2 件 / backfill の処理済みはグループ単位 / **旧ロジック由来は触らない** / **sibling が増えても Elith 全面除外は不変** |
 | **⑩-3** | ③ **本番の 2 件 (`2026-09-17` / `2026-09-24` `98bb8668…`) を `mode:'one'` で叩いても `already_processed`** / id の増減ゼロ / 測定値 11 件のまま / superseded は処理済みに数えない / **`replace` の口が無い** |
 
 **②-2 の fixture は本番の対象検体そのもの** — `docs/scan/golden/scan_golden_healthcheckup_20250123.md`
@@ -415,7 +425,7 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 `空腹時血糖`=104 / `クレアチニン`=1.03 / `eGFR`=56.9 / `尿酸`=7.8) と、
 **行を作らない 4 項目** (総蛋白 / アルブミン / HbA1c(NGSP) / 尿素窒素) を固定している。
 
-### 12.2 退行注入 (**37 種とも名指しで落ちることを確認済み**・2026-10-02 / 10-03)
+### 12.2 退行注入 (**46 種とも名指しで落ちることを確認済み**・2026-10-02 / 10-03)
 
 | # | 壊し方 | 結果 |
 |---|---|---|
@@ -455,6 +465,20 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 | F-2 | supersede を `delete` にする (行を消す) | FAIL 4 |
 | F-3 | 候補解決が派生を返す | FAIL 13 |
 | F-4 | supersede が**別の日**の派生も降ろす | FAIL 4 |
+
+**入力グループの分割 (§13・2026-10-03)**
+
+| # | 壊し方 | 結果 |
+|---|---|---|
+| S-1 | 内部ページ (`ページN`) も境界にする | FAIL 2 |
+| S-2 | 分割をやめて全部まとめて渡す (壊れていた形に戻す) | FAIL 58 |
+| S-3 | 冪等キーから `externalTestId` を外す (sibling が消し合う) | FAIL 9 |
+| S-4 | 全グループ run の事前片付けを外す (親 id が変わる再送で増える) | FAIL 10 |
+| S-5 | backfill の処理済み判定を受診日単位に戻す | FAIL 6 |
+| S-6 | 旧ロジック由来 (`external_test_id` なし) も自動で作り直す | FAIL 8 |
+| S-7 | 派生判定を `external_test_id` ベースに変える (marker を見ない) | FAIL 21 |
+| S-8 | `γ-GT` の同義語を外す | FAIL 9 |
+| S-9 | `scan_md` を常に優先する (jsonb の measurements を無視) | FAIL 6 |
 
 **レビュー指摘の fail-closed (①②③)**
 
@@ -504,3 +528,161 @@ POST /api/admin/derived-blood/backfill        (Bearer ADMIN_API_KEY)
 | AC-1 | 現行デメカル CSV の実ヘッダ 15 件と §4 の mapping の一致 (裁定 Q-1) |
 | AC-2 | Production の read-only 確認 (裁定 Q-14)。`source='user_upload' AND test_type='blood'` の既存行 / `imported_by='derived_healthcheck_blood'` の先行使用 / 同一日 blood の重複 — **backfill の preview がこの 3 つをそのまま返す**ので、別途 SQL を流す必要はない |
 | AC-3 | backfill は発注者の明示指示まで production で実行しない (裁定 Q-11) |
+
+---
+
+## 13. 入力グループ (「N枚目」) ごとの分割 (発注者指示 2026-10-03)
+
+### 13.1 何が起きていたか (実測)
+
+1 件の health_checkup に**独立した健診結果が 2 通**入っていることがある。
+アップロードが**複数ファイルを 1 回で受ける**ので、`joinPageMarkdown()`
+(`src/lib/scan-markdown.ts:51`) が `## 1枚目` / `## 2枚目` を付けて 1 本の
+`markdownClean` に束ねる。**これが原本の入力単位**。
+
+本番 `2026-09-17` がその形で、
+
+- 1 枚目 … LDL **96** / 総コレステロール 159 / 空腹時血糖 97 …
+- 2 枚目 … LDL **102** / 総コレステロール 196 / 空腹時血糖 104 …
+
+を**まとめて `extractBloodSubset()` に渡していた**ため、通ごとに違う値が
+「同じ項目の別値」に見えて `value_conflict` で両方落ち、
+**15 項目のうち 2 項目しか残らなかった**。
+除外の判断そのものは正しい (§6・推測で片方を選ばない)。**渡す単位が間違っていた。**
+
+### 13.2 分割の境界 — 「N枚目」**だけ**
+
+**値の内容からは一切分割しない** (発注者指示)。
+
+| 見出し | 扱い |
+|---|---|
+| `1枚目` / `２枚目` (全角も) | **境界。** そこから次の `N枚目` までが 1 グループ |
+| `1枚目 / ページ2` / `1枚目／ページ3` | **同じ 1 枚目グループ。** 内部のページ番号では割らない |
+| `ページ2` 単独 / `血液検査` / `3枚目の所見` | **境界ではない** (完全な形だけを見る) |
+| `N枚目` が 1 つも無い (1 枚だけの回) | **1 グループ**。従来と同じ挙動 |
+| 見出しの前の前文 | 1 グループ目に入れる |
+
+グループ番号は**原本の数字そのまま**なので、何度やり直しても同じ番号になる
+(= sibling の識別子が安定する)。
+
+実装 = `measurementGroupsFromMarkdown()` / `sheetGroupNumber()` (`src/lib/elith-export.ts`)。
+**`measurementsFromMarkdown()` (health_checkup 側の経路) は 1 行も変えていない** —
+通す整形は同じ `toMeasurements` → `sanitizeMeasurementsForDelivery` を
+**グループごとに**呼ぶだけ。検査が「全グループの合計 = まとめて整形した件数」を固定している。
+
+### 13.3 材料の選び方 (`toDerivedBloodGroups`)
+
+| 条件 | 使う材料 |
+|---|---|
+| `scan_md` が **2 グループ以上**に割れて、測定値が 1 件以上取れる | **markdown 由来の分割** |
+| 1 グループしか無い | **保存済み jsonb の `measurements`** = 従来と 1 バイトも変わらない |
+| 1 グループで jsonb が空 | markdown 由来 (材料がそれしかない) |
+| `scan_md` が無い (admin バッチ等) | jsonb の `measurements` を 1 グループ |
+
+**1 グループのときに markdown を優先しない**のが要点。`scan_md='## 原文'` のように
+表を持たない原文だと markdown 側は 0 件になるので、優先すると**従来 11 項目取れていた回が
+0 件になる** (実装中に実際に踏んだ。退行注入 S-9 がこれを固定している)。
+
+**再解析ではない** — `scan_md` は保存済みの確定 Markdown で、通すのは決定論関数だけ。
+Gemini も PDF も 1 度も呼ばない (v1.1 §3)。
+
+### 13.4 sibling の識別子 — **migration なし**
+
+> ## **既存カラム `external_test_id` を使う。migration は足さない。**
+
+`external_test_id = 'derived_hc:<親 health_checkup の artifact id>:g<グループ番号>'`
+(`derivedBloodExternalTestId()` / `derivedBloodParentId()` / `derivedBloodGroupIndex()`
+= `src/lib/blood-subset.ts`)。
+
+- **UNIQUE がこれで初めて効く。** `test_artifacts` の UNIQUE は
+  `(uid, source, test_type, test_date, external_test_id)` で、
+  **`external_test_id` が NULL のとき効かない** (`20260601000010:208` / §0.4 と同じ罠)。
+  グループ番号を入れると同じ受診日に 2 件並べても衝突しない。
+- `notes` にもグループの見出しを書く (監査用。`… / 1枚目` )。
+- **Elith 除外の判定には使わない。** 判定は `imported_by` の完全一致 1 本のまま (§8)。
+  `external_test_id` だけが派生の形をしていても派生とは見なさない
+  (検査 ⑪-J / 退行注入 S-7)。
+
+### 13.5 冪等 — 片付けの範囲を run の種類で変える
+
+| run | 片付ける範囲 |
+|---|---|
+| **全グループ** (`onlyGroups` 無し。新規保存・`mode:'one'` の初回) | ループの**前に 1 回**、その受診日の派生を `external_test_id` を問わず片付ける |
+| **一部だけ** (`onlyGroups` 指定。backfill の差分補完) | そのグループの `external_test_id` **完全一致**だけ |
+
+全グループ側で `external_test_id` を問わないのは、**`saveScanResult` で同じ回を送り直すと
+親 health_checkup の id が変わる**ため (古い行を片付けて insert し直す)。
+完全一致だけで片付けると**前の親の派生が残って 2 倍に増える** (退行注入 S-4)。
+一部だけ側で完全一致にするのは、**隣の sibling を巻き込んで消さない**ため (S-3)。
+
+`replaceSameDateArtifacts()` の条件は 4 → 6 個 (`importedBy` / `externalTestId` は任意) で、
+**渡さなければ既存 2 呼び出しの挙動は 1 バイトも変わらない。**
+
+### 13.6 グループごとの結果を黙らせない
+
+`DerivedBloodOutcome.siblings[]` (`groupIndex` / `externalTestId` / `created` /
+`reason` / `artifactId` / `rows` / `items` / `excluded` / `skipped`) と `groupCount`。
+`created` / `rows` / `items` は**全グループの合計 / 連結**で、内訳は `siblings` を見る。
+
+| ケース | 挙動 |
+|---|---|
+| 片方のグループから 0 件 | **そのグループだけ作らない。** 他方は通常どおり作る。`siblings[].reason='no_items'` |
+| どのグループも 0 件 | 何も作らない (§6 と同じ) |
+| 同日に通常 blood が在る | **どのグループも作らない** (§7 は受診日単位の規則なので不変) |
+| 通常 blood が後から届く | **sibling 全件を `superseded`** (`supersedeDerivedBloodOnSameDate` は marker と受診日で絞るので自然に全件) |
+
+### 13.7 backfill の処理済み判定は**グループ単位**
+
+`external_test_id` から `親 → 済んだグループ番号` を組み、**欠けているグループだけ**
+`onlyGroups` で作る。
+
+| 状態 | `mode:'one'` | `mode:'pending'` |
+|---|---|---|
+| 全グループ済み | `already_processed` (何も書かない) | 対象外 |
+| 一部のグループだけ済み | **欠けた分だけ作る** | 対象に拾う |
+| **`external_test_id` を持たない派生が同日に在る** (旧ロジック由来) | `already_processed` + `legacy_derived:true` | **対象外** |
+
+**旧ロジック由来を自動で触らないのが要件** (発注者指示: 既存の
+`9d350c7e-4de7-4cda-b854-5099f9687d06` を削除・supersede・再生成しない)。
+グループ番号が分からない行を「未処理」と見ると**作り直してしまう**ので、
+その受診日は**済み扱いで止める** (退行注入 S-6)。
+置き換えが要るなら**発注者の指示を受けてから**。
+
+preview は `group_count` / `missing_groups` / `legacy_derived` と
+`would_create.groups[]` (グループごとの項目名と件数) を返す。
+
+### 13.8 `γ-GT` を `γ-GTP` の同義語に足した
+
+原本が `γ-GT` と印字する様式がある (2026-09-17 の 1 枚目)。足さないと
+**15 項目のうち γ-GTP だけが落ちる**。
+
+- `standard-master.ts` の `γ-GTP` の `synonyms` に `γ-GT` / `γGT` を追加。
+  `normKey('γ-GT')='γ-gt'` で**既存のどのキーとも衝突しない** (確認済み)。
+- `measurement-queries.ts` の `SERIES_NAME_ALIASES` にも
+  `'γ-GT' → 'γ-GTP'` を追加。`canonical_name` は**書き込み時点で確定する**ので
+  マスタに足しても既存行には遡って付かず、寄せないと**既定の推移グラフ
+  (`DEFAULT_TREND_ITEMS` に γ-GTP が在る) が割れる** (§9.4 と同型)。
+- **`HealthCheckupData` の納品名は変わらない。** 納品名は `pickDeliveryName()` が決めており
+  `findByAlias()` を通さない。`canonicalize.ts` は通すが
+  **`scan.canonicalize` は既定 off** (CLAUDE.md) なので現行の本番では発火しない。
+  on にする判断をするときに**ここも 🎯 で見る**こと (`γ-GT` → `γ-GTP` に寄る)。
+- 同じ概念になることで `observation-dedup` (`scan.obs_dedup`) が
+  `γ-GT` と `γ-GTP` を同一概念として扱う。**同値なら畳む / 別値は競合記録で自動採用しない**
+  ので捏造は増えない。
+
+### 13.9 画面・グラフ (**発注者の判断待ち。実装では答えを出していない**)
+
+同じ受診日に sibling が 2 件並ぶので、**現状コードの挙動**を測った結果が以下。
+**どれもこちらの判断で変えていない。**
+
+| 画面 | 現状の挙動 |
+|---|---|
+| Dashboard の検査カード | 血液は**最新 1 件**を出す。同日の sibling の順序は `dashboard-queries` の `order` では決まらないので**どちらが出るかは不定** |
+| 「データ」ボタン | 上で選ばれた 1 件の `/result/{id}` へ行く。もう片方は `siblings` の切替から辿れるが、**同日なのでラベルが同じ**になる |
+| 推移グラフ | **2 点とも出る** (落とさない・平均しない)。同じ日に 2 点が並ぶ |
+| `getTrendCandidates` | 「日付の違う点が 2 つ以上」で数えるので、**同日 2 件だけでは候補に出ない** |
+
+> **発注者に確認したいこと**: 同日 2 点をグラフにどう出すか (① 2 点ともそのまま /
+> ② ラベルで区別 / ③ 片方を選ばせる)。**①「そのまま」が現状**で、
+> **捏造ゼロの観点では① が一番安全** (落とさない・作らない)。②③ は表示仕様の追加なので
+> **指示を受けてから実装する。**

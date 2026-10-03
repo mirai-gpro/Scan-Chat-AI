@@ -47,10 +47,14 @@ import { getServerSupabase } from '../../../../lib/supabase';
 import { refreshConfig } from '../../../../lib/app-config';
 import {
   persistDerivedBloodArtifact,
+  toDerivedBloodGroups,
   type DerivedBloodOutcome,
+  type DerivedBloodSourceGroup,
 } from '../../../../lib/scan-persist';
 import {
   extractBloodSubset,
+  derivedBloodGroupIndex,
+  derivedBloodParentId,
   DERIVED_HC_BLOOD_IMPORTED_BY,
   BLOOD_SUBSET_ITEMS,
 } from '../../../../lib/blood-subset';
@@ -87,6 +91,8 @@ interface HcRow {
   test_date: string | null;
   status: string | null;
   measurements: unknown;
+  /** **入力グループ (「N枚目」) の境界はここに在る** (§13)。無い回は 1 グループ扱い。 */
+  scan_md: string | null;
 }
 
 /** `test_artifacts.measurements` (jsonb・形は DB が保証しない) を lean の配列として検証する。 */
@@ -174,7 +180,8 @@ export const POST: APIRoute = async ({ request }) => {
   // ── ① 材料 = 保存済みの health_checkup (active)。**再解析しない** ──────────
   let q = dsb
     .from('test_artifacts')
-    .select('id, test_date, status, measurements')
+    // `scan_md` も引く — 入力グループの境界 (「N枚目」) がここに在る (§13)。
+    .select('id, test_date, status, measurements, scan_md')
     .eq('diagnostic_user_id', uid)
     .eq('test_type', 'health_checkup')
     .eq('status', 'active')
@@ -185,18 +192,20 @@ export const POST: APIRoute = async ({ request }) => {
   let hc = (hcRaw ?? []) as HcRow[];
 
   /*
-   * ── 処理済み (= 既に active な派生 blood が在る受診日) を引く ──────────────
+   * ── 処理済み判定は **グループ単位** (発注者指示 2026-10-03 §12) ──────────────
    *
-   * **fail-closed** (発注者指示 2026-10-03 ②)。引けなかったら 500 で終わり、
+   * **「その日付に派生が 1 件あれば処理済み」では誤判定する** — 1 件の health_checkup に
+   * 入力グループ (「N枚目」) が 2 つあるのに派生が 1 件しか無い回は**まだ未完了**。
+   * → `external_test_id` (`derived_hc:<親>:g<N>`) で**親 artifact ごとに
+   *   「どのグループが済んでいるか」**を持つ。
+   *
+   * **fail-closed** (②)。引けなかったら 500 で終わり、
    * `persistDerivedBloodArtifact()` を **1 回も呼ばない**。
-   * 「DB エラーを未処理 0 件として扱う」と、**既に在る派生を作り直してしまう**
-   * (本番の `2026-09-17` / `2026-09-24` がその対象になる)。
-   *
-   * **mode に関わらず引く** — `'one'` でも処理済みなら何も書かない (下・③)。
+   * 「DB エラーを未処理 0 件として扱う」と、**既に在る派生を作り直してしまう**。
    */
   const { data: derivedRaw, error: derivedErr } = await dsb
     .from('test_artifacts')
-    .select('test_date')
+    .select('test_date, external_test_id')
     .eq('diagnostic_user_id', uid)
     .eq('test_type', 'blood')
     .eq('status', 'active')
@@ -209,39 +218,76 @@ export const POST: APIRoute = async ({ request }) => {
       diagnostic_user_id: uid, test_date: testDate,
     }, 500);
   }
-  const done = new Set(
-    ((derivedRaw ?? []) as { test_date: string | null }[])
-      .map((r) => String(r.test_date ?? '').slice(0, 10))
-      .filter(Boolean),
-  );
-  const alreadyDone = [...done].sort();
+  const derivedRows = (derivedRaw ?? []) as { test_date: string | null; external_test_id: string | null }[];
+  /** 親 artifact id → 済んでいるグループ番号。 */
+  const doneByParent = new Map<string, Set<number>>();
+  /** 受診日 → その日に派生が 1 件以上在るか (旧ロジックで作られた `external_test_id=null` も拾う)。 */
+  const doneDates = new Set<string>();
+  for (const r of derivedRows) {
+    const d = String(r.test_date ?? '').slice(0, 10);
+    if (d) doneDates.add(d);
+    const parent = derivedBloodParentId(r.external_test_id);
+    const gi = derivedBloodGroupIndex(r.external_test_id);
+    if (parent && gi != null) {
+      const set = doneByParent.get(parent) ?? new Set<number>();
+      set.add(gi);
+      doneByParent.set(parent, set);
+    }
+  }
+  const alreadyDone = [...doneDates].sort();
 
   /*
-   * ── ③ **`mode:'one'` でも処理済みなら作り直さない** (発注者指示 2026-10-03) ──
+   * 各 health_checkup について「どのグループが未処理か」を出す。
    *
-   * この機能は「**未処理**の人間ドックから Dashboard 用 blood を生成する」ためのもの。
-   * **再生成・置換はしない** (`replace:true` のような口も作らない)。
-   * 本番に在る `2026-09-17` / `2026-09-24` を作り直さないための歯止め。
-   *
-   * superseded / withdrawn の派生は `done` に入らない (上の query が active 限定) ので、
-   * 通常 blood に差し替わった回は改めて処理できる。
+   * ⚠️ **`external_test_id` を持たない派生 (= 旧ロジックで作られた行)** は
+   * グループ番号が分からないので、**その受診日は「処理済み」として扱い自動では触らない**
+   * (本番の `2026-09-17` 2 項目 / `2026-09-24` 11 項目がこれ)。
+   * **置き換えは発注者の指示を受けてから**なので、ここで勝手に作り直さない (§11)。
    */
-  if (mode === 'one' && testDate && done.has(testDate)) {
-    return json({
-      ok: true, mode: 'preview', selection: 'one', already_processed: true,
-      note: `${testDate} には既に active な派生 blood が在ります。作り直しはしないので何も書いていません。`,
-      diagnostic_user_id: uid, test_date: testDate,
-      already_done_dates: alreadyDone,
-      targets: [], verification: await readBack(dsb, uid),
-    });
+  const planOf = (row: HcRow): { groups: DerivedBloodSourceGroup[]; missing: number[]; legacy: boolean } => {
+    const groups = toDerivedBloodGroups({ scanMd: row.scan_md, measurements: toLean(row.measurements) });
+    const date = String(row.test_date ?? '').slice(0, 10);
+    const doneGroups = doneByParent.get(row.id) ?? new Set<number>();
+    // この受診日に派生が在るのに、この親の sibling として記録が無い = 旧ロジック由来。
+    const legacy = doneDates.has(date) && doneGroups.size === 0;
+    const missing = groups.filter((g) => !doneGroups.has(g.index)).map((g) => g.index);
+    return { groups, missing, legacy };
+  };
+
+  /*
+   * ── ③ **`mode:'one'` でも処理済みなら作り直さない** ──────────────────────
+   * **全グループが済んでいる / 旧ロジック由来の行が在る** なら何も書かない。
+   * 一部のグループだけ欠けているときは**欠けている分だけ**作る (§12)。
+   */
+  if (mode === 'one' && testDate) {
+    const row = hc[0];
+    if (row) {
+      const { groups, missing, legacy } = planOf(row);
+      if (legacy || (groups.length > 0 && missing.length === 0)) {
+        return json({
+          ok: true, mode: 'preview', selection: 'one', already_processed: true,
+          note: legacy
+            ? `${testDate} には既に派生 blood が在ります (グループ識別子を持たない旧ロジック由来)。置き換えは指示を受けてから行うので、ここでは何も書いていません。`
+            : `${testDate} の入力グループ ${groups.length} 件はすべて派生 blood が作られています。作り直しはしないので何も書いていません。`,
+          diagnostic_user_id: uid, test_date: testDate,
+          group_count: groups.length, missing_groups: missing, legacy_derived: legacy,
+          already_done_dates: alreadyDone,
+          targets: [], verification: await readBack(dsb, uid),
+        });
+      }
+    }
   }
 
   if (mode === 'pending') {
-    hc = hc.filter((r) => !done.has(String(r.test_date ?? '').slice(0, 10)));
+    // **未処理のグループが 1 つ以上ある回だけ**を対象にする (旧ロジック由来は触らない)。
+    hc = hc.filter((r) => {
+      const { groups, missing, legacy } = planOf(r);
+      return !legacy && groups.length > 0 && missing.length > 0;
+    });
     if (hc.length === 0) {
       return json({
         ok: true, mode: confirm ? 'applied' : 'preview', selection: 'pending',
-        note: '未処理の検診・人間ドックはありません (すべて派生 blood が作られています)。何も書いていません。',
+        note: '未処理の入力グループはありません (すべて派生 blood が作られているか、旧ロジック由来のため触りません)。何も書いていません。',
         diagnostic_user_id: uid, test_date: null,
         already_done_dates: alreadyDone,
         targets: [], verification: await readBack(dsb, uid),
@@ -264,7 +310,16 @@ export const POST: APIRoute = async ({ request }) => {
     health_checkup_artifact_id: string;
     test_date: string | null;
     source_measurements: number;
-    would_create?: { items: string[]; count: number };
+    /** 原本から見つけた入力グループ (「N枚目」) の数。 */
+    group_count?: number;
+    /** まだ派生が無いグループ番号。 */
+    missing_groups?: number[];
+    /** `external_test_id` を持たない旧ロジック由来の派生が同日に在る。 */
+    legacy_derived?: boolean;
+    would_create?: {
+      items: string[]; count: number;
+      groups?: { group: number; label: string | null; items: string[]; count: number; excluded?: unknown; skipped?: number }[];
+    };
     outcome?: DerivedBloodOutcome;
     excluded?: unknown;
     skipped?: number;
@@ -280,21 +335,38 @@ export const POST: APIRoute = async ({ request }) => {
       });
       continue;
     }
+    const { groups, missing, legacy } = planOf(row);
     if (!confirm) {
-      // **preview は読み取りだけ。** extractBloodSubset は純関数。
-      const { kept, excluded, skipped } = extractBloodSubset(lean);
+      // **preview は読み取りだけ。** `extractBloodSubset` は純関数。
       targets.push({
         health_checkup_artifact_id: row.id, test_date: date, source_measurements: lean.length,
-        would_create: { items: kept.map((m) => String(m.name)), count: kept.length },
-        excluded, skipped,
+        group_count: groups.length, missing_groups: missing, legacy_derived: legacy,
+        would_create: {
+          // **グループごとの内訳**を出す (1 グループなら従来と同じ見え方)。
+          groups: groups
+            .filter((g) => missing.includes(g.index))
+            .map((g) => {
+              const { kept, excluded, skipped } = extractBloodSubset(g.measurements);
+              return { group: g.index, label: g.label ?? null, items: kept.map((m) => String(m.name)), count: kept.length, excluded, skipped };
+            }),
+          items: groups.filter((g) => missing.includes(g.index))
+            .flatMap((g) => extractBloodSubset(g.measurements).kept.map((m) => String(m.name))),
+          count: groups.filter((g) => missing.includes(g.index))
+            .reduce((a, g) => a + extractBloodSubset(g.measurements).kept.length, 0),
+        },
       });
       continue;
     }
     const outcome = await persistDerivedBloodArtifact(sb as never, {
-      diagnosticUserId: uid, testDate: date, sourceMeasurements: lean,
+      diagnosticUserId: uid, testDate: date,
+      parentArtifactId: row.id,
+      sourceGroups: groups,
+      // **欠けているグループだけ**作る (冪等・§12)。
+      onlyGroups: missing,
     });
     targets.push({
-      health_checkup_artifact_id: row.id, test_date: date, source_measurements: lean.length, outcome,
+      health_checkup_artifact_id: row.id, test_date: date, source_measurements: lean.length,
+      group_count: groups.length, missing_groups: missing, legacy_derived: legacy, outcome,
     });
   }
 

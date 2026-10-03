@@ -72,6 +72,44 @@ export function isDerivedHealthcheckBlood(
   return String(row.imported_by ?? '') === DERIVED_HC_BLOOD_IMPORTED_BY;
 }
 
+/* ════════════════════════════════════════════════════════════════════
+ * 派生 sibling の識別子 (2026-10-03 §8)
+ * ════════════════════════════════════════════════════════════════════
+ * 1 件の health_checkup に独立した入力グループ (「N枚目」) が複数あるとき、
+ * **グループごとに派生 blood を 1 件**作る。その 2 件を区別する識別子。
+ *
+ * **既存列 `test_artifacts.external_test_id` に入れる。migration は要らない。**
+ *   - `unique (diagnostic_user_id, source, test_type, test_date, external_test_id)`
+ *     は **`external_test_id` が NULL だと効かない**ので、値を入れて初めて
+ *     「同じ sibling を二重に作らない」が DB 側でも効く。
+ *   - **親 artifact id ＋ グループ番号から決まる**ので、backfill を何度流しても
+ *     同じ sibling を特定できる (= 増えない)。
+ *   - 通常 blood (`lab-results` 系) は `external_test_id` が NULL なので衝突しない。
+ *
+ * ⚠️ **Elith の除外判定にこれを使わない。** 除外は `imported_by` の完全一致 1 本
+ * (最上位ルール・§0)。sibling が 1 件でも 5 件でも Dashboard 専用。
+ */
+export const DERIVED_HC_BLOOD_EXTERNAL_PREFIX = 'derived_hc:';
+
+/** `derived_hc:<親 artifact id>:g<グループ番号>`。 */
+export function derivedBloodExternalTestId(parentArtifactId: string, groupIndex: number): string {
+  return `${DERIVED_HC_BLOOD_EXTERNAL_PREFIX}${String(parentArtifactId).trim()}:g${groupIndex}`;
+}
+
+/** `external_test_id` から派生 sibling のグループ番号を読む。派生でなければ null。 */
+export function derivedBloodGroupIndex(externalTestId: string | null | undefined): number | null {
+  const m = /^derived_hc:(.+):g(\d+)$/.exec(String(externalTestId ?? ''));
+  if (!m) return null;
+  const n = Number(m[2]);
+  return Number.isInteger(n) && n > 0 ? n : null;
+}
+
+/** `external_test_id` から親 health_checkup の artifact id を読む。派生でなければ null。 */
+export function derivedBloodParentId(externalTestId: string | null | undefined): string | null {
+  const m = /^derived_hc:(.+):g(\d+)$/.exec(String(externalTestId ?? ''));
+  return m ? m[1] : null;
+}
+
 /** 上の禁止を破ろうとしたときに各経路が返す理由。文言を 1 か所に持つ。 */
 export const DERIVED_HC_BLOOD_ELITH_BLOCK =
   '人間ドック由来の派生 blood (imported_by=derived_healthcheck_blood) は Dashboard 表示専用で、'

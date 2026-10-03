@@ -15,10 +15,11 @@
  * 正規化を通す。ここで独自に整形しない (CLAUDE.md「納品整形は決定論プログラムに集約」)。
  */
 
-import { extractExamDate, measurementsFromMarkdown } from './elith-export';
+import { extractExamDate, measurementsFromMarkdown, measurementGroupsFromMarkdown } from './elith-export';
 import {
   extractBloodSubset,
   isDerivedHealthcheckBlood,
+  derivedBloodExternalTestId,
   DERIVED_HC_BLOOD_IMPORTED_BY,
   DERIVED_HC_BLOOD_ELITH_BLOCK,
   type BloodSubsetExclusion,
@@ -65,8 +66,25 @@ export interface SaveScanResult {
   derivedBlood?: DerivedBloodOutcome;
 }
 
+/** 入力グループ (「N枚目」) 1 つぶんの結果。 */
+export interface DerivedBloodSibling {
+  /** 原本の「N枚目」の番号。 */
+  groupIndex: number;
+  /** `external_test_id` に入れた sibling 識別子。 */
+  externalTestId: string;
+  created: boolean;
+  reason?: 'no_items' | 'error';
+  artifactId?: string | null;
+  rows?: number;
+  items?: string[];
+  excluded?: BloodSubsetExclusion[];
+  skipped?: number;
+  detail?: string;
+}
+
 /** 派生 blood を作ったか / 作らなかったならなぜか。 */
 export interface DerivedBloodOutcome {
+  /** **1 件以上**作ったか。 */
   created: boolean;
   /**
    * `no_items`             … 15 項目が 1 件も取れなかった (裁定 Q-6。**何も作らない**)
@@ -84,6 +102,13 @@ export interface DerivedBloodOutcome {
   /** 15 項目に当たらなかった入力の件数 (監査用)。 */
   skipped?: number;
   detail?: string;
+  /**
+   * **入力グループごとの結果** (2026-10-03 §3)。1 グループなら 1 件。
+   * `created`/`rows`/`items` は**全グループの合計 / 連結**で、内訳はここを見る。
+   */
+  siblings?: DerivedBloodSibling[];
+  /** 原本から見つけた入力グループの数 (「N枚目」の数)。 */
+  groupCount?: number;
 }
 
 /**
@@ -123,7 +148,15 @@ async function replaceSameDateArtifacts(
    * **これが無いと将来の「利用者が血液検査の紙をスキャンした回」を巻き込んで消す**
    * (裁定 Q-4 と同じ理由)。
    */
-  q: { diagnosticUserId: string; testType: string; testDate: string; source: string; importedBy?: string },
+  /*
+   * `externalTestId` は**任意の 6 つ目の条件** (2026-10-03)。
+   * 派生 blood が**同じ受診日に複数 (sibling A / B)** 並ぶので、これが無いと
+   * **sibling B を作るときに sibling A を消す**。渡さなければ従来どおり。
+   */
+  q: {
+    diagnosticUserId: string; testType: string; testDate: string; source: string;
+    importedBy?: string; externalTestId?: string;
+  },
 ): Promise<{ deleted: number; superseded: number }> {
   const out = { deleted: 0, superseded: 0 };
   try {
@@ -137,6 +170,7 @@ async function replaceSameDateArtifacts(
       .eq('test_date', q.testDate)
       .eq('source', q.source);
     if (q.importedBy) sel = sel.eq('imported_by', q.importedBy);
+    if (q.externalTestId) sel = sel.eq('external_test_id', q.externalTestId);
     const { data: rows } = await sel;
     const ids: string[] = (rows ?? []).map((r: { id: string }) => r.id);
     if (ids.length === 0) return out;
@@ -293,7 +327,13 @@ export async function saveScanResult(
     derivedBlood = await persistDerivedBloodArtifact(sb as unknown as AnySchemaClient, {
       diagnosticUserId: input.diagnosticUserId,
       testDate,
-      sourceMeasurements: kept as unknown as LeanMeasurement[],
+      parentArtifactId: artifactId,
+      /*
+       * **入力単位 (「N枚目」) ごとに分ける** (§13)。`md` は**いま保存したものと同一**で、
+       * 通す整形も `measurementsFromMarkdown` と同じ決定論関数 = 再解析ゼロ。
+       * 1 枚だけの回は 1 グループ = 従来どおり 1 件。
+       */
+      sourceGroups: toDerivedBloodGroups({ scanMd: md, measurements: kept as unknown as LeanMeasurement[] }),
     });
   } catch (e) {
     derivedBlood = { created: false, reason: 'error', detail: e instanceof Error ? e.message : String(e) };
@@ -390,15 +430,62 @@ export async function supersedeDerivedBloodOnSameDate(
   }
 }
 
+/** 入力グループ 1 つぶんの材料。 */
+export interface DerivedBloodSourceGroup {
+  /** 原本の「N枚目」の番号 (`measurementGroupsFromMarkdown` の `index`)。 */
+  index: number;
+  label?: string | null;
+  /** そのグループだけの lean measurements。 */
+  measurements: readonly LeanMeasurement[];
+}
+
 /**
- * **人間ドック・健康診断の既存 measurements から派生 blood を 1 件作る。**
+ * 材料を**入力グループの配列**に揃える。
  *
- * 入力は `sanitizeMeasurementsForDelivery()` を通した後の lean measurement
- * (= `test_artifacts.measurements` jsonb と同じもの)。
+ * - `scan_md` を `measurementGroupsFromMarkdown()` に通して「N枚目」で割る。
+ *   **グループが 2 つ以上になった回だけ**、その分割を採る (ここが 2026-10-03 の本題)。
+ * - **1 グループしか無い回は、保存済み jsonb の measurements をそのまま使う**
+ *   = 従来と 1 バイトも変わらない。`scan_md` が在っても (表が無い / 様式が違う /
+ *   admin バッチが別経路で measurements を入れた) 取りこぼさない。
+ *   実測: `scan_md='## 原文'` のように表の無い原文だと markdown 側は 0 件になる。
+ * - jsonb が空で `scan_md` からしか取れない回は markdown 由来を使う (材料がそれだけ)。
+ *
+ * **再解析ではない** — `scan_md` は保存済みの確定 Markdown で、通す整形も
+ * `measurementsFromMarkdown` と同じ決定論関数。Gemini も PDF も触らない。
+ */
+export function toDerivedBloodGroups(input: {
+  scanMd?: string | null;
+  measurements?: readonly LeanMeasurement[] | null;
+}): DerivedBloodSourceGroup[] {
+  const lean = input.measurements ?? [];
+  const md = String(input.scanMd ?? '').trim();
+  if (md) {
+    const groups = measurementGroupsFromMarkdown(md);
+    const total = groups.reduce((a, g) => a + g.kept.length, 0);
+    const mapped = (): DerivedBloodSourceGroup[] => groups.map((g) => ({
+      index: g.index, label: g.label,
+      measurements: g.kept as unknown as LeanMeasurement[],
+    }));
+    // 分割が要る回 = 「N枚目」が 2 つ以上あって、実際に測定値が取れている。
+    if (groups.length > 1 && total > 0) return mapped();
+    // jsonb が空なら markdown 由来しか材料が無い。
+    if (groups.length === 1 && lean.length === 0 && total > 0) return mapped();
+  }
+  return lean.length > 0 ? [{ index: 1, label: null, measurements: lean }] : [];
+}
+
+/**
+ * **人間ドック・健康診断の既存 measurements から派生 blood を作る。**
+ *
+ * **入力グループ (「N枚目」) ごとに 1 件**作る (2026-10-03 §3)。
+ * 1 件の health_checkup に独立した健診結果が 2 通ぶん入っていれば **derived blood 2 件**。
+ * 入力グループが 1 つだけなら**従来どおり 1 件**。
+ *
+ * 入力は `sanitizeMeasurementsForDelivery()` を通した後の lean measurement。
  * **OCR / Gemini / PDF 解析は 1 度も呼ばない** (v1.1 §3「再解析しない」)。
  *
  * 元の health_checkup artifact には**一切触らない** — `id` / `status` /
- * `measurements` を 1 バイトも変えない。派生は**別の行**として作る (発注者指示 §6)。
+ * `measurements` を 1 バイトも変えない。派生は**別の行**として作る (§6)。
  *
  * **投げない。** 失敗は `reason:'error'` で返す。人間ドック側の保存結果は守る (§10.3)。
  */
@@ -407,37 +494,61 @@ export async function persistDerivedBloodArtifact(
   input: {
     diagnosticUserId: string;
     testDate: string;
-    /** health_checkup 側の lean measurements。**ここで再解析しない。** */
-    sourceMeasurements: readonly LeanMeasurement[] | null | undefined;
-    /** 由来の記録 (監査用)。既定は 'scan_md'。 */
+    /**
+     * 親の health_checkup artifact id。**sibling の識別子に使う**ので必須
+     * (`external_test_id = derived_hc:<親>:g<N>`)。
+     */
+    parentArtifactId: string;
+    /** 入力グループごとの材料 (推奨)。 */
+    sourceGroups?: readonly DerivedBloodSourceGroup[];
+    /** 後方互換: グループに割れない呼び出し。1 グループとして扱う。 */
+    sourceMeasurements?: readonly LeanMeasurement[] | null;
+    /** このグループ番号だけを作る (backfill の差分補完用)。空なら全グループ。 */
+    onlyGroups?: readonly number[];
     sourceFileKind?: string | null;
   },
 ): Promise<DerivedBloodOutcome> {
-  const { kept, excluded, skipped } = extractBloodSubset(input.sourceMeasurements);
+  const groups: DerivedBloodSourceGroup[] = input.sourceGroups
+    ? [...input.sourceGroups]
+    : toDerivedBloodGroups({ measurements: input.sourceMeasurements ?? [] });
 
-  // 裁定 Q-6: 0 件なら artifact も測定値も作らない。これは成立判定ではない。
-  if (kept.length === 0) {
-    return { created: false, reason: 'no_items', excluded, skipped, rows: 0, items: [] };
+  if (!input.parentArtifactId) {
+    return { created: false, reason: 'error', detail: '親の health_checkup artifact id が要ります', groupCount: groups.length };
   }
 
-  // 裁定 Q-10: 同日に通常 blood が在れば作らない。引けなければ作らない (fail-closed)。
+  /*
+   * 裁定 Q-10: 同日に通常 blood が在れば**どのグループも作らない** (通常 blood 優先)。
+   * 引けなければ作らない (fail-closed)。**グループ単位ではなく受診日単位の判断**
+   * — 同じ日に通常と派生を並べない、という規則なので。
+   */
   const normal = await findNormalBloodOnDate(sb, input.diagnosticUserId, input.testDate);
   if (normal == null) {
-    return { created: false, reason: 'error', excluded, skipped, detail: '同日の通常 blood を確認できませんでした (作成を見送りました)' };
+    return { created: false, reason: 'error', groupCount: groups.length, detail: '同日の通常 blood を確認できませんでした (作成を見送りました)' };
   }
   if (normal.length > 0) {
     return {
-      created: false, reason: 'normal_blood_exists', excluded, skipped,
+      created: false, reason: 'normal_blood_exists', groupCount: groups.length,
       detail: `同じ受診日に通常 blood が ${normal.length} 件あるため派生は作りません`,
     };
   }
 
-  try {
-    /*
-     * 冪等は**既存の仕組みをそのまま使う**。新しい方式を作らない (§10.2)。
-     * `importedBy` を足して**派生だけ**を差し替える = デメカル (`wellfort_lab`) や
-     * admin バッチ (`admin_batch`)、将来の実血液 user upload を巻き込まない。
-     */
+  const only = input.onlyGroups && input.onlyGroups.length > 0 ? new Set(input.onlyGroups) : null;
+  const siblings: DerivedBloodSibling[] = [];
+
+  /*
+   * ── 片付けの範囲は「全グループを作り直すのか」で変える ────────────────────
+   *
+   * **全グループ (`onlyGroups` 無し) = その受診日の派生を作り直す**ので、
+   * **`external_test_id` を問わず**同じ日の派生を先に 1 回片付ける。
+   * 【なぜ必要か・実測 2026-10-03】`saveScanResult` で同じ回を送り直すと
+   * **health_checkup の id が変わる** (古い行を片付けて insert し直すため) ので、
+   * sibling 識別子 (`derived_hc:<親>:g<N>`) も変わる。
+   * `external_test_id` 完全一致だけで片付けると**前の親の派生が残って 2 倍に増える**。
+   *
+   * **一部だけ (`onlyGroups` 指定 = backfill の差分補完) は、そのグループだけ**を
+   * `external_test_id` 完全一致で片付ける。隣の sibling を巻き込まない。
+   */
+  if (!only) {
     await replaceSameDateArtifacts(sb, {
       diagnosticUserId: input.diagnosticUserId,
       testType: 'blood',
@@ -445,50 +556,106 @@ export async function persistDerivedBloodArtifact(
       source: 'user_upload',
       importedBy: DERIVED_HC_BLOOD_IMPORTED_BY,
     });
-
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const dsb = sb.schema('diagnosis') as any;
-    const { data, error } = await dsb
-      .from('test_artifacts')
-      .insert([
-        {
-          diagnostic_user_id: input.diagnosticUserId,
-          source: 'user_upload',
-          test_type: 'blood',
-          test_date: input.testDate,
-          lab_name: null,          // 検査機関ではない
-          schema_version: '1.0',
-          display_mode: 'single',
-          page_count: 1,
-          imported_by: DERIVED_HC_BLOOD_IMPORTED_BY,
-          status: 'active',
-          // scan_md は入れない。原文は health_checkup 側の artifact に在る (二重に持たない)。
-          scan_md: null,
-          notes: '人間ドック・健康診断の既存AIスキャン結果から血液検査値を抽出（再解析なし）',
-        },
-      ])
-      .select('id');
-    if (error) return { created: false, reason: 'error', excluded, skipped, detail: String(error.message ?? error) };
-    const artifactId = (data?.[0] as { id?: string } | undefined)?.id;
-    if (!artifactId) return { created: false, reason: 'error', excluded, skipped, detail: 'test_artifacts の id を取得できませんでした' };
-
-    // 測定値は **persistMeasurements() が唯一の書き込み口** (CLAUDE.md)。独自 INSERT を作らない。
-    const r = await persistMeasurements(sb as unknown as SchemaClient, {
-      artifactId,
-      diagnosticUserId: input.diagnosticUserId,
-      testType: 'blood',
-      testDate: input.testDate,
-      measurements: kept as never,
-      sourceFileKind: input.sourceFileKind ?? 'scan_md',
-    });
-
-    return {
-      created: true, artifactId, rows: r.rows,
-      items: kept.map((m) => String(m.name)), excluded, skipped,
-    };
-  } catch (e) {
-    return { created: false, reason: 'error', excluded, skipped, detail: e instanceof Error ? e.message : String(e) };
   }
+
+  for (const g of groups) {
+    if (only && !only.has(g.index)) continue;
+    const externalTestId = derivedBloodExternalTestId(input.parentArtifactId, g.index);
+    const { kept, excluded, skipped } = extractBloodSubset(g.measurements);
+
+    // 裁定 Q-6: そのグループから 0 件なら、そのグループは作らない。
+    if (kept.length === 0) {
+      siblings.push({ groupIndex: g.index, externalTestId, created: false, reason: 'no_items', excluded, skipped, rows: 0, items: [] });
+      continue;
+    }
+    try {
+      /*
+       * 差分補完のときだけ、**このグループの `external_test_id` 完全一致**で片付ける
+       * (6 つ目の条件)。これが無いと**sibling B を作るときに sibling A を消す**。
+       * 全グループのときは上で 1 回片付けてあるので、ここでは何もしない。
+       */
+      if (only) {
+        await replaceSameDateArtifacts(sb, {
+          diagnosticUserId: input.diagnosticUserId,
+          testType: 'blood',
+          testDate: input.testDate,
+          source: 'user_upload',
+          importedBy: DERIVED_HC_BLOOD_IMPORTED_BY,
+          externalTestId,
+        });
+      }
+
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const dsb = sb.schema('diagnosis') as any;
+      const { data, error } = await dsb
+        .from('test_artifacts')
+        .insert([
+          {
+            diagnostic_user_id: input.diagnosticUserId,
+            source: 'user_upload',
+            test_type: 'blood',
+            test_date: input.testDate,
+            lab_name: null,
+            schema_version: '1.0',
+            display_mode: 'single',
+            page_count: 1,
+            imported_by: DERIVED_HC_BLOOD_IMPORTED_BY,
+            // **sibling 識別子** (§8)。UNIQUE がこれで初めて効く。
+            external_test_id: externalTestId,
+            status: 'active',
+            scan_md: null,
+            notes: `人間ドック・健康診断の既存AIスキャン結果から血液検査値を抽出（再解析なし / ${g.label ?? `${g.index}枚目`}）`,
+          },
+        ])
+        .select('id');
+      if (error) {
+        siblings.push({ groupIndex: g.index, externalTestId, created: false, reason: 'error', excluded, skipped, detail: String(error.message ?? error) });
+        continue;
+      }
+      const artifactId = (data?.[0] as { id?: string } | undefined)?.id;
+      if (!artifactId) {
+        siblings.push({ groupIndex: g.index, externalTestId, created: false, reason: 'error', excluded, skipped, detail: 'test_artifacts の id を取得できませんでした' });
+        continue;
+      }
+
+      const r = await persistMeasurements(sb as unknown as SchemaClient, {
+        artifactId,
+        diagnosticUserId: input.diagnosticUserId,
+        testType: 'blood',
+        testDate: input.testDate,
+        measurements: kept as never,
+        sourceFileKind: input.sourceFileKind ?? 'scan_md',
+      });
+      siblings.push({
+        groupIndex: g.index, externalTestId, created: true, artifactId,
+        rows: r.rows, items: kept.map((m) => String(m.name)), excluded, skipped,
+      });
+    } catch (e) {
+      siblings.push({ groupIndex: g.index, externalTestId, created: false, reason: 'error', excluded, skipped, detail: e instanceof Error ? e.message : String(e) });
+    }
+  }
+
+  const made = siblings.filter((x) => x.created);
+  if (made.length === 0) {
+    const allNoItems = siblings.length > 0 && siblings.every((x) => x.reason === 'no_items');
+    return {
+      created: false,
+      reason: allNoItems || siblings.length === 0 ? 'no_items' : 'error',
+      groupCount: groups.length, siblings,
+      excluded: siblings.flatMap((x) => x.excluded ?? []),
+      skipped: siblings.reduce((a, x) => a + (x.skipped ?? 0), 0),
+      rows: 0, items: [],
+      detail: siblings.find((x) => x.detail)?.detail,
+    };
+  }
+  return {
+    created: true, groupCount: groups.length, siblings,
+    artifactId: made[0].artifactId ?? null,
+    rows: made.reduce((a, x) => a + (x.rows ?? 0), 0),
+    items: made.flatMap((x) => x.items ?? []),
+    excluded: siblings.flatMap((x) => x.excluded ?? []),
+    skipped: siblings.reduce((a, x) => a + (x.skipped ?? 0), 0),
+  };
 }
 
 /** Elith の format_id → `test_artifacts.test_type`。CHECK の値と 1:1 で対応させる。 */
