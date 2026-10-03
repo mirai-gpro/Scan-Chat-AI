@@ -107,7 +107,7 @@ export const STANDARD_MASTER: StandardItem[] = [
   // 肝機能
   { canonical_name: 'GOT(AST)', synonyms: ['AST', 'GOT', 'AST(GOT)'], unit: 'U/L', unit_aliases: ['u/l', 'iu/l'], category: '肝機能', source_std: 'starter' },
   { canonical_name: 'GPT(ALT)', synonyms: ['ALT', 'GPT', 'ALT(GPT)'], unit: 'U/L', unit_aliases: ['u/l', 'iu/l'], category: '肝機能', source_std: 'starter' },
-  { canonical_name: 'γ-GTP', synonyms: ['γGTP', 'ガンマGTP', 'GGT', 'Y-GTP', 'YGTP', 'Y-GTP(γ-GTP)'], unit: 'U/L', unit_aliases: ['u/l', 'iu/l'], category: '肝機能', source_std: 'starter' },
+  { canonical_name: 'γ-GTP', synonyms: ['γGTP', 'ガンマGTP', 'GGT', 'Y-GTP', 'YGTP', 'Y-GTP(γ-GTP)', 'γ-GT', 'γGT'], unit: 'U/L', unit_aliases: ['u/l', 'iu/l'], category: '肝機能', source_std: 'starter' },
   { canonical_name: 'ALP', synonyms: ['アルカリフォスファターゼ'], unit: 'IU/L', unit_aliases: ['u/l', 'iu/l'], category: '肝機能', source_std: 'starter' },
   { canonical_name: '総蛋白', synonyms: ['TP', '血清総蛋白', '総タンパク'], unit: 'g/dL', unit_aliases: ['g/dl'], category: '肝機能', source_std: 'starter' },
   { canonical_name: 'アルブミン', synonyms: ['Alb', 'ALB'], unit: 'g/dL', unit_aliases: ['g/dl'], category: '肝機能', source_std: 'starter' },
