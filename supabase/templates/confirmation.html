@@ -1,0 +1,121 @@
+<!--
+  Supabase Auth「Confirm signup」(メールアドレス確認) のテンプレート正本。
+
+  ═══════════════════════════════════════════════════════════════════════
+  ⚠️ このファイルを置いても**本番は 1 ミリも変わらない**。
+     Hosted Supabase のメールテンプレートは **Dashboard (または Management API)**
+     でしか変わらない。`supabase/config.toml` の `[auth.email.template.*]` は
+     **ローカル CLI / セルフホスト専用**で、Hosted プロジェクトには届かない
+     (出典: supabase.com/docs/guides/auth/auth-email-templates
+      「The dashboard template builder does not apply when running local
+       development with CLI or self-hosted Supabase.」)。
+     → ここは**文面の正本**であって、適用の証拠ではない。
+       反映手順と現在の設定値は
+       `docs/operations/Supabase認証メール_Wellfort化_設定手順書.md` が正。
+  ═══════════════════════════════════════════════════════════════════════
+
+  件名 (Dashboard の Subject heading に入れる値):
+    【Wellfort】メールアドレスの確認
+
+  【リンクは必ず `{{ .ConfirmationURL }}` を使う】
+    token / token_hash / redirect_to / SiteURL から URL を自分で組み立て直さない。
+    本アプリは **implicit flow** (`@supabase/auth-js` 2.106.1 の既定
+    `GoTrueClient.js:24` = `flowType: 'implicit'`・`createClient` に options を
+    渡していない) なので、`{{ .ConfirmationURL }}` のままで成立する。
+    **PKCE へ変えない / `/auth/confirm` を新設しない。**
+
+  【トランザクションメールに限定する】
+    入れるもの = Wellfort 名 / 「メールアドレスをご確認ください」/ 認証ボタン /
+    心当たりが無ければ破棄 / 株式会社ウェルフォート / Welltect。
+    入れないもの = 商品説明・AI疾病予防報告書等の宣伝・キャンペーン・
+    長いサービス説明・大量の画像・SNS リンク・不要な外部リンク。
+
+  【画像を入れない】
+    外部画像はメールクライアントのブロック・tracking 扱い・spam 判定に効くため、
+    初期版はテキストの `Wellfort` をヘッダーにする。正式ロゴを入れるなら
+    ホスティング先を確定してから別途。
+-->
+<div style="
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI','Noto Sans JP',sans-serif;
+  max-width:560px;
+  margin:0 auto;
+  padding:32px 24px;
+  color:#102B3A;
+">
+
+  <div style="
+    font-size:22px;
+    font-weight:700;
+    margin-bottom:28px;
+  ">
+    Wellfort
+  </div>
+
+  <h2 style="
+    font-size:20px;
+    line-height:1.5;
+    margin:0 0 18px;
+  ">
+    メールアドレスをご確認ください
+  </h2>
+
+  <p style="
+    font-size:14px;
+    line-height:1.8;
+    margin:0 0 12px;
+  ">
+    Wellfort Webアプリのご利用登録ありがとうございます。
+  </p>
+
+  <p style="
+    font-size:14px;
+    line-height:1.8;
+    margin:0 0 12px;
+  ">
+    メールアドレスを確認するため、下のボタンを押してください。
+  </p>
+
+  <p style="margin:28px 0;">
+    <a
+      href="{{ .ConfirmationURL }}"
+      style="
+        display:inline-block;
+        padding:12px 24px;
+        background:#287F86;
+        color:#ffffff;
+        text-decoration:none;
+        border-radius:6px;
+        font-size:14px;
+        font-weight:600;
+      "
+    >
+      メールアドレスを確認する
+    </a>
+  </p>
+
+  <p style="
+    font-size:12px;
+    line-height:1.7;
+    color:#6b7280;
+    margin-top:28px;
+  ">
+    このメールに心当たりがない場合は、そのまま破棄してください。
+  </p>
+
+  <hr style="
+    border:0;
+    border-top:1px solid #e5e7eb;
+    margin:28px 0 18px;
+  ">
+
+  <p style="
+    font-size:12px;
+    line-height:1.7;
+    color:#6b7280;
+    margin:0;
+  ">
+    株式会社ウェルフォート<br>
+    Welltect
+  </p>
+
+</div>
