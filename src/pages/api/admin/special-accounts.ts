@@ -248,12 +248,22 @@ export const POST: APIRoute = async ({ request }) => {
        * (一括 migration は行わない = 再登録したときに移る・仕様書 §4.1.1)。
        */
       const kept = emails[at].uid || mintSpecialUid(takenUids);
+      /*
+       * **採番に失敗したら何も保存せず中止する** (2026-10-05 hardening)。
+       * `mintSpecialUid` は既存 uid と衝突し続けた回に `null` を返す。
+       * ここで続けると **uid 無しの行** か **別人の uid への相乗り** を作るので、
+       * `setConfig` に 1 度も到達させない — `special.account_emails` /
+       * `special.account_uids` のどちらも変更せずに 503 で返す。
+       */
+      if (!kept) return json({ ok: false, error: 'uid_generation_failed', rejected }, 503);
       takenUids.add(kept);
       emails[at] = { ...emails[at], uid: kept, label: label || emails[at].label };
       ensureUidEntry(entries, kept, emails[at].label || emails[at].masked);
     } else {
       // **新規。その場で uid を発行し、メール行と資格一覧の両方へ入れる。**
       const uid = mintSpecialUid(takenUids);
+      // 同上。**発行できないまま行を作らない** (保存へ進ませない)。
+      if (!uid) return json({ ok: false, error: 'uid_generation_failed', rejected }, 503);
       takenUids.add(uid);
       emails.push({ hash: h, masked: maskEmail(addr), uid, label });
       ensureUidEntry(entries, uid, label || maskEmail(addr));

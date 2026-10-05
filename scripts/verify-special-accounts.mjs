@@ -116,6 +116,27 @@ console.log('\n② 資格の判定 (admin を混ぜない・uid だけで決ま�
     ok(`app-config.ts に ${k} がある`, read('src/lib/app-config.ts').includes(`key: '${k}'`),
       'setConfig が未知キーとして弾く');
   }
+  /*
+   * **admin 画面の説明文も現在仕様に合わせる。**
+   * `app-config.ts` の `CONFIG_SPECS[].description` は admin のカタログにそのまま出る。
+   * 旧文言「uid はサインイン時に自動で埋まる」は**嘘**になった (登録時に発行される) し、
+   * 「Google アカウントで登録」もメール＋パスワード認証を足した今は片方しか指していない。
+   * **説明が実装と食い違っていると、操作する人が「本人が来るまで待つもの」と誤解する** —
+   * 事前にデータを入れるためにこの仕様へ変えたので、ここが古いと目的が伝わらない。
+   */
+  {
+    const spec = read('src/lib/app-config.ts');
+    const i = spec.indexOf("key: 'special.account_emails'");
+    const block = i >= 0 ? spec.slice(i, spec.indexOf("key: 'special.account_uids'", i)) : '';
+    ok('special.account_emails の説明に旧文言「サインイン時に自動で埋まる」が残っていない',
+      i >= 0 && !/サインイン時に自動で埋まる/.test(block), block);
+    ok('  入口が「メールアドレス」になっている (Google 限定の書き方をしていない)',
+      /メールアドレスで登録/.test(block) && !/Google アカウントで登録/.test(block), block);
+    ok('  **登録時に即時発行される**ことが書いてある',
+      /即時発行/.test(block), block);
+    ok('  本人の Sign up / Sign in では既存 uid へ紐付くことが書いてある',
+      /既存 uid へ本人認証が紐付く/.test(block), block);
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -158,8 +179,13 @@ const M = await (async () => {
 export const __store = {};
 export const __writes = [];
 export const __forced = [];
+// 照会の失敗を**実際に起こす**ための口 (null 以外を入れると refreshConfig が投げる)。
+export const __state = { throws: null };
 export const cfg = (k) => __store[k] ?? '';
-export const refreshConfig = async (force) => { if (force) __forced.push(1); };
+export const refreshConfig = async (force) => {
+  if (__state.throws) throw __state.throws;
+  if (force) __forced.push(1);
+};
 export const setConfig = async (u) => { __writes.push(u); Object.assign(__store, u); return { ok: true }; };
 `);
   const swap = (s) => js(s
@@ -296,9 +322,25 @@ console.log('\n⑥ uid の採番 (記録済み → 既存 → 新規発行)\n');
   eq('① 以後は記録済みの uid が返る (**1 度決めたら変わらない**)',
     await M.resolveSpecialUidByEmail(MAIL), minted);
   eq('① 事前発行済みの照会も同じ uid を返す (競合ガードの根拠)',
-    await M.specialPreassignedUidByEmail(MAIL), minted);
-  eq('  → 登録の無い人には null (ガードを誤発火させない)',
-    await M.specialPreassignedUidByEmail('stranger@example.com'), null);
+    await M.specialPreassignedUidByEmail(MAIL), { ok: true, uid: minted });
+  eq('  → 登録の無い人には uid: null (ガードを誤発火させない)',
+    await M.specialPreassignedUidByEmail('stranger@example.com'), { ok: true, uid: null });
+  /*
+   * **「引けなかった」を「事前発行なし」と同一視しない。**
+   * null 1 本で返していたときは、app_config の取得が落ちた回が
+   * 「登録されていない人」と見分けが付かず、**競合ガードが素通り**していた
+   * (= 事前投入済みの UID-A が黙って UID-B へ張り替わる)。
+   */
+  eq('  → メールが無いのは失敗ではない (ok: true)',
+    await M.specialPreassignedUidByEmail(null), { ok: true, uid: null });
+  {
+    M.store.__state.throws = new Error('app_config unreachable');
+    const got = await M.specialPreassignedUidByEmail(MAIL);
+    M.store.__state.throws = null;
+    eq('  → **照会に失敗したら ok: false** (「事前発行なし」と同一視しない)', got.ok, false);
+    ok('  → 失敗の戻り値に uid を載せない (呼び出し側が誤って使えない形)',
+      !('uid' in got), JSON.stringify(got));
+  }
   eq('  → 別の既存 uid を渡されても記録済みが勝つ',
     await M.resolveSpecialUidByEmail(MAIL, EXIST), minted);
   eq('  → 現物のアドレスは保存物のどこにも無い',
@@ -524,6 +566,70 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+   5''. **採番に失敗したら衝突 uid を返さない (fail-closed)**
+   ══════════════════════════════════════════════════════════════════════
+
+   以前は `MINT_ATTEMPTS` 回ぜんぶ外したときに**最後の候補 (= 既存 uid と
+   衝突している値) をそのまま返して**いた。確率は現実には 0 だが、返した瞬間に
+   「既存 uid と衝突しない」という契約が破れ、**別人の uid へ相乗りした行**を作る。
+   uid には実データが紐づくので、ここは何もしないで止めるのが正しい。
+
+   衝突は 2^122 なので自然には再現できない。**`crypto.randomUUID` を差し替えて
+   8 回とも既存 uid を返させる**ことで、実際にその経路を通す。 */
+console.log("\n⑨' 採番に失敗したら何も保存しない (randomUUID を差し替えて実走)\n");
+{
+  const COLLIDE = 'cccccccc-1111-4111-8111-111111111111';
+  const realUuid = globalThis.crypto.randomUUID.bind(globalThis.crypto);
+  const stubUuid = (fn) => Object.defineProperty(globalThis.crypto, 'randomUUID', {
+    value: fn, configurable: true, writable: true,
+  });
+
+  // ── 関数そのもの: 全部衝突したら null (最後の候補を返さない) ──
+  stubUuid(() => COLLIDE);
+  eq("5''. 8 回とも衝突 → **null** (衝突 uid を返さない)", M.mintSpecialUid([COLLIDE]), null);
+  eq("5''.   1 回でも空いていれば採れる", M.mintSpecialUid([]), COLLIDE);
+  stubUuid(realUuid);
+
+  // ── API: 新規行。**503 で止まり、保存は 0 件** ──
+  reset();
+  STORE['special.account_uids'] = COLLIDE;
+  const before = WRITES.length;
+  const emailsBefore = String(STORE['special.account_emails'] ?? '');
+  const uidsBefore = uidsRaw();
+  stubUuid(() => COLLIDE);
+  const r = await callApi({ add_email: [{ email: 'mintfail@example.com', label: 'トランスコスモス 2026-10' }] });
+  stubUuid(realUuid);
+  eq("5''. 新規登録は **503** で止まる", r.status, 503);
+  eq("5''.   error は uid_generation_failed", r.body.error, 'uid_generation_failed');
+  eq("5''.   **保存 0 件** (setConfig を呼んでいない)", WRITES.length - before, 0);
+  eq("5''.   `special.account_emails` は 1 文字も変わらない",
+    String(STORE['special.account_emails'] ?? ''), emailsBefore);
+  eq("5''.   `special.account_uids` も 1 文字も変わらない", uidsRaw(), uidsBefore);
+  ok("5''.   行が作られていない (資格も立たない)",
+    !uidsRaw().includes('mintfail') && M.specialEmailEntries().length === 0,
+    JSON.stringify(STORE));
+
+  // ── API: legacy の uid='' 行を再登録する経路も同じ ──
+  reset();
+  const h = await M.demo.hashEmail('legacyfail@example.com');
+  STORE['special.account_uids'] = COLLIDE;
+  STORE['special.account_emails'] = M.demo.serializeEmailEntries(
+    [{ hash: h, masked: M.demo.maskEmail('legacyfail@example.com'), uid: '', label: '旧仕様の行' }]);
+  const before2 = WRITES.length;
+  const emailsBefore2 = String(STORE['special.account_emails'] ?? '');
+  stubUuid(() => COLLIDE);
+  const r2 = await callApi({ add_email: [{ email: 'legacyfail@example.com' }] });
+  stubUuid(realUuid);
+  eq("5''. legacy 行の救済でも **503**", [r2.status, r2.body.error], [503, 'uid_generation_failed']);
+  eq("5''.   **保存 0 件**", WRITES.length - before2, 0);
+  eq("5''.   旧行は uid 空のまま (壊さない)",
+    String(STORE['special.account_emails'] ?? ''), emailsBefore2);
+
+  // ── 差し替えを戻せているか (以降の検査を汚染しない) ──
+  ok("5''. randomUUID を元に戻してある", UUID_RE.test(M.mintSpecialUid([])));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
    ⑩ 事前発行 uid を黙って張り替えないこと (resolve.ts の静的ガード)
    ══════════════════════════════════════════════════════════════════════
 
@@ -532,24 +638,52 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 console.log('\n⑩ 事前発行 uid の競合ガード (位置を固定)\n');
 {
   const r = read('src/pages/api/auth/resolve.ts');
-  const iGuard = r.indexOf("if (resolvedFrom === 'special')");
+  const iGuard = r.indexOf('const preassigned = await specialPreassignedUidByEmail(email);');
+  const iCred = r.indexOf('await issueAdminCred(');
   const iRebind = r.indexOf('diagnosticUserId = linkedUid;');
   const iDetach = r.indexOf(".update({ auth_user_id: null, google_sub: null");
   const iUpsert = r.indexOf('.upsert(row');
+  const iLinkDemo = r.indexOf('await linkDemoEmail(');
+  const iLinkSp = r.indexOf('await linkSpecialEmail(');
+  const iCookie = r.indexOf('cookies.set(VIEWER_COOKIE');
+  // ガード 1 ブロックだけを切り出す (後続のコードを巻き込んで判定しない)。
+  const block = iGuard >= 0 ? r.slice(r.lastIndexOf("if (linkedUid &&", iGuard), r.indexOf('const adminForCred', iGuard)) : '';
+
   ok('競合ガードが在る', iGuard >= 0,
     '事前投入した検査データが別人格へ黙って紐付く');
+  /*
+   * **`issueAdminCred` より前**であることが 2026-10-05 hardening の本体。
+   * 以前はガードが張り替え分岐の中 (= `issueAdminCred` の後ろ) にあり、
+   * 本線の書き込みには届いていなかったが **admin credential だけは発行済み**で
+   * 「何も書かない」が成立していなかった。
+   */
+  ok('**admin credential の発行 (`issueAdminCred`) より前**にある',
+    iGuard >= 0 && iCred >= 0 && iGuard < iCred,
+    '後ろだと 409 を返す前に admin credential を set / delete してしまう');
   ok('**張り替えより前**にある', iGuard >= 0 && iRebind >= 0 && iGuard < iRebind,
     '後ろだと張り替えが先に起きるので意味が無い');
   ok('detach より前', iGuard >= 0 && iDetach >= 0 && iGuard < iDetach);
   ok('app_users の upsert より前', iGuard >= 0 && iUpsert >= 0 && iGuard < iUpsert);
+  ok('linkDemoEmail / linkSpecialEmail より前',
+    iGuard >= 0 && iLinkDemo >= 0 && iLinkSp >= 0 && iGuard < iLinkDemo && iGuard < iLinkSp);
+  ok('viewer Cookie の発行より前', iGuard >= 0 && iCookie >= 0 && iGuard < iCookie);
   ok('**事前発行済みかを直接引いている** (戻り値から逆算しない)',
     /specialPreassignedUidByEmail\(email\)/.test(r),
     'resolveSpecialUidByEmail の優先順位を 1 行変えた瞬間に静かに効かなくなる');
-  ok('409 で止める', /\}, 409\)/.test(r.slice(iGuard, iRebind)));
+  ok('409 で止める', /\}, 409\)/.test(block), block.slice(0, 200));
+  /*
+   * **照会の失敗を「事前発行なし」と同一視しない。** 同一視すると app_config の
+   * 取得が落ちた回にガードが素通りし、ちょうど守りたかった張り替えが起きる。
+   */
+  ok('**照会に失敗したら fail-closed で止める** (事前発行なしと同一視しない)',
+    /if \(!preassigned\.ok\)/.test(block) && /\}, 503\)/.test(block),
+    '引けなかった回を通すと、守りたかった張り替えがちょうど起きる');
+  ok('  判定は `preassigned.uid` を見ている (戻り値を素で真偽判定しない)',
+    /preassigned\.uid && preassigned\.uid === diagnosticUserId/.test(block), block.slice(0, 400));
   ok('生の DB エラー・内部情報を利用者へ返していない',
-    !/detail|message/.test(r.slice(iGuard, iRebind)));
+    !/detail|\.message/.test(block));
   ok('デモ枠は従来どおり (special だけを止めている)',
-    /resolvedFrom === 'special'/.test(r) && !/resolvedFrom === 'demo'/.test(r),
+    /resolvedFrom === 'special'/.test(block) && !/resolvedFrom === 'demo'/.test(r),
     'デモはダミーなので張り替えても実害が無い。順序も変えない');
 }
 
@@ -561,4 +695,4 @@ if (fails.length) {
   process.exit(1);
 }
 console.log('✓ スペシャル枠は本人の実データ。ダミーは 1 件も出ない。');
-console.log('  登録=Google アカウント / 判定=uid / 緊急停止=除外リスト (全停止スイッチは無い)。');
+console.log('  登録=メールアドレス (uid はその場で発行) / 判定=uid / 緊急停止=除外リスト (全停止スイッチは無い)。');

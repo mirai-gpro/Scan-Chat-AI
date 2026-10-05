@@ -301,6 +301,67 @@ export const POST: APIRoute = async (apiCtx) => {
   }
 
   /*
+   * ══════════════════════════════════════════════════════════════════════
+   * **事前発行したスペシャル uid は、黙って張り替えない** (2026-10-05 発注者指示)
+   * ══════════════════════════════════════════════════════════════════════
+   *
+   * スペシャル枠は**メール登録のその場で uid を発行し、本人のログイン前に
+   * 健診・遺伝子・報告書を投入する**。したがって
+   *
+   *     special 登録時 UID-A → UID-A に実データ投入 → 本人サインイン
+   *     → 既存 linkedUid = UID-B → 黙って UID-B に切り替える
+   *
+   * は**絶対に禁止**。やると **UID-A に入れた本人の健康データと本人の認証が
+   * 分離する** (本人は自分のデータを見られず、UID-A のデータは誰にも結び付かない)。
+   * 下の張り替え分岐の `if (!uidIsAuthoritative)` が**まさにこれをする**
+   * (スペシャルもデモも「顧客DB由来でない」= `uidIsAuthoritative === false`)。
+   * デモ枠はダミーなので従来どおりで構わないが、スペシャル枠は実データなので止める。
+   *
+   * 【止める位置 = `issueAdminCred` より前】(2026-10-05 hardening)
+   * 以前はこのガードが張り替え分岐の中、つまり `issueAdminCred` の**後ろ**にあった。
+   * 本線の書き込み (detach / upsert / `linkDemoEmail` / `linkSpecialEmail` /
+   * viewer Cookie) には届いていなかったが、**admin credential だけは発行済み**で
+   * 「何も書かない」が成立していなかった。ここへ移して
+   * **set / delete とも 1 回も呼ばない**ようにする。
+   *
+   * 【判定を推論しない】「`resolvedFrom === 'special'` なら記録済み uid のはず」と
+   * 逆算すると、`resolveSpecialUidByEmail` の優先順位を 1 行変えた瞬間に
+   * **静かに効かなくなる**。**事前発行済みかを直接引いて**突き合わせる。
+   *
+   * 【照会が落ちたら通さない (fail-closed)】**引けなかったことを「事前発行なし」と
+   * 同一視しない。** 同一視すると app_config の取得が落ちた回にガードが素通りし、
+   * ちょうど守りたかった張り替えが起きる。引けなければ**何も書かずに 503**。
+   *
+   * 【legacy は従来どおり】新仕様より前に登録した `uid=''` の行は記録が無いので
+   * `uid: null` が返り、ここは素通りして下の救済 (既存 uid へ寄せる) に入る。
+   *
+   * 【通常は起きない】起きるのは「事前発行した uid とは別の uid に、同じ
+   * Auth アカウントが既に束縛されている」ときだけ。自動移行はしない —
+   * **どちらのデータが本物かを機械が決めてよい場面ではない**ので、人が判断する。
+   */
+  if (linkedUid && diagnosticUserId && linkedUid !== diagnosticUserId && resolvedFrom === 'special') {
+    const preassigned = await specialPreassignedUidByEmail(email);
+    if (!preassigned.ok) {
+      console.error(
+        '[auth/resolve] スペシャル枠の事前発行 uid を照会できませんでした。'
+        + ' 「事前発行なし」とは扱わず、何も書かずに中止します'
+        + ` (linked=${linkedUid})。`,
+      );
+      return json({ error: 'ただいま混み合っています。時間をおいて再度お試しください。' }, 503);
+    }
+    if (preassigned.uid && preassigned.uid === diagnosticUserId) {
+      console.error(
+        '[auth/resolve] スペシャル枠の事前発行 uid と既存の束縛が競合しています。'
+        + ` 何も書かずに中止しました (preassigned=${diagnosticUserId}, linked=${linkedUid})。`
+        + ' 事前投入した検査データを別の人格へ紐付けないため、自動移行はしません。',
+      );
+      return json({
+        error: 'アカウント連携情報が既存のIDと競合しています。事務局へご連絡ください。',
+      }, 409);
+    }
+  }
+
+  /*
    * **admin 専用 credential (`welltect_admin_v`) は、uid が決まる前に発行する**
    * (2026-09-30・仕様書 §12.4.1)。
    *
@@ -329,52 +390,14 @@ export const POST: APIRoute = async (apiCtx) => {
    *   ・デモ発行の uid   → **既存の uid を採る**(勝手に新しい人格を作らない)
    *   ・顧客DB由来の uid → **顧客DBが正**。古い行から認証の束縛だけ外して張り直す
    *                        (**行は消さない**。検査データはその uid のまま残る)
+   *
+   * ⚠️ **スペシャル枠の事前発行 uid の競合ガードはここには無い。**
+   * `issueAdminCred` より前へ移した (上の「事前発行したスペシャル uid」ブロック)。
+   * ここへ戻すと **admin credential を発行してから 409 を返す**ことになり、
+   * 「何も書かない」が成立しない。`verify:email-auth` ⑫ と
+   * `verify:special-accounts` ⑩ が位置を見張っている。
    */
   if (linkedUid && linkedUid !== diagnosticUserId) {
-    /*
-     * ══════════════════════════════════════════════════════════════════
-     * **事前発行したスペシャル uid は、黙って張り替えない** (2026-10-05 発注者指示)
-     * ══════════════════════════════════════════════════════════════════
-     *
-     * 2026-10-05 の仕様変更で、スペシャル枠は**メール登録のその場で uid を発行し、
-     * 本人のログイン前に健診・遺伝子・報告書を投入する**。したがって
-     *
-     *     special 登録時 UID-A → UID-A に実データ投入 → 本人サインイン
-     *     → 既存 linkedUid = UID-B → 黙って UID-B に切り替える
-     *
-     * は**絶対に禁止**。やると **UID-A に入れた本人の健康データと本人の認証が
-     * 分離する** (本人が自分のデータを見られず、UID-A のデータは誰にも結び付かない)。
-     *
-     * 直下の `if (!uidIsAuthoritative)` は**まさにこれをする分岐**だった
-     * (スペシャルもデモも「顧客DB由来でない」= `uidIsAuthoritative === false`)。
-     * デモ枠はダミーなので従来どおりで構わないが、スペシャル枠は実データなので止める。
-     *
-     * 【判定を推論しない】「`resolvedFrom === 'special'` なら記録済み uid のはず」と
-     * 逆算すると、`resolveSpecialUidByEmail` の優先順位を 1 行変えた瞬間に
-     * **静かに効かなくなる**。**事前発行済みかを直接引いて**突き合わせる。
-     *
-     * 【何も書かずに止める (fail-closed)】ここは `issueAdminCred` より後なので
-     * admin credential は発行済みだが、**本線の書き込みには 1 つも到達しない** —
-     * detach / `app_users` upsert / `linkDemoEmail` / `linkSpecialEmail` /
-     * viewer Cookie のいずれも下にある。既存行・special の資格・検査データは**不変**。
-     *
-     * 【通常は起きない】起きるのは「事前発行した uid とは別の uid に、同じ
-     * Auth アカウントが既に束縛されている」ときだけ。自動移行はしない —
-     * **どちらのデータが本物かを機械が決めてよい場面ではない**ので、人が判断する。
-     */
-    if (resolvedFrom === 'special') {
-      const preassigned = await specialPreassignedUidByEmail(email);
-      if (preassigned && preassigned === diagnosticUserId) {
-        console.error(
-          '[auth/resolve] スペシャル枠の事前発行 uid と既存の束縛が競合しています。'
-          + ` 何も書かずに中止しました (preassigned=${diagnosticUserId}, linked=${linkedUid})。`
-          + ' 事前投入した検査データを別の人格へ紐付けないため、自動移行はしません。',
-        );
-        return json({
-          error: 'アカウント連携情報が既存のIDと競合しています。事務局へご連絡ください。',
-        }, 409);
-      }
-    }
     if (!uidIsAuthoritative) {
       diagnosticUserId = linkedUid;
     } else {

@@ -70,15 +70,19 @@ export const CONFIG_SPECS: ConfigSpec[] = [
   // デモ枠に入れると本人の画面に他人名義のダミーが出る。判定の実体は
   // `special-accounts.ts` の `isSpecialAccount` (uid 1 本・同期・外部依存ゼロ)。
   // **全停止スイッチは無い** — 止めるとその人がログインできなくなるため。緊急停止は除外リスト。
-  { key: 'special.account_emails', type: 'string', group: 'スペシャル', label: 'スペシャルアカウント (Google アカウントで登録)', default: '',
-    description: '**人が使う入口はこちら。** 相手の Google アカウントを登録すると、'
-      + 'その人は EC で購入していなくてもサインインできる (uid はサインイン時に自動で埋まる)。'
+  { key: 'special.account_emails', type: 'string', group: 'スペシャル', label: 'スペシャルアカウント (メールアドレスで登録)', default: '',
+    description: '**人が使う入口はこちら。** 相手のメールアドレスを登録すると、'
+      + 'その人は EC で購入していなくても Web アプリを利用できる'
+      + ' (ログインは Google 認証でもメール＋パスワードでもよい)。'
+      + ' **diagnostic_user_id はこのメール登録の時点で即時発行される** —'
+      + ' 本人の初回ログインを待たずに検査データを先に入れられる。'
+      + ' 本人の Sign up / Sign in では、新しい uid を作らずこの既存 uid へ本人認証が紐付く。'
       + ' **メールアドレスの現物は保存しない** — 1 行 = sha256 + 表示用マスク + uid + メモ。'
       + ' 直接編集せず /admin/special-accounts から操作すること。' },
   { key: 'special.account_uids', type: 'string', group: 'スペシャル', label: 'スペシャルアカウントの uid', default: '',
     description: '判定に使う diagnostic_user_id をカンマ / 空白 / 改行 区切りで。'
       + ' env SPECIAL_ALLOWED_UIDS に足される (和であって上書きではない)。'
-      + ' 通常は手で書かず、上のメール登録から自動で埋まる。' },
+      + ' 通常は手で書かず、上のメール登録の時点で同じリクエストの中で自動的に埋まる。' },
   { key: 'elith.plan_formats', type: 'string', group: 'Elith', label: 'プラン別の必要 format (自動納品の判定)', default: '',
     description: '夜間 cron (`/api/cron/elith-deliver`) が「揃った」を判定するための plan_code → format 対応。'
       + ' 書式 `plan_code=HealthCheckupData|LifestyleQuestionnaireData, 別plan=...`。'
