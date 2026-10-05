@@ -11,7 +11,7 @@ import { denyForShare } from '../../../lib/write-guard';
 import { isAdminEmailAsync } from '../../../lib/admin-auth';
 import { issueAdminCred } from '../../../lib/admin-identity';
 import { linkDemoEmail, resolveDemoUidByEmail } from '../../../lib/demo-accounts';
-import { linkSpecialEmail, resolveSpecialUidByEmail } from '../../../lib/special-accounts';
+import { linkSpecialEmail, resolveSpecialUidByEmail, specialPreassignedUidByEmail } from '../../../lib/special-accounts';
 
 export const prerender = false;
 
@@ -331,6 +331,50 @@ export const POST: APIRoute = async (apiCtx) => {
    *                        (**行は消さない**。検査データはその uid のまま残る)
    */
   if (linkedUid && linkedUid !== diagnosticUserId) {
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     * **事前発行したスペシャル uid は、黙って張り替えない** (2026-10-05 発注者指示)
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * 2026-10-05 の仕様変更で、スペシャル枠は**メール登録のその場で uid を発行し、
+     * 本人のログイン前に健診・遺伝子・報告書を投入する**。したがって
+     *
+     *     special 登録時 UID-A → UID-A に実データ投入 → 本人サインイン
+     *     → 既存 linkedUid = UID-B → 黙って UID-B に切り替える
+     *
+     * は**絶対に禁止**。やると **UID-A に入れた本人の健康データと本人の認証が
+     * 分離する** (本人が自分のデータを見られず、UID-A のデータは誰にも結び付かない)。
+     *
+     * 直下の `if (!uidIsAuthoritative)` は**まさにこれをする分岐**だった
+     * (スペシャルもデモも「顧客DB由来でない」= `uidIsAuthoritative === false`)。
+     * デモ枠はダミーなので従来どおりで構わないが、スペシャル枠は実データなので止める。
+     *
+     * 【判定を推論しない】「`resolvedFrom === 'special'` なら記録済み uid のはず」と
+     * 逆算すると、`resolveSpecialUidByEmail` の優先順位を 1 行変えた瞬間に
+     * **静かに効かなくなる**。**事前発行済みかを直接引いて**突き合わせる。
+     *
+     * 【何も書かずに止める (fail-closed)】ここは `issueAdminCred` より後なので
+     * admin credential は発行済みだが、**本線の書き込みには 1 つも到達しない** —
+     * detach / `app_users` upsert / `linkDemoEmail` / `linkSpecialEmail` /
+     * viewer Cookie のいずれも下にある。既存行・special の資格・検査データは**不変**。
+     *
+     * 【通常は起きない】起きるのは「事前発行した uid とは別の uid に、同じ
+     * Auth アカウントが既に束縛されている」ときだけ。自動移行はしない —
+     * **どちらのデータが本物かを機械が決めてよい場面ではない**ので、人が判断する。
+     */
+    if (resolvedFrom === 'special') {
+      const preassigned = await specialPreassignedUidByEmail(email);
+      if (preassigned && preassigned === diagnosticUserId) {
+        console.error(
+          '[auth/resolve] スペシャル枠の事前発行 uid と既存の束縛が競合しています。'
+          + ` 何も書かずに中止しました (preassigned=${diagnosticUserId}, linked=${linkedUid})。`
+          + ' 事前投入した検査データを別の人格へ紐付けないため、自動移行はしません。',
+        );
+        return json({
+          error: 'アカウント連携情報が既存のIDと競合しています。事務局へご連絡ください。',
+        }, 409);
+      }
+    }
     if (!uidIsAuthoritative) {
       diagnosticUserId = linkedUid;
     } else {

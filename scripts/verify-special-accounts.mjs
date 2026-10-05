@@ -98,6 +98,17 @@ console.log('\n② 資格の判定 (admin を混ぜない・uid だけで決ま�
   ok('組み込みを名簿として育てていない',
     /const BUILTIN_SPECIAL_UIDS: readonly string\[\] = \[\];/.test(sa),
     '実データが紐づくのでコードに焼き込まない。通常は app_config で管理 (仕様書 §5)');
+  /*
+   * **`uid` が在ること = 本人サインイン済み、ではない** (2026-10-05 の仕様変更)。
+   * 旧コメントは `linked = その人がもうサインインしたか` と書いていたが、
+   * 新仕様では登録のその場で uid が付くので**虚偽になる**。
+   * 本人の認証状況を知りたいなら `diagnosis.app_users.auth_user_id` を根拠にする。
+   */
+  ok('uid の有無を「本人がサインインしたか」と定義していない',
+    !/`?linked`? *= *その人が\*\*もうサインインしたか/.test(sa)
+    && !/linked.*=.*本人.*サインイン済/.test(sa),
+    'uid はメール登録時に発行されるので、uid の有無は認証状況を表さない');
+  ok('`uidAllocated` という名前で意味を明示している', /uidAllocated/.test(sa));
   ok('純粋関数はデモ枠から import している (再実装しない)',
     /from '\.\/demo-accounts'/.test(sa) && !/SHA-256/.test(sa),
     'hashEmail 等を書き写すと片方だけ直って黙ってすれ違う');
@@ -214,6 +225,12 @@ console.log('\n④ 供給元の和と除外リスト (実際に動かす)\n');
   globalThis.__saEnv.SPECIAL_ALLOWED_UIDS = undefined;
 }
 
+/*
+ * ⑤ は **`special.account_emails` を直接組んで** `linkSpecialEmail` を動かす。
+ * つまり**新仕様より前に登録された uid 空の行** (legacy) の形。
+ * 新仕様の「登録のその場で uid を発行する」経路は ⑨ が API ごと動かして見る。
+ * **`uid` が在ることは「本人がサインインした」ことを意味しない** (2026-10-05)。
+ */
 console.log('\n⑤ メール登録 (現物を保存しない・uid は 1 度決めたら変わらない)\n');
 {
   const MAIL = 'invited@example.com';
@@ -225,8 +242,8 @@ console.log('\n⑤ メール登録 (現物を保存しない・uid は 1 度決�
   eq('マスクから現物は復元できない', M.demo.maskEmail(MAIL), 'i******@example.com');
 
   STORE['special.account_emails'] = M.demo.serializeEmailEntries([{ hash: h, masked: M.demo.maskEmail(MAIL), uid: '', label: '招待 A' }]);
-  eq('サインイン前は「サインイン待ち」(異常ではない)',
-    M.listSpecialAccounts().emails.map((e) => e.linked), [false]);
+  eq('legacy 行 (uid 空) は uid 未発行として出る',
+    M.listSpecialAccounts().emails.map((e) => e.uidAllocated), [false]);
   eq('  → まだ資格は無い', M.isSpecialAccount(UID), false);
 
   eq('登録の無い人は素通り', await M.linkSpecialEmail('stranger@example.com', UID), false);
@@ -237,7 +254,9 @@ console.log('\n⑤ メール登録 (現物を保存しない・uid は 1 度決�
   eq('  → その場で資格が立つ', M.isSpecialAccount(UID), true);
   eq('  → メール行に uid が記録される',
     M.listSpecialAccounts().emails.map((e) => e.uid), [UID]);
-  eq('  → admin 画面で「サインイン済み」になる',
+  eq('  → uid 発行済みとして出る (**「サインイン済み」の意味ではない**)',
+    M.listSpecialAccounts().emails.map((e) => e.uidAllocated), [true]);
+  eq('  → 旧名 linked は uidAllocated の別名として同じ値を返す',
     M.listSpecialAccounts().emails.map((e) => e.linked), [true]);
   eq('  → uid 行にメール由来の印が付く',
     M.listSpecialAccounts().rows.filter((r) => r.uid === UID).map((r) => r.viaEmail), [true]);
@@ -251,7 +270,7 @@ console.log('\n⑤ メール登録 (現物を保存しない・uid は 1 度決�
 
   // ラベルは admin が書き換えられる。**推測でなく記録**を見ていることの確認。
   STORE['special.account_uids'] = `${UID}  # 別のメモに書き換えた`;
-  eq('ラベルを書き換えても状態を誤らない', M.listSpecialAccounts().emails[0]?.linked, true);
+  eq('ラベルを書き換えても状態を誤らない', M.listSpecialAccounts().emails[0]?.uidAllocated, true);
 }
 
 console.log('\n⑥ uid の採番 (記録済み → 既存 → 新規発行)\n');
@@ -276,6 +295,10 @@ console.log('\n⑥ uid の採番 (記録済み → 既存 → 新規発行)\n');
   await M.linkSpecialEmail(MAIL, minted);
   eq('① 以後は記録済みの uid が返る (**1 度決めたら変わらない**)',
     await M.resolveSpecialUidByEmail(MAIL), minted);
+  eq('① 事前発行済みの照会も同じ uid を返す (競合ガードの根拠)',
+    await M.specialPreassignedUidByEmail(MAIL), minted);
+  eq('  → 登録の無い人には null (ガードを誤発火させない)',
+    await M.specialPreassignedUidByEmail('stranger@example.com'), null);
   eq('  → 別の既存 uid を渡されても記録済みが勝つ',
     await M.resolveSpecialUidByEmail(MAIL, EXIST), minted);
   eq('  → 現物のアドレスは保存物のどこにも無い',
@@ -332,6 +355,202 @@ console.log('\n⑧ API がブラインド化してから返す\n');
   ok('マスク文字列を添える (dob_masked)', /dob_masked/.test(api), '登録済みかだけ分かればよい');
   ok('生年月日の生値をレスポンスに入れない',
     !/dob:\s*d\.dob/.test(api), '生の日付を JSON に載せない');
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   ⑨ **メール登録のその場で uid を発行する** (2026-10-05 発注者指示)
+   ══════════════════════════════════════════════════════════════════════
+
+   【なぜ変えたか】以前は uid が空のまま登録され、本人の初回サインインで
+   `linkSpecialEmail` が埋めていた。それだと **本人が来るまで検査データを
+   入れられない** (admin 画面の［追加検査データ］が uid 無しでは押せない)。
+   実際の用途 (トランスコスモス 10 名) は「本人のログイン前に健診・遺伝子・
+   報告書を準備する」ことなので、登録の時点で uid が確定していないと成立しない。
+
+   【ここは静かに壊れる】
+     - uid を発行し忘れても **登録は成功して見える**。詰まるのは数日後、
+       データを入れようとした人が「ボタンが押せない」と気づいたときだけ。
+     - 逆に**再登録で uid を作り直してしまっても画面は正常に見える**。
+       壊れるのは「前に入れた検査データが誰のものでもなくなる」ことで、
+       それは一覧の数字が 0 に戻るまで誰も気づかない。
+     - メール行にだけ書いて `special.account_uids` に足し忘れても、
+       uid は画面に出るので**発行できたように見える**。実際は資格が立たない。
+
+   だから**実物の API ハンドラをそのまま動かす**。app_config だけスタブ。
+   ══════════════════════════════════════════════════════════════════════ */
+console.log('\n⑨ メール登録でその場で uid を発行する (API を実際に動かす)\n');
+const API = await (async () => {
+  writeFileSync(resolve(CACHE, 'sa-api-auth.mjs'), 'export const isAdminAuthorized = () => true;\n');
+  writeFileSync(resolve(CACHE, 'sa-progress.mjs'), 'export const getAccountProgress = async () => ({});\n');
+  let src = read('src/pages/api/admin/special-accounts.ts')
+    .replace(/^import type .*?;$/gm, '')
+    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/app-config'/g, "from './sa-app-config.mjs'")
+    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/demo-accounts'/g, "from './sa-demo-accounts.mjs'")
+    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/special-accounts'/g, "from './sa-special-accounts.mjs'")
+    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/api-auth'/g, "from './sa-api-auth.mjs'")
+    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/account-progress'/g, "from './sa-progress.mjs'");
+  // 差し替え漏れを**黙って通さない** (import の形が変わったら気づけるように)。
+  if (/\.\.\/\.\.\/\.\.\/lib\//.test(src)) fails.push('verify: API の import 差し替えに失敗');
+  const out = resolve(CACHE, 'sa-api.mjs');
+  writeFileSync(out, js(src));
+  return import(out);
+})();
+
+/** admin API の POST を 1 回叩く。**実物のハンドラ**を呼ぶ。 */
+const callApi = async (body) => {
+  const res = await API.POST({
+    request: new Request('http://x/api/admin/special-accounts', {
+      method: 'POST', headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  });
+  return { status: res.status, body: await res.json().catch(() => ({})) };
+};
+const uidOf = (r, mask) => (r.body.emails ?? []).find((e) => e.masked === mask)?.uid ?? '';
+/** 保存された資格一覧 (未保存なら空文字)。**undefined で crash させない**。 */
+const uidsRaw = () => String(STORE['special.account_uids'] ?? '');
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+{
+  const MAIL = 'pre1@example.com';
+  const MASK = 'p***@example.com';
+  reset();
+
+  // ── 1. 登録したレスポンスの時点で有効な UUID が在る ──
+  const r1 = await callApi({ add_email: [{ email: MAIL, label: 'トランスコスモス 2026-10' }] });
+  const uid1 = uidOf(r1, MASK);
+  eq('1. 登録は成功する', r1.status, 200);
+  ok('1. **レスポンスの時点で有効な UUID が在る** (本人のログインを待たない)',
+    UUID_RE.test(uid1), `uid=${JSON.stringify(uid1)}`);
+
+  // ── 4. 同じリクエスト内で special.account_uids にも入る ──
+  ok('4. **`special.account_uids` にも同じ uid が入る** (メール行だけに書かない)',
+    !!uid1 && uidsRaw().includes(uid1), `uids=${JSON.stringify(uidsRaw())}`);
+  eq('4. その場で資格が立つ (本人のログイン前から)', M.isSpecialAccount(uid1), true);
+  eq('4. 一覧の uidAllocated が true', (r1.body.emails ?? []).map((e) => e.uidAllocated), [true]);
+  ok('4. 保存は 1 回の setConfig にまとめている (片方だけ書かれる形を作らない)',
+    WRITES.length === 1 && 'special.account_uids' in (WRITES[0] ?? {}) && 'special.account_emails' in (WRITES[0] ?? {}),
+    JSON.stringify(WRITES));
+
+  // ── 作るのは uid だけ。Auth は 1 つも作らない ──
+  ok('   **Auth ユーザー / password / google_sub を作っていない**',
+    !/auth_user_id|google_sub|password/.test(JSON.stringify(STORE)), JSON.stringify(STORE));
+  eq('   現物のアドレスは保存物のどこにも無い', /pre1@example\.com/.test(JSON.stringify(STORE)), false);
+
+  // ── 2. 同じメールを再登録しても uid が変わらない ──
+  const r2 = await callApi({ add_email: [{ email: MAIL, label: 'メモを書き換えた' }] });
+  eq('2. **再登録で uid が変わらない**', uidOf(r2, MASK), uid1);
+  // ── 6. label 変更で uid が変わらない (同上の呼び出しで確認) ──
+  eq('6. label を変えても uid が変わらない', uidOf(r2, MASK), uid1);
+  eq('6.   label は更新されている', (r2.body.emails ?? []).map((e) => e.label), ['メモを書き換えた']);
+
+  // ── 7. DOB / sex を更新しても uid が変わらない ──
+  const r3 = await callApi({ add_email: [{ email: MAIL, dob: '1970-05-15', sex: 'male' }] });
+  eq('7. **DOB / sex を更新しても uid が変わらない**', uidOf(r3, MASK), uid1);
+  eq('7.   DOB は登録されている (生値は返さない)',
+    (r3.body.emails ?? []).map((e) => [e.has_dob, e.dob_masked, e.sex]), [[true, '****-**-**', 'male']]);
+  eq('7.   ログイン前でもウェルネス年齢の年齢ソースとして引ける',
+    M.specialSubjectByUid(uid1), { dateOfBirth: '1970-05-15', sex: 'male' });
+
+  // ── 8. メール Delete で資格も外れる (検査データは消さない) ──
+  const r4 = await callApi({ remove_email: [(r3.body.emails ?? [])[0].hash] });
+  eq('8. **メールを外すと uid の資格も外れる**', M.isSpecialAccount(uid1), false);
+  eq('8.   メール行も消えている', (r4.body.emails ?? []).length, 0);
+  ok('8.   `special.account_uids` からも消えている',
+    !!uid1 && !uidsRaw().includes(uid1), `uids=${JSON.stringify(uidsRaw())}`);
+}
+
+{
+  // ── 3. legacy の uid='' 行を再登録すると 1 度だけ発行される ──
+  const MAIL = 'legacy@example.com';
+  const MASK = 'l*****@example.com';
+  reset();
+  const h = await M.demo.hashEmail(MAIL);
+  // 旧仕様で登録された行 = uid 空。**GET しただけでは書き換えない** (一括 migration はしない)。
+  STORE['special.account_emails'] = M.demo.serializeEmailEntries(
+    [{ hash: h, masked: M.demo.maskEmail(MAIL), uid: '', label: '旧仕様の行' }]);
+  const before = WRITES.length;
+  const g = await API.GET({ request: new Request('http://x/api/admin/special-accounts') });
+  await g.json().catch(() => ({}));
+  eq('3. GET しただけでは書き換えない (一括 migration はしない)', WRITES.length, before);
+  eq('3.   旧行は uid 空のまま', M.specialEmailEntries?.().map((e) => e.uid) ?? ['?'], ['']);
+
+  const r = await callApi({ add_email: [{ email: MAIL, label: '旧仕様の行' }] });
+  const uid = uidOf(r, MASK);
+  ok('3. **再登録すると uid が 1 度だけ発行される**', UUID_RE.test(uid), `uid=${JSON.stringify(uid)}`);
+  eq('3.   資格も立つ', M.isSpecialAccount(uid), true);
+  const again = await callApi({ add_email: [{ email: MAIL }] });
+  eq('3.   もう一度登録しても作り直さない', uidOf(again, MASK), uid);
+}
+
+{
+  // ── 5. 同一リクエストに複数メールがあっても、それぞれ固有 uid になる ──
+  reset();
+  const r = await callApi({
+    add_email: [
+      { email: 'm1@example.com', label: 'トランスコスモス 2026-10' },
+      { email: 'm2@example.com', label: 'トランスコスモス 2026-10' },
+      { email: 'm3@example.com', label: 'トランスコスモス 2026-10' },
+    ],
+  });
+  const uids = (r.body.emails ?? []).map((e) => e.uid);
+  eq('5. 3 件とも uid が付く', uids.filter((u) => UUID_RE.test(u)).length, 3);
+  eq('5. **それぞれ固有の uid** (使い回さない)', new Set(uids).size, 3);
+  eq('5.   3 件とも資格が立つ', uids.map((u) => M.isSpecialAccount(u)), [true, true, true]);
+  eq('5.   `special.account_uids` にも 3 件', M.demo.parseEntries(uidsRaw()).length, 3);
+}
+
+{
+  // ── 5'. 既存 uid と衝突する uid を採らない (mintSpecialUid を直接動かす) ──
+  const taken = ['11111111-1111-4111-8111-111111111111'];
+  const minted = Array.from({ length: 20 }, () => M.mintSpecialUid(taken));
+  ok("5'. 既存 uid を採らない", minted.every((u) => u !== taken[0]));
+  ok("5'. 大文字・空白の既存 uid も衝突として扱う",
+    M.mintSpecialUid([` ${taken[0].toUpperCase()} `]) !== taken[0]);
+  ok("5'. 毎回 UUID 形式", minted.every((u) => UUID_RE.test(u)));
+  /*
+   * **API が既存 uid を渡していること**は静的に見る。
+   * 衝突 (2^122) は実挙動では再現できないので、「渡し忘れ」は動かしても捕まらない。
+   */
+  const api = read('src/pages/api/admin/special-accounts.ts');
+  ok("5'. API は既存 uid の集合を渡している (上書きを作らない)",
+    /mintSpecialUid\(takenUids\)/.test(api) && !/mintSpecialUid\(\[\]\)/.test(api),
+    '空を渡すと既存 uid と衝突したときに上書きしてしまう');
+  ok("5'.   集合に 3 つの供給元すべてを入れている",
+    /const takenUids = new Set<string>\(\[[\s\S]{0,400}?cur\.rows[\s\S]{0,200}?entries[\s\S]{0,200}?emails/.test(api),
+    '組み込み / env / config / メール行 のどれかが漏れると衝突を見逃す');
+  ok("5'.   発行したらその場で集合へ足している (同一リクエスト内の重複よけ)",
+    /takenUids\.add\(/.test(api));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+   ⑩ 事前発行 uid を黙って張り替えないこと (resolve.ts の静的ガード)
+   ══════════════════════════════════════════════════════════════════════
+
+   実挙動は `verify:email-auth` ⑫ が `POST` を動かして見る。ここでは
+   **ガードの位置**を固定する — 書き込みより後ろへ動かされたら意味が無い。 */
+console.log('\n⑩ 事前発行 uid の競合ガード (位置を固定)\n');
+{
+  const r = read('src/pages/api/auth/resolve.ts');
+  const iGuard = r.indexOf("if (resolvedFrom === 'special')");
+  const iRebind = r.indexOf('diagnosticUserId = linkedUid;');
+  const iDetach = r.indexOf(".update({ auth_user_id: null, google_sub: null");
+  const iUpsert = r.indexOf('.upsert(row');
+  ok('競合ガードが在る', iGuard >= 0,
+    '事前投入した検査データが別人格へ黙って紐付く');
+  ok('**張り替えより前**にある', iGuard >= 0 && iRebind >= 0 && iGuard < iRebind,
+    '後ろだと張り替えが先に起きるので意味が無い');
+  ok('detach より前', iGuard >= 0 && iDetach >= 0 && iGuard < iDetach);
+  ok('app_users の upsert より前', iGuard >= 0 && iUpsert >= 0 && iGuard < iUpsert);
+  ok('**事前発行済みかを直接引いている** (戻り値から逆算しない)',
+    /specialPreassignedUidByEmail\(email\)/.test(r),
+    'resolveSpecialUidByEmail の優先順位を 1 行変えた瞬間に静かに効かなくなる');
+  ok('409 で止める', /\}, 409\)/.test(r.slice(iGuard, iRebind)));
+  ok('生の DB エラー・内部情報を利用者へ返していない',
+    !/detail|message/.test(r.slice(iGuard, iRebind)));
+  ok('デモ枠は従来どおり (special だけを止めている)',
+    /resolvedFrom === 'special'/.test(r) && !/resolvedFrom === 'demo'/.test(r),
+    'デモはダミーなので張り替えても実害が無い。順序も変えない');
 }
 
 // ══════════════════════════════════════════════════════════════════════

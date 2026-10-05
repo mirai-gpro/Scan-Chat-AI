@@ -17,6 +17,13 @@
  * デモ枠にある「管理者リストから初回登録」は**本枠では実装しない** —
  * 実データが紐づくので、名簿を写して自動登録するのは危険。
  *
+ * 【メール登録のその場で uid を発行する】(2026-10-05 発注者指示・仕様書 §4.1)
+ * 本人の初回ログインを `diagnostic_user_id` の発行条件にしない。
+ * **ログイン前に検査データを準備できる**ことが要件 (トランスコスモス 10 名)。
+ * 発行するのは **`diagnostic_user_id` だけ** — Supabase Auth user / password /
+ * Google identity / `auth_user_id` / `google_sub` は**作らない**。
+ * admin が Auth ユーザーを代理作成したり仮パスワードを置いたりは**絶対にしない**。
+ *
  *   GET    → { ok, rows:[{uid,label,source,viaEmail,denied}], emails:[…] }
  *   POST   → { add_email:[{email,label}] } / { remove_email:[hash] }   ← **人が使う入口**
  *            { add:[{uid,label}] }        / { remove:[uid] }           ← uid を直接
@@ -31,7 +38,7 @@ import { isAdminAuthorized } from '../../../lib/api-auth';
 import { refreshConfig, setConfig } from '../../../lib/app-config';
 import { hashEmail, isUuid, maskEmail, parseEmailEntries, parseEntries, serializeEmailEntries } from '../../../lib/demo-accounts';
 import {
-  listSpecialAccounts, serializeUidEntries,
+  listSpecialAccounts, serializeUidEntries, mintSpecialUid,
   parseDobEntries, serializeDobEntries, normSexToken,
 } from '../../../lib/special-accounts';
 import { getAccountProgress } from '../../../lib/account-progress';
@@ -56,6 +63,16 @@ function validDob(v: unknown): string {
   const y = Number(s.slice(0, 4));
   const nowY = new Date().getUTCFullYear();
   return y >= 1900 && y <= nowY ? s : '';
+}
+
+/**
+ * **`special.account_uids` に 1 件足す (既に在れば何もしない)。**
+ * ラベルだけは空のときに補う — 既存のメモを上書きしない。
+ */
+function ensureUidEntry(entries: { uid: string; label: string }[], uid: string, label: string): void {
+  const at = entries.findIndex((e) => e.uid === uid);
+  if (at < 0) entries.push({ uid, label });
+  else if (!entries[at].label && label) entries[at] = { uid, label };
 }
 
 function json(body: unknown, status = 200): Response {
@@ -172,6 +189,7 @@ export const POST: APIRoute = async ({ request }) => {
      * **メール登録から来た uid は uid 側だけ外しても戻ってくる。**
      * 次のサインインで `linkSpecialEmail` が同じ uid を書き直すため、
      * 外したつもりが数分後に復活する = 黙って効かない操作になる。メール行の側で外させる。
+     * (新仕様では登録の時点で両方に入っているので、なおさらメール行が正。)
      */
     const src = emails.find((e) => e.uid === uid);
     if (src) {
@@ -186,8 +204,30 @@ export const POST: APIRoute = async ({ request }) => {
   /*
    * ── Google アカウント (メール) で登録する側 ─────────────────────
    * **これが人が使う入口。** 相手に UUID は聞けない。
-   * uid はサインイン時に自動で埋まる (`linkSpecialEmail`)。
+   *
+   * **ここで `diagnostic_user_id` を発行する** (2026-10-05 発注者指示)。
+   * 以前はサインインまで uid が空で、`linkSpecialEmail` が後から埋めていた。
+   * それだと**本人が来るまで検査データを入れられない** (admin 画面の
+   * ［追加検査データ］が uid 無しでは押せない) ため、登録の時点で確定させる。
+   *
+   * 【冪等】同じメールを再登録しても **uid は変えない**。
+   *   メール行あり + uid あり → そのまま維持 (label / DOB / sex の更新でも変えない)
+   *   メール行あり + uid 空   → **ここで 1 度だけ**発行する (新仕様より前の行の救済)
+   *   メール行なし            → 発行して行を作る
+   *
+   * 【両方へ書く】メール行だけに uid を書くと資格が立たない。
+   * **同じリクエストの中で `special.account_uids` にも足す** (下の `updates` に
+   * まとめて渡すので、片方だけ保存される形にはならない)。
    */
+  /*
+   * 発行済み uid の集合 = `special.account_uids` ＋ メール行の uid ＋ 組み込み / env。
+   * **既存 uid を上書きしない**ための衝突回避に使う (ループの中で足していく)。
+   */
+  const takenUids = new Set<string>([
+    ...cur.rows.map((r) => r.uid),
+    ...entries.map((e) => e.uid),
+    ...emails.map((e) => e.uid).filter((u): u is string => !!u),
+  ]);
   for (const raw of addEmail) {
     const addr = String((raw as { email?: unknown })?.email ?? raw ?? '').trim().toLowerCase();
     const label = String((raw as { label?: unknown })?.label ?? '').replace(/[\r\n#]/g, ' ').trim().slice(0, 80);
@@ -201,8 +241,23 @@ export const POST: APIRoute = async ({ request }) => {
     }
     const h = await hashEmail(addr);
     const at = emails.findIndex((e) => e.hash === h);
-    if (at >= 0) emails[at] = { ...emails[at], label: label || emails[at].label };
-    else emails.push({ hash: h, masked: maskEmail(addr), uid: '', label });
+    if (at >= 0) {
+      /*
+       * **既にある行。uid は触らない** (一度割り当てた uid は変えない)。
+       * ただし新仕様より前に作られた **uid 空の行はここで 1 度だけ発行**して移行する
+       * (一括 migration は行わない = 再登録したときに移る・仕様書 §4.1.1)。
+       */
+      const kept = emails[at].uid || mintSpecialUid(takenUids);
+      takenUids.add(kept);
+      emails[at] = { ...emails[at], uid: kept, label: label || emails[at].label };
+      ensureUidEntry(entries, kept, emails[at].label || emails[at].masked);
+    } else {
+      // **新規。その場で uid を発行し、メール行と資格一覧の両方へ入れる。**
+      const uid = mintSpecialUid(takenUids);
+      takenUids.add(uid);
+      emails.push({ hash: h, masked: maskEmail(addr), uid, label });
+      ensureUidEntry(entries, uid, label || maskEmail(addr));
+    }
     // DOB は専用キーへ (PII 隔離)。**入力があったフィールドだけ上書き** — 空で既存を消さない。
     if (dob || sex) {
       const di = dobEntries.findIndex((e) => e.hash === h);
@@ -215,14 +270,18 @@ export const POST: APIRoute = async ({ request }) => {
     const at = emails.findIndex((e) => e.hash === key);
     if (at < 0) { rejected.push({ uid: key, reason: '登録されていない' }); continue; }
     /*
-     * **サインイン済みなら uid 側も一緒に外す。**
+     * **発行済みの uid も一緒に外す。**
      * メールを外しただけでは uid が残り、本人には資格が残り続ける
      * (画面上は「外れた」ように見えるのに実際は外れていない = 一番まずい形)。
+     *
+     * ⚠️ **検査データは消さない。** 外すのは資格 (`special.account_uids`) だけで、
+     * その uid に入っている `test_artifacts` 等は**そのまま残る**。
+     * 実データの削除は別の重大操作なので、この口では扱わない (仕様書 §4.1.3)。
      */
-    const linked = emails[at].uid;
+    const allocated = emails[at].uid;
     emails.splice(at, 1);
-    if (linked) {
-      const ui = entries.findIndex((e) => e.uid === linked);
+    if (allocated) {
+      const ui = entries.findIndex((e) => e.uid === allocated);
       if (ui >= 0) entries.splice(ui, 1);
     }
     // 生年月日・性別も同じハッシュの行を消す (PII を残さない)。

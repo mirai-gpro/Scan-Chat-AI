@@ -107,11 +107,47 @@ const BUILTIN_LABELS: Readonly<Record<string, string>> = {};
 // ══════════════════════════════════════════════════════════════════════
 //
 // **登録はメール / 判定は uid。** 人は自分の `diagnostic_user_id` を知らない。
-// uid はサインイン時に自動で埋まる (`linkSpecialEmail`)。
+// **uid はメール登録のその場で発行する** (2026-10-05 発注者指示・仕様書 §4.1)。
+// 本人の初回ログインを uid 発行の条件にしない — **ログイン前に検査データを入れられる**
+// 必要があるため (トランスコスモス 10 名のように、先にデータを準備する運用)。
+// サインイン時の `linkSpecialEmail` は**事前発行済みの uid をそのまま確認する**だけで、
+// 新しい uid は作らない。
 // **メールアドレスの現物は保存しない** — sha256 / マスク / uid / メモ の 4 つだけ。
+//
+// ⚠️ **ここで作るのは `diagnostic_user_id` だけ。** Supabase Auth user / password /
+// Google identity / `auth_user_id` / `google_sub` は**一切作らない**。
+// Auth アカウントは本人が Web アプリで Sign up / Sign in したときに従来どおり作られる。
 
 export function specialEmailEntries(): SpecialEmailEntry[] {
   return parseEmailEntries(cfg('special.account_emails'));
+}
+
+/**
+ * **この email に事前発行済みの uid が記録されているか** (記録済みの ① だけを見る)。
+ *
+ * 2026-10-05 の新仕様では、メール登録のその場で uid を発行して**実データを先に入れる**。
+ * そのため `/api/auth/resolve` は「いま返した uid が**事前発行された本物**なのか、
+ * それとも既存 uid・新規発行にフォールバックした結果なのか」を区別する必要がある
+ * (区別できないと、事前投入したデータを別 uid へ黙って張り替えてしまう)。
+ *
+ * **判定を推論に頼らないためにこの関数を置いている。** `resolveSpecialUidByEmail` の
+ * 戻り値から逆算すると、将来そちらを 1 行変えた瞬間にガードが静かに効かなくなる。
+ *
+ * @returns 記録済みの uid / 記録が無ければ null (登録そのものが無い場合も null)。
+ */
+export async function specialPreassignedUidByEmail(
+  email: string | null | undefined,
+): Promise<string | null> {
+  try {
+    if (!email) return null;
+    await refreshConfig();
+    const h = await hashEmail(email);
+    const hit = specialEmailEntries().find((e) => e.hash === h);
+    return hit?.uid ? norm(hit.uid) : null;
+  } catch (e) {
+    console.error('[special-accounts] specialPreassignedUidByEmail 失敗:', e instanceof Error ? e.message : e);
+    return null;
+  }
 }
 
 /**
@@ -123,6 +159,9 @@ export function specialEmailEntries(): SpecialEmailEntry[] {
  * - **1 度決めたら変わらない。** メール行に記録した uid をそのまま返す
  * - **顧客レコードは作らない。** 作るのは診断側の識別子だけ (PII は生まれない)
  * - **保存はしない。** 直後に呼ばれる `linkSpecialEmail` が書く (書き込み口を 2 つに増やさない)
+ *
+ * **新仕様 (2026-10-05) では ① がほぼ必ず当たる** — 登録時に uid を発行済みなので。
+ * ②③ は**新仕様より前に登録した行 (uid 空) の救済**として残す。**順序は変えない。**
  *
  * @param existingUid **その Google アカウントに既に割り当てられている uid**
  *   (`diagnosis.app_users` を `auth_user_id` / `google_sub` で引いた結果)。
@@ -150,6 +189,10 @@ export async function resolveSpecialUidByEmail(
 /**
  * **サインイン時に呼ぶ。** この email がスペシャル枠として登録されていれば、
  * その uid を uid 側の一覧へ写す (以後は uid だけで毎リクエスト判定できる)。
+ *
+ * **新仕様 (2026-10-05) では登録時に両方へ書いてあるので、ここは何も書かずに
+ * true を返すのが通常**(下の「何も変わらない = 書きに行かない」で抜ける)。
+ * 書くのは**新仕様より前に登録した uid 空の行**が初めてサインインしたときだけ。
  *
  * @param email `sb.auth.getUser()` が返した**サーバ検証済み**の値。クライアントの申告ではない。
  * @returns 写したら true (＝この人はスペシャルアカウント)。
@@ -196,6 +239,41 @@ export async function linkSpecialEmail(email: string | null | undefined, uid: st
   }
 }
 
+/**
+ * **メール登録のその場で `diagnostic_user_id` を発行する** (2026-10-05 発注者指示)。
+ *
+ * 【なぜ登録時か】本人の初回ログインを uid 発行の条件にすると、
+ * **ログイン前に検査データを入れられない**。実際の用途 (トランスコスモス 10 名) は
+ * 「本人がまだ来ていないうちに健診・遺伝子・報告書を準備する」ことなので、
+ * 登録の時点で uid が確定していなければ運用が成立しない。
+ *
+ * 【作るのは uid だけ】Supabase Auth user / password / Google identity /
+ * `auth_user_id` / `google_sub` は**作らない**。admin が代理で Auth ユーザーを
+ * 作ったり仮パスワードを置いたりは**絶対にしない** (仕様書 §4.3)。
+ *
+ * 【衝突を作らない】`crypto.randomUUID()` の衝突確率は無視できるが、
+ * **既存 uid を上書きする実装にはしない**のが要件。既に使われている uid
+ * (`special.account_uids` ＋ メール行の uid) を渡して、当たったら引き直す。
+ * 過剰な仕組みは置かない — 数回引いて駄目なら最後の候補をそのまま返す
+ * (そこまで来る確率は現実には 0 で、**無限ループを作る方が害が大きい**)。
+ *
+ * @param taken 既に使われている uid。大文字・空白は吸収する。
+ */
+export function mintSpecialUid(taken: Iterable<string>): string {
+  const used = new Set<string>();
+  for (const t of taken) {
+    const u = norm(t);
+    if (u) used.add(u);
+  }
+  let uid = '';
+  for (let i = 0; i < 8; i += 1) {
+    uid = crypto.randomUUID().toLowerCase();
+    if (!used.has(uid)) return uid;
+  }
+  console.error('[special-accounts] uid の採番が 8 回連続で衝突しました (ありえない。要調査)');
+  return uid;
+}
+
 /** 保存形式は 1 行 1 件 + `#` 注釈。人が読める形で残す。 */
 export function serializeUidEntries(list: SpecialAccountEntry[]): string {
   return list.map((e) => (e.label ? `${e.uid}  # ${e.label}` : e.uid)).join('\n');
@@ -216,7 +294,7 @@ export interface SpecialAccountRow extends SpecialAccountEntry {
 
 export function listSpecialAccounts(): {
   rows: SpecialAccountRow[];
-  emails: (SpecialEmailEntry & { linked: boolean })[];
+  emails: (SpecialEmailEntry & { uidAllocated: boolean; linked: boolean })[];
   configRaw: string;
   emailsRaw: string;
   deniedRaw: string;
@@ -234,16 +312,32 @@ export function listSpecialAccounts(): {
     ...parseEntries(configRaw).map((e) => ({ ...e, source: 'config' as const })),
   ];
   /*
-   * `linked` = その人が**もうサインインしたか**。false なら「登録はしたがまだ本人が来ていない」
-   * = 正常。**異常に見せない** (仕様書 §4.1)。
+   * `uidAllocated` = **`diagnostic_user_id` が発行されて資格一覧にも載っているか**。
+   *
+   * ⚠️ **これは「本人がサインインしたか」ではない** (2026-10-05 の仕様変更)。
+   * 新仕様では**メール登録のその場で uid を発行する**ので、登録直後から true になる。
+   * 以前のコメントは `linked = その人がもうサインインしたか` と書いていたが、
+   * それは**もう成り立たない**ので直した。「本人が認証済みか」を知りたいなら
+   * `diagnosis.app_users.auth_user_id` 等、**実際の Auth 紐付けを根拠にすること**
+   * (この関数は app_config しか見ないので、その判定はここでは出せない)。
+   *
    * 判定は**記録した uid が一覧に在るか**だけ。ラベルの一致で推測しない
    * (ラベルは admin が書き換えられるので、推測すると黙って誤判定する)。
    */
   const known = new Set(rows.map((r) => r.uid));
-  const emails = parseEmailEntries(emailsRaw).map((e) => ({
-    ...e,
-    linked: !!e.uid && known.has(e.uid),
-  }));
+  const emails = parseEmailEntries(emailsRaw).map((e) => {
+    const uidAllocated = !!e.uid && known.has(e.uid);
+    return {
+      ...e,
+      uidAllocated,
+      /**
+       * @deprecated **`uidAllocated` の別名。** 既存の API 形を壊さないために残しているが、
+       * **「サインイン済み」という意味では使わないこと。** 新しい consumer は
+       * `uidAllocated` を読む。
+       */
+      linked: uidAllocated,
+    };
+  });
 
   const fromEmail = new Set(emails.filter((e) => e.uid).map((e) => e.uid));
   for (const r of rows) {
@@ -281,7 +375,8 @@ export function specialAccountStats(): {
 // は admin 画面へ生テキスト (emailsRaw) を返して編集させるので、生年月日を混ぜると
 // **ブラインド表示が崩れる**。DOB は専用キーに隔離し、**admin へは API GET でマスクして返す**。
 // 登録時点では uid はまだ無い (サインイン前) ので **email の sha256 で控える**。
-// uid からの参照はサインイン済みの email 行 (uid↔hash) を辿る。
+// uid からの参照は email 行 (uid↔hash) を辿る。
+// (新仕様では登録時に uid が付くので、**本人のサインイン前でも辿れる**。)
 //
 // **共有の純粋関数には手を入れていない** (仕様書 §9.1)。DOB は special 専用の追加。
 
@@ -344,8 +439,11 @@ export function specialDobEntries(): SpecialDobEntry[] {
  * **uid → 登録時に控えた生年月日・性別。** ウェルネス年齢の年齢ソース。
  *
  * 顧客レコードを持たない枠のためのフォールバックなので、email 行 (uid↔hash) を
- * 辿って DOB キーを引く。**サインイン済み (uid が埋まっている) 行のみ**。
- * 無ければ null (捏造しない)。
+ * 辿って DOB キーを引く。**uid が埋まっている行のみ**。無ければ null (捏造しない)。
+ *
+ * 新仕様 (2026-10-05) では登録時に uid を発行するので、**本人のサインイン前でも引ける**
+ * (= ログイン前に入れた検査データでもウェルネス年齢が算出できる)。
+ * 以前は「サインイン済みの行のみ」と書いていたが、uid の発行時期が変わったので直した。
  */
 export function specialSubjectByUid(uid: string): { dateOfBirth: string | null; sex: 'male' | 'female' | null } | null {
   const u = norm(uid);

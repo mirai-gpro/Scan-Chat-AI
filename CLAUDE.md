@@ -1980,7 +1980,44 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   - **判定 = `special-accounts.ts` の `isSpecialAccount(uid)`。uid が一覧にあるか、それだけ。**
     admin は見ない (デモ枠で踏んだ誤りをそのまま持ち込まない)。
   - **登録は Google アカウント (メール) / 判定は uid**。保存するのは sha256 / マスク / uid / メモ の
-    4 つだけで、**メールの現物は保存しない**。uid はサインイン時に `linkSpecialEmail` が写す。
+    4 つだけで、**メールの現物は保存しない**。
+  - **【uid はメール登録のその場で発行する 2026-10-05 確定・発注者指示】仕様書 §4.1.1 / §4.2.1 / §4.2.2。**
+    **本人の初回ログインを `diagnostic_user_id` の発行条件にしない** —
+    admin 画面の［追加検査データ］［共有URL設定］［Elith納品］は uid が無いと押せないので、
+    旧仕様では**本人が来るまでデータを入れられなかった** (用途=トランスコスモス 10 名の事前準備)。
+    - **ここで作るのは `diagnostic_user_id` だけ。** Supabase Auth user / password /
+      Google identity / `auth_user_id` / `google_sub` は**作らない**。Auth アカウントは
+      本人が Web アプリで Sign up / Sign in したときに従来どおり作られる。
+      **admin が Auth ユーザーを代理作成する・仮パスワードを置くのは絶対にしない。**
+    - **冪等**: メール行に uid があれば**そのまま維持** (label / DOB / sex の更新でも変えない) /
+      uid 空の legacy 行は**再登録したときに 1 度だけ**発行 (一括 migration はしない) /
+      行が無ければ発行して作る。**一度割り当てた uid は変えない。**
+    - **両方へ書く**: `special.account_emails` と `special.account_uids` を
+      **同じリクエストの 1 回の `setConfig(updates, …)`** にまとめる (片方だけ保存される形を作らない)。
+      既存 uid を上書きしないよう `mintSpecialUid(taken)` に既存 uid の集合を渡す。
+    - **【最重要】事前発行 uid と `linkedUid` の競合は何も書かずに 409** (仕様書 §4.2.1)。
+      `/api/auth/resolve` の「既存 uid へ寄せる」分岐は、スペシャルが
+      `uidIsAuthoritative=false` なので**黙って張り替えていた**。新仕様では
+      **UID-A に実データを投入済み**なので、それをやると**本人の健康データと認証が分離する**。
+      → `specialPreassignedUidByEmail(email)` で**事前発行済みかを直接引いて**
+      (戻り値から逆算しない) 突き合わせ、食い違ったら
+      **detach / upsert / `linkSpecialEmail` / viewer Cookie のいずれにも到達する前に 409**。
+      自動移行はしない (どちらが本物かを機械が決めてよい場面ではない)。
+      **デモ枠は従来どおり**・解決順序 (実顧客 → staging → special → demo) も変えない。
+    - **`uid` が在る = 本人サインイン済み、ではない** (仕様書 §4.2.2)。
+      `listSpecialAccounts()` の **`uidAllocated`** は「uid が発行されて資格一覧にも載っているか」で、
+      登録直後から true。旧名 `linked` は**deprecated な別名**として残すが
+      **「サインイン済み」の意味では使わない** (consumer 実測 0 件)。
+      認証状況を知りたいなら `diagnosis.app_users.auth_user_id` を根拠にする。
+      admin 画面の「サインイン待ち」は**撤去**し「ID が未発行」へ。
+    - **削除**: メールを Delete すると事前発行 uid も資格一覧から外れる (従来どおり)。
+      **検査データは自動削除しない** (実データ削除は別の重大操作)。
+    - **氏名・会社名は保存しない** (既存 PII 方針を維持)。DOB / sex も
+      `special.account_dob` と email hash の紐付けのまま変えない
+      (登録時に uid があっても **DOB のキーを uid へ移行しない**)。
+    - **検証**: `npm run verify:special-accounts` の **⑨ (API を実際に動かす) / ⑩ (ガードの位置)** と
+      `verify:email-auth` の **⑫ (P-09〜P-16・resolve を動かす)**。
+      **退行注入 10 種**で名指しに落ちることを確認済み。
   - **一覧 = 組み込み ∪ env `SPECIAL_ALLOWED_UIDS` ∪ app_config `special.account_uids`
     − `special.account_denied_uids`** (除外は和のあと)。
     **組み込み (`BUILTIN_SPECIAL_UIDS`) は空のままにする** — 実データが紐づくので焼き込まない。
@@ -2066,7 +2103,8 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     - **UI は表示と処理を分ける**: `SignInPanel.astro` (表示) / `EmailPasswordAuth.astro` (処理)。
       **メールの入口は `#signin-ready` の外**に置く — 中に入れると **Google の読み込み失敗で一緒に消え、
       メール認証まで行き止まりになる**。要素が無いページでは何もしない (`BaseLayout` に 1 回置くだけ)。
-    - **検証 `npm run verify:email-auth` 122 件** (CI の A 層。うち ⑪ 33 件は下の HP マイページ導線)。`resolve.ts` を transpile し Supabase を
+    - **検証 `npm run verify:email-auth` 141 件** (CI の A 層。うち ⑪ 33 件は下の HP マイページ導線・
+      ⑫ 19 件は事前発行 uid の保護)。`resolve.ts` を transpile し Supabase を
       スタブに差し替えて**実物を動かす**。**最重要 = テスト L**: **Google Identity を持つ** +
       `amr.method='password'` → `password` と正しく判定し、Google 利用済みなら **409・書き込み 0 件・
       Cookie 0 枚**。**B-04/B-05** = `google_sub` ありで `auth_user_id` が**今回と同じ回**と
@@ -2113,7 +2151,7 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
       登録した人は復旧できないので、本導線とは別に判断が要る。
   - 増減は wellfort-site `/admin/special-accounts` (サイドバー「設定」・**デモ用アカウントとは別メニュー**)。
     UI=wellfort-site / 処理=Scan-Chat-AI `/api/admin/special-accounts` (Bearer `ADMIN_API_KEY`)。
-  - **検証 `npm run verify:special-accounts` 70 件** (CI の A 層)。`demoFallbackEnabled` の本体を
+  - **検証 `npm run verify:special-accounts` 115 件** (CI の A 層)。`demoFallbackEnabled` の本体を
     切り出して実際に動かし、`demo-accounts.ts` / `special-accounts.ts` は app_config だけスタブに
     差し替えて実物を呼ぶ。**退行注入 10 種**で名指しに落ちることを確認済み。
     ⑦生年月日=DOB のラウンドトリップ/暦日検証/uid↔hash 突き合わせ・⑧API のブラインド化 (present で
