@@ -41,6 +41,10 @@ interface Props {
 }
 const { href, receivedAt = null, available = true, isNew = false } = Astro.props as Props;
 const showNew = available && isNew;
+// 通常報告書はそのまま /report へ、トランスコスモスの完成済み PDF がある人だけ
+// `/api/report-route` が本人 uid を確認して短寿命の署名 URL へ送る。
+// `dest` は相対 URL のみを API 側で許可し、通常利用者への挙動は従来どおり。
+const routedHref = `/api/report-route?dest=${encodeURIComponent(href)}`;
 ---
 
 <section class:list={[
@@ -70,7 +74,7 @@ const showNew = available && isNew;
 
   {available ? (
     <a
-      href={href}
+      href={routedHref}
       class="flex min-h-touch items-center justify-center gap-1.5 rounded-xl bg-white px-3 text-base font-semibold text-brand-700 transition hover:bg-brand-50"
     >
       報告書を読む<AppIcon name="next" size={18} />
