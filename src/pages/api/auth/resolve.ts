@@ -16,7 +16,11 @@ import { linkSpecialEmail, resolveSpecialUidByEmail } from '../../../lib/special
 export const prerender = false;
 
 /**
- * Google One Tap サインイン後の本人解決 (サーバー側)。
+ * サインイン後の本人解決 (サーバー側)。**Google / メール＋パスワード の共通合流点**。
+ *
+ * 認証方式が増えても**この口は 1 つだけ**。メール認証専用の本人解決 API は作らない
+ * (2026-10-05 発注者指示 §7)。クライアントは Supabase のアクセストークンを渡すだけで、
+ * email / sub は**サーバがトークンから検証**する (クライアント申告を使わない)。
  *
  * クライアントから Supabase アクセストークンを受け取り、本人を検証したうえで:
  *   1. email → diagnostic_user_id を解決
@@ -50,9 +54,39 @@ export const POST: APIRoute = async (apiCtx) => {
   if (userErr || !userData?.user) return json({ error: 'invalid session' }, 401);
   const user = userData.user;
   const email = (user.email ?? '').trim().toLowerCase();
-  const sub = (user.user_metadata as Record<string, string> | undefined)?.sub ?? null;
   const authId = user.id;
-  if (!email) return json({ error: 'no email in Google account' }, 400);
+  if (!email) return json({ error: 'no email in account' }, 400);
+
+  /*
+   * ── **「持っている Identity」と「今回使った認証方式」を分ける** ──────────────
+   * (2026-10-05 発注者指示 §2。混同すると §8 の退行 L が起きる)
+   *
+   *   hasGoogleIdentity … **その人が Google Identity を持っているか**。
+   *                       `app_metadata` / `identities` (getUser が返すサーバ検証済み情報)。
+   *   currentAuthMethod … **今回のセッションが何で認証されたか**。
+   *                       アクセストークンの `amr` (Authentication Method References)。
+   *
+   * `app_metadata.providers` に `google` が在ることは、**今回 Google で入った証拠にならない**
+   * (Google Identity を持つ人が password でも入れるため)。
+   */
+  const hasGoogleIdentity = detectGoogleIdentity(user);
+  const currentAuthMethod = await detectCurrentAuthMethod(sb, accessToken, user);
+
+  /*
+   * **`google_sub` は「今回 Google で認証した」ときだけ書く。**
+   *
+   * ・password と**確定した**セッションでは書かない (メール認証で Google 由来でない値を
+   *   入れない・テスト K)。
+   * ・`amr` が取れなかった回 (`unknown`) は **従来どおりの挙動**に倒す
+   *   = Google Identity があれば書く。これで既存 Google ユーザーの動作が変わらない
+   *   (テスト J)。**書く値そのものは従来と同じ式**で、ここでは変えていない。
+   *
+   * ⚠️ `user_metadata.sub` が利用者書き換え可能である既存の課題は**別件**
+   *   (2026-10-05 発注者指示 §9)。ここでは**悪化させないだけ**で、意味も移行も変えない。
+   */
+  const sub = hasGoogleIdentity && currentAuthMethod !== 'password'
+    ? ((user.user_metadata as Record<string, string> | undefined)?.sub ?? null)
+    : null;
 
   // 1) email → diagnostic_user_id + 表示名(姓)
   let diagnosticUserId: string | null = null;
@@ -209,6 +243,64 @@ export const POST: APIRoute = async (apiCtx) => {
   }
 
   /*
+   * ══════════════════════════════════════════════════════════════════════
+   * **Google 認証済み → 後からメール＋パスワード認証 を拒否する** (発注者指示 §3)
+   * ══════════════════════════════════════════════════════════════════════
+   *
+   * 禁じているのは**この一方向だけ**。逆 (メール認証 → 後から Google) は禁じない。
+   *
+   * 【拒否する条件は 2 つだけ】(2026-10-05 実コードレビューで是正)
+   *   ① `diagnosticUserId` が決まっている
+   *   ② 今回の方式が `password` と**確定**している (`amr` 由来・`unknown` では止めない)
+   *   かつ ③ その uid の `app_users.google_sub` が**存在する** (= Google 利用済み)
+   *
+   * **`auth_user_id` が今回と同じか違うかは拒否条件にしない。** 禁じているのは
+   * 「**Google 利用済みの人がメール＋パスワード認証を使うこと自体**」であって、
+   * 「認証 ID が張り替わること」ではない。両者を混同すると取り逃す:
+   *   - 本番 `diagnosis.app_users` 実測 (2026-10-05): `google_sub` あり **24 件** のうち
+   *     **`auth_user_id` が NULL のものが 13 件**。`auth_user_id` を条件に入れると
+   *     **この 13 件は password 認証を拒否できない**。
+   *   - 同じ auth user に後からパスワードを付けた回も `auth_user_id` が一致するので
+   *     素通りしてしまう。
+   *
+   * 【なぜ書き込みの前で止めるか】`findLinkedUid` は `auth_user_id` / `google_sub` でしか
+   * 引けないので、**別の auth user で入ってきた password セッションは `linkedUid` に
+   * 当たらない**。すると下の張り替え分岐を素通りし、`upsert` が
+   * **既存行の `auth_user_id` / `google_sub` を無言で書き換える** (調査 §9)。
+   *
+   * 【止める位置】`issueAdminCred` より前。Cookie を 1 枚も発行しない。
+   * detach / upsert / `linkSpecialEmail` のいずれにも到達しない。
+   *
+   * 【引けなかったら通さない (fail-closed)】照会が落ちたら「Google 済かどうか不明」なので
+   * **何も書かずに 503**。この照会は **password セッションのときだけ**走るので、
+   * 既存の Google ログインには 1 回も影響しない。
+   */
+  if (diagnosticUserId && currentAuthMethod === 'password') {
+    const { data: existing, error: exErr } = await sb
+      .schema('diagnosis')
+      .from('app_users')
+      .select('auth_user_id, google_sub')
+      .eq('diagnostic_user_id', diagnosticUserId)
+      .maybeSingle();
+    if (exErr) {
+      console.error('[auth/resolve] 既存束縛の照会に失敗 (何も書かずに中止):', exErr.message);
+      return json({ error: 'ただいま混み合っています。時間をおいて再度お試しください。' }, 503);
+    }
+    const row = existing as { auth_user_id?: string | null; google_sub?: string | null } | null;
+    // **`auth_user_id` は見ない。** Google 利用済み (`google_sub` あり) なら それだけで拒否する。
+    if (row?.google_sub) {
+      console.warn(
+        `[auth/resolve] Google 利用済みの uid に password セッションが来たので拒否しました`
+        + ` (uid=${diagnosticUserId}, method=${currentAuthMethod})。何も書いていません。`,
+      );
+      return json({
+        error: 'このメールアドレスは別のログイン方法でご利用中です。'
+             + '最初にご利用になった方法でサインインしてください。',
+      }, 409);
+    }
+  }
+
+  /*
    * **admin 専用 credential (`welltect_admin_v`) は、uid が決まる前に発行する**
    * (2026-09-30・仕様書 §12.4.1)。
    *
@@ -335,6 +427,125 @@ export const POST: APIRoute = async (apiCtx) => {
   // `resolvedBy` は切り分け用 (PII 非含有)。**staging 由来かどうかがここで分かる**。
   return json({ linked: true, diagnosticUserId, resolvedBy: resolvedFrom }, 200);
 };
+
+/**
+ * **その人が Google Identity を持っているか** (= `hasGoogleIdentity`)。
+ *
+ * ⚠️ **「今回 Google で認証した」ではない。** 両者を同一視すると、
+ * Google Identity を持つ人の password セッションを Google と誤判定する
+ * (発注者指示 §2 / テスト L)。今回の方式は `detectCurrentAuthMethod()` で見る。
+ *
+ * 根拠は `sb.auth.getUser()` が返した**サーバ検証済みの User**。
+ * `app_metadata` は Admin API でしか書けない (利用者は `updateUser` で触れない) ので、
+ * `user_metadata` と違って信用できる。
+ */
+export function detectGoogleIdentity(user: {
+  app_metadata?: { provider?: string; providers?: string[] } | null;
+  identities?: { provider?: string }[] | null;
+} | null | undefined): boolean {
+  if (!user) return false;
+  const meta = user.app_metadata ?? {};
+  if (meta.provider === 'google') return true;
+  if (Array.isArray(meta.providers) && meta.providers.includes('google')) return true;
+  return (user.identities ?? []).some((i) => i?.provider === 'google');
+}
+
+/** 今回のセッションが何で認証されたか。`amr` から決める。 */
+export type CurrentAuthMethod = 'oauth' | 'password' | 'other' | 'unknown';
+
+/**
+ * **`amr` (Authentication Method References) から「今回の認証方式」を決める。**
+ *
+ * `amr` はアクセストークンのクレームで、**そのセッションを成立させた方法**が入る。
+ * `app_metadata.providers` (持っている Identity の一覧) とは別物。
+ *
+ * | `amr[].method` | 返す値 |
+ * |---|---|
+ * | `oauth` / `oauth_provider/...` / `sso/saml` | `'oauth'` |
+ * | `password` / `email/signup` | `'password'` |
+ * | `magiclink` / `otp` / `totp` / `mfa/*` 等 | `'other'` |
+ * | `token_refresh` | **無視** (元の方式を表さないため) |
+ * | 取れない / 判別不能 | `'unknown'` |
+ *
+ * **`'unknown'` では何も止めない**。止めるのは `'password'` と確定したときだけで、
+ * 既存の Google ログインを巻き込まないため (発注者指示 §3)。
+ */
+export function authMethodFromAmr(amr: unknown): CurrentAuthMethod {
+  const names: string[] = [];
+  if (Array.isArray(amr)) {
+    for (const e of amr) {
+      if (typeof e === 'string') names.push(e);
+      else if (e && typeof e === 'object' && typeof (e as { method?: unknown }).method === 'string') {
+        names.push((e as { method: string }).method);
+      }
+    }
+  }
+  // `token_refresh` は「更新した」という記録で、元の方式を表さない。
+  const m = names.map((n) => n.toLowerCase()).filter((n) => n !== 'token_refresh');
+  if (m.length === 0) return 'unknown';
+  const oauth = m.some((n) => n === 'oauth' || n.startsWith('oauth_provider/') || n.startsWith('sso/'));
+  const password = m.some((n) => n === 'password' || n === 'email/signup');
+  if (oauth && password) return 'unknown';   // 同時に立つことは無い想定。判らないものは止めない
+  if (oauth) return 'oauth';
+  if (password) return 'password';
+  return 'other';
+}
+
+/**
+ * アクセストークンの `amr` を取って「今回の認証方式」を返す。
+ *
+ * 1. **`getClaims(accessToken)` を優先**する (@supabase/auth-js に在る。JWT を検証して
+ *    クレームを返す)。
+ * 2. 無い / 失敗した環境では、**`getUser()` の検証が通った後に限り**同じトークンの
+ *    payload を自前で復号して `amr` だけを読む。**未検証の JWT は信用しない** —
+ *    `sub` と `email` が `getUser()` の結果と一致することを確かめてから使う
+ *    (発注者指示 §1)。
+ * 3. どちらも駄目なら `'unknown'` (何も止めない・従来どおりの挙動)。
+ *
+ * **新しい依存は足していない。**
+ */
+export async function detectCurrentAuthMethod(
+  sb: NonNullable<ReturnType<typeof getServerSupabase>>,
+  accessToken: string,
+  user: { id: string; email?: string | null },
+): Promise<CurrentAuthMethod> {
+  // ① getClaims (在れば優先)
+  try {
+    const auth = sb.auth as unknown as {
+      getClaims?: (jwt?: string) => Promise<{ data?: { claims?: { amr?: unknown } } | null; error?: unknown }>;
+    };
+    if (typeof auth.getClaims === 'function') {
+      const { data, error } = await auth.getClaims(accessToken);
+      if (!error && data?.claims) {
+        const got = authMethodFromAmr(data.claims.amr);
+        if (got !== 'unknown') return got;
+      }
+    }
+  } catch (e) {
+    console.warn('[auth/resolve] getClaims が使えませんでした:', e instanceof Error ? e.message : e);
+  }
+
+  // ② getUser 検証後のトークンの payload から amr だけ読む (検証前の JWT は信用しない)
+  try {
+    const parts = accessToken.split('.');
+    if (parts.length !== 3) return 'unknown';
+    const json = JSON.parse(
+      Buffer.from(parts[1].replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'),
+    ) as { sub?: unknown; email?: unknown; amr?: unknown };
+    /*
+     * **同じトークンであることを確かめてから使う。** `getUser()` は Auth サーバに
+     * 問い合わせて本人を確定済みなので、その結果と `sub` / `email` が一致すれば、
+     * この payload は**検証済みトークンのもの**だと言える。
+     */
+    if (String(json.sub ?? '') !== user.id) return 'unknown';
+    const tokenEmail = String(json.email ?? '').trim().toLowerCase();
+    const userEmail = (user.email ?? '').trim().toLowerCase();
+    if (tokenEmail && userEmail && tokenEmail !== userEmail) return 'unknown';
+    return authMethodFromAmr(json.amr);
+  } catch {
+    return 'unknown';
+  }
+}
 
 /**
  * この Google アカウントに**既に割り当てられている** `diagnostic_user_id`。

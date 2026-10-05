@@ -418,6 +418,58 @@ for (const [width, height, label] of SIZES) {
   }
 }
 
+// ── ⑥ サインイン画面: メール＋パスワードの入口 ─────────────────────
+/*
+ * **Google が使えない環境で入口が 1 つも無くならないこと**を見る (2026-10-05)。
+ * 以前は GSI の失敗で `#signin-ready` ごと隠していたので、ここが壊れると
+ * **その環境の人は一生サインインできない**のに、画面は「読み込めませんでした」と
+ * 出るだけで正常に見える。
+ *
+ * 未サインインで `/dashboard` を開くと `SignInPanel` が出る (Cookie を持たないため)。
+ */
+{
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await ctx.newPage();
+  await page.goto(`${BASE}/dashboard`, { waitUntil: 'domcontentloaded' });
+  const got = await page.evaluate(() => {
+    const q = (id) => document.getElementById(id);
+    const el = q('signin-login-email');
+    const pw = q('signin-login-password');
+    const sz = pw ? parseFloat(getComputedStyle(pw).fontSize) : 0;
+    // GSI を読み込めなかった状態を作って、メールのフォームが残ることを見る。
+    document.dispatchEvent(new CustomEvent('welltect:signin', { detail: { state: 'unavailable' } }));
+    const stillVisible = !!(el && el.getBoundingClientRect().height > 0);
+    return {
+      login: !!el, password: !!pw,
+      signupEmail: !!q('signin-signup-email'), signupPassword: !!q('signin-signup-password'),
+      minlength: pw?.getAttribute('minlength') ?? '', type: pw?.getAttribute('type') ?? '',
+      autocomplete: pw?.getAttribute('autocomplete') ?? '',
+      fontSize: sz, gsiSlot: !!q('gsi-button'), stillVisible,
+      // 新規登録の案内に「存在を教える語」が無いこと。
+      leaks: /既に登録|すでに登録|Google で登録|Googleで登録/.test(document.body.innerText),
+    };
+  });
+  /*
+   * **サインインパネルは `PUBLIC_GOOGLE_CLIENT_ID` が在るときだけ描かれる**
+   * (`dashboard.astro:92` の `authEnabled`)。未設定の環境では画面に出ないので、
+   * ここは**実行しないことを明示して**飛ばす。**黙って通さない。**
+   * markup の契約そのものは `npm run verify:email-auth` (A 層) が毎回見ている。
+   */
+  if (!got.gsiSlot && !got.login) {
+    console.log('— サインイン画面: 未実行 (PUBLIC_GOOGLE_CLIENT_ID 未設定でパネルが描かれない環境)。'
+      + ' markup の契約は verify:email-auth が見ています。');
+  } else {
+    const ok = got.login && got.password && got.signupEmail && got.signupPassword
+      && got.minlength === '8' && got.type === 'password' && got.autocomplete === 'current-password'
+      && got.fontSize >= 16 && got.gsiSlot && got.stillVisible && !got.leaks;
+    console.log(`${ok ? '✓' : '✗'} サインイン画面: メール欄 ${got.login ? '有' : '無'} / 新規登録 ${got.signupEmail ? '有' : '無'}`
+      + ` / minlength=${got.minlength} / ${got.fontSize}px / Google 失敗後も表示 ${got.stillVisible ? '有' : '無'}`
+      + ` / 存在を漏らす語 ${got.leaks ? '**有**' : '無'}`);
+    if (!ok) fails.push(`サインイン画面: ${JSON.stringify(got)}`);
+  }
+  await ctx.close();
+}
+
 await browser.close();
 
 if (fails.length) {

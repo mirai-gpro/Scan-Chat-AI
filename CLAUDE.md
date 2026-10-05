@@ -2009,6 +2009,77 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
       (`parseDobEntries` / `serializeDobEntries` / `specialSubjectByUid` / `normSexToken`)。
     - **任意項目**。空なら送らない (既存を空で上書きしない)。同じメールで登録し直すと上書き。
       **uid 直接追加の経路には DOB 欄を付けない** (メール登録が主経路)。
+  - **【メール＋パスワード認証を足した 2026-10-05・発注者指示】仕様書 §6.1。**
+    Google アカウントを持たない / 使いたくない招待相手にも渡せるようにする。**Google 認証は残す。**
+    - **使うのは Scan-Chat-AI 自身の Supabase Auth**。**HP/EC のパスワードは共有しない**
+      (別プロジェクト・Auth 連携もしない)。利用者は**このアプリでパスワードを登録する**。
+    - **本人解決の口は増やさない** — `POST /api/auth/resolve` が Google / メールの共通合流点。
+      解決順序 (実顧客 → local/linked → staging → スペシャル → デモ → 未連携) は **1 つも動かしていない**。
+      `findLinkedUid` / `resolveSpecialUidByEmail` / `linkSpecialEmail` のロジックとシグネチャも不変。
+      本人判定は **`getUser()` が返したサーバ検証済み `user.email`** だけ (クライアント申告は使わない)。
+    - **【最重要】「持っている Identity」と「今回の認証方式」は別物**。混同すると下の拒否が効かない。
+      `hasGoogleIdentity` = `app_metadata.provider`/`providers`/`identities` (**その人が Google Identity を
+      持っているか**) / `currentAuthMethod` = アクセストークンの **`amr`** (**今回何で認証されたか**)。
+      `app_metadata.provider` は公式に「**最初にサインアップに使った** provider」なので「今回」を表さない。
+      → **`amr` で判定する**: `oauth`/`oauth_provider/*`/`sso/*`→oauth ・ `password`/`email/signup`→password ・
+      `magiclink`/`otp`/`totp`/`mfa/*`→other ・ **`token_refresh` は無視**(元の方式を表さない) ・
+      取れない/両方立つ→`unknown`。取得は **`sb.auth.getClaims(accessToken)` を優先**
+      (`@supabase/auth-js` 2.106.1 に在る)。無い環境では **`getUser()` の検証が通った後に限り**
+      payload を復号して `amr` だけ読む (`sub`/`email` が一致することを確認。**未検証 JWT を先に信用しない**)。
+      **新しい依存は足していない。**
+    - **禁じる切り替えは一方向だけ** = 「**Google 利用済みのユーザーが、後から同じメールアドレスで
+      メール＋パスワード認証を使う**」。**逆 (メール → 後から Google) は禁じない**ので、双方向を見張る
+      `auth_provider` のような仕組みは作らない。拒否は **2 つの条件だけ** (①`diagnosticUserId` が
+      決まっている ＋ 今回が `password` と**確定** ②その uid の `app_users.google_sub` が**存在する**)
+      → **409**。このとき `auth_user_id`/`google_sub`/`diagnostic_user_id`/スペシャル枠の email↔uid を
+      **1 つも書き換えず Cookie も 0 枚** (detach/upsert/`linkSpecialEmail` に到達しない)。
+      **照会が落ちたら通さない (fail-closed) = 何も書かずに 503**。この照会は **password セッションの
+      ときだけ**走るので既存の Google ログインに影響しない。**`unknown` では何も止めない。**
+    - **【重要・2026-10-05 是正】`auth_user_id` が同じか違うかは拒否条件にしない。**
+      禁じているのは「**Google 利用済みの人がメール＋パスワード認証を使うこと自体**」であって、
+      「**認証 ID が張り替わること**」ではない。混同すると取り逃す:
+      **本番 `diagnosis.app_users` 実測** = `google_sub` あり **24 件**・うち `auth_user_id` あり 11 件 /
+      **`auth_user_id` NULL が 13 件** → `auth_user_id` を条件に入れると**この 13 件を拒否できない**。
+      同じ auth user に後からパスワードを付けた回も一致するので素通りする。
+      → 判定は **`row?.google_sub` の有無だけ**。実装前は 3 条件 (旧 ③`auth_user_id !== authId`) だった。
+      退行注入で旧 3 条件へ戻すと **B-04/B-05 の 10 件が名指しで落ち**、`upsert 1`/`Cookie 1`/
+      `admin cred 1`/`linkSpecialEmail 1` まで到達することを実測で確認済み。
+    - **なぜ書き込みの前で止めるか**: `findLinkedUid` は `auth_user_id`/`google_sub` でしか引けないので、
+      **別の auth user で来た password セッションは `linkedUid` に当たらない** → 張り替え分岐を素通りし
+      `upsert` が既存行の `auth_user_id`/`google_sub` を**無言で書き換える**。
+    - **`google_sub` は「今回 Google で認証した」ときだけ書く**。`password` 確定時は書かない。
+      `unknown` の回は**従来どおり**に倒す (Google Identity があれば書く) ので既存ユーザーの動作は不変。
+      **書く値の式は変えていない。**
+      ⚠️ **`user_metadata.sub` が利用者書き換え可能** (`updateUser({data})`→`raw_user_meta_data`) である
+      既存の課題は**別件**。今回は**悪化させないだけ**で `google_sub` の意味も移行も変えない。
+      **修正候補** = `identities[].id` (Admin API でしか書けない) へ寄せる。**影響** = 既存行の由来が
+      変わるので移行を伴う。**今回の方式判定には使っていない**ので、ここで直す必要は無い。
+    - **DB 変更なし**。migration を 1 本も足さない・`auth_provider` 列を作らない・
+      `diagnostic_user_id`/`auth_user_id`/`google_sub` のスキーマは不変。
+      **パスワードはアプリ側 DB に保存しない・ログにも残さない。**
+    - **User Enumeration を起こさない**。未認証の利用者に**アカウントの在/不在も方式も教えない**。
+      新規登録の文言は**これに固定**:「確認メールを送信しました。メールが届かない場合は、
+      以前利用したログイン方法もお試しください。」(在/不在と方式を漏らさず、かつ Google で登録済みの人を
+      行き止まりにしない)。Supabase の `error.message` を**そのまま出さない**。
+      **Confirm Email の ON/OFF どちらでも壊れない**ようにする (本番設定は変えない)。
+      **`updateUser({ password })` は実装しない** (Google アカウントへのパスワード追加を作らない)。
+    - **UI は表示と処理を分ける**: `SignInPanel.astro` (表示) / `EmailPasswordAuth.astro` (処理)。
+      **メールの入口は `#signin-ready` の外**に置く — 中に入れると **Google の読み込み失敗で一緒に消え、
+      メール認証まで行き止まりになる**。要素が無いページでは何もしない (`BaseLayout` に 1 回置くだけ)。
+    - **検証 `npm run verify:email-auth` 89 件** (CI の A 層)。`resolve.ts` を transpile し Supabase を
+      スタブに差し替えて**実物を動かす**。**最重要 = テスト L**: **Google Identity を持つ** +
+      `amr.method='password'` → `password` と正しく判定し、Google 利用済みなら **409・書き込み 0 件・
+      Cookie 0 枚**。**B-04/B-05** = `google_sub` ありで `auth_user_id` が**今回と同じ回**と
+      **NULL の回 (本番 13 件の形)** のどちらも 409・書き込み 0・Cookie 0・admin cred 0・
+      `linkSpecialEmail` 0。**B-06** = `google_sub` が無ければ拒否しない。
+      **退行注入 11 種** (identity で方式を代用・`token_refresh` を方式として採る・
+      409 を upsert の後ろへ動かす・fail-closed を通す に倒す・文言を変える・
+      **拒否条件へ `auth_user_id !== authId` を足す** 等) で名指しに落ちることを確認済み。
+      `verify:screen` の ⑥ も同じ markup を見るが、**`PUBLIC_GOOGLE_CLIENT_ID` が無い環境では
+      パネルが描かれない**ので明示して skip する (`dashboard.astro` の `authEnabled`)。
+      **markup の契約は `verify:email-auth` が常に見ている。**
+    - **発注者の操作が要る**: 本番 Supabase の **Email provider / Confirm Email / Site URL /
+      Redirect URLs**。**こちらから本番設定は変更しない。**
   - 増減は wellfort-site `/admin/special-accounts` (サイドバー「設定」・**デモ用アカウントとは別メニュー**)。
     UI=wellfort-site / 処理=Scan-Chat-AI `/api/admin/special-accounts` (Bearer `ADMIN_API_KEY`)。
   - **検証 `npm run verify:special-accounts` 70 件** (CI の A 層)。`demoFallbackEnabled` の本体を
