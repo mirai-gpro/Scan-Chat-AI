@@ -2066,7 +2066,7 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     - **UI は表示と処理を分ける**: `SignInPanel.astro` (表示) / `EmailPasswordAuth.astro` (処理)。
       **メールの入口は `#signin-ready` の外**に置く — 中に入れると **Google の読み込み失敗で一緒に消え、
       メール認証まで行き止まりになる**。要素が無いページでは何もしない (`BaseLayout` に 1 回置くだけ)。
-    - **検証 `npm run verify:email-auth` 89 件** (CI の A 層)。`resolve.ts` を transpile し Supabase を
+    - **検証 `npm run verify:email-auth` 122 件** (CI の A 層。うち ⑪ 33 件は下の HP マイページ導線)。`resolve.ts` を transpile し Supabase を
       スタブに差し替えて**実物を動かす**。**最重要 = テスト L**: **Google Identity を持つ** +
       `amr.method='password'` → `password` と正しく判定し、Google 利用済みなら **409・書き込み 0 件・
       Cookie 0 枚**。**B-04/B-05** = `google_sub` ありで `auth_user_id` が**今回と同じ回**と
@@ -2080,6 +2080,37 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
       **markup の契約は `verify:email-auth` が常に見ている。**
     - **発注者の操作が要る**: 本番 Supabase の **Email provider / Confirm Email / Site URL /
       Redirect URLs**。**こちらから本番設定は変更しない。**
+  - **【HP マイページから来た初回利用者の導線 2026-10-05 確定・発注者指示】**
+    正本 `docs/operations/スペシャルアカウント_仕様書.md` §6.2 /
+    `docs/architecture/wellfort_mypage_button_spec.md` §2・§5-3。
+    - **HP マイページ → Web アプリのリンクには `?entry=wellfort-mypage` を付ける**
+      (wellfort-site `src/pages/mypage.astro`)。HP と Web アプリは**別の Supabase Auth
+      プロジェクト**なので、HP で認証済みでもこちらには認証ユーザーが居ない。それを伝えないと
+      初回利用者が HP のメール＋パスワードを入れて `Invalid login credentials` になる (実測)。
+    - **`entry` は UI 分岐専用。認証・本人確認には一切使わない。** 誰でも付けられるので、
+      「`entry` が在る → 本人確認済み → `resolve` を省略」は**絶対にやらない**。
+    - **PII をクエリに載せない** (`?email=` / `?u=` / `?customer_id=` / auth user id 等)。
+      URL 履歴・アクセスログ・Referer に出る。**渡すのは入口種別 1 つだけ。**
+      `?u=<diagnostic_user_id>` を外した 2026-09-29 の判断と同じ理由。
+    - **HP マイページ経由 = 新規登録 (Sign up) が主導線** / **通常アクセス = 従来どおり
+      サインイン (Sign in) が主導線**。初回=新規登録 / 登録済み=ログイン の 2 語で通し、
+      **「新規サインイン」という概念は作らない**。登録済みの人の出口 (ログインへ戻る導線) は
+      **常に残す** (片道にしない)。
+    - **認証後は従来どおり Supabase Auth → access_token → `POST /api/auth/resolve`** を必ず通す。
+      `resolve.ts` も認証部品も `entry` を 1 文字も読まない。
+    - **メール存在の事前照会 API は作らない** (未認証で「このメールは登録済みか」を聞けると
+      User Enumeration)。初回かどうかは**利用者に 2 つの入口から選ばせる**。
+    - 実装は **`src/components/SignInPanel.astro` だけ** (表示の器)。初期表示は
+      **SSR の `hidden` 属性で決める** (`hidden={fromMypage}` / `hidden={!fromMypage}`) ——
+      JS で切り替えると JS が落ちた環境で従来の順序に戻る。判定は**完全一致**
+      (`=== 'wellfort-mypage'`) なので、想定外の値では画面が変わらない。
+      **Google (One Tap / 公式ボタン / `/api/auth/resolve`) は 1 行も変えていない。**
+    - **検証**: Scan `npm run verify:email-auth` の **⑪ (M-01〜M-32)** と
+      `verify:screen` の **⑦** (実画面で初期表示・切替・URL のクエリ)。
+      wellfort-site は **`npm run verify:webapp-entry`** (`entry` が在り PII が無いこと)。
+      **退行注入 20 種**で名指しに落ちることを確認済み。
+    - **パスワード再設定は別タスク** (`resetPasswordForEmail` は未実装)。間違ったパスワードで
+      登録した人は復旧できないので、本導線とは別に判断が要る。
   - 増減は wellfort-site `/admin/special-accounts` (サイドバー「設定」・**デモ用アカウントとは別メニュー**)。
     UI=wellfort-site / 処理=Scan-Chat-AI `/api/admin/special-accounts` (Bearer `ADMIN_API_KEY`)。
   - **検証 `npm run verify:special-accounts` 70 件** (CI の A 層)。`demoFallbackEnabled` の本体を

@@ -24,8 +24,18 @@
 
 | 環境 | URL |
 |---|---|
-| **本番** | `https://scan-chat-ai.vercel.app/` |
-| **将来 (Phase 2.0)** | `https://app.wellfort.co.jp/` 等カスタムドメインに移行予定 |
+| **本番** | `https://scan-chat-ai.vercel.app/?entry=wellfort-mypage` |
+| **将来 (Phase 2.0)** | `https://app.wellfort.co.jp/?entry=wellfort-mypage` 等カスタムドメインに移行予定 |
+
+**`?entry=wellfort-mypage` は「どこから来たか」だけを伝える入口種別** (2026-10-05 確定)。
+Scan-Chat AI 側はこの値で**初回登録を主導線にするだけ**で、**認証・本人確認には使わない**
+(§5-3)。`/` は `url.search` を保ったまま `/dashboard` へ 302 するので、ルート宛てで届く。
+
+> **【絶対】個人情報をクエリに載せない。**
+> `?email=` / `?u=<diagnostic_user_id>` / `?customer_id=` / auth user id 等は禁止。
+> **URL 履歴・アクセスログ・Referer に出る。** 渡すのは `entry` ただ 1 つ。
+> (`?u=` は 2026-09-29 に意図して外した。JS で href を組み立て直さないこと。)
+> 機械で見張っている: wellfort-site `npm run verify:webapp-entry`。
 
 ---
 
@@ -67,7 +77,7 @@ Wellfort マイページの既存スタイル (Bootstrap / 独自 CSS / Tailwind
 
 ```html
 <a
-  href="https://scan-chat-ai.vercel.app/"
+  href="https://scan-chat-ai.vercel.app/?entry=wellfort-mypage"
   target="_blank"
   rel="noopener"
   class="wellfort-scan-chat-card"
@@ -167,7 +177,7 @@ Wellfort マイページの既存スタイル (Bootstrap / 独自 CSS / Tailwind
 
 ```html
 <a
-  href="https://scan-chat-ai.vercel.app/"
+  href="https://scan-chat-ai.vercel.app/?entry=wellfort-mypage"
   target="_blank"
   rel="noopener"
   class="btn btn-primary"
@@ -215,6 +225,31 @@ Wellfort マイページの既存スタイル (Bootstrap / 独自 CSS / Tailwind
 SSO 連携 (Wellfort 側のセッショントークンを Scan-Chat AI に渡す方式) を
 別途検討。今回のスコープ外。
 
+### 5-3. 初回利用者は「新規登録」から (2026-10-05 確定・発注者指示)
+
+**HP と Scan-Chat AI は別の Supabase Auth プロジェクト**なので、HP で認証済みでも
+**こちらには認証ユーザーが居ない**。Google 認証なら One Tap が同じアカウントで通るが、
+**メール＋パスワードで入る人は、こちらで一度アカウントを作る必要がある**。
+
+上の図は Google 経路。メール経路は `?entry=wellfort-mypage` の有無でこう分かれる:
+
+| | 通常アクセス (entry 無し) | HP マイページ経由 (entry 有り) |
+|---|---|---|
+| 見出し | サインイン | Webアプリを利用する |
+| 初期表示 | ログイン | **新規登録 (Sign up)** |
+
+- **初回 = 新規登録 / 登録済み = ログイン** の 2 語で通す。
+  **「新規サインイン」という概念は作らない。**
+- **登録済みの人がログインへ戻る導線は常に出す** (片道にしない)。
+- **Google の入口 (One Tap / 公式ボタン) は entry でも消えない。**
+- **認証後は従来どおり Supabase Auth → `POST /api/auth/resolve`** を必ず通る。
+  `entry` は UI の分岐にしか使わない (誰でも付けられるので本人確認にならない)。
+- **「このメールは登録済みか」を未認証で聞ける API は作らない** (User Enumeration)。
+  初回かどうかは利用者が 2 つの入口から選ぶ。
+
+実装 = Scan-Chat-AI `src/components/SignInPanel.astro` (表示の器) のみ。
+正本 = `docs/operations/スペシャルアカウント_仕様書.md` §6.2。
+
 ---
 
 ## 6. ターゲット属性
@@ -242,7 +277,7 @@ Wellfort マイページが Google Analytics / 独自計測を入れている場
 
 ```html
 <a
-  href="https://scan-chat-ai.vercel.app/"
+  href="https://scan-chat-ai.vercel.app/?entry=wellfort-mypage"
   target="_blank"
   rel="noopener"
   onclick="gtag('event', 'click_scan_chat_card', { source: 'mypage_main' })"
@@ -258,7 +293,7 @@ Wellfort マイページが Google Analytics / 独自計測を入れている場
 | # | 項目 | 期待動作 |
 |---|---|---|
 | 1 | ボタン表示 | マイページにカードが表示される (PC / スマホ両方) |
-| 2 | クリック | 新規タブで `https://scan-chat-ai.vercel.app/` が開く |
+| 2 | クリック | 新規タブで `https://scan-chat-ai.vercel.app/?entry=wellfort-mypage` が開く |
 | 3 | One Tap 認証 (同一 Google アカウント) | One Tap UI が表示、1 タップで認証完了、ダッシュボードに遷移 |
 | 4 | 認証後ダッシュボード | ユーザー名 (例: 宮澤様) と検査結果 / 数値変動が表示される |
 | 5 | キーボード操作 | Tab フォーカスでカードに移動、Enter で遷移 |

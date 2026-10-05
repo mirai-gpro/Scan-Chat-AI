@@ -22,7 +22,7 @@
  * DB も dev サーバも鍵も要らない — Supabase は条件を記録するスタブに差し替える。
  */
 
-import { readFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -417,6 +417,158 @@ console.log('\n⑩ 禁止事項の番人');
     panel.indexOf('id="signin-email-login"') > panel.indexOf('id="signin-error"'));
   ok('S-18', '  説明文から Google 固有の表現を外した',
     !/ご登録の Google アカウント/.test(panel));
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   ⑪ HP マイページからの初回導線 (`?entry=wellfort-mypage`)
+   ══════════════════════════════════════════════════════════════════
+
+   【ここは静かに壊れる】
+     - `entry` を取り落としても画面は正常に出る。従来どおり「サインイン」が
+       先に出るだけで、**初回利用者が HP のメール＋パスワードを入れて
+       `Invalid login credentials` になる**ところしか壊れない。それは
+       こちらのログに何も残らない (実測 2026-10-05)。
+     - 逆に `entry` を本人確認に使ってしまっても、**正常に見える**。
+       誰でも付けられるクエリなので、`resolve` を省略したら認証が無くなる。
+     - 「このメールは登録済みか」を事前に聞く口を足しても画面は親切になるだけ。
+       **User Enumeration** は目に見えない。
+   ══════════════════════════════════════════════════════════════════ */
+console.log('\n⑪ B / C / D / E / F — HP マイページからの初回導線');
+{
+  const panelRaw = read('src/components/SignInPanel.astro');
+  const panelCode = code('src/components/SignInPanel.astro');
+  /** frontmatter (--- … ---) と markup を分ける。 */
+  const strip = (t) => t.split('\n').filter((ln) => !/^\s*(\*|\/\/|\/\*)/.test(ln)).join('\n');
+  /** frontmatter と markup を分け、**どちらもコメントを落として**から見る
+      (経緯の説明に「やらないこと」を書いてあるので、そこを拾わない)。 */
+  const fm = strip(panelRaw.slice(panelRaw.indexOf('---') + 3, panelRaw.indexOf('\n---', 3)));
+  const markup = strip(panelRaw.slice(panelRaw.indexOf('\n---', 3) + 4)
+    .replace(/\{\/\*[\s\S]*?\*\/\}/g, ''));
+
+  /* ── B. HP マイページ経由 ─────────────────────────────────────── */
+
+  /*
+   * **判定は完全一致**。前方一致や「entry が在れば」にすると、想定外の値で
+   * 画面が変わる (= 誰が何を見ているのか追えなくなる)。
+   */
+  ok('M-01', '`entry` の判定は **`=== \'wellfort-mypage\'` の完全一致**',
+    /searchParams\.get\(\s*['"]entry['"]\s*\)\s*===\s*['"]wellfort-mypage['"]/.test(fm),
+    'startsWith / includes / 真偽だけ などになっている');
+  ok('M-02', '  `entry` を読むのは `Astro.url` から 1 か所だけ',
+    (panelCode.match(/searchParams\.get\(\s*['"]entry['"]\s*\)/g) ?? []).length === 1);
+
+  /*
+   * **初期表示はサーバ側で決める** (`hidden` 属性)。JS で切り替えると、
+   * JS が落ちた環境で「サインイン」が先に出たままになる。
+   */
+  const loginSec  = markup.match(/<section id="signin-email-login"[^>]*>/)?.[0] ?? '';
+  const signupSec = markup.match(/<section id="signin-email-signup"[^>]*>/)?.[0] ?? '';
+  ok('M-03', '**signup が初期表示** (`hidden={!fromMypage}`)',
+    /hidden=\{\s*!\s*fromMypage\s*\}/.test(signupSec), signupSec);
+  ok('M-04', '**login は初期非表示** (`hidden={fromMypage}`)',
+    /hidden=\{\s*fromMypage\s*\}/.test(loginSec), loginSec);
+  ok('M-05', '  2 つの `hidden` が取り違えられていない (同じ式でない)',
+    /hidden=\{\s*fromMypage\s*\}/.test(loginSec) && !/hidden=\{\s*fromMypage\s*\}/.test(signupSec));
+
+  /*
+   * **ログインへ戻る出口が必ず残る。** 片道にすると、登録済みの人が
+   * もう一度 signUp して「確認メールを送信しました」で止まる。
+   */
+  ok('M-06', '**ログインへ戻る導線が signup の中に在る** (片道にしない)',
+    markup.indexOf('id="signin-show-login"') > markup.indexOf('id="signin-email-signup"')
+    && markup.includes('id="signin-show-login"'));
+  ok('M-07', '  signup へ行く導線も残っている (login 側)',
+    markup.includes('id="signin-show-signup"'));
+  ok('M-08', '  切替は `hidden` の付け外しだけ (要素を消さない)',
+    /loginSec\.hidden\s*=/.test(panelCode) && /signupSec\.hidden\s*=/.test(panelCode));
+
+  /*
+   * **「新規サインイン」という語を作らない** (発注者指示 2026-10-05)。
+   * 初回=新規登録 / 登録済み=ログイン の 2 語で通す。
+   */
+  ok('M-09', '**「新規サインイン」という概念を作っていない**', !/新規サインイン/.test(fm + markup));
+  ok('M-10', '  entry のときの見出しが「サインイン」から変わる',
+    /fromMypage\s*\?\s*'[^']+'\s*:\s*'サインイン'/.test(fm));
+  ok('M-11', '  entry のときに「初回のみ」登録が要ることを言っている',
+    /初回/.test(fm) && /登録/.test(fm));
+
+  /* **Google は entry でも消えない。** 入口を 1 つに減らさない。 */
+  ok('M-12', '**Google の器 (`#gsi-button`) は entry の条件に入っていない**',
+    markup.includes('id="gsi-button"')
+    && !/fromMypage[\s\S]{0,200}?id="gsi-button"/.test(markup));
+  ok('M-13', '  Google の 3 状態 (loading / ready / error) も条件に入っていない',
+    ['signin-loading', 'signin-ready', 'signin-error'].every((id) =>
+      new RegExp(`id="${id}"[^>]*>`).test(markup)
+      && !new RegExp(`id="${id}"[^>]*fromMypage`).test(markup)));
+
+  /* ── C. 通常アクセス (entry 無し) ─────────────────────────────── */
+
+  /*
+   * `?entry=` が無いときは**従来どおり**。`hidden={fromMypage}` /
+   * `hidden={!fromMypage}` の 2 行で機械的に決まるので、ここは
+   * **既定値が false 側に倒れること**を式から読む。
+   */
+  /*
+   * **実物の式を取り出して動かす。** 自分で書き写した式を試すと、
+   * 実装が `startsWith` に変わっても検査だけが通る (= 無意味になる)。
+   */
+  const expr = fm.match(/const fromMypage\s*=\s*([^;]+);/)?.[1] ?? '';
+  ok('M-14a', '  `fromMypage` の式を実物から取り出せた', !!expr.trim(), JSON.stringify(expr));
+  const evalExpr = new Function('search',
+    `const Astro = { url: new URL('https://example.test/dashboard' + search) };
+     return !!(${expr || 'undefined'});`);
+  /** 式が throw したら**落ちたことを名指しで出す** (スクリプトごと死なせない)。 */
+  const fromMypageOf = (search) => {
+    try { return evalExpr(search); } catch (e) { return `THREW: ${e.message}`; }
+  };
+  eq('M-14', '通常アクセス (クエリ無し) → fromMypage = false', fromMypageOf(''), false);
+  eq('M-15', '別の値 (?entry=other) → false (想定外の値で画面が変わらない)',
+    fromMypageOf('?entry=other'), false);
+  eq('M-16', '前方一致でも false (?entry=wellfort-mypage-x)',
+    fromMypageOf('?entry=wellfort-mypage-x'), false);
+  eq('M-17', 'admin 代理表示 (?u=…) だけでは false', fromMypageOf('?u=' + UID_CUST), false);
+  eq('M-18', 'HP マイページ経由 → true', fromMypageOf('?entry=wellfort-mypage'), true);
+  eq('M-19', '他のクエリと併記でも true', fromMypageOf('?entry=wellfort-mypage&x=1'), true);
+
+  /*
+   * **`/` は `url.search` を保ったまま `/dashboard` へ 302 する。**
+   * ここが落ちると `https://…/?entry=wellfort-mypage` でクエリが消え、
+   * **リンクは普通に開くのに onboarding だけが効かない**。
+   */
+  const idx = code('src/pages/index.astro');
+  ok('M-20', '**`/` の 302 がクエリを保っている** (`url.search`)',
+    /\/dashboard\$\{url\.search\}/.test(idx) || /'\/dashboard'\s*\+\s*url\.search/.test(idx), idx);
+
+  /* ── D. 認証処理は 1 行も変えていない ───────────────────────── */
+  const epa = code('src/components/EmailPasswordAuth.astro');
+  ok('M-21', '新規登録は `sb.auth.signUp(` のまま', /sb\.auth\.signUp\(/.test(epa));
+  ok('M-22', 'ログインは `sb.auth.signInWithPassword(` のまま', /sb\.auth\.signInWithPassword\(/.test(epa));
+  ok('M-23', '**`updateUser(` を足していない**', !/updateUser\s*\(/.test(epa));
+  ok('M-24', '**認証部品は `entry` を見ていない** (表示の話を認証へ持ち込まない)',
+    !/entry/.test(epa));
+
+  /* ── E. 認証後は従来どおり `/api/auth/resolve` を通る ─────────── */
+  ok('M-25', '**認証成功後は `POST /api/auth/resolve`** (省略していない)',
+    epa.includes("'/api/auth/resolve'") && /method:\s*'POST'/.test(epa));
+  const rs2 = code('src/pages/api/auth/resolve.ts');
+  ok('M-26', '**`resolve` は `entry` を一切見ない** (本人確認に使わない)', !/entry/.test(rs2));
+  ok('M-27', '  `resolve` は `getUser()` でサーバ検証を続けている', /getUser\(/.test(rs2));
+  ok('M-28', '  `entry` をサーバへ送っていない (body / header に載せない)',
+    !/entry/.test(epa) && !/entry/.test(code('src/components/GoogleOneTap.astro')));
+
+  /* ── F. メール存在の事前照会 API を作っていない ───────────────── */
+  const apiDir = resolve(ROOT, 'src/pages/api');
+  const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(resolve(d, e.name)) : [resolve(d, e.name)]);
+  const apis = walk(apiDir);
+  const suspicious = apis.filter((f) => /(check|exists|lookup|probe|has)[-_]?(email|user|account)|email[-_]?(check|exists|lookup)/i.test(f));
+  eq('M-29', '**メール存在を照会する API ファイルが無い**', suspicious.map((f) => f.slice(ROOT.length + 1)), []);
+  ok('M-30', '  画面からそういう口を叩いていない',
+    !/fetch\([^)]*(check-email|email-exists|user-exists|account-exists)/.test(panelCode + epa));
+  ok('M-31', '  画面に「登録済み / 未登録」を言い分ける分岐が無い',
+    !/(既に登録|すでに登録|未登録|登録されていません|not registered|already registered)/.test(fm + markup));
+  ok('M-32', '  **初回かどうかは利用者に選ばせている** (2 つの入口が在る)',
+    markup.includes('id="signin-email-login"') && markup.includes('id="signin-email-signup"'));
 }
 
 /* ── 結果 ──────────────────────────────────────────────────────── */
