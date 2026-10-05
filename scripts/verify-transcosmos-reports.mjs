@@ -507,6 +507,17 @@ console.log('\nE. ダッシュボードの行き先\n');
     '短寿命の署名 URL が共有キャッシュへ載らないようにする');
   ok('E.   dest は相対 URL だけ通す',
     /dest\.startsWith\('\/'\)[\s\S]{0,80}startsWith\('\/\/'\)/.test(route));
+  /*
+   * **フォールバックに `ctx.request.url` の origin を使ってはいけない。**
+   * Vercel の関数が見る URL は内部のもので、本番で
+   * `location: https://localhost/report` へ飛ばしていた (2026-10-05 実測)。
+   * `Location` は相対値が許されるので `dest` をそのまま返す。
+   */
+  ok('E. **フォールバックは相対 URL** (本番で https://localhost へ飛んでいた)',
+    /const fallback = dest;/.test(route) && !/new URL\(dest, url\.origin\)/.test(route),
+    'request.url の origin は Vercel では内部 URL になる');
+  ok('E.   dest の解釈に実 origin を混ぜていない',
+    !/new URL\([^)]*url\.origin\)/.test(route));
 }
 
 /* ══════════════════════════════════════════════════════════════════════
