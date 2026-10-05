@@ -14,7 +14,9 @@
  *      function 参照を直接渡し、prompt() で One Tap 起動
  *   4. 認証成功 → signInWithIdToken → ?u=<uid> に redirect
  *
- * 【表示との分界】この部品は認証処理だけを持ち、画面は SignInPanel.astro。
+ * 【表示との分界】この部品は **Google の認証処理だけ**を持ち、画面は SignInPanel.astro。
+ *   メール＋パスワードは `EmailPasswordAuth.astro` が同じ流儀で担当する
+ *   (合流点は双方とも `POST /api/auth/resolve`・2026-10-05)。
  *   One Tap は iOS Safari の ITP や Google 未サインインの環境では**出ない**ので、
  *   `#gsi-button` があれば Google 公式ボタンをそこに描画し、進捗と失敗を
  *   `welltect:signin` イベントで SignInPanel に渡す (契約は SignInPanel 側に記載)。

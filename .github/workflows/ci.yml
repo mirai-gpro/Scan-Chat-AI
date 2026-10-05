@@ -129,6 +129,12 @@ jobs:
       # production の 4 分割へ黙って書き換え、キット進捗が 0 件になった。
       # **画面にエラーは出ない**ので目視では守れない。鍵もサーバも要らないので A 層。
       - run: npm run verify:viewer-origin
+      # メール＋パスワード認証 (2026-10-05 追加)。**ここは静かに壊れる** —
+      # 「今回どの方式でサインインしたか」を identity 情報 (app_metadata/identities) で
+      # 代用すると Google Identity を持つ password セッションを oauth と誤判定し、
+      # 409 で止めるべき回が通って `auth_user_id` / `google_sub` を書き換える。
+      # 画面はどちらでも「サインインできた」ように見えるので目視では守れない。
+      - run: npm run verify:email-auth
 
   # ── PowerShell 必須の検査 (初回 non-required) ──────────────────
   # ubuntu-24.04 ランナーには PowerShell 7.6.5 が同梱されている見込み

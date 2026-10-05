@@ -1,6 +1,7 @@
 ---
 import '../styles/global.css';
 import GoogleOneTap from '../components/GoogleOneTap.astro';
+import EmailPasswordAuth from '../components/EmailPasswordAuth.astro';
 import ShareBanner from '../components/ShareBanner.astro';
 import { LOGO } from '../lib/brand.ts';
 
@@ -154,6 +155,8 @@ const share = Astro.locals.share ?? null;
     </div>
     {/* Google One Tap (PUBLIC_GOOGLE_CLIENT_ID 未設定なら何もレンダリングしない) */}
     <GoogleOneTap />
+    {/* メール＋パスワード。器 (SignInPanel) が無いページでは何もしない。 */}
+    <EmailPasswordAuth />
 
     {/*
       最小の Service Worker (オフライン案内だけ)。中身と「やらないこと」は public/sw.js を読む。

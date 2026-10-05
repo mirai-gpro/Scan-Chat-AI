@@ -11,14 +11,21 @@ import AppLogo from './AppLogo.astro';
  *   表示されない**ので、その環境ではロゴとスピナーの画面で止まり、
  *   何が起きているのかも次に何をすればよいのかも分からなかった。
  *
- * 【責務分界】この部品は**表示だけ**を持つ。認証処理は GoogleOneTap.astro。
- *   両者は DOM とイベントで繋ぐ (契約は下記)。
+ * 【責務分界】この部品は**表示だけ**を持つ。認証処理は
+ *   `GoogleOneTap.astro` (Google) と `EmailPasswordAuth.astro` (メール＋パスワード)。
+ *   どちらも DOM とイベントで繋ぐ (契約は下記)。
  *     - `#gsi-button`     … GoogleOneTap が Google 公式ボタンを描画する器。
- *     - `welltect:signin` … GoogleOneTap → この部品への通知。
- *         detail.state = 'ready'       … GSI が使える (ボタンを出す)
- *                      | 'unavailable' … GSI を読み込めなかった (再読み込み導線)
+ *     - `#signin-email-login-form` / `#signin-email-signup-form`
+ *                         … EmailPasswordAuth が submit を拾う器。
+ *     - `welltect:signin` … 認証部品 → この部品への通知。
+ *         detail.state = 'ready'       … GSI が使える (Google ボタンを出す)
+ *                      | 'unavailable' … GSI を読み込めなかった
  *                      | 'message'     … 処理中/失敗の文言だけ差し替える
  *         detail.text, detail.tone ('error' | 'info')
+ *
+ * 【メール認証を Google の失敗で巻き込まない】GSI が読み込めない環境でも
+ *   **メールのフォームは出したままにする**。以前は `#signin-ready` ごと隠していたので、
+ *   Google が使えない環境で**入口が 1 つも無くなる**形になる。
  */
 interface Props {
   /** app_config `ui.support_contact`。未設定なら行ごと出さない。 */
@@ -28,7 +35,7 @@ interface Props {
 }
 const {
   supportContact = '',
-  desc = 'ご登録の Google アカウントでサインインしてください。検査結果と AI 診断は、サインイン後に表示されます。',
+  desc = 'ご登録のアカウントでサインインしてください。検査結果と AI 診断は、サインイン後に表示されます。',
 } = Astro.props as Props;
 ---
 
@@ -49,16 +56,72 @@ const {
     <div id="gsi-button" class="flex min-h-touch items-center justify-center"></div>
   </div>
 
-  {/* 3. GSI を読み込めなかった。行き止まりにしないため再読み込み導線を出す。 */}
+  {/* 3. GSI を読み込めなかった。行き止まりにしないため再読み込み導線を出す。
+         **メールのフォーム (下) は隠さない。** */}
   <div id="signin-error" class="flex max-w-[28em] flex-col items-center gap-3" hidden>
     <p class="flex items-start gap-2 text-left text-base text-status-action">
       <AppIcon name="watch" size={20} class="mt-0.5 shrink-0" />
-      <span>サインイン機能を読み込めませんでした。通信環境をご確認のうえ、再読み込みしてください。</span>
+      <span>Google でのサインインを読み込めませんでした。メールアドレスとパスワードでサインインするか、再読み込みしてください。</span>
     </p>
     <button type="button" id="signin-reload" class="btn-secondary">
       <AppIcon name="refresh" size={20} class="mr-2" />
       再読み込み
     </button>
+  </div>
+
+  {/*
+    メールアドレス＋パスワード。**Google が使えるかどうかに関係なく常に出す。**
+    構成は wellfort-site `LoginModal.astro` と同じ (ログイン / 新規登録を display で切替)。
+    入力欄は 16px 下限 — iOS Safari が 16px 未満でフォーカス時に自動ズームするため。
+  */}
+  <div class="flex w-full max-w-[22rem] flex-col gap-3">
+    <div class="flex items-center gap-3 text-sm text-slate-600">
+      <span class="h-px flex-1 bg-slate-200"></span>
+      <span>または</span>
+      <span class="h-px flex-1 bg-slate-200"></span>
+    </div>
+
+    <section id="signin-email-login" class="flex flex-col gap-3 text-left">
+      <form id="signin-email-login-form" class="flex flex-col gap-3" autocomplete="on">
+        <label class="flex flex-col gap-1 text-sm font-semibold text-slate-700">
+          メールアドレス
+          <input type="email" id="signin-login-email" name="email" required
+                 autocomplete="email" placeholder="example@email.com"
+                 class="min-h-touch rounded-xl border-2 border-navy-400 px-3 text-base text-slate-900 outline-none focus:border-brand-600" />
+        </label>
+        <label class="flex flex-col gap-1 text-sm font-semibold text-slate-700">
+          パスワード
+          <input type="password" id="signin-login-password" name="password" required
+                 minlength="8" autocomplete="current-password" placeholder="8文字以上"
+                 class="min-h-touch rounded-xl border-2 border-navy-400 px-3 text-base text-slate-900 outline-none focus:border-brand-600" />
+        </label>
+        <button type="submit" id="signin-login-submit" class="btn-primary min-h-touch">サインイン</button>
+      </form>
+      <button type="button" id="signin-show-signup" class="min-h-touch text-base text-brand-700 underline">
+        アカウントをお持ちでない方 →
+      </button>
+    </section>
+
+    <section id="signin-email-signup" class="flex flex-col gap-3 text-left" hidden>
+      <form id="signin-email-signup-form" class="flex flex-col gap-3" autocomplete="on">
+        <label class="flex flex-col gap-1 text-sm font-semibold text-slate-700">
+          メールアドレス
+          <input type="email" id="signin-signup-email" name="email" required
+                 autocomplete="email" placeholder="example@email.com"
+                 class="min-h-touch rounded-xl border-2 border-navy-400 px-3 text-base text-slate-900 outline-none focus:border-brand-600" />
+        </label>
+        <label class="flex flex-col gap-1 text-sm font-semibold text-slate-700">
+          パスワード（8文字以上）
+          <input type="password" id="signin-signup-password" name="new-password" required
+                 minlength="8" autocomplete="new-password" placeholder="パスワードを設定"
+                 class="min-h-touch rounded-xl border-2 border-navy-400 px-3 text-base text-slate-900 outline-none focus:border-brand-600" />
+        </label>
+        <button type="submit" id="signin-signup-submit" class="btn-primary min-h-touch">新規登録</button>
+      </form>
+      <button type="button" id="signin-show-login" class="min-h-touch text-base text-brand-700 underline">
+        アカウントをお持ちの方 →
+      </button>
+    </section>
   </div>
 
   {/* 4. 認証処理の途中経過・失敗。ボタンは出したまま文言だけ差し替える。 */}
@@ -87,7 +150,22 @@ const {
       loading.hidden = which !== 'loading';
       ready.hidden   = which !== 'ready';
       errorEl.hidden = which !== 'error';
+      // メールのフォームはここで触らない (Google の可否と独立に出したままにする)。
     }
+
+    // ログイン / 新規登録の表示切替 (wellfort-site LoginModal と同じ考え方)。
+    var loginSec  = document.getElementById('signin-email-login');
+    var signupSec = document.getElementById('signin-email-signup');
+    function showSignup(on) {
+      if (!loginSec || !signupSec) return;
+      loginSec.hidden = on;
+      signupSec.hidden = !on;
+      message('');
+    }
+    var toSignup = document.getElementById('signin-show-signup');
+    var toLogin  = document.getElementById('signin-show-login');
+    if (toSignup) toSignup.addEventListener('click', function () { showSignup(true); });
+    if (toLogin)  toLogin.addEventListener('click', function () { showSignup(false); });
 
     function message(text, tone) {
       if (!status) return;
