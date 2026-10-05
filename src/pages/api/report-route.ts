@@ -38,13 +38,28 @@ export const GET: APIRoute = async (ctx) => {
   const dest = url.searchParams.get('dest') || '/report';
   if (!dest.startsWith('/') || dest.startsWith('//')) return text('invalid destination', 400);
 
+  /*
+   * `dest` の中の `?u=` を読むためだけに URL として解釈する。**基準は任意の
+   * ダミー origin** で、ここから行き先を組み立てはしない (下の `fallback` を見よ)。
+   */
   let destUrl: URL;
   try {
-    destUrl = new URL(dest, url.origin);
+    destUrl = new URL(dest, 'https://dest.invalid');
   } catch {
     return text('invalid destination', 400);
   }
-  const fallback = destUrl.toString();
+
+  /*
+   * **フォールバックは相対 URL のまま返す。**
+   *
+   * `ctx.request.url` の origin を使ってはいけない — Vercel の関数が見る URL は
+   * 内部のもので、**本番で `https://localhost/report` へ飛ばしていた**
+   * (2026-10-05 実測: `location: https://localhost/report`)。
+   * `Location` は相対値が正式に許され、ブラウザは**自分が叩いた URL** を基準に
+   * 解決するので、どの環境でも正しい origin になる
+   * (`Response.redirect()` は絶対 URL を要求するが、自前の `redirect()` なら不要)。
+   */
+  const fallback = dest;
 
   const viewer = await resolveViewer(ctx);
   let uid = viewer.uid;
