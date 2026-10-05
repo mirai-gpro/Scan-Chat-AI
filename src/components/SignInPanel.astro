@@ -26,6 +26,21 @@ import AppLogo from './AppLogo.astro';
  * 【メール認証を Google の失敗で巻き込まない】GSI が読み込めない環境でも
  *   **メールのフォームは出したままにする**。以前は `#signin-ready` ごと隠していたので、
  *   Google が使えない環境で**入口が 1 つも無くなる**形になる。
+ *
+ * 【HP マイページから来た初回利用者】`?entry=wellfort-mypage` が付いていたら
+ *   **新規登録を主導線にする**。HP (`wellfort-site`) と この Web アプリは
+ *   **別の Supabase Auth プロジェクト**なので、HP で認証済みでも
+ *   こちらには認証ユーザーが居ない。それなのに「サインイン」を先に出していたため、
+ *   利用者が HP のメール＋パスワードを入れて `Invalid login credentials` になっていた
+ *   (実測 2026-10-05)。**初回 = 新規登録 / 登録済み = ログイン** が正しい言い方で、
+ *   「新規サインイン」という概念は作らない。
+ *
+ *   ⚠️ **`entry` は本人確認に一切使わない。** 画面の初期表示を変えるだけのヒントで、
+ *   誰でも付けられる。認証後は従来どおり Supabase Auth → access_token →
+ *   `POST /api/auth/resolve` を必ず通す (ここは 1 行も変えていない)。
+ *
+ *   ⚠️ **メール存在の事前照会はしない。** 「このメールは登録済みか」を未認証で
+ *   問い合わせる API を作ると User Enumeration になる。初回かどうかは**利用者に選ばせる**。
  */
 interface Props {
   /** app_config `ui.support_contact`。未設定なら行ごと出さない。 */
@@ -35,15 +50,28 @@ interface Props {
 }
 const {
   supportContact = '',
-  desc = 'ご登録のアカウントでサインインしてください。検査結果と AI 診断は、サインイン後に表示されます。',
+  desc = '',
 } = Astro.props as Props;
+
+/*
+ * HP マイページ経由かどうか。**値が完全一致したときだけ**オンボーディングにする
+ * (前方一致や「entry が在れば」にしない = 想定外の値で画面が変わらないように)。
+ * `/` は `index.astro:12` が `url.search` を保ったまま `/dashboard` へ 302 するので、
+ * `https://scan-chat-ai.vercel.app/?entry=wellfort-mypage` でもここへ届く。
+ */
+const fromMypage = Astro.url.searchParams.get('entry') === 'wellfort-mypage';
+
+const heading = fromMypage ? 'Webアプリを利用する' : 'サインイン';
+const lead = desc || (fromMypage
+  ? 'Wellfortマイページとは別に、初回のみWebアプリのアカウント登録が必要です。'
+  : 'ご登録のアカウントでサインインしてください。検査結果と AI 診断は、サインイン後に表示されます。');
 ---
 
 <main class="flex flex-1 flex-col items-center justify-center gap-4 px-6 py-10 text-center">
   <AppLogo height={56} />
 
-  <h1 class="text-lg font-bold text-navy-800">サインイン</h1>
-  <p class="max-w-[28em] text-base leading-relaxed text-slate-700">{desc}</p>
+  <h1 class="text-lg font-bold text-navy-800">{heading}</h1>
+  <p class="max-w-[28em] text-base leading-relaxed text-slate-700">{lead}</p>
 
   {/* 1. 初期状態。GSI の読み込みを待っている。 */}
   <div id="signin-loading" class="flex items-center gap-2 text-base text-slate-600">
@@ -81,7 +109,10 @@ const {
       <span class="h-px flex-1 bg-slate-200"></span>
     </div>
 
-    <section id="signin-email-login" class="flex flex-col gap-3 text-left">
+    <section id="signin-email-login" class="flex flex-col gap-3 text-left" hidden={fromMypage}>
+      {fromMypage && (
+        <p class="text-sm font-semibold text-navy-800">すでにWebアプリのアカウントをお持ちの方</p>
+      )}
       <form id="signin-email-login-form" class="flex flex-col gap-3" autocomplete="on">
         <label class="flex flex-col gap-1 text-sm font-semibold text-slate-700">
           メールアドレス
@@ -95,14 +126,19 @@ const {
                  minlength="8" autocomplete="current-password" placeholder="8文字以上"
                  class="min-h-touch rounded-xl border-2 border-navy-400 px-3 text-base text-slate-900 outline-none focus:border-brand-600" />
         </label>
-        <button type="submit" id="signin-login-submit" class="btn-primary min-h-touch">サインイン</button>
+        <button type="submit" id="signin-login-submit" class="btn-primary min-h-touch">
+          {fromMypage ? 'ログインする' : 'サインイン'}
+        </button>
       </form>
       <button type="button" id="signin-show-signup" class="min-h-touch text-base text-brand-700 underline">
-        アカウントをお持ちでない方 →
+        {fromMypage ? '初めてWebアプリをご利用の方 →' : 'アカウントをお持ちでない方 →'}
       </button>
     </section>
 
-    <section id="signin-email-signup" class="flex flex-col gap-3 text-left" hidden>
+    <section id="signin-email-signup" class="flex flex-col gap-3 text-left" hidden={!fromMypage}>
+      {fromMypage && (
+        <p class="text-sm font-semibold text-navy-800">初めてWebアプリをご利用の方</p>
+      )}
       <form id="signin-email-signup-form" class="flex flex-col gap-3" autocomplete="on">
         <label class="flex flex-col gap-1 text-sm font-semibold text-slate-700">
           メールアドレス
@@ -116,10 +152,13 @@ const {
                  minlength="8" autocomplete="new-password" placeholder="パスワードを設定"
                  class="min-h-touch rounded-xl border-2 border-navy-400 px-3 text-base text-slate-900 outline-none focus:border-brand-600" />
         </label>
-        <button type="submit" id="signin-signup-submit" class="btn-primary min-h-touch">新規登録</button>
+        <button type="submit" id="signin-signup-submit" class="btn-primary min-h-touch">
+          {fromMypage ? 'アカウントを作成する' : '新規登録'}
+        </button>
       </form>
+      {/* **登録済みの人の出口を必ず残す。** 片道にしない。 */}
       <button type="button" id="signin-show-login" class="min-h-touch text-base text-brand-700 underline">
-        アカウントをお持ちの方 →
+        {fromMypage ? 'すでにWebアプリのアカウントをお持ちの方 → ログイン' : 'アカウントをお持ちの方 →'}
       </button>
     </section>
   </div>

@@ -470,6 +470,102 @@ for (const [width, height, label] of SIZES) {
   await ctx.close();
 }
 
+// ── ⑦ HP マイページからの初回導線 (`?entry=wellfort-mypage`) ─────────
+/*
+ * **実際の DOM で「どちらの入口が出ているか」を見る。** A 層
+ * (`verify:email-auth` ⑪) は `hidden={…}` の式を機械で読むところまでで、
+ * **Astro が本当にその属性を描いているか**は見られない。
+ *
+ * ここが壊れても画面は正常に見える — 従来どおり「サインイン」が先に出るだけで、
+ * **初回利用者が HP のメール＋パスワードを入れて弾かれる**ところしか壊れない
+ * (実測 2026-10-05)。こちらのログには何も残らない。
+ */
+{
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await ctx.newPage();
+
+  const probe = async (search) => {
+    await page.goto(`${BASE}/dashboard${search}`, { waitUntil: 'domcontentloaded' });
+    return page.evaluate(() => {
+      const q = (id) => document.getElementById(id);
+      const vis = (id) => {
+        const el = q(id);
+        return !!(el && el.getBoundingClientRect().height > 0);
+      };
+      return {
+        panel: !!q('signin-email-login') || !!q('signin-email-signup'),
+        loginVisible: vis('signin-email-login'),
+        signupVisible: vis('signin-email-signup'),
+        /** ログインへ戻る出口が押せること (片道にしない)。 */
+        toLogin: vis('signin-show-login'),
+        /** Google の入口は entry でも消えない。 */
+        gsi: !!q('gsi-button'),
+        heading: document.querySelector('h1')?.textContent?.trim() ?? '',
+        /** 「新規サインイン」という語を作らない (発注者指示)。 */
+        badWord: /新規サインイン/.test(document.body.innerText),
+        /** 存在を漏らす語が無い (User Enumeration)。 */
+        leaks: /既に登録|すでに登録|未登録|登録されていません/.test(document.body.innerText),
+        /** URL に個人情報が乗っていない。 */
+        query: [...new URL(location.href).searchParams.keys()],
+      };
+    });
+  };
+
+  const entry = await probe('?entry=wellfort-mypage');
+  const plain = await probe('');
+
+  if (!entry.panel && !plain.panel) {
+    console.log('— 初回導線: 未実行 (PUBLIC_GOOGLE_CLIENT_ID 未設定でパネルが描かれない環境)。'
+      + ' 初期表示の契約は verify:email-auth ⑪ が見ています。');
+  } else {
+    /* B. HP マイページ経由 → 新規登録が初期表示・ログインへも行ける・Google も在る。 */
+    const bOk = entry.signupVisible && !entry.loginVisible && entry.toLogin && entry.gsi
+      && !entry.badWord && !entry.leaks && entry.heading !== 'サインイン';
+    console.log(`${bOk ? '✓' : '✗'} 初回導線 (entry 有): 新規登録 ${entry.signupVisible ? '表示' : '**非表示**'}`
+      + ` / ログイン ${entry.loginVisible ? '**表示**' : '非表示'} / 戻る導線 ${entry.toLogin ? '有' : '**無**'}`
+      + ` / Google ${entry.gsi ? '有' : '**無**'} / 見出し「${entry.heading}」`
+      + `${entry.badWord ? ' / **新規サインインという語**' : ''}${entry.leaks ? ' / **存在を漏らす語**' : ''}`);
+    if (!bOk) fails.push(`初回導線 (entry 有): ${JSON.stringify(entry)}`);
+
+    /* C. 通常アクセス → 従来どおりログインが初期表示。 */
+    const cOk = plain.loginVisible && !plain.signupVisible && plain.gsi
+      && plain.heading === 'サインイン' && !plain.badWord && !plain.leaks;
+    console.log(`${cOk ? '✓' : '✗'} 通常アクセス (entry 無): ログイン ${plain.loginVisible ? '表示' : '**非表示**'}`
+      + ` / 新規登録 ${plain.signupVisible ? '**表示**' : '非表示'} / Google ${plain.gsi ? '有' : '**無**'}`
+      + ` / 見出し「${plain.heading}」`);
+    if (!cOk) fails.push(`通常アクセス (entry 無): ${JSON.stringify(plain)}`);
+
+    /*
+     * **切替は 1 クリックで両方向。** 片道だと登録済みの人が signUp をやり直して
+     * 「確認メールを送信しました」で止まる。
+     */
+    const seen = () => page.evaluate(() => ({
+      login: document.getElementById('signin-email-login')?.getBoundingClientRect().height > 0,
+      signup: document.getElementById('signin-email-signup')?.getBoundingClientRect().height > 0,
+    }));
+    /** ボタンが無ければ**名指しで落とす** (例外でスクリプトを殺さない)。 */
+    const tap = async (sel) => {
+      try { await page.click(sel, { timeout: 3000 }); return true; } catch { return false; }
+    };
+    await page.goto(`${BASE}/dashboard?entry=wellfort-mypage`, { waitUntil: 'domcontentloaded' });
+    const tapLogin = await tap('#signin-show-login');
+    const afterLogin = await seen();
+    const tapSignup = await tap('#signin-show-signup');
+    const backToSignup = await seen();
+    const swOk = tapLogin && tapSignup
+      && afterLogin.login && !afterLogin.signup && backToSignup.signup && !backToSignup.login;
+    console.log(`${swOk ? '✓' : '✗'} 入口の切替: 登録済み→ログイン ${afterLogin.login ? '可' : '**不可**'}`
+      + ` / 戻って新規登録 ${backToSignup.signup ? '可' : '**不可**'}`);
+    if (!swOk) fails.push(`入口の切替: ${JSON.stringify({ tapLogin, tapSignup, afterLogin, backToSignup })}`);
+
+    /* URL に個人情報が乗っていないこと (HP 側のリンクの契約と対で見る)。 */
+    const qOk = entry.query.length === 1 && entry.query[0] === 'entry';
+    console.log(`${qOk ? '✓' : '✗'} URL のクエリ: ${JSON.stringify(entry.query)}`);
+    if (!qOk) fails.push(`URL のクエリに余分なキー: ${JSON.stringify(entry.query)}`);
+  }
+  await ctx.close();
+}
+
 await browser.close();
 
 if (fails.length) {
