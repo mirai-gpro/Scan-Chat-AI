@@ -133,20 +133,33 @@ export function specialEmailEntries(): SpecialEmailEntry[] {
  * **判定を推論に頼らないためにこの関数を置いている。** `resolveSpecialUidByEmail` の
  * 戻り値から逆算すると、将来そちらを 1 行変えた瞬間にガードが静かに効かなくなる。
  *
- * @returns 記録済みの uid / 記録が無ければ null (登録そのものが無い場合も null)。
+ * 【照会の失敗を「事前発行なし」と同一視しない】**ここが肝**。null 1 本で返すと、
+ * app_config の取得が落ちた回が「登録されていない人」と**見分けが付かない**。
+ * すると競合ガードが素通りし、**事前投入済みの UID-A が黙って UID-B へ張り替わる** —
+ * 守りたかったものがちょうど守れない。だから `ok` で**引けたかどうか**を分けて返し、
+ * 呼び出し側は引けなかったら fail-closed で止める (`resolve.ts` が 503)。
+ *
+ * @returns `{ ok: true, uid }` … 引けた (`uid` は記録済みの uid / 記録が無ければ null)
+ *          `{ ok: false }`     … **引けなかった** (通してはいけない)
  */
+export type PreassignedUidLookup =
+  | { ok: true; uid: string | null }
+  | { ok: false; reason: string };
+
 export async function specialPreassignedUidByEmail(
   email: string | null | undefined,
-): Promise<string | null> {
+): Promise<PreassignedUidLookup> {
+  // メールが無い = 照会するものが無い。これは失敗ではない (Google 以外の経路など)。
+  if (!email) return { ok: true, uid: null };
   try {
-    if (!email) return null;
     await refreshConfig();
     const h = await hashEmail(email);
     const hit = specialEmailEntries().find((e) => e.hash === h);
-    return hit?.uid ? norm(hit.uid) : null;
+    return { ok: true, uid: hit?.uid ? norm(hit.uid) : null };
   } catch (e) {
-    console.error('[special-accounts] specialPreassignedUidByEmail 失敗:', e instanceof Error ? e.message : e);
-    return null;
+    const reason = e instanceof Error ? e.message : String(e);
+    console.error('[special-accounts] specialPreassignedUidByEmail 失敗 (事前発行なしと同一視しない):', reason);
+    return { ok: false, reason };
   }
 }
 
@@ -251,27 +264,37 @@ export async function linkSpecialEmail(email: string | null | undefined, uid: st
  * `auth_user_id` / `google_sub` は**作らない**。admin が代理で Auth ユーザーを
  * 作ったり仮パスワードを置いたりは**絶対にしない** (仕様書 §4.3)。
  *
- * 【衝突を作らない】`crypto.randomUUID()` の衝突確率は無視できるが、
+ * 【衝突を作らない (fail-closed)】`crypto.randomUUID()` の衝突確率は無視できるが、
  * **既存 uid を上書きする実装にはしない**のが要件。既に使われている uid
- * (`special.account_uids` ＋ メール行の uid) を渡して、当たったら引き直す。
- * 過剰な仕組みは置かない — 数回引いて駄目なら最後の候補をそのまま返す
- * (そこまで来る確率は現実には 0 で、**無限ループを作る方が害が大きい**)。
+ * (`special.account_uids` ＋ メール行の uid ＋ 組み込み / env) を渡して、当たったら引き直す。
+ *
+ * **引き直しても駄目なら衝突 uid を返さない。** 以前は `MINT_ATTEMPTS` 回ぜんぶ外したときに
+ * **最後の候補 (= 既存 uid と衝突している値) をそのまま返して**いた。確率は現実には 0 だが、
+ * 返した瞬間に「既存 uid と衝突しない」という契約が破れ、**別人の uid へ相乗りした行**を
+ * 作る。uid には実データが紐づくので、ここは**何もしないで止める**のが正しい
+ * (呼び出し側の admin API が `503 uid_generation_failed` で中止し、`setConfig` を呼ばない)。
+ * 無限ループは作らない — 回数は `MINT_ATTEMPTS` で打ち切る。
  *
  * @param taken 既に使われている uid。大文字・空白は吸収する。
+ * @returns 採れた uid / **採れなければ `null`** (呼び出し側は保存せず中止する)
  */
-export function mintSpecialUid(taken: Iterable<string>): string {
+export const MINT_ATTEMPTS = 8;
+
+export function mintSpecialUid(taken: Iterable<string>): string | null {
   const used = new Set<string>();
   for (const t of taken) {
     const u = norm(t);
     if (u) used.add(u);
   }
-  let uid = '';
-  for (let i = 0; i < 8; i += 1) {
-    uid = crypto.randomUUID().toLowerCase();
+  for (let i = 0; i < MINT_ATTEMPTS; i += 1) {
+    const uid = crypto.randomUUID().toLowerCase();
     if (!used.has(uid)) return uid;
   }
-  console.error('[special-accounts] uid の採番が 8 回連続で衝突しました (ありえない。要調査)');
-  return uid;
+  console.error(
+    `[special-accounts] uid の採番が ${MINT_ATTEMPTS} 回連続で既存 uid と衝突しました。`
+    + ' 衝突した uid は返しません (何も保存せず中止します)。ありえないので要調査。',
+  );
+  return null;
 }
 
 /** 保存形式は 1 行 1 件 + `#` 注釈。人が読める形で残す。 */

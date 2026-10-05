@@ -1995,15 +1995,28 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     - **両方へ書く**: `special.account_emails` と `special.account_uids` を
       **同じリクエストの 1 回の `setConfig(updates, …)`** にまとめる (片方だけ保存される形を作らない)。
       既存 uid を上書きしないよう `mintSpecialUid(taken)` に既存 uid の集合を渡す。
+      **採番は fail-closed** (2026-10-05 hardening): 最大 8 回引き直し、全部外したら
+      **衝突 uid を返さず `null`**。以前は最後の候補 (= 既存 uid) をそのまま返しており、
+      返した瞬間に**別人の uid へ相乗りした行**ができる。admin API は
+      **`503 uid_generation_failed`** で中止し、**`setConfig()` を呼ばない**
+      (2 キーとも 1 文字も変えない・legacy 行の救済経路も同じ)。
     - **【最重要】事前発行 uid と `linkedUid` の競合は何も書かずに 409** (仕様書 §4.2.1)。
       `/api/auth/resolve` の「既存 uid へ寄せる」分岐は、スペシャルが
       `uidIsAuthoritative=false` なので**黙って張り替えていた**。新仕様では
       **UID-A に実データを投入済み**なので、それをやると**本人の健康データと認証が分離する**。
       → `specialPreassignedUidByEmail(email)` で**事前発行済みかを直接引いて**
       (戻り値から逆算しない) 突き合わせ、食い違ったら
-      **detach / upsert / `linkSpecialEmail` / viewer Cookie のいずれにも到達する前に 409**。
-      自動移行はしない (どちらが本物かを機械が決めてよい場面ではない)。
+      **detach / upsert / `linkDemoEmail` / `linkSpecialEmail` / viewer Cookie の
+      いずれにも到達する前に 409**。自動移行はしない (どちらが本物かを機械が決めてよい場面ではない)。
       **デモ枠は従来どおり**・解決順序 (実顧客 → staging → special → demo) も変えない。
+      - **ガードは `issueAdminCred()` より前** (2026-10-05 hardening)。以前は張り替え分岐の中
+        = `issueAdminCred()` の**後ろ**にあり、本線の書き込みには届かないまま
+        **admin credential だけ set / delete されて**いた。前へ移して **adminCred も 0 回**に。
+      - **照会の失敗を「事前発行なし」と同一視しない** (同 hardening)。
+        `specialPreassignedUidByEmail()` は **`{ ok: true, uid }` / `{ ok: false }`** を返す。
+        失敗を `null` で返していたときは app_config の取得が落ちた回が「登録なし」と
+        見分けが付かず、**ガードが素通りしてちょうど守りたかった張り替えが起きた**。
+        引けなければ**何も書かずに 503**。`uid: null` (登録なし / legacy `uid=''`) は従来どおり救済へ。
     - **`uid` が在る = 本人サインイン済み、ではない** (仕様書 §4.2.2)。
       `listSpecialAccounts()` の **`uidAllocated`** は「uid が発行されて資格一覧にも載っているか」で、
       登録直後から true。旧名 `linked` は**deprecated な別名**として残すが
@@ -2015,9 +2028,12 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     - **氏名・会社名は保存しない** (既存 PII 方針を維持)。DOB / sex も
       `special.account_dob` と email hash の紐付けのまま変えない
       (登録時に uid があっても **DOB のキーを uid へ移行しない**)。
-    - **検証**: `npm run verify:special-accounts` の **⑨ (API を実際に動かす) / ⑩ (ガードの位置)** と
-      `verify:email-auth` の **⑫ (P-09〜P-16・resolve を動かす)**。
-      **退行注入 10 種**で名指しに落ちることを確認済み。
+    - **検証**: `npm run verify:special-accounts` の **⑨ (API を実際に動かす) / ⑨' (採番の
+      fail-closed・`crypto.randomUUID` を差し替えて 8 回とも衝突させ「保存 0 件」を固定) /
+      ⑩ (ガードの位置 = `issueAdminCred` / 張り替え / detach / upsert / 名簿 / Cookie より前)** と
+      `verify:email-auth` の **⑫ (P-09〜P-16・resolve を動かす。競合・照会失敗の両方で
+      書き込み 0 / Cookie 0 / **adminCred 0**)**。
+      **退行注入 16 種**で名指しに落ちることを確認済み。
   - **一覧 = 組み込み ∪ env `SPECIAL_ALLOWED_UIDS` ∪ app_config `special.account_uids`
     − `special.account_denied_uids`** (除外は和のあと)。
     **組み込み (`BUILTIN_SPECIAL_UIDS`) は空のままにする** — 実データが紐づくので焼き込まない。
@@ -2103,7 +2119,7 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     - **UI は表示と処理を分ける**: `SignInPanel.astro` (表示) / `EmailPasswordAuth.astro` (処理)。
       **メールの入口は `#signin-ready` の外**に置く — 中に入れると **Google の読み込み失敗で一緒に消え、
       メール認証まで行き止まりになる**。要素が無いページでは何もしない (`BaseLayout` に 1 回置くだけ)。
-    - **検証 `npm run verify:email-auth` 141 件** (CI の A 層。うち ⑪ 33 件は下の HP マイページ導線・
+    - **検証 `npm run verify:email-auth` 151 件** (CI の A 層。うち ⑪ 33 件は下の HP マイページ導線・
       ⑫ 19 件は事前発行 uid の保護)。`resolve.ts` を transpile し Supabase を
       スタブに差し替えて**実物を動かす**。**最重要 = テスト L**: **Google Identity を持つ** +
       `amr.method='password'` → `password` と正しく判定し、Google 利用済みなら **409・書き込み 0 件・
@@ -2151,7 +2167,7 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
       登録した人は復旧できないので、本導線とは別に判断が要る。
   - 増減は wellfort-site `/admin/special-accounts` (サイドバー「設定」・**デモ用アカウントとは別メニュー**)。
     UI=wellfort-site / 処理=Scan-Chat-AI `/api/admin/special-accounts` (Bearer `ADMIN_API_KEY`)。
-  - **検証 `npm run verify:special-accounts` 115 件** (CI の A 層)。`demoFallbackEnabled` の本体を
+  - **検証 `npm run verify:special-accounts` 140 件** (CI の A 層)。`demoFallbackEnabled` の本体を
     切り出して実際に動かし、`demo-accounts.ts` / `special-accounts.ts` は app_config だけスタブに
     差し替えて実物を呼ぶ。**退行注入 10 種**で名指しに落ちることを確認済み。
     ⑦生年月日=DOB のラウンドトリップ/暦日検証/uid↔hash 突き合わせ・⑧API のブラインド化 (present で

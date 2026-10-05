@@ -76,7 +76,8 @@ const linkDemoEmail = async () => { globalThis.__linkDemo = (globalThis.__linkDe
 const resolveDemoUidByEmail = async (e, u) => globalThis.__demoUid?.(e, u) ?? null;
 const linkSpecialEmail = async () => { globalThis.__linkSpecial = (globalThis.__linkSpecial ?? 0) + 1; };
 const resolveSpecialUidByEmail = async (e, u) => globalThis.__specialUid?.(e, u) ?? null;
-const specialPreassignedUidByEmail = async (e) => globalThis.__preassigned?.(e) ?? null;
+const specialPreassignedUidByEmail = async (e) => globalThis.__preassigned?.(e)
+  ?? { ok: true, uid: null };
 ` + src;
   return load(src);
 }
@@ -185,7 +186,16 @@ async function post(opts) {
   globalThis.__staging = false;
   globalThis.__customer = customer ? () => customer : null;
   globalThis.__specialUid = specialUid ? () => specialUid : () => null;
-  globalThis.__preassigned = opts.preassigned ? () => opts.preassigned : () => null;
+  /*
+   * 事前発行 uid の照会。**「引けなかった」と「事前発行なし」を別物として渡せる**ようにする
+   * (同一視すると競合ガードが素通りする = ちょうど守りたかった張り替えが起きる)。
+   *   preassignedFails: true → { ok: false }
+   *   preassigned: '<uid>'   → { ok: true, uid }
+   *   どちらも無し           → { ok: true, uid: null }  (登録なし / legacy 行)
+   */
+  globalThis.__preassigned = opts.preassignedFails
+    ? () => ({ ok: false, reason: 'stub failure' })
+    : () => ({ ok: true, uid: opts.preassigned ?? null });
   globalThis.__demoUid = demoUid ? () => demoUid : () => null;
   globalThis.__signed = 0;
   globalThis.__adminCred = 0;
@@ -651,9 +661,42 @@ console.log('\n⑫ 事前発行 special uid の保護 (9〜13)');
       r.writes.length, 0);
     eq('P-13b', '  special の名簿にも触らない (linkSpecialEmail を呼ばない)', r.linkSpecial, 0);
     eq('P-13c', '  デモの名簿にも触らない', r.linkDemo, 0);
-    eq('P-13d', '  viewer Cookie を 1 枚も発行しない', r.cookieSets, 0);
+    eq('P-13d', '  viewer Cookie を 1 枚も発行しない', [r.cookieSets, r.signed], [0, 0]);
+    /*
+     * **2026-10-05 hardening の本体。** 以前はガードが `issueAdminCred` の後ろに
+     * あったので、本線の書き込みには届かないまま **admin credential だけは
+     * set / delete されて**いた。ガードを前へ移して「何も書かない」を成立させた。
+     * (スタブは set / delete の両方を 1 カウントで数えるので 0 = どちらも起きていない。)
+     */
+    eq('P-13f', '  **admin credential を set も delete もしない** (ガードが issueAdminCred より前)',
+      r.adminCred, 0);
     ok('P-13e', '  応答に別 uid を載せない (張り替え先を漏らさない)',
       r.body.diagnosticUserId === undefined, JSON.stringify(r.body));
+  }
+
+  /* ── 12''. **照会が落ちた回を「事前発行なし」と同一視しない** ──
+   *
+   * 以前 `specialPreassignedUidByEmail` は失敗を `null` で返していた。すると
+   * app_config の取得が落ちた回が「登録されていない人」と**見分けが付かず**、
+   * ガードが素通りして **UID-A → UID-B の張り替えがちょうど起きる**。
+   * 守りたかったものが、守れないときに限って守られない形だった。 */
+  {
+    const r = await post({
+      user: emailUser, claims: AMR_PASSWORD,
+      specialUid: PRE, preassignedFails: true,
+      row: { diagnostic_user_id: OTHER, auth_user_id: AUTH_EMAIL, google_sub: null },
+      linkedHit: true,
+    });
+    eq('P-12f', '**照会に失敗したら 503 で止める** (事前発行なしと同一視しない)', r.status, 503);
+    ok('P-12f2', '  既存 uid へ張り替えていない (応答に uid を載せない)',
+      r.body.diagnosticUserId === undefined, JSON.stringify(r.body));
+    eq('P-13f1', '  app_users を 1 行も書き換えない', r.writes.length, 0);
+    eq('P-13f2', '  linkSpecialEmail / linkDemoEmail を呼ばない', [r.linkSpecial, r.linkDemo], [0, 0]);
+    eq('P-13f3', '  viewer Cookie を 1 枚も発行しない', [r.cookieSets, r.signed], [0, 0]);
+    eq('P-13f4', '  admin credential も set / delete しない', r.adminCred, 0);
+    ok('P-12f3', '  利用者向けの文言で返す (内部情報を出さない)',
+      typeof r.body.error === 'string' && !/stub failure|duplicate|constraint|column/i.test(r.body.error),
+      JSON.stringify(r.body));
   }
 
   /* ── 12'. Google セッションでも同じ (方式に依存しない) ── */
@@ -666,6 +709,7 @@ console.log('\n⑫ 事前発行 special uid の保護 (9〜13)');
     });
     eq('P-12g', "Google セッションでも競合は 409 (認証方式に依存しない)", r.status, 409);
     eq('P-13g', '  こちらでも書き込み 0 件', r.writes.length, 0);
+    eq('P-13g2', '  こちらでも admin credential 0 / Cookie 0', [r.adminCred, r.cookieSets], [0, 0]);
   }
 
   /* ── 14. デモ枠は従来どおり (special を優先する既存順序を壊していない) ── */
