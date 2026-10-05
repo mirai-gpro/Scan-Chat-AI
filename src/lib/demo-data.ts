@@ -279,6 +279,17 @@ function demoLatestResult(uid: string): DiagnosisResult {
     extracted_at: daysAgo(18),
     extracted_by_model: 'demo',
     status: 'published',
+    /*
+     * デモは**完成済み PDF の枠ではない**ので 5 列とも null。
+     * とくに `source_key` は null のままにする — ダッシュボードの
+     * 「manual:transcosmos: で始まるなら PDF へ送る」判定が
+     * **デモを巻き込まない**ための条件そのもの。
+     */
+    report_pdf_url: null,
+    report_pdf_sha256: null,
+    report_pdf_pages: null,
+    report_pdf_received_at: null,
+    source_key: null,
   };
 }
 

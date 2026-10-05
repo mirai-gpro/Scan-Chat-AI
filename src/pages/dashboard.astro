@@ -184,6 +184,7 @@ const checkups = (data?.artifacts ?? []).filter((a) => a.test_type === 'health_c
  */
 const reportAvailable = !!data?.latestResult || demoShown;
 
+
 /*
  * **報告書の「New」(新着) 判定** (発注者要望 2026-09「作成済のステータス New バッジ等」)。
  *
@@ -242,6 +243,31 @@ const logoAlt = isDemoBrand ? 'がんチェッカー' : 'Welltect';
 const q = viewerLinkQuery(viewer);
 // **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
 const linkPrefix = viewerPathPrefix(viewer);
+
+/*
+ * ── 完成済み PDF (トランスコスモス 10 名) だけ行き先を変える ──────────
+ *
+ * 【なぜ分岐が要るか】この 10 名は Elith の受領 JSON ではなく**組版済みの
+ * AI疾病予防報告書 PDF そのもの**を持っている。`/report` は受領 JSON から
+ * 紙面を組むレンダラなので、PDF しか無い回に開くと帯だけの `emptyVM` になる。
+ * → `/api/report-route` が本人 uid を確認して**短寿命の署名 URL** へ送る。
+ *
+ * 【通常利用者は 1 px も変えない】条件は
+ *   ① `source_key` が `manual:transcosmos:` で始まる
+ *   ② `report_pdf_url` が在る
+ * の AND。受領 JSON の利用者もデモも `source_key` が null なので従来どおり
+ * `/report` へ行く (デモの `demoLatestResult` は 5 列とも null にしてある)。
+ *
+ * 【器は書き換えない】`ReportLinkCard` 側で全員を resolver へ通すと
+ * 通常利用者にも余分な 1 往復が入る。判定はここ 1 か所だけ。
+ */
+const normalReportHref = `${linkPrefix}/report${q}`;
+const manualPdfReport =
+  !!data?.latestResult?.report_pdf_url
+  && String(data?.latestResult?.source_key ?? '').startsWith('manual:transcosmos:');
+const reportHref = manualPdfReport
+  ? `/api/report-route?dest=${encodeURIComponent(normalReportHref)}`
+  : normalReportHref;
 ---
 
 <BaseLayout title={data ? `${greeting} | Welltect` : 'マイページ | Welltect'} width="app">
@@ -332,10 +358,10 @@ const linkPrefix = viewerPathPrefix(viewer);
         {healthAge?.latest ? (
           <div class="grid grid-cols-1 items-stretch gap-5 lg:grid-cols-[minmax(0,1fr)_17rem]">
             <HealthAgeCard latest={healthAge.latest} followup={healthAgeFollowup} canGraph={(healthAge.trend?.points?.length ?? 0) >= 2} linkQuery={q} linkPrefix={linkPrefix} />
-            <ReportLinkCard href={`${linkPrefix}/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
+            <ReportLinkCard href={reportHref} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
           </div>
         ) : (
-          <ReportLinkCard href={`${linkPrefix}/report${q}`} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
+          <ReportLinkCard href={reportHref} receivedAt={data?.latestResult?.received_at} available={reportAvailable} isNew={reportIsNew} />
         )}
 
         {/*

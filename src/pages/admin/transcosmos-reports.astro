@@ -1,0 +1,354 @@
+---
+/**
+ * トランスコスモス 10 名 — 完成済み AI疾病予防報告書 PDF の一括登録。
+ *
+ * 【操作は ZIP を 1 個選ぶだけ】ZIP は **ブラウザ内で展開する** (91MB を
+ * Vercel Functions へ送らない。本文上限 4.5MB)。PDF 本体も関数を通さず、
+ * 署名つき upload URL で **ブラウザ → Supabase Storage へ直接** 送る。
+ *
+ * 【氏名をどこにも残さない】ZIP 内のファイル名には氏名が入っているが、
+ * 画面に出すだけでサーバへも DB へも送らない。送るのは
+ * `slot` (01〜10) / `sizeBytes` / `sha256` / 保存キー だけ。
+ */
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import AppIcon from '../../components/AppIcon.astro';
+import { notFoundForNonAdmin } from '../../lib/admin-auth';
+import { resolveViewer } from '../../lib/viewer';
+import { noStore } from '../../lib/http-cache';
+import { TRANSCOSMOS_SLOTS } from '../../lib/transcosmos-reports';
+
+export const prerender = false;
+noStore(Astro.response);
+
+// admin 判定は Cookie の本人で行う (`?u=` を admin uid にしただけでは通らない)。
+const viewer = await resolveViewer(Astro);
+if (!viewer.isAdmin) return notFoundForNonAdmin();
+const qs = viewer.uid ? `?u=${encodeURIComponent(viewer.uid)}` : '';
+---
+
+<BaseLayout title="トランスコスモス10名 AI疾病予防報告書 一括登録 | Scan-Chat AI" width="app">
+  <header class="hero-gradient px-5 pt-6 pb-4">
+    <div class="flex items-center justify-between">
+      <a href={`/admin/${qs}`} class="text-xs text-slate-500 hover:text-slate-700">‹ 管理画面</a>
+      <p class="text-xs font-medium uppercase tracking-wider text-red-600/80">ADMIN</p>
+      <span class="w-10"></span>
+    </div>
+    <h1 class="mt-3 text-xl font-bold tracking-tight">
+      <AppIcon name="upload" size={20} /> トランスコスモス10名<br />AI疾病予防報告書 一括登録
+    </h1>
+    <p class="mt-2 text-sm leading-relaxed text-slate-700">
+      完成済みの報告書 PDF が入った ZIP を選び、「10名へ登録する」を押すだけです。
+      登録後は各本人のダッシュボードの「AI疾病予防報告書」から PDF が開きます。
+    </p>
+  </header>
+
+  <main class="flex flex-1 flex-col gap-4 px-5 pb-10">
+
+    <section class="card">
+      <h2 class="text-base font-bold">1. ZIP を選ぶ</h2>
+      <p class="mt-1 text-sm text-slate-600">
+        ファイル名の先頭 2 桁（<span class="font-mono">01</span>〜<span class="font-mono">10</span>）で
+        対象者を判定します。ZIP はこのブラウザの中だけで開き、<b>サーバへは送りません</b>。
+      </p>
+      <div class="mt-3 flex flex-wrap items-center gap-3">
+        <label class="btn-pair btn-data cursor-pointer">
+          ZIP を選択
+          <input id="tc-zip" type="file" accept=".zip,application/zip" class="hidden" />
+        </label>
+        <span id="tc-zip-name" class="text-sm text-slate-600">未選択</span>
+      </div>
+      <p id="tc-zip-note" class="mt-2 text-sm text-slate-600"></p>
+    </section>
+
+    <section id="tc-review-wrap" class="card" hidden>
+      <h2 class="text-base font-bold">2. 内容を確認する</h2>
+      <div class="md-region mt-2 overflow-x-auto">
+        <table class="rp-table w-max min-w-full text-sm">
+          <thead>
+            <tr>
+              <th class="whitespace-nowrap">#</th>
+              <th class="whitespace-nowrap">ファイル名</th>
+              <th class="whitespace-nowrap">サイズ</th>
+              <th class="whitespace-nowrap">PDF</th>
+              <th class="whitespace-nowrap">SHA-256</th>
+              <th class="whitespace-nowrap">状態</th>
+            </tr>
+          </thead>
+          <tbody id="tc-review-body">
+            {TRANSCOSMOS_SLOTS.map((slot) => (
+              <tr data-slot={slot}>
+                <td class="whitespace-nowrap font-mono">{slot}</td>
+                <td data-cell="name" class="text-slate-500">—</td>
+                <td data-cell="size" class="whitespace-nowrap tnum">—</td>
+                <td data-cell="pdf" class="whitespace-nowrap">—</td>
+                <td data-cell="sha" class="whitespace-nowrap">—</td>
+                <td data-cell="state" class="whitespace-nowrap">未読込</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+      <p id="tc-preflight" class="mt-3 text-sm font-semibold"></p>
+    </section>
+
+    <section class="card">
+      <h2 class="text-base font-bold">3. 登録する</h2>
+      <p class="mt-1 text-sm text-slate-600">
+        10 件すべてが揃ったときだけ押せます。PDF は
+        <b>ブラウザから保存先へ直接</b>送られ、全件成功してから DB へ記録します。
+      </p>
+      <button id="tc-submit" type="button" class="btn-pair btn-graph mt-3" disabled>
+        10名へ登録する
+      </button>
+      <p id="tc-progress" class="mt-3 text-sm font-semibold" aria-live="polite"></p>
+      <div id="tc-done" class="mt-3 flex flex-col gap-1 text-sm" hidden></div>
+    </section>
+
+  </main>
+</BaseLayout>
+
+<script>
+  import { unzipSync } from 'fflate';
+  import { createClient } from '@supabase/supabase-js';
+  import {
+    TRANSCOSMOS_BUCKET,
+    TRANSCOSMOS_MAX_BYTES,
+    TRANSCOSMOS_SLOTS,
+    slotFromPdfName,
+  } from '../../lib/transcosmos-reports';
+
+  const $ = (id: string) => document.getElementById(id);
+  const zipInput = $('tc-zip') as HTMLInputElement | null;
+  const zipName = $('tc-zip-name');
+  const zipNote = $('tc-zip-note');
+  const reviewWrap = $('tc-review-wrap');
+  const preflightEl = $('tc-preflight');
+  const submitBtn = $('tc-submit') as HTMLButtonElement | null;
+  const progressEl = $('tc-progress');
+  const doneEl = $('tc-done');
+  if (!zipInput || !submitBtn) throw new Error('transcosmos-reports: 必要な要素がありません');
+
+  interface Picked {
+    slot: string;
+    name: string;
+    bytes: Uint8Array;
+    sha256: string;
+  }
+  let picked: Picked[] = [];
+
+  const fmtSize = (n: number) =>
+    n >= 1024 * 1024 ? `${(n / 1024 / 1024).toFixed(1)} MB` : `${Math.ceil(n / 1024)} KB`;
+
+  const cell = (slot: string, key: string) =>
+    document.querySelector<HTMLElement>(`#tc-review-body tr[data-slot="${slot}"] [data-cell="${key}"]`);
+
+  function resetRows(): void {
+    for (const slot of TRANSCOSMOS_SLOTS) {
+      const name = cell(slot, 'name'); if (name) { name.textContent = '—'; name.className = 'text-slate-500'; }
+      for (const k of ['size', 'pdf', 'sha']) { const c = cell(slot, k); if (c) c.textContent = '—'; }
+      const st = cell(slot, 'state'); if (st) { st.textContent = '未読込'; st.className = 'whitespace-nowrap text-slate-500'; }
+    }
+  }
+
+  async function sha256Hex(bytes: Uint8Array): Promise<string> {
+    // ArrayBuffer を素で渡す (SubtleCrypto は TypedArray も受けるが明示する)。
+    const buf = await crypto.subtle.digest('SHA-256', bytes.slice().buffer as ArrayBuffer);
+    return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  }
+
+  /** 先頭 5 バイトが `%PDF-` か。**中身の医学的な解析はしない。** */
+  const looksPdf = (b: Uint8Array) =>
+    b.length > 5 && b[0] === 0x25 && b[1] === 0x50 && b[2] === 0x44 && b[3] === 0x46 && b[4] === 0x2d;
+
+  zipInput.addEventListener('change', async () => {
+    const file = zipInput.files?.[0] ?? null;
+    picked = [];
+    submitBtn.disabled = true;
+    if (doneEl) { doneEl.hidden = true; doneEl.textContent = ''; }
+    if (progressEl) progressEl.textContent = '';
+    resetRows();
+    if (!file) {
+      if (zipName) zipName.textContent = '未選択';
+      if (zipNote) zipNote.textContent = '';
+      if (reviewWrap) reviewWrap.hidden = true;
+      return;
+    }
+    if (zipName) zipName.textContent = file.name;
+    if (zipNote) zipNote.textContent = `ZIP を開いています… (${fmtSize(file.size)})`;
+    if (reviewWrap) reviewWrap.hidden = false;
+
+    let entries: Record<string, Uint8Array>;
+    try {
+      const raw = new Uint8Array(await file.arrayBuffer());
+      // PDF だけ取り出す (ZIP 内の階層は無視し basename で判定)。
+      entries = unzipSync(raw, {
+        filter: (f) => slotFromPdfName(f.name) !== null,
+      });
+    } catch (e) {
+      if (zipNote) zipNote.textContent = `ZIP を開けませんでした: ${e instanceof Error ? e.message : e}`;
+      if (preflightEl) preflightEl.textContent = '';
+      return;
+    }
+
+    const bySlot = new Map<string, Picked[]>();
+    for (const [path, bytes] of Object.entries(entries)) {
+      const slot = slotFromPdfName(path);
+      if (!slot) continue;
+      const name = path.split('/').pop() ?? path;
+      const sha256 = await sha256Hex(bytes);
+      const list = bySlot.get(slot) ?? [];
+      list.push({ slot, name, bytes, sha256 });
+      bySlot.set(slot, list);
+    }
+
+    const problems: string[] = [];
+    for (const slot of TRANSCOSMOS_SLOTS) {
+      const list = bySlot.get(slot) ?? [];
+      const nameCell = cell(slot, 'name');
+      const stateCell = cell(slot, 'state');
+      if (list.length === 0) {
+        problems.push(`${slot} が見つからない`);
+        if (stateCell) { stateCell.textContent = '不足'; stateCell.className = 'whitespace-nowrap font-semibold text-red-700'; }
+        continue;
+      }
+      if (list.length > 1) {
+        problems.push(`${slot} が ${list.length} 件ある`);
+        if (stateCell) { stateCell.textContent = '重複'; stateCell.className = 'whitespace-nowrap font-semibold text-red-700'; }
+        continue;
+      }
+      const it = list[0];
+      // 氏名入りのファイル名は**ここに出すだけ**。送信もログも保存もしない。
+      if (nameCell) { nameCell.textContent = it.name; nameCell.className = ''; }
+      const sizeCell = cell(slot, 'size'); if (sizeCell) sizeCell.textContent = fmtSize(it.bytes.length);
+      const pdfCell = cell(slot, 'pdf');
+      const shaCell = cell(slot, 'sha'); if (shaCell) shaCell.textContent = 'SHA OK';
+      const ok = it.bytes.length > 0 && it.bytes.length <= TRANSCOSMOS_MAX_BYTES && looksPdf(it.bytes);
+      if (pdfCell) pdfCell.textContent = looksPdf(it.bytes) ? '○' : '×';
+      if (!ok) {
+        problems.push(it.bytes.length === 0 ? `${slot} が 0 バイト` : `${slot} が PDF ではない / 大きすぎる`);
+        if (stateCell) { stateCell.textContent = '不正'; stateCell.className = 'whitespace-nowrap font-semibold text-red-700'; }
+        continue;
+      }
+      if (stateCell) { stateCell.textContent = '確認OK'; stateCell.className = 'whitespace-nowrap font-semibold text-brand-700'; }
+      picked.push(it);
+    }
+
+    if (zipNote) zipNote.textContent = `PDF ${picked.length} 件を読み込みました。`;
+    if (problems.length || picked.length !== TRANSCOSMOS_SLOTS.length) {
+      picked = [];
+      submitBtn.disabled = true;
+      if (preflightEl) {
+        preflightEl.className = 'mt-3 text-sm font-semibold text-red-700';
+        preflightEl.textContent = `登録できません: ${problems.join(' / ') || '10 件揃っていません'}`;
+      }
+      return;
+    }
+    picked.sort((a, b) => a.slot.localeCompare(b.slot));
+    submitBtn.disabled = false;
+    if (preflightEl) {
+      preflightEl.className = 'mt-3 text-sm font-semibold text-brand-700';
+      preflightEl.textContent = '10 件すべて確認できました。「10名へ登録する」を押してください。';
+    }
+  });
+
+  const api = async (body: unknown) => {
+    const res = await fetch('/api/admin/transcosmos-reports', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const json = await res.json().catch(() => ({}));
+    return { status: res.status, json } as { status: number; json: Record<string, unknown> };
+  };
+
+  submitBtn.addEventListener('click', async () => {
+    if (picked.length !== TRANSCOSMOS_SLOTS.length) return;
+    submitBtn.disabled = true;
+    zipInput.disabled = true;
+    const say = (msg: string, bad = false) => {
+      if (progressEl) {
+        progressEl.className = `mt-3 text-sm font-semibold ${bad ? 'text-red-700' : 'text-slate-700'}`;
+        progressEl.textContent = msg;
+      }
+    };
+
+    say('保存先を準備しています…');
+    const plan = await api({
+      action: 'plan',
+      // **氏名もファイル名も送らない。** slot / サイズ / SHA だけ。
+      files: picked.map((p) => ({ slot: p.slot, sizeBytes: p.bytes.length, sha256: p.sha256 })),
+    });
+    if (plan.status !== 200 || !plan.json.ok) {
+      say(`準備に失敗しました (${plan.status} ${String(plan.json.error ?? '')})`, true);
+      submitBtn.disabled = false; zipInput.disabled = false;
+      return;
+    }
+    const planned = plan.json.files as { slot: string; path: string; token: string }[];
+
+    const url = import.meta.env.PUBLIC_SUPABASE_URL as string;
+    const anon = import.meta.env.PUBLIC_SUPABASE_ANON_KEY as string;
+    if (!url || !anon) { say('Supabase の公開設定がありません。', true); return; }
+    const storage = createClient(url, anon).storage.from(TRANSCOSMOS_BUCKET);
+
+    // 全並列にしない (大きな PDF が 10 本なので回線と Storage を詰まらせる)。
+    let done = 0;
+    const failures: string[] = [];
+    const queue = [...planned];
+    const worker = async () => {
+      for (;;) {
+        const job = queue.shift();
+        if (!job) return;
+        const item = picked.find((p) => p.slot === job.slot);
+        if (!item) { failures.push(job.slot); continue; }
+        const { error } = await storage.uploadToSignedUrl(
+          job.path, job.token, item.bytes, { contentType: 'application/pdf' },
+        );
+        if (error) failures.push(`${job.slot}: ${error.message}`);
+        else {
+          done += 1;
+          say(`アップロード ${done} / ${planned.length}`);
+          const st = cell(job.slot, 'state');
+          if (st) { st.textContent = '送信済'; st.className = 'whitespace-nowrap font-semibold text-brand-700'; }
+        }
+      }
+    };
+    await Promise.all([worker(), worker()]);
+
+    if (failures.length) {
+      // **1 件でも失敗したら finalize を呼ばない** (半分だけ登録された状態を作らない)。
+      say(`アップロードに失敗しました (${failures.length} 件)。登録はしていません: ${failures.join(' / ')}`, true);
+      submitBtn.disabled = false; zipInput.disabled = false;
+      return;
+    }
+
+    say('登録しています…');
+    const fin = await api({
+      action: 'finalize',
+      files: planned.map((p) => {
+        const item = picked.find((x) => x.slot === p.slot)!;
+        return { slot: p.slot, path: p.path, sizeBytes: item.bytes.length, sha256: item.sha256 };
+      }),
+    });
+    if (fin.status !== 200 || !fin.json.ok) {
+      say(`登録に失敗しました (${fin.status} ${String(fin.json.error ?? '')} ${String(fin.json.detail ?? '')})`, true);
+      submitBtn.disabled = false; zipInput.disabled = false;
+      return;
+    }
+
+    const results = (fin.json.results ?? []) as { slot: string; uid: string }[];
+    say(`${results.length} / ${TRANSCOSMOS_SLOTS.length} 登録完了`);
+    for (const r of results) {
+      const st = cell(r.slot, 'state');
+      if (st) { st.textContent = '完了'; st.className = 'whitespace-nowrap font-semibold text-brand-700'; }
+    }
+    if (doneEl) {
+      doneEl.hidden = false;
+      doneEl.innerHTML = results
+        .sort((a, b) => a.slot.localeCompare(b.slot))
+        .map((r) => `<div><span class="font-mono">${r.slot}</span> 完了 — `
+          + `<a class="font-semibold text-brand-700 underline" href="/dashboard?u=${encodeURIComponent(r.uid)}">`
+          + 'ダッシュボード確認</a></div>')
+        .join('');
+    }
+  });
+</script>

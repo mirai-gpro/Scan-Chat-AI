@@ -1713,6 +1713,75 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   - **未処理 = トランスコスモス 10 名の PDF の差し替え** (発注者判断済み)。本番へ入れてから
     同じ受領 JSON で作り直す。**基準値を表で見せたいなら Elith に `reference`/`judgement` を
     フィールドで返してもらうのが唯一の筋** (値から当社が判定を計算するのは捏造)。
+- **【トランスコスモス10名の完成済み報告書 PDF 2026-10-05・P0・実装済み】
+  正本 `docs/operations/トランスコスモス10名_完成済み報告書PDF_手順書.md`。**
+  既に完成している **AI疾病予防報告書 PDF 10 本**を、**Elith 再処理・JSON 再生成・OCR を
+  一切行わず**本人のダッシュボードから開けるようにする。
+  - **【取り違え厳禁】これは AI疾病予防報告書で、`ai_prediction` / 「AI疾病発症予測」/ LAiF ではない。**
+    `test_artifacts` に 1 行も書かない (`test_type='ai_prediction'` として登録しない)。
+    Elith JSON へ逆変換しない。置き場所は `diagnosis.diagnosis_results` で、
+    受領 JSON の代わりに **PDF だけ**を持つ行 (`schema_version='manual-pdf-v1'`)。
+  - **操作は ZIP 1 個を選んで押すだけ** = `/admin/transcosmos-reports` (Scan 側・admin 限定)。
+    **認可は管理者 session** (`resolveViewer` → `viewer.isAdmin`)。**`ADMIN_API_KEY` は使わない** —
+    鍵認可にすると鍵を持つ誰か (専用 PC・スクリプト) が 10 名の枠へ書ける。
+  - **PDF 本体を Vercel Functions へ通さない**。最大 15MB 超 × 10 本で ZIP は 91MB、
+    本文上限は 4.5MB なので中継すると**関数に届く前に 413**。
+    ZIP は**ブラウザ内で展開** (`fflate`・新規依存はこれだけ) し、
+    **署名つき upload URL でブラウザ → Supabase Storage へ直送** (2 並列)。
+    API が受けるのは `slot` / `sizeBytes` / `sha256` / 保存キーだけ。
+  - **保存先は Supabase Storage `lab-results`** (S3 は使わない)。DB には**相対キー**
+    `manual/transcosmos/20260928/<uid>/<randomUUID>.pdf` を入れる —
+    `getOriginalSignedUrl()` は相対キーなら `lab-results` の署名 URL を作る
+    (`originals-storage.ts:200-206`)。公開 URL を保存しない・`public/` に置かない・
+    **PDF を GitHub へ commit しない**。
+  - **氏名をどこにも残さない**。固定するのは**先頭 2 桁 (01〜10) と uid の対応だけ**
+    (`src/lib/transcosmos-reports.ts`)。氏名・メールをコード / DB / ログ / 保存キーに入れない。
+    **ブラウザはファイル名をサーバへ送らない** (画面に出すだけ)。
+  - **`app_users` の placeholder を作る**。`diagnosis_results.diagnostic_user_id` は
+    `app_users` への FK (`20260601000010:231`) で、10 名はまだ誰もログインしていない。
+    入れるのは **`diagnostic_user_id` 1 列だけ**で、`auth_user_id` / `google_sub` /
+    `hp_customer_user_id` / `display_name_cache` は**書かない** (全部 NULL)。
+    **Supabase Auth user も password も作らない。** `ignoreDuplicates: true` なので
+    既存行は 1 列も上書きしない = 本人の Sign up / Sign in は従来どおり
+    **この同じ行**へ紐付く (別 uid を発行しない)。
+  - **冪等**: `diagnostic_user_id + source_key`
+    (`manual:transcosmos:20260928:<uid>`) で先に引いて update / insert を明示的に分ける。
+    `diagnostic_id` は維持し**行を増やさない**。`source_key` には部分 UNIQUE 索引がある
+    (`20260917000010`) が、それに頼らず自分で保証する。
+  - **Storage に object が在ることを確かめてから DB を書く**。応答を信じるだけだと
+    upload が失敗した回に DB だけ出来上がり、**ボタンは押せるのに開くと 503** になる
+    (利用者から見ていちばん悪い形)。PDF 本体は関数へ落とさず **存在と size > 0** だけ見る。
+  - **通常利用者の行き先は変えない**。判定は **`dashboard.astro` の 1 か所**で
+    ①`report_pdf_url` が在る ②`source_key` が `manual:transcosmos:` で始まる の AND。
+    受領 JSON の人もデモも `source_key` が null なので従来どおり `/report`
+    (`demoLatestResult` の 5 列は null にしてある)。
+    **`ReportLinkCard` で全員を resolver へ通さない** (器は `href` をそのまま使う)。
+  - **【本番で壊れていた 2 件をこの作業で直した】**
+    - **`/api/report-route` が全リクエストで 500** (実測 `curl` → `500`)。
+      `noStore(ctx.response)` を呼んでいたが、**`Astro.response` が在るのは `.astro`
+      ページだけで API route の `APIContext` に `response` は無い**。
+      `noStore(undefined)` が TypeError になり、`ReportLinkCard` が全利用者を
+      この口へ通していたので**ダッシュボードの「報告書を読む」が誰も開けなかった**。
+      → 呼び出しを外し、`Response.redirect()` (headers が immutable で `cache-control` を
+      付けられない) も自前の `redirect()` へ置き換え **`private, no-store`** を付けた。
+    - **`astro check` が 6 errors で CI が赤**。`src/types/supabase-diagnosis.ts` が
+      生成し直しの取りこぼしで migration の 5 列を欠いていた (`report_pdf_*` 4 件 +
+      `source_key`)。**型だけ**を実 DDL に合わせた — **DB は 1 文字も変えていない**
+      (migration を足さない)。
+  - **検証 `npm run verify:transcosmos-reports` 140 件** (CI の A 層) ＋
+    `verify:url-uid-privacy` に **T-11c / T-11d** を追加 (report-route の `?u=` 引き継ぎは
+    `viewer.isAdmin` で閉じていること。**ただの許可リストにしない**)。
+    **退行注入 13 種**とも名指しで落ちることを確認済み。
+    **H は本物の ZIP を組んで**画面と同じ `fflate` + `crypto.subtle` 経路を通す。
+  - **この環境で確認できていないもの**: **admin 画面の実ブラウザ操作**
+    (`?u=` 入場は**admin を与えない**仕様 `viewer.ts:388-391` なので、Supabase / HP Edge が
+    無いコンテナでは管理者になれない)。実 PDF の upload・署名 URL の実挙動・
+    `lab-results` の書き込み権限も未確認。**本番で 1 回通すのが完了条件。**
+  - **やっていないこと**: Elith 再処理 / JSON 生成 / AI問診 / OCR / Genoplan /
+    `test_artifacts` / `measurement_values` / `ai_prediction` / LAiF / S3 / wellfort-site /
+    **DB migration** / 新規 schema / 報告書 HTML renderer / PDF→JSON 変換 /
+    Supabase Auth ユーザー作成。
+
 - **【誰にダミーを出すか 2026-08-30 確定・発注者指示】正本 `docs/operations/デモ用アカウント_仕様書.md`。**
   **アプリ全体にかかる仕組み**なので特定機能の仕様書には書かない (報告書 spec §4.6 はここを指すだけ)。
   - **デモ用アカウントと管理者アカウントは別物。混ぜない。**
@@ -2279,6 +2348,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/elith/elith_assembly_wrapping_spec.md` | **納品セット アセンブリのラップ仕様(Elith向け説明)**。フォルダ/命名/ウェルネス年齢の時系列化(検査日毎・旧1件を撤回)・疑似データも同様に時系列生成・**LAiF AI疾病発症予測(Other/ai_prediction)のファイル仕様=Elith承諾により確定(§5・2026-08)。合成は data.items[] の発症率%/相対リスク比のみジッタ・昨年比は前年の相対リスク比を引継ぎ(実装済)**・manifest不一致の確認事項 |
 | **`docs/specs/special_account_management_spec_20261001.md`** | **【スペシャルアカウントの「管理画面と Elith 納品の起動」の正本。仕様のみ・未実装】** 発注者指示 2026-10-01。**スペシャルは 23:00 JST の cron 対象から外し、`/admin/special-accounts` の行の［Elith納品］ボタンでだけ本番納品する**（cron 自体は残し、契約者/単品の自動納品は壊さない）/ **AI問診は必須ではない**・最低条件は「uid 確定 ∧ Elith へ渡せるデータが 1 種類以上」（`decideReady()` の fail-closed は契約者用なので触らない）/ 一覧を 1 アカウント 1 行へ整理し**検査種別ごとの件数＋最新日**を出す / ［追加検査データ］［共有URL設定］［Elith納品］の 3 ボタン / **追加検査登録は「登録」だけにし、その場で本番納品しない** / 検診・人間ドックの Admin 登録を追加（`source` 違いで 2 行目を作らない）/ **裁定済み D-1〜D-8**（2026-10-01・§25.1。**発注者裁定は全て確定だが、Elith 確認事項 E-1〜E-6 と実装時に実測する V-1〜V-4 は未確認のまま**）/ **v1.3 の精査 4 点**（`putVerified` の追加 GET は新規・変更で最大 2 回／run snapshot に**納品ファイル 1 件ごとの `format_id`・`delivered_date`・`destination_key`・`sha256`** を持たせ同日同件数の内容変更も検知／**確認モーダルの正本は DB 件数でなく実際の assemble 結果 = delivery preview**・不一致なら警告・確定後は同じ plan を putVerified・snapshot は verified 結果から／**`elith_delivery_runs` はスペシャルの手動納品 run 限定で通常 cron へ広げない**） / **§6.5・§13.4 = 承認画面案 (2026-10-01) の補正事項**（画像だけを見て存在しない機能を実装させないための禁止事項。氏名・会社名は持っていないので表示前提にしない / UID は UUID / **共有URLにパスワードを足さない・「ダウンロード可」権限は存在しない**・scope は `view` 固定＋`interview`/`scan` のみ / AdminLayout は既存のまま） |
 | **`docs/specs/special_account_additional_tests_spec_20260930.md`** | **【スペシャルアカウントの追加検査 (遺伝子/血液/がんリスク/AI疾病予測) の正本。触る前に必読・2026-09-30 実装済み】** 原本選択 1 回で 原本S3→DB→Dashboard→Elith 納品→読戻し検証 まで通し、**`/admin/lab-results` への二重アップロードを廃止**する。既存パイプラインの組み合わせに徹する (専用の別解析を作らない) / **重複防止は DB でなくアプリが守る** (UNIQUE に `source` が入り NULL で効かない) / 受診日必須・today fallback 禁止 / 原本キーに氏名を入れない / manifest を作らない / `elith_delivery_items` を新設 / 検証 `npm run verify:special-additional-tests` 142 件 + 退行注入 7 種 |
+| **`docs/operations/トランスコスモス10名_完成済み報告書PDF_手順書.md`** | **完成済み AI疾病予防報告書 PDF 10 本を、Elith 再処理なしで本人のダッシュボードから開けるようにする運用手順** (2026-10-05・P0・実装済み)。**これは `ai_prediction` / LAiF ではない** (`test_artifacts` に書かない) / 操作は ZIP 1 個 → `/admin/transcosmos-reports` / **PDF 本体は Vercel Functions を通さず**ブラウザ → Supabase Storage `lab-results` へ直送 (本文上限 4.5MB) / 保存キーは相対で氏名を入れない / `app_users` placeholder は `diagnostic_user_id` 1 列だけ / 冪等 / **本番で壊れていた 2 件** (`report-route` の 500・`astro check` 6 errors) の真因と直し方 / この環境で確認できていないこと |
 | **`docs/operations/スペシャルアカウント_仕様書.md`** | **スペシャルアカウントの正本 (アプリ全体)**。EC 購入を伴わない招待で**本人の実データ**を扱う枠。**デモ枠とは目的が逆で、混ぜると本人の画面に他人名義のダミーが出る**。判定 / 登録 (メール) と判定 (uid) の分離 / 供給元の和と除外 / サインインの橋渡しの位置 / **全停止スイッチを持たない理由** / 検証 / 切り分け |
 | **`docs/operations/デモ用アカウント_仕様書.md`** | **デモ用アカウントの正本 (アプリ全体)**。目的 / 誰が見るか / 判定の順序と理由 / 3 供給元の和 / 増やし方 / 実装上の約束 / 検証 / 切り分け。**権限 (admin) の仕組みに乗せない**のが設計の要 |
 | **`docs/elith/AI疾病予防報告書_引継ぎ書.md`** | **【この機能に着手する人が最初に読む】** 新規セッション用の入口。読む順番 / 越えてはならない線 / コードの地図 / 検証コマンド / いま動いているものと残っているもの / 詰まったときの切り分け。**仕様は書かない** (仕様の正は下の仕様書) |
