@@ -264,27 +264,61 @@ console.log('\n⑤ L — Google Identity を持つ password セッションを G
   eq('L-08', '  currentAuthMethod は password（Identity と混同しない）', R.authMethodFromAmr(AMR_PASSWORD.amr), 'password');
 }
 
-console.log('\n⑥ B — Google 利用済み uid への password セッション（別 auth user）');
+console.log('\n⑥ B — Google 利用済み uid への password セッション（auth_user_id は条件にしない）');
 {
+  /*
+   * **拒否条件は `google_sub` の有無だけ**（2026-10-05 実コードレビューで是正）。
+   * 禁じているのは「Google 利用済みの人がメール＋パスワード認証を使うこと自体」であって、
+   * 「認証 ID が張り替わること」ではない。`auth_user_id` を条件に混ぜると取り逃す:
+   *   - 本番 `diagnosis.app_users` 実測: `google_sub` あり 24 件のうち
+   *     **`auth_user_id` NULL が 13 件** → 拒否できない
+   *   - 同じ auth user に後からパスワードを付けた回も一致するので素通りする
+   */
+
+  // B-01〜03: 別 auth user で来た password セッション
   const r = await post({ user: emailUser, claims: AMR_PASSWORD, row: rowGoogle, specialUid: UID_SPECIAL });
-  eq('B-01', '**409 で拒否**', r.status, 409);
+  eq('B-01', '**409 で拒否**（別 auth user）', r.status, 409);
   eq('B-02', '  **書き込み 0 件**（auth_user_id / google_sub を張り替えない）', r.writes.length, 0);
   eq('B-03', '  Cookie 発行 0', [r.cookieSets, r.signed], [0, 0]);
 
-  // 同じ auth user（Supabase が identity を link した形）は 3 条件を満たさないので通す。
+  /*
+   * B-04 **`auth_user_id` が今回と同じでも 409**。
+   * 旧版はここを 200 で通していたが、それは仕様違反だった
+   * （同じ auth user にパスワードを足した人が素通りする）。
+   */
   const same = await post({
     user: { ...emailUser, id: AUTH_GOOGLE }, claims: AMR_PASSWORD,
     row: rowGoogle, specialUid: UID_SPECIAL, linkedHit: true,
   });
-  eq('B-04', '  auth_user_id が同じなら張り替えにならないので通す（指示 3 の 3 条件）', same.status, 200);
+  eq('B-04', '  **auth_user_id が同じでも 409**（張り替えの有無を条件にしない）', same.status, 409);
+  eq('B-04w', '    書き込み 0 件', same.writes.length, 0);
+  eq('B-04c', '    Cookie 発行 0', [same.cookieSets, same.signed], [0, 0]);
+  eq('B-04a', '    admin credential も発行しない', same.adminCred, 0);
+  eq('B-04l', '    linkSpecialEmail / linkDemoEmail も呼ばない', [same.linkSpecial, same.linkDemo], [0, 0]);
 
-  // google_sub が無い（メール認証だけで使ってきた）uid には password で入れる＝逆方向は禁じない。
+  /*
+   * B-05 **`auth_user_id` が NULL でも 409**。
+   * 本番に 13 件実在する形（`google_sub` あり / `auth_user_id` NULL）。
+   * ここを取り逃すと「Google 利用済みなのに password で入れる」人が 13 件残る。
+   */
+  const nullAuth = await post({
+    user: emailUser, claims: AMR_PASSWORD,
+    row: { diagnostic_user_id: UID_SPECIAL, auth_user_id: null, google_sub: GOOGLE_SUB },
+    specialUid: UID_SPECIAL,
+  });
+  eq('B-05', '  **auth_user_id が NULL でも 409**（本番 13 件の形）', nullAuth.status, 409);
+  eq('B-05w', '    書き込み 0 件', nullAuth.writes.length, 0);
+  eq('B-05c', '    Cookie 発行 0', [nullAuth.cookieSets, nullAuth.signed], [0, 0]);
+  eq('B-05a', '    admin credential も発行しない', nullAuth.adminCred, 0);
+  eq('B-05l', '    linkSpecialEmail / linkDemoEmail も呼ばない', [nullAuth.linkSpecial, nullAuth.linkDemo], [0, 0]);
+
+  // B-06: google_sub が無い（メール認証だけで使ってきた）uid には password で入れる＝逆方向は禁じない。
   const noGoogle = await post({
     user: emailUser, claims: AMR_PASSWORD,
     row: { diagnostic_user_id: UID_SPECIAL, auth_user_id: 'cccccccc-3333-4333-8333-cccccccccccc', google_sub: null },
     specialUid: UID_SPECIAL,
   });
-  eq('B-05', '  google_sub が無ければ拒否しない', noGoogle.status, 200);
+  eq('B-06', '  **google_sub が無ければ拒否しない**（メール → 後から Google は禁じない）', noGoogle.status, 200);
 }
 
 console.log('\n⑦ ガードの fail-closed（照会が落ちたら何も書かない）');

@@ -2029,13 +2029,22 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
       **新しい依存は足していない。**
     - **禁じる切り替えは一方向だけ** = 「**Google 利用済みのユーザーが、後から同じメールアドレスで
       メール＋パスワード認証を使う**」。**逆 (メール → 後から Google) は禁じない**ので、双方向を見張る
-      `auth_provider` のような仕組みは作らない。拒否は **3 条件が揃ったときだけ** (①その uid に
-      `google_sub` が入っている ②今回が `password` と**確定** ③今回の `auth_user_id` が既存と違う) →
-      **409**。このとき `auth_user_id`/`google_sub`/`diagnostic_user_id`/スペシャル枠の email↔uid を
+      `auth_provider` のような仕組みは作らない。拒否は **2 つの条件だけ** (①`diagnosticUserId` が
+      決まっている ＋ 今回が `password` と**確定** ②その uid の `app_users.google_sub` が**存在する**)
+      → **409**。このとき `auth_user_id`/`google_sub`/`diagnostic_user_id`/スペシャル枠の email↔uid を
       **1 つも書き換えず Cookie も 0 枚** (detach/upsert/`linkSpecialEmail` に到達しない)。
       **照会が落ちたら通さない (fail-closed) = 何も書かずに 503**。この照会は **password セッションの
       ときだけ**走るので既存の Google ログインに影響しない。**`unknown` では何も止めない。**
-    - **なぜ要るか**: `findLinkedUid` は `auth_user_id`/`google_sub` でしか引けないので、
+    - **【重要・2026-10-05 是正】`auth_user_id` が同じか違うかは拒否条件にしない。**
+      禁じているのは「**Google 利用済みの人がメール＋パスワード認証を使うこと自体**」であって、
+      「**認証 ID が張り替わること**」ではない。混同すると取り逃す:
+      **本番 `diagnosis.app_users` 実測** = `google_sub` あり **24 件**・うち `auth_user_id` あり 11 件 /
+      **`auth_user_id` NULL が 13 件** → `auth_user_id` を条件に入れると**この 13 件を拒否できない**。
+      同じ auth user に後からパスワードを付けた回も一致するので素通りする。
+      → 判定は **`row?.google_sub` の有無だけ**。実装前は 3 条件 (旧 ③`auth_user_id !== authId`) だった。
+      退行注入で旧 3 条件へ戻すと **B-04/B-05 の 10 件が名指しで落ち**、`upsert 1`/`Cookie 1`/
+      `admin cred 1`/`linkSpecialEmail 1` まで到達することを実測で確認済み。
+    - **なぜ書き込みの前で止めるか**: `findLinkedUid` は `auth_user_id`/`google_sub` でしか引けないので、
       **別の auth user で来た password セッションは `linkedUid` に当たらない** → 張り替え分岐を素通りし
       `upsert` が既存行の `auth_user_id`/`google_sub` を**無言で書き換える**。
     - **`google_sub` は「今回 Google で認証した」ときだけ書く**。`password` 確定時は書かない。
@@ -2057,11 +2066,15 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     - **UI は表示と処理を分ける**: `SignInPanel.astro` (表示) / `EmailPasswordAuth.astro` (処理)。
       **メールの入口は `#signin-ready` の外**に置く — 中に入れると **Google の読み込み失敗で一緒に消え、
       メール認証まで行き止まりになる**。要素が無いページでは何もしない (`BaseLayout` に 1 回置くだけ)。
-    - **検証 `npm run verify:email-auth` 80 件** (CI の A 層)。`resolve.ts` を transpile し Supabase を
+    - **検証 `npm run verify:email-auth` 89 件** (CI の A 層)。`resolve.ts` を transpile し Supabase を
       スタブに差し替えて**実物を動かす**。**最重要 = テスト L**: **Google Identity を持つ** +
       `amr.method='password'` → `password` と正しく判定し、Google 利用済みなら **409・書き込み 0 件・
-      Cookie 0 枚**。**退行注入 10 種** (identity で方式を代用・`token_refresh` を方式として採る・
-      409 を upsert の後ろへ動かす・fail-closed を通す に倒す・文言を変える 等) で名指しに落ちることを確認済み。
+      Cookie 0 枚**。**B-04/B-05** = `google_sub` ありで `auth_user_id` が**今回と同じ回**と
+      **NULL の回 (本番 13 件の形)** のどちらも 409・書き込み 0・Cookie 0・admin cred 0・
+      `linkSpecialEmail` 0。**B-06** = `google_sub` が無ければ拒否しない。
+      **退行注入 11 種** (identity で方式を代用・`token_refresh` を方式として採る・
+      409 を upsert の後ろへ動かす・fail-closed を通す に倒す・文言を変える・
+      **拒否条件へ `auth_user_id !== authId` を足す** 等) で名指しに落ちることを確認済み。
       `verify:screen` の ⑥ も同じ markup を見るが、**`PUBLIC_GOOGLE_CLIENT_ID` が無い環境では
       パネルが描かれない**ので明示して skip する (`dashboard.astro` の `authEnabled`)。
       **markup の契約は `verify:email-auth` が常に見ている。**

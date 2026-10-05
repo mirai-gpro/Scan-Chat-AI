@@ -249,11 +249,24 @@ export const POST: APIRoute = async (apiCtx) => {
    *
    * 禁じているのは**この一方向だけ**。逆 (メール認証 → 後から Google) は禁じない。
    *
-   * 【なぜ要るか】`findLinkedUid` は `auth_user_id` / `google_sub` でしか引けないので、
-   * **別の auth user で入ってきた password セッションは `linkedUid` に当たらない**。
-   * すると下の張り替え分岐 (`:240`) を素通りし、`upsert` が
+   * 【拒否する条件は 2 つだけ】(2026-10-05 実コードレビューで是正)
+   *   ① `diagnosticUserId` が決まっている
+   *   ② 今回の方式が `password` と**確定**している (`amr` 由来・`unknown` では止めない)
+   *   かつ ③ その uid の `app_users.google_sub` が**存在する** (= Google 利用済み)
+   *
+   * **`auth_user_id` が今回と同じか違うかは拒否条件にしない。** 禁じているのは
+   * 「**Google 利用済みの人がメール＋パスワード認証を使うこと自体**」であって、
+   * 「認証 ID が張り替わること」ではない。両者を混同すると取り逃す:
+   *   - 本番 `diagnosis.app_users` 実測 (2026-10-05): `google_sub` あり **24 件** のうち
+   *     **`auth_user_id` が NULL のものが 13 件**。`auth_user_id` を条件に入れると
+   *     **この 13 件は password 認証を拒否できない**。
+   *   - 同じ auth user に後からパスワードを付けた回も `auth_user_id` が一致するので
+   *     素通りしてしまう。
+   *
+   * 【なぜ書き込みの前で止めるか】`findLinkedUid` は `auth_user_id` / `google_sub` でしか
+   * 引けないので、**別の auth user で入ってきた password セッションは `linkedUid` に
+   * 当たらない**。すると下の張り替え分岐を素通りし、`upsert` が
    * **既存行の `auth_user_id` / `google_sub` を無言で書き換える** (調査 §9)。
-   * 指示 3 の 3 条件が揃うときは、**書き込みに触れる前に**止める。
    *
    * 【止める位置】`issueAdminCred` より前。Cookie を 1 枚も発行しない。
    * detach / upsert / `linkSpecialEmail` のいずれにも到達しない。
@@ -274,7 +287,8 @@ export const POST: APIRoute = async (apiCtx) => {
       return json({ error: 'ただいま混み合っています。時間をおいて再度お試しください。' }, 503);
     }
     const row = existing as { auth_user_id?: string | null; google_sub?: string | null } | null;
-    if (row?.google_sub && row.auth_user_id && row.auth_user_id !== authId) {
+    // **`auth_user_id` は見ない。** Google 利用済み (`google_sub` あり) なら それだけで拒否する。
+    if (row?.google_sub) {
       console.warn(
         `[auth/resolve] Google 利用済みの uid に password セッションが来たので拒否しました`
         + ` (uid=${diagnosticUserId}, method=${currentAuthMethod})。何も書いていません。`,
