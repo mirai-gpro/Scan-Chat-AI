@@ -73,6 +73,7 @@ jobs:
       - run: npm run verify:sheet-contract
       - run: npm run verify:demo-gate
       - run: npm run verify:special-accounts
+      - run: npm run verify:transcosmos-reports
       - run: npm run verify:single-purchase
       # Elith 自動納品の権利判定 (ba15df7・clean baseline に含まれる機能) は静かに壊れるので A 層で見張る
       - run: npm run verify:elith-entitlement

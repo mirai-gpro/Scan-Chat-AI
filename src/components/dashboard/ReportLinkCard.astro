@@ -41,10 +41,13 @@ interface Props {
 }
 const { href, receivedAt = null, available = true, isNew = false } = Astro.props as Props;
 const showNew = available && isNew;
-// 通常報告書はそのまま /report へ、トランスコスモスの完成済み PDF がある人だけ
-// `/api/report-route` が本人 uid を確認して短寿命の署名 URL へ送る。
-// `dest` は相対 URL のみを API 側で許可し、通常利用者への挙動は従来どおり。
-const routedHref = `/api/report-route?dest=${encodeURIComponent(href)}`;
+/*
+ * **ここで行き先を書き換えない。** 以前は全員を `/api/report-route` へ通していたが、
+ * それだと**通常利用者にも余分な 1 往復が入る**し、この器が「どの人が
+ * 完成済み PDF か」を知らないまま判定することになる。
+ * 判定は `dashboard.astro` が `latestResult` を見て行い、ここは渡された
+ * `href` をそのまま使う (器は器のまま)。
+ */
 ---
 
 <section class:list={[
@@ -74,7 +77,7 @@ const routedHref = `/api/report-route?dest=${encodeURIComponent(href)}`;
 
   {available ? (
     <a
-      href={routedHref}
+      href={href}
       class="flex min-h-touch items-center justify-center gap-1.5 rounded-xl bg-white px-3 text-base font-semibold text-brand-700 transition hover:bg-brand-50"
     >
       報告書を読む<AppIcon name="next" size={18} />

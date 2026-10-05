@@ -178,9 +178,31 @@ if (dormantHits.length) {
 }
 
 {
-  const readers = FILES.filter((f) => /searchParams\.get\(\s*['"]u['"]\s*\)/.test(code(f)));
-  ok('T-11', "searchParams.get('u') は viewer.ts と admin 以外に無い",
+  /*
+   * **例外は 1 本だけ: `/api/report-route`** (トランスコスモス 10 名の完成済み PDF)。
+   *
+   * この口は `dest=/report?u=<uid>` の `u` を引き継ぐ。admin 代理表示のときに
+   * **対象者の PDF を確認できる**ようにするためで、引き継がないと admin は
+   * 自分の uid で引いてしまい確認できない。
+   *
+   * **ただの許可リストにはしない** — 読むこと自体は許し、
+   * **`viewer.isAdmin` で閉じていること**を下の T-11c が機械で見る。
+   * 非 admin でも読めるように緩めたら落ちる。
+   */
+  const UID_READ_ALLOW = ['src/pages/api/report-route.ts'];
+  const readers = FILES
+    .filter((f) => /searchParams\.get\(\s*['"]u['"]\s*\)/.test(code(f)))
+    .filter((f) => !UID_READ_ALLOW.includes(f));
+  ok('T-11', "searchParams.get('u') は viewer.ts と admin 以外に無い (例外は report-route のみ)",
     readers.length === 0, readers.join(' / '));
+  {
+    const c = code('src/pages/api/report-route.ts');
+    ok('T-11c', '  report-route の ?u= 引き継ぎは viewer.isAdmin で閉じている',
+      /viewer\.isAdmin\s*&&\s*requestedUid/.test(c),
+      '非 admin が ?u= を指定できると他人の報告書 PDF の署名 URL が取れる');
+    ok('T-11d', '  引き継いだ uid は UUID の形だけ通す',
+      /\/\^\[0-9a-f-\]\{36\}\$\/i\.test\(requestedUid\)/.test(c));
+  }
   ok('T-11b', "viewer.ts は searchParams.get('u') を持つ",
     /searchParams\.get\('u'\)/.test(code('src/lib/viewer.ts')));
 }

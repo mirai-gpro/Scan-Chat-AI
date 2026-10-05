@@ -128,6 +128,20 @@ export type Database = {
           extracted_at: string | null;
           extracted_by_model: string | null;
           status: string;
+          /*
+           * 以下 5 列は migration で後から足したもの。**生成し直しの取りこぼし**で
+           * ここに無く、`report-route.ts` / `report-finalize.ts` が
+           * `astro check` で 6 件のエラーになっていた (production で実測・2026-10-05)。
+           *   report_pdf_*  … 20260820000040_diagnosis_report_pdf.sql
+           *   source_key    … 20260917000010_diagnosis_results_source.sql
+           *                   (`source_key is not null` の部分 UNIQUE 索引つき)
+           * 型だけを実 DDL に合わせる。**DB 側は 1 文字も変えない** (migration を足さない)。
+           */
+          report_pdf_url: string | null;
+          report_pdf_sha256: string | null;
+          report_pdf_pages: number | null;
+          report_pdf_received_at: string | null;
+          source_key: string | null;
         };
         Insert: {
           id?: string;
@@ -143,6 +157,11 @@ export type Database = {
           extracted_at?: string | null;
           extracted_by_model?: string | null;
           status?: string;
+          report_pdf_url?: string | null;
+          report_pdf_sha256?: string | null;
+          report_pdf_pages?: number | null;
+          report_pdf_received_at?: string | null;
+          source_key?: string | null;
         };
         Update: Partial<Database['diagnosis']['Tables']['diagnosis_results']['Insert']>;
         Relationships: [];

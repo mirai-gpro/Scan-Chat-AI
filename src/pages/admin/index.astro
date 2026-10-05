@@ -48,6 +48,22 @@ const qs = `?u=${encodeURIComponent(uid!)}`;
       <span aria-hidden class="text-slate-400">›</span>
     </a>
 
+    <a
+      href={`/admin/transcosmos-reports${qs}`}
+      class="card flex items-center gap-4 transition hover:-translate-y-0.5"
+    >
+      <div class="flex h-12 w-12 items-center justify-center rounded-xl bg-brand-600 text-white text-xl">
+        <AppIcon name="upload" size={20} />
+      </div>
+      <div class="flex-1">
+        <h2 class="text-base font-semibold">トランスコスモス10名 報告書 一括登録</h2>
+        <p class="text-xs text-slate-600">
+          完成済みの AI疾病予防報告書 PDF が入った ZIP を 1 個選ぶだけ
+        </p>
+      </div>
+      <span aria-hidden class="text-slate-400">›</span>
+    </a>
+
     <div class="card text-center text-xs text-slate-500">
       <p>その他の管理機能は順次追加予定</p>
     </div>
