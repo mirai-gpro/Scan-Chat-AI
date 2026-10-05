@@ -76,6 +76,7 @@ const linkDemoEmail = async () => { globalThis.__linkDemo = (globalThis.__linkDe
 const resolveDemoUidByEmail = async (e, u) => globalThis.__demoUid?.(e, u) ?? null;
 const linkSpecialEmail = async () => { globalThis.__linkSpecial = (globalThis.__linkSpecial ?? 0) + 1; };
 const resolveSpecialUidByEmail = async (e, u) => globalThis.__specialUid?.(e, u) ?? null;
+const specialPreassignedUidByEmail = async (e) => globalThis.__preassigned?.(e) ?? null;
 ` + src;
   return load(src);
 }
@@ -146,7 +147,20 @@ function makeSb(row = null) {
             }
             return { data: { ...r }, error: null };
           },
-          async update(values) { writes.push({ table, op: 'update', values, filters: { ...st.filters } }); return { data: null, error: null }; },
+          /*
+           * `update()` は **`.eq()` を繋げてから await される** (detach 経路)。
+           * 直接 await される形も在り得るので、**記録はここで 1 回だけ**行い、
+           * `.eq()` はフィルタを足して解決するだけにする (二重記録を作らない)。
+           */
+          update(values) {
+            const rec = { table, op: 'update', values, filters: { ...st.filters } };
+            writes.push(rec);
+            const done = Promise.resolve({ data: null, error: null });
+            return {
+              eq(k, v) { rec.filters[k] = v; return done; },
+              then(...a) { return done.then(...a); },
+            };
+          },
           async upsert(values) { writes.push({ table, op: 'upsert', values }); return { data: null, error: null }; },
         };
         return api;
@@ -171,6 +185,7 @@ async function post(opts) {
   globalThis.__staging = false;
   globalThis.__customer = customer ? () => customer : null;
   globalThis.__specialUid = specialUid ? () => specialUid : () => null;
+  globalThis.__preassigned = opts.preassigned ? () => opts.preassigned : () => null;
   globalThis.__demoUid = demoUid ? () => demoUid : () => null;
   globalThis.__signed = 0;
   globalThis.__adminCred = 0;
@@ -569,6 +584,136 @@ console.log('\n⑪ B / C / D / E / F — HP マイページからの初回導線
     !/(既に登録|すでに登録|未登録|登録されていません|not registered|already registered)/.test(fm + markup));
   ok('M-32', '  **初回かどうかは利用者に選ばせている** (2 つの入口が在る)',
     markup.includes('id="signin-email-login"') && markup.includes('id="signin-email-signup"'));
+}
+
+/* ══════════════════════════════════════════════════════════════════
+   ⑫ 事前発行した special uid を黙って張り替えない (2026-10-05 仕様変更)
+   ══════════════════════════════════════════════════════════════════
+
+   スペシャル枠は**メール登録のその場で uid を発行し、本人のログイン前に
+   健診・遺伝子・報告書を投入する**ようになった。したがって
+
+       special 登録時 UID-A → UID-A に実データ投入 → 本人サインイン
+       → 既存 linkedUid = UID-B → 黙って UID-B に切り替える
+
+   は**絶対に禁止**。やると **UID-A の健康データと本人の認証が分離する**
+   (本人は自分のデータを見られず、UID-A のデータは誰にも結び付かない)。
+
+   【ここは静かに壊れる】張り替えは**成功して見える** — サインインは通り、
+   ダッシュボードが開き、ただ中身が空になるだけ。利用者は「データがまだ来ていない」と
+   思うだけで、こちらのログにも異常は出ない。だから目視では守れない。
+   ══════════════════════════════════════════════════════════════════ */
+console.log('\n⑫ 事前発行 special uid の保護 (9〜13)');
+{
+  const PRE = '33333333-3333-4333-8333-333333333333';   // 事前発行 (UID-A)
+  const OTHER = '44444444-4444-4444-8444-444444444444'; // 既存の束縛 (UID-B)
+
+  /* ── 9 / 10. linkedUid が無い初回 → 事前発行 uid をそのまま使う ── */
+  {
+    const r = await post({
+      user: emailUser, claims: AMR_PASSWORD,
+      specialUid: PRE, preassigned: PRE, row: null, linkedHit: false,
+    });
+    eq('P-09', '初回 Auth resolve で事前発行 uid をそのまま使う',
+      [r.status, r.body.linked, r.body.diagnosticUserId], [200, true, PRE]);
+    eq('P-10', '  linkedUid=null でも別 uid を作らない',
+      r.writes.find((w) => w.op === 'upsert')?.values?.diagnostic_user_id, PRE);
+    eq('P-09b', '  Cookie を発行して通す', r.cookieSets >= 1, true);
+  }
+
+  /* ── 11. linkedUid === 事前発行 uid → 正常 ── */
+  {
+    const r = await post({
+      user: emailUser, claims: AMR_PASSWORD,
+      specialUid: PRE, preassigned: PRE,
+      row: { diagnostic_user_id: PRE, auth_user_id: AUTH_EMAIL, google_sub: null },
+      linkedHit: true,
+    });
+    eq('P-11', 'linkedUid が事前発行 uid と同じ → そのまま通る',
+      [r.status, r.body.diagnosticUserId], [200, PRE]);
+    eq('P-11b', '  張り替え (detach) をしていない',
+      r.writes.filter((w) => w.op === 'update').length, 0);
+  }
+
+  /* ── 12 / 13. linkedUid !== 事前発行 uid → 何も書かずに 409 ── */
+  {
+    const r = await post({
+      user: emailUser, claims: AMR_PASSWORD,
+      specialUid: PRE, preassigned: PRE,
+      row: { diagnostic_user_id: OTHER, auth_user_id: AUTH_EMAIL, google_sub: null },
+      linkedHit: true,
+    });
+    eq('P-12', '**競合は 409 で止める** (A→B / B→A のどちらにも張り替えない)', r.status, 409);
+    ok('P-12b', '  利用者向けの文言で返す (生の DB エラー・内部情報を出さない)',
+      typeof r.body.error === 'string' && !/duplicate|constraint|column|relation/i.test(r.body.error),
+      JSON.stringify(r.body));
+    eq('P-13', '  **app_users を 1 行も書き換えない** (upsert / detach とも 0)',
+      r.writes.length, 0);
+    eq('P-13b', '  special の名簿にも触らない (linkSpecialEmail を呼ばない)', r.linkSpecial, 0);
+    eq('P-13c', '  デモの名簿にも触らない', r.linkDemo, 0);
+    eq('P-13d', '  viewer Cookie を 1 枚も発行しない', r.cookieSets, 0);
+    ok('P-13e', '  応答に別 uid を載せない (張り替え先を漏らさない)',
+      r.body.diagnosticUserId === undefined, JSON.stringify(r.body));
+  }
+
+  /* ── 12'. Google セッションでも同じ (方式に依存しない) ── */
+  {
+    const r = await post({
+      user: googleUser, claims: AMR_OAUTH,
+      specialUid: PRE, preassigned: PRE,
+      row: { diagnostic_user_id: OTHER, auth_user_id: AUTH_GOOGLE, google_sub: GOOGLE_SUB },
+      linkedHit: true,
+    });
+    eq('P-12g', "Google セッションでも競合は 409 (認証方式に依存しない)", r.status, 409);
+    eq('P-13g', '  こちらでも書き込み 0 件', r.writes.length, 0);
+  }
+
+  /* ── 14. デモ枠は従来どおり (special を優先する既存順序を壊していない) ── */
+  {
+    const r = await post({
+      user: emailUser, claims: AMR_PASSWORD,
+      demoUid: PRE, preassigned: null, // demo 由来 = 事前発行ではない
+      row: { diagnostic_user_id: OTHER, auth_user_id: AUTH_EMAIL, google_sub: null },
+      linkedHit: true,
+    });
+    eq('P-14', 'デモ由来の uid は従来どおり既存 uid へ寄せる (409 にしない)',
+      [r.status, r.body.diagnosticUserId], [200, OTHER]);
+  }
+
+  /* ── 14'. 事前発行でない special (legacy uid 空 → linkedUid へ落ちた回) も従来どおり ── */
+  {
+    const r = await post({
+      user: emailUser, claims: AMR_PASSWORD,
+      specialUid: OTHER, preassigned: null, // 記録が無い = legacy 行
+      row: { diagnostic_user_id: OTHER, auth_user_id: AUTH_EMAIL, google_sub: null },
+      linkedHit: true,
+    });
+    eq("P-14b", 'legacy 行 (事前発行なし) は従来どおり通る',
+      [r.status, r.body.diagnosticUserId], [200, OTHER]);
+  }
+
+  /* ── 15. 通常顧客は退行なし (顧客DB由来は従来どおり張り替える) ── */
+  {
+    const r = await post({
+      user: googleUser, claims: AMR_OAUTH,
+      customer: { customer: { diagnostic_user_id: UID_CUST, display_name: '顧客' }, isAdmin: false },
+      preassigned: PRE, // special の記録が在っても顧客DBが勝つ (ガードを誤発火させない)
+      row: { diagnostic_user_id: OTHER, auth_user_id: AUTH_GOOGLE, google_sub: GOOGLE_SUB },
+      linkedHit: true,
+    });
+    eq('P-15', '通常顧客は従来どおり顧客DBの uid が勝つ (409 にしない)',
+      [r.status, r.body.diagnosticUserId], [200, UID_CUST]);
+    ok('P-15b', '  旧束縛の detach も従来どおり走る',
+      r.writes.some((w) => w.op === 'update' && w.values?.auth_user_id === null));
+  }
+
+  /* ── 16. メールの現物をログ・応答へ出していない ── */
+  {
+    const r = read('src/lib/special-accounts.ts') + read('src/pages/api/admin/special-accounts.ts');
+    ok('P-16', 'メールの現物をログへ出していない',
+      !/console\.(log|warn|error)\([^)]*\b(addr|email)\b[^)]*\)/.test(r),
+      'app_config に残すのは hash + mask だけ、という既存方針を守る');
+  }
 }
 
 /* ── 結果 ──────────────────────────────────────────────────────── */
