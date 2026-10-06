@@ -212,6 +212,40 @@ console.log('\nE. genetics-plan\n');
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ * E'. 保存先バケットが無いとき (2026-10-06 実測の P0)
+ *
+ * 本番は原本を S3 (`AWS_S3_ORIGINALS_BUCKET`) に置いているので、
+ * フォールバック用の Supabase Storage `lab-results` が**一度も作られていなかった**。
+ * そのため実行すると **`sign_failed / The related resource does not exist`** で
+ * 全員落ちた。バケット名を言わないエラーなので原因が分かりにくい。
+ * ════════════════════════════════════════════════════════════════════ */
+console.log("\nE'. 保存先バケットが無いとき\n");
+{
+  seedSpecial();
+  M.db.BUCKETS.delete('lab-results');          // 本番と同じ状態にする
+  const r = await call({ action: 'genetics-plan', files: planFiles() });
+  eq("E'1 **バケットが無くても通る** (private で作ってから署名する)", [r.status, r.json.ok], [200, true]);
+  const made = M.db.WRITES.filter((w) => w.op === 'createBucket');
+  eq("E'2 作るのは 1 回だけ", made.length, 1);
+  eq("E'3 **public にしない**", [made[0]?.name, made[0]?.public], ['lab-results', false]);
+  eq("E'4 10 件とも署名が出る", (r.json.files ?? []).length, 10);
+
+  seedSpecial();
+  const r2 = await call({ action: 'genetics-plan', files: planFiles() });
+  eq("E'5 既に在れば作らない", M.db.WRITES.filter((w) => w.op === 'createBucket').length, 0);
+  eq("E'5-2 それでも署名は出る", [r2.status, (r2.json.files ?? []).length], [200, 10]);
+
+  seedSpecial();
+  M.db.BUCKETS.delete('lab-results');
+  M.db.BUCKET_FAIL.create = true;
+  const r3 = await call({ action: 'genetics-plan', files: planFiles() });
+  M.db.BUCKET_FAIL.create = false;
+  eq("E'6 作れないときは **名指しで返す** (opaque な sign_failed にしない)",
+    [r3.status, r3.json.error], [503, 'bucket_unavailable']);
+  ok("E'6-2 どのバケットが要るかを書く", /lab-results/.test(String(r3.json.detail ?? '')), String(r3.json.detail));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  * F. genetics-finalize (§16 〜 §20)
  * ════════════════════════════════════════════════════════════════════ */
 console.log('\nF. genetics-finalize\n');
