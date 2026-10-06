@@ -24,6 +24,7 @@
  */
 import type { APIRoute } from 'astro';
 import { isAdminAuthorized } from '../../../../lib/api-auth';
+import { refreshConfig } from '../../../../lib/app-config';
 import { createAdditionalOriginalTicket, MAX_ORIGINAL_BYTES, PRESIGN_EXPIRES_SEC } from '../../../../lib/additional-originals';
 import { checkAdditionalTarget } from '../../../../lib/special-additional-tests';
 
@@ -46,6 +47,20 @@ export const POST: APIRoute = async ({ request }) => {
   } catch {
     return json({ ok: false, error: 'invalid_json' }, 400);
   }
+
+  /*
+   * **`checkAdditionalTarget` より前に app_config を読み直す。**
+   *
+   * `isSpecialAccount()` は同期関数で `cfg('special.account_uids')` を見るだけなので、
+   * **呼ぶ側が先に `refreshConfig()` 済みであること**が `app-config.ts` の前提。
+   * Vercel の cold instance は cache が null のまま入るため、これが無いと
+   * `special.account_uids` が既定の '' に落ち、**本番で登録済みの uid まで
+   * `not_special_account` になる** (2026-10-06 実測: トランスコスモス 10 名が 10/10 全員 403)。
+   *
+   * `force=true` にするのは、管理者が明示的に実行するアップロード操作で
+   * **TTL 45 秒の古い資格情報を使わない**ため。`report-finalize.ts` と同じ形。
+   */
+  await refreshConfig(true);
 
   // **対象はスペシャルアカウントだけ**（§6）。原本バケットは 10 年保管・削除不可なので、
   // 対象外の人のファイルを置かせない。

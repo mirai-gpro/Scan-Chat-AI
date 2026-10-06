@@ -221,6 +221,7 @@ async function bundle() {
       'src/pages/api/admin/special-accounts/deliver-one.ts',
       'src/pages/api/admin/lab-results/register.ts',
       'src/pages/api/admin/special-additional-tests/finalize.ts',
+      'src/pages/api/admin/special-additional-tests/original-ticket.ts',
     ],
     bundle: true, platform: 'node', format: 'esm', logLevel: 'error',
     // `SPECIAL_ALLOWED_UIDS` を渡して **本物の `isSpecialAccount()`** を動かす
@@ -249,6 +250,13 @@ async function bundle() {
     deliverOne: await import(built('pages/api/admin/special-accounts/deliver-one.mjs')),
     register: await import(built('pages/api/admin/lab-results/register.mjs')),
     finalize: await import(built('pages/api/admin/special-additional-tests/finalize.mjs')),
+    /*
+     * **原本チケットの口も実際に動かす。** `isSpecialAccount()` は同期なので
+     * 呼ぶ前に `refreshConfig()` が要る — それが抜けていて本番で 10/10 全員が
+     * `not_special_account` になった (2026-10-06)。静的検査では捕まらないので、
+     * **cold cache から app_config を引き直せるか**を実行で見る。
+     */
+    ticket: await import(built('pages/api/admin/special-additional-tests/original-ticket.mjs')),
     /*
      * **スタブはキャッシュを割らずに import する。** `?t=` を付けると
      * Node が別のモジュール実体を作り、バンドル側が見ている Map と

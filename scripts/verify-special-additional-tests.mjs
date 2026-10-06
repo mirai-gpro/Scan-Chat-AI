@@ -715,6 +715,48 @@ console.log('\nJ. 複数年\n');
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ * L. cold instance の app_config (P0 2026-10-06)
+ *
+ * `isSpecialAccount()` は同期関数で `cfg('special.account_uids')` を読むだけなので、
+ * **呼ぶ側が先に `refreshConfig()` 済みであること**が前提 (`app-config.ts`)。
+ * Vercel の cold instance は cache が null で入るため、これを忘れると
+ * **DB に登録済みの uid まで `not_special_account`** になる
+ * (実測: トランスコスモス 10 名が original-ticket で 10/10 全員 403)。
+ * `report-finalize.ts` は元から `await refreshConfig(true)` を踏んでいた。
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\nL. cold instance の app_config\n');
+{
+  resetAll();
+  // **env `SPECIAL_ALLOWED_UIDS` には無く、DB (app_config) にだけ在る uid** を使う。
+  // UID_A は bundle 時の define で特別扱いされるので、ここでは使えない。
+  const UID_COLD = 'cccccccc-3333-4333-8333-333333333333';
+  const UID_NONE = 'dddddddd-4444-4444-8444-444444444444';
+  M.db.TABLES.app_config = [{ key: 'special.account_uids', value: UID_COLD }];
+
+  const t = { testType: 'ai_prediction', testDate: '2026-09-28', bytes: PDF.byteLength, sha256Base64: shaB64(PDF) };
+
+  // 1 cache 未ロード (cold) でも、DB に在れば通る
+  const r1 = await call(M.ticket, { diagnosticUserId: UID_COLD, ...t });
+  eq('L1 app_config にしか無い uid でも署名が出る', [r1.status, r1.json.ok], [200, true]);
+  eq('L1-2 キーはサーバが採番する (氏名も元ファイル名も入らない)',
+    r1.json.key, `additional_results/${UID_COLD}/ai_prediction/2026_09_28/${shaHex(PDF)}.pdf`);
+
+  // 2 登録の無い uid は従来どおり弾く (ゲートを緩めていない)
+  const r2 = await call(M.ticket, { diagnosticUserId: UID_NONE, ...t });
+  eq('L2 登録の無い uid は 403 のまま', [r2.status, r2.json.error], [403, 'not_special_account']);
+
+  // 3 順序を固定する — 後ろへ動かすと cold instance で同じ事故が再発する
+  const src = code('src/pages/api/admin/special-additional-tests/original-ticket.ts');
+  const iRefresh = src.indexOf('refreshConfig(');
+  const iTarget = src.indexOf('checkAdditionalTarget(');
+  ok('L3 refreshConfig が checkAdditionalTarget より前にある',
+    iRefresh >= 0 && iTarget >= 0 && iRefresh < iTarget,
+    '同期の isSpecialAccount を呼ぶ前に app_config を読み直す');
+  ok('L3-2 force=true で読み直す', /refreshConfig\(\s*true\s*\)/.test(src),
+    '管理者が明示的に実行する操作なので TTL 45 秒の古い資格情報を使わない');
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  * その他: PII / 禁止事項 (§38 / §39 / §43 / §47)
  * ════════════════════════════════════════════════════════════════════ */
 console.log('\nX. PII / 禁止事項\n');
