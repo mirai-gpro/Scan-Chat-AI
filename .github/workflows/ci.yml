@@ -189,16 +189,45 @@ jobs:
       - name: Chromium を入れる
         run: npx playwright install --with-deps chromium
 
+      # ── dev サーバを起動して「vite の依存の最適化が終わるまで」待つ ──────────
+      #
+      # **200 が返っただけでは早い。** vite は最初のリクエストで依存を最適化し、
+      # 終わると `optimized dependencies changed. reloading` を出してページを
+      # **リロードさせる**。これが検査の 2 回目の遷移に重なると
+      # `page.goto: net::ERR_ABORTED` / `Execution context was destroyed` で落ちる
+      # (2026-10-06 に実測・同じジョブが 2 回続けて赤。手元でも再現し、
+      #  最適化が落ち着いたあとは同じ検査が通ることを確認済み)。
+      #
+      # → ①200 を待つ ②検査が開くページを**先に温める** ③ログに
+      #   「最適化した」が出るのを待つ (出なければ最適化が要らなかった回なので
+      #   タイムアウトで進む) ④リロードが流れきるまで少し待つ。
+      #   **検査そのものは 1 行も緩めない。**
       - name: dev サーバを起動して待つ
         run: |
           ALLOW_UID_ENTRY=on npx astro dev --port 4321 > /tmp/dev.log 2>&1 &
+          up=0
           for i in $(seq 1 60); do
             if curl -sf -o /dev/null http://localhost:4321/report; then
-              echo "dev server up ($i s)"; exit 0
+              echo "dev server up ($i s)"; up=1; break
             fi
             sleep 1
           done
-          echo "dev server did not come up"; tail -40 /tmp/dev.log; exit 1
+          if [ "$up" != "1" ]; then
+            echo "dev server did not come up"; tail -40 /tmp/dev.log; exit 1
+          fi
+          for u in "/report?preview=1" "/report?preview=2" "/report?preview=1&print=1" \
+                   "/report?print=1" "/dashboard" "/dashboard?entry=wellfort-mypage"; do
+            curl -sf -o /dev/null "http://localhost:4321$u" || echo "warm $u failed (無視して進む)"
+          done
+          for i in $(seq 1 15); do
+            if grep -q "optimized dependencies changed" /tmp/dev.log; then
+              echo "vite の再最適化を検知 ($i s)"; break
+            fi
+            sleep 1
+          done
+          sleep 3
+          curl -sf -o /dev/null http://localhost:4321/report || true
+          echo "warm-up done"
 
       - name: verify:screen
         env:
@@ -227,16 +256,45 @@ jobs:
       - name: Chromium を入れる
         run: npx playwright install --with-deps chromium
 
+      # ── dev サーバを起動して「vite の依存の最適化が終わるまで」待つ ──────────
+      #
+      # **200 が返っただけでは早い。** vite は最初のリクエストで依存を最適化し、
+      # 終わると `optimized dependencies changed. reloading` を出してページを
+      # **リロードさせる**。これが検査の 2 回目の遷移に重なると
+      # `page.goto: net::ERR_ABORTED` / `Execution context was destroyed` で落ちる
+      # (2026-10-06 に実測・同じジョブが 2 回続けて赤。手元でも再現し、
+      #  最適化が落ち着いたあとは同じ検査が通ることを確認済み)。
+      #
+      # → ①200 を待つ ②検査が開くページを**先に温める** ③ログに
+      #   「最適化した」が出るのを待つ (出なければ最適化が要らなかった回なので
+      #   タイムアウトで進む) ④リロードが流れきるまで少し待つ。
+      #   **検査そのものは 1 行も緩めない。**
       - name: dev サーバを起動して待つ
         run: |
           ALLOW_UID_ENTRY=on npx astro dev --port 4321 > /tmp/dev.log 2>&1 &
+          up=0
           for i in $(seq 1 60); do
             if curl -sf -o /dev/null http://localhost:4321/report; then
-              echo "dev server up ($i s)"; exit 0
+              echo "dev server up ($i s)"; up=1; break
             fi
             sleep 1
           done
-          echo "dev server did not come up"; tail -40 /tmp/dev.log; exit 1
+          if [ "$up" != "1" ]; then
+            echo "dev server did not come up"; tail -40 /tmp/dev.log; exit 1
+          fi
+          for u in "/report?preview=1" "/report?preview=2" "/report?preview=1&print=1" \
+                   "/report?print=1" "/dashboard" "/dashboard?entry=wellfort-mypage"; do
+            curl -sf -o /dev/null "http://localhost:4321$u" || echo "warm $u failed (無視して進む)"
+          done
+          for i in $(seq 1 15); do
+            if grep -q "optimized dependencies changed" /tmp/dev.log; then
+              echo "vite の再最適化を検知 ($i s)"; break
+            fi
+            sleep 1
+          done
+          sleep 3
+          curl -sf -o /dev/null http://localhost:4321/report || true
+          echo "warm-up done"
 
       # CHROMIUM_PATH は設定しない (browser-screen と同じ理由 = フォールバックに任せる)。
       - name: ブラウザ検査 3 本
