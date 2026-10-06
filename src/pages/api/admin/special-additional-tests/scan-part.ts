@@ -107,6 +107,25 @@ export const POST: APIRoute = async ({ request }) => {
       detected_date_source: s.dateSource,
       vqa_audit: s.vqaAudit, // VQA 再読の監査 (可視化用・Elith 納品 data には含めない)
       scan_model: MODELS.scan,
+      /*
+       * **どこで 0 件になったのかを切り分けるための内訳** (2026-10-06)。
+       * 「検査値が 1 件も取れない」ときに、原因が
+       *   A 画像から何も読めていない (raw_markdown が空)
+       *   B 読めているが表として解釈できていない (regions / table が 0)
+       *   C 表はあるが列名が合わず measurements に落ちない (toMeasurements の写像)
+       * のどれかを**画面で**判別できるようにする。実際に A だった
+       * (pdf.js が CMap 未設定で日本語を描けず、枠だけの画像を送っていた)。
+       *
+       * **件数と列見出しだけ。** 検査値そのものは既に `measurements` /
+       * `raw_markdown` で返しているので、ここで増やさない。
+       */
+      parse_diag: {
+        regions: s.regions.length,
+        table_regions: s.regions.filter((r) => r.type === 'table').length,
+        table_rows: s.regions.reduce((n, r) => n + (r.type === 'table' ? (r.rows?.length ?? 0) : 0), 0),
+        // 列見出しは構造情報 (C の「列名が合っていない」を目で見るのに要る)。
+        table_columns: s.regions.filter((r) => r.type === 'table').map((r) => r.columns ?? []),
+      },
     });
   } catch (err) {
     // **PDF の base64 も parsed 全文もログへ出さない**（§39）。返すのは例外メッセージだけ。

@@ -715,6 +715,27 @@ console.log('\nJ. 複数年\n');
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ * M. 0 件になった場所を切り分けられるか (P0 2026-10-06)
+ *
+ * 「検査値を 1 件も読み取れません」が **どこで起きたのか**を画面で判別できるように、
+ * `scan-part` が内訳を返す。実際の原因は A (pdf.js が CMap 未設定で日本語を
+ * 描けず、枠だけの画像を送っていた) だったが、**それを確かめる手段が無かった**。
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\nM. 0 件の切り分け\n');
+{
+  const part = code('src/pages/api/admin/special-additional-tests/scan-part.ts');
+  ok('M1 regions / table / rows の件数を返す',
+    /parse_diag:\s*\{/.test(part) && /regions: s\.regions\.length/.test(part)
+    && /table_regions:/.test(part) && /table_rows:/.test(part));
+  ok('M2 **列見出し**も返す (列名が合わずに落ちる C を目で見るため)',
+    /table_columns:/.test(part));
+  ok('M3 検査値そのものを増やして返していない (measurements / raw_markdown のまま)',
+    !/parse_diag[\s\S]{0,400}(values|rows: r\.rows\b)/.test(part));
+  ok('M4 items 形式 (遺伝子 / AI疾病) の応答は変えていない',
+    /kind: 'items'/.test(part) && !/parse_diag[\s\S]{0,200}kind: 'items'/.test(part));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  * L. cold instance の app_config (P0 2026-10-06)
  *
  * `isSpecialAccount()` は同期関数で `cfg('special.account_uids')` を読むだけなので、
