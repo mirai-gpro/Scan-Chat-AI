@@ -78,7 +78,6 @@ export const TRANSCOS_GENETICS_NOTE =
 
 const SLOT_RE = /^(0[1-9]|10)$/;
 const SHA_RE = /^[0-9a-f]{64}$/i;
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /** 番号が manifest に在るか。**在る番号しか通さない。** */
 export function isTranscosSlot(slot: unknown): boolean {

@@ -96,8 +96,38 @@ export const POST: APIRoute = async ({ request }) => {
   if (!sb) return json({ ok: false, error: 'supabase_not_configured' }, 503);
   const storage = sb.storage.from(TRANSCOS_GENETICS_BUCKET);
 
+  /*
+   * **保存先バケットが無ければ作る** (2026-10-06 実測の P0)。
+   *
+   * 本番は原本を S3 (`AWS_S3_ORIGINALS_BUCKET`) に置いているので、
+   * フォールバック用の Supabase Storage `lab-results` は**一度も作られていなかった**。
+   * そのため `createSignedUploadUrl()` が
+   * **`sign_failed / The related resource does not exist`** で落ちていた
+   * (エラー文がバケット名を言わないので、原因が分かりにくい)。
+   *
+   * 作るのは **private バケット 1 つだけ** — 公開しない・ポリシーも足さない。
+   * 既に在れば何もしない (`already exists` は無視する)。
+   * ここで作れなければ**何が足りないかを名指しで返す** (opaque な sign_failed にしない)。
+   */
+  async function ensureBucket(client: NonNullable<typeof sb>): Promise<{ ok: true } | { ok: false; detail: string }> {
+    const got = await client.storage.getBucket(TRANSCOS_GENETICS_BUCKET);
+    if (got.data) return { ok: true };
+    const made = await client.storage.createBucket(TRANSCOS_GENETICS_BUCKET, { public: false });
+    if (made.error && !/already exists/i.test(made.error.message ?? '')) {
+      return { ok: false, detail: made.error.message ?? 'createBucket に失敗しました' };
+    }
+    return { ok: true };
+  }
+
   // ── genetics-plan: 署名つき upload URL を発行する ─────────────────
   if (action === 'genetics-plan') {
+    const bucket = await ensureBucket(sb);
+    if (!bucket.ok) {
+      return json({
+        ok: false, error: 'bucket_unavailable',
+        detail: `Supabase Storage のバケット "${TRANSCOS_GENETICS_BUCKET}" を用意できませんでした (${bucket.detail})。`,
+      }, 503);
+    }
     const planned: {
       slot: string; path: string; token: string; signedUrl: string;
       sizeBytes: number; sha256: string; pageCount: number;

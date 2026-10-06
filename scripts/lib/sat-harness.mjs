@@ -120,6 +120,8 @@ let signSeq = 0;
 const storageApi = {
   createSignedUploadUrl: async (path) => {
     if (STORAGE_FAIL.sign) return { data: null, error: { message: 'sign boom' } };
+    // **本番で出たエラーをそのまま再現する** (バケットが無いときの文言)。
+    if (!BUCKETS.has('lab-results')) return { data: null, error: { message: 'The related resource does not exist' } };
     WRITES.push({ table: 'storage', op: 'sign', path });
     return { data: { path, token: 'tok-' + (++signSeq), signedUrl: 'https://stub/' + path }, error: null };
   },
@@ -137,8 +139,32 @@ const storageApi = {
   },
 };
 
+/**
+ * **バケットの有無**も模す。本番は原本を S3 へ置いているので
+ * Supabase Storage の lab-results は一度も作られておらず、
+ * createSignedUploadUrl が The related resource does not exist で落ちていた。
+ */
+export const BUCKETS = new Set();
+export function resetBuckets() { BUCKETS.clear(); BUCKETS.add('lab-results'); }
+export const BUCKET_FAIL = { create: false };
+
 export function getServerSupabase() {
-  return FAIL.noServer ? null : { schema: () => ({ from: table }), storage: { from: () => storageApi } };
+  if (FAIL.noServer) return null;
+  return {
+    schema: () => ({ from: table }),
+    storage: {
+      from: () => storageApi,
+      getBucket: async (name) => (BUCKETS.has(name)
+        ? { data: { name }, error: null }
+        : { data: null, error: { message: 'Bucket not found' } }),
+      createBucket: async (name, opts) => {
+        if (BUCKET_FAIL.create) return { data: null, error: { message: 'no permission' } };
+        WRITES.push({ table: 'storage', op: 'createBucket', name, public: !!(opts && opts.public) });
+        BUCKETS.add(name);
+        return { data: { name }, error: null };
+      },
+    },
+  };
 }
 export function getBridgeSupabase() { return null; }
 export function isBridgeConfigured() { return false; }
@@ -317,6 +343,7 @@ export const shaB64 = (b) => createHash('sha256').update(b).digest('base64');
 export function resetAll() {
   M.db.reset();
   M.db.resetStorage();
+  M.db.resetBuckets();
   M.s3.reset();
   M.orig.reset();
 }
