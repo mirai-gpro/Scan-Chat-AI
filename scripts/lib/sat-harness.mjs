@@ -108,7 +108,38 @@ const table = (name) => ({
   delete: () => q(name, [], 'delete', null, null),
 });
 
-export function getServerSupabase() { return FAIL.noServer ? null : { schema: () => ({ from: table }) }; }
+/*
+ * **Supabase Storage のスタブ** (lab-results への署名付き upload と存在確認)。
+ * 既存の 2 スイートは storage を使わないので**足すだけ**で挙動は変わらない。
+ *   STORAGE: path -> size   (ブラウザが PUT 済みの状態を作る)
+ */
+export const STORAGE = new Map();
+export const STORAGE_FAIL = { sign: false, list: false };
+export function resetStorage() { STORAGE.clear(); STORAGE_FAIL.sign = false; STORAGE_FAIL.list = false; }
+let signSeq = 0;
+const storageApi = {
+  createSignedUploadUrl: async (path) => {
+    if (STORAGE_FAIL.sign) return { data: null, error: { message: 'sign boom' } };
+    WRITES.push({ table: 'storage', op: 'sign', path });
+    return { data: { path, token: 'tok-' + (++signSeq), signedUrl: 'https://stub/' + path }, error: null };
+  },
+  list: async (dir, o) => {
+    if (STORAGE_FAIL.list) return { data: null, error: { message: 'list boom' } };
+    const want = o?.search ?? '';
+    const out = [];
+    for (const [p, size] of STORAGE) {
+      if (!p.startsWith(dir + '/')) continue;
+      const base = p.slice(dir.length + 1);
+      if (want && base !== want) continue;
+      out.push({ name: base, id: 'x', metadata: { size } });
+    }
+    return { data: out, error: null };
+  },
+};
+
+export function getServerSupabase() {
+  return FAIL.noServer ? null : { schema: () => ({ from: table }), storage: { from: () => storageApi } };
+}
 export function getBridgeSupabase() { return null; }
 export function isBridgeConfigured() { return false; }
 export function getBrowserSupabase() { return null; }
@@ -215,6 +246,7 @@ async function bundle() {
       'src/lib/elith-delivery-json.ts',
       'src/lib/special-additional-tests.ts',
       'src/lib/account-progress.ts',
+      'src/lib/transcosmos-test-data.ts',
       'src/lib/s3-verified-put.ts',
       'src/lib/elith-manual-delivery.ts',
       'src/lib/elith-delivery-runs.ts',
@@ -222,6 +254,7 @@ async function bundle() {
       'src/pages/api/admin/lab-results/register.ts',
       'src/pages/api/admin/special-additional-tests/finalize.ts',
       'src/pages/api/admin/special-additional-tests/original-ticket.ts',
+      'src/pages/api/admin/transcosmos-test-data.ts',
     ],
     bundle: true, platform: 'node', format: 'esm', logLevel: 'error',
     // `SPECIAL_ALLOWED_UIDS` を渡して **本物の `isSpecialAccount()`** を動かす
@@ -257,6 +290,9 @@ async function bundle() {
      * **cold cache から app_config を引き直せるか**を実行で見る。
      */
     ticket: await import(built('pages/api/admin/special-additional-tests/original-ticket.mjs')),
+    /** トランスコスモス 10 名の検査データ一括反映 (Genoplan 側の口)。 */
+    ttd: await import(built('pages/api/admin/transcosmos-test-data.mjs')),
+    tlib: await import(built('lib/transcosmos-test-data.mjs')),
     /*
      * **スタブはキャッシュを割らずに import する。** `?t=` を付けると
      * Node が別のモジュール実体を作り、バンドル側が見ている Map と
@@ -280,6 +316,7 @@ export const shaB64 = (b) => createHash('sha256').update(b).digest('base64');
 
 export function resetAll() {
   M.db.reset();
+  M.db.resetStorage();
   M.s3.reset();
   M.orig.reset();
 }

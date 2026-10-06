@@ -83,6 +83,15 @@ export type Database = {
           imported_by: string;
           status?: string;
           notes?: string | null;
+          /**
+           * **実 DDL には在るのに生成し直しの取りこぼしで Insert から欠けていた 2 列**
+           * (`20260904000010` scan_md / `20260820000010` measurements)。
+           * 型だけを実 DDL に合わせてある — **DB は 1 文字も変えていない**
+           * (migration を足さない)。同じ取りこぼしを `diagnosis_results` でも踏んでいる
+           * (2026-10-05・本番の `astro check` が 6 errors で赤くなった)。
+           */
+          scan_md?: string | null;
+          measurements?: unknown;
         };
         Update: Partial<Database['diagnosis']['Tables']['test_artifacts']['Insert']>;
         Relationships: [];
