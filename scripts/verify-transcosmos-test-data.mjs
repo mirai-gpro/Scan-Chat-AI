@@ -421,6 +421,67 @@ console.log("\nF'. blood-rebuild\n");
   const api = code('src/pages/api/admin/transcosmos-test-data.ts');
   ok("F'9 **再解析しない** (Gemini も画像も呼ばない)",
     !/scanImageToParsed|scan-part|imageBase64/.test(api));
+
+  /*
+   * ── F'10 原本の印字そのまま (2026-10-06 の実害) ──────────────────────
+   * 検体 (2025-09-18 の「健康診断結果レポート」) は**項目名のセルに単位が同居**する
+   * 様式で、`空腹時血糖 (mg/dL)` のように印字される。標準マスタの完全一致が
+   * **1 件も当たらず**、血液が丸ごと作られていなかった (`no_items`)。
+   * 原本の印字を 1 文字も変えずに通して、血液ができることを固定する。
+   */
+  seedSpecial();
+  M.db.TABLES.test_artifacts = [{
+    id: 'hc-3', diagnostic_user_id: uid, test_type: 'health_checkup', test_date: date,
+    status: 'active', source: 'admin_batch', display_mode: 'single', imported_by: 'admin',
+    scan_md: '',
+    measurements: [
+      { name: '赤血球数', value: '474' },
+      { name: '血色素量', value: '15.0' },
+      { name: '空腹時血糖 (mg/dL)', value: '84' },
+      { name: 'HbA1c (NGSP) (%)', value: '5.2' },
+      { name: 'AST (GOT) (U/L)', value: '32' },
+      { name: 'ALT (GPT) (U/L)', value: '23' },
+      { name: 'γ-GTP (U/L)', value: '29' },
+      { name: 'HDL-コレステロール (mg/dL)', value: '62' },
+      { name: '空腹時中性脂肪 (mg/dL)', value: '49' },
+      { name: 'LDL-コレステロール (mg/dL)', value: '101' },
+    ],
+  }];
+  const r8 = await call({ action: 'blood-rebuild', slots: ['05'] });
+  const got8 = (r8.json.results ?? [])[0]?.results?.[0] ?? {};
+  ok("F'10 **項目名に単位が同居する原本でも血液ができる** (以前は no_items)",
+    got8.created === true && (got8.items ?? []).length === 8,
+    JSON.stringify({ created: got8.created, reason: got8.reason, items: got8.items }));
+  ok("F'10-2 LDL / HDL も拾える (`HDL-コレステロール` のハイフン)",
+    (got8.items ?? []).includes('LDLコレステロール') && (got8.items ?? []).includes('HDLコレステロール'),
+    JSON.stringify(got8.items));
+
+  /*
+   * ── F'11 当たらなかった項目名を画面へ返す ───────────────────────────
+   * `no_items` だけでは「血液の欄が無い紙」なのか「項目名の形が合っていない」のか
+   * 分からない。**標準マスタに当たらなかった項目名**をそのまま返す。
+   * **項目名は PII ではない** — 氏名・社員番号は返さない。
+   */
+  seedSpecial();
+  M.db.TABLES.test_artifacts = [{
+    id: 'hc-4', diagnostic_user_id: uid, test_type: 'health_checkup', test_date: date,
+    status: 'active', source: 'admin_batch', display_mode: 'single', imported_by: 'admin',
+    scan_md: '',
+    measurements: [
+      { name: '診察所見', value: '異常なし' },
+      { name: 'まだ知らない項目', value: '1' },
+      { name: 'AST(GOT)', value: '22', unit: 'U/L' },
+    ],
+  }];
+  const r9 = await call({ action: 'blood-rebuild', slots: ['05'] });
+  const got9 = (r9.json.results ?? [])[0]?.results?.[0] ?? {};
+  ok("F'11 当たらなかった項目名が返る", (got9.unmatched ?? []).includes('まだ知らない項目'),
+    JSON.stringify(got9.unmatched));
+  ok("F'11-2 当たった項目名は入れない", !(got9.unmatched ?? []).includes('AST(GOT)'),
+    JSON.stringify(got9.unmatched));
+  ok("F'11-3 氏名・社員番号を返していない",
+    !/氏名|社員番号|diagnostic_user_id/.test(JSON.stringify(r9.json).replace(/"uid":"[^"]*"/g, '')),
+    JSON.stringify(r9.json).slice(0, 200));
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -536,8 +597,11 @@ if (!existsSync(resolve(WELLFORT, 'src/pages/admin/transcosmos-test-data.astro')
   const RELAY = readFileSync(resolve(WELLFORT, 'src/pages/api/admin/transcosmos-test-data.ts'), 'utf8');
   ok('H17 中継は admin を確認してから上流へ出す',
     /verifyAdmin\(request\)/.test(RELAY) && /admin_users/.test(RELAY));
-  ok('H18 中継は 2 つの action しか通さない',
-    /ALLOWED = new Set\(\['genetics-plan', 'genetics-finalize'\]\)/.test(RELAY));
+  // **許可は 3 つだけ** (`blood-rebuild` を 2026-10-06 に追加)。増やすならここも直す。
+  ok('H18 中継は 3 つの action しか通さない',
+    /ALLOWED = new Set\(\['genetics-plan', 'genetics-finalize', 'blood-rebuild'\]\)/.test(RELAY));
+  ok('H19 画面は当たらなかった項目名を出す (no_items の切り分け)',
+    /d\.unmatched/.test(PAGE) && /unmatched: first\.unmatched/.test(PAGE));
 }
 
 /* ══════════════════════════════════════════════════════════════════════ */

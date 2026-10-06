@@ -96,8 +96,8 @@ export const STANDARD_MASTER: StandardItem[] = [
   { canonical_name: '随時中性脂肪', synonyms: [], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: '中性脂肪', synonyms: ['TG', '中性脂肪(TG)', 'トリグリセライド'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: '総コレステロール', synonyms: ['TC', 'T-Cho', '総コレステロール(TC)'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
-  { canonical_name: 'HDLコレステロール', synonyms: ['HDL', 'HDL-C'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
-  { canonical_name: 'LDLコレステロール', synonyms: ['LDL', 'LDL-C'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
+  { canonical_name: 'HDLコレステロール', synonyms: ['HDL', 'HDL-C', 'HDL-コレステロール'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
+  { canonical_name: 'LDLコレステロール', synonyms: ['LDL', 'LDL-C', 'LDL-コレステロール'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: 'LDLコレステロール(F式)', synonyms: ['LDL(F式)', 'LDLコレステロールF式'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   { canonical_name: 'non-HDLコレステロール', synonyms: ['nonHDLコレステロール', 'non-HDL'], unit: 'mg/dL', unit_aliases: ['mg/dl'], category: '脂質', source_std: 'starter' },
   // 糖代謝（空腹時/随時 を区別）
@@ -147,11 +147,60 @@ export function masterItemNames(): string[] {
   return STANDARD_MASTER.map((m) => m.canonical_name);
 }
 
+/*
+ * ── 単位の正規化キー ──────────────────────────────────────────────
+ * マスタが持っている単位語彙 (`unit` / `unit_aliases`) だけを集める。
+ * **ここで単位を発明しない** (マスタに無い単位は「単位」として扱わない)。
+ */
+function unitKey(s: string): string {
+  return String(s || '').normalize('NFKC').toLowerCase().replace(/[\s　]/g, '');
+}
+const UNIT_KEYS: ReadonlySet<string> = (() => {
+  const set = new Set<string>();
+  for (const item of STANDARD_MASTER) {
+    if (item.unit) set.add(unitKey(item.unit));
+    for (const u of item.unit_aliases ?? []) set.add(unitKey(u));
+  }
+  set.delete('');
+  return set;
+})();
+
+/** 末尾のかっこ 1 組。半角・全角の両方。 */
+const TRAILING_PAREN = /[（(]\s*([^（）()]*?)\s*[)）]\s*$/;
+
 /**
  * 名称（canonical_name / synonyms のいずれか）からマスタ項目を引く。
  * 正規化した完全一致のみ（部分一致しない＝誤マップ=捏造の防止）。見つからなければ null。
+ *
+ * ── 末尾の「単位かっこ」だけを外して引き直す (2026-10-06 追加・実測根拠あり) ──
+ *
+ * 【根拠】健診票の原本で、**項目名のセルに単位が同居している**様式を実測した
+ * (2025-09-18 の「健康診断結果レポート」をテキスト層で確認):
+ *     `空腹時血糖 (mg/dL)` / `HbA1c (NGSP) (%)` / `AST (GOT) (U/L)` / `γ-GTP (U/L)`
+ * `normKey` はかっこを**消すだけ**なので `空腹時血糖mg/dl` になり、完全一致が
+ * **1 件も当たらない**。派生 blood の 15 項目が丸ごと 0 件 (`no_items`) になる。
+ *
+ * 【条件を緩めないこと】外すのは **かっこの中身がマスタの単位語彙に完全一致したときだけ**。
+ * `(NGSP)` / `(GOT)` / `(JDS)` / `(F式)` / `(血清)` は単位ではないので外さない。
+ * とくに `HbA1c(JDS)` のかっこを外すと `HbA1c` = **NGSP の canonical に当たってしまう**
+ * (JDS と NGSP は約 0.4% 違う別の値) ので、それは捏造になる。
+ *
+ * **直接一致が当たるときの挙動は 1 バイトも変わらない** (先に直接一致を引く)。
  */
 export function findByAlias(name: string | null | undefined): StandardItem | null {
   if (!name) return null;
-  return ALIAS_INDEX.get(normKey(name)) ?? null;
+  let s = String(name).trim();
+  const direct = ALIAS_INDEX.get(normKey(s));
+  if (direct) return direct;
+  // 単位かっこは最大 2 組まで外す (`AST (GOT) (U/L)` は 1 組で足りる)。
+  for (let i = 0; i < 2; i += 1) {
+    const m = TRAILING_PAREN.exec(s);
+    if (!m) return null;
+    if (!UNIT_KEYS.has(unitKey(m[1]))) return null;   // 単位でなければ外さない
+    s = s.slice(0, m.index).trim();
+    if (!s) return null;
+    const hit = ALIAS_INDEX.get(normKey(s));
+    if (hit) return hit;
+  }
+  return null;
 }

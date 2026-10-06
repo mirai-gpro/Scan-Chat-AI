@@ -321,6 +321,20 @@ const SERIES_NAME_ALIASES: Readonly<Record<string, string>> = {
    */
   'γ-GT': 'γ-GTP',
   'γGT': 'γ-GTP',
+  /*
+   * **2026-10-06 に `HDL-コレステロール` / `LDL-コレステロール` をマスタの同義語へ
+   * 足したことの後始末** (上と同型)。健診票の原本が**ハイフン入り**で印字する様式があり
+   * (「健康診断結果レポート」で実測)、足す前に書かれた行は canonical_name=null のまま。
+   * `LDLコレステロール` は `DEFAULT_TREND_ITEMS` に在るので、寄せないと
+   * **デメカルの血液検査と別系列に割れる** (線は 1 本描かれるのでエラーも出ない)。
+   *
+   * ⚠️ **単位が付いた形 (`HDL-コレステロール (mg/dL)` 等) はここに入れない。**
+   *    あれは様式の都合で項目名のセルに単位が同居しているだけで、表記ゆれではない。
+   *    書き込み時点の `findByAlias()` が単位かっこを外して canonical_name を付けるので、
+   *    **これから書かれる行は正しく寄る**。既存行は健診を登録し直したときに直る。
+   */
+  'HDL-コレステロール': 'HDLコレステロール',
+  'LDL-コレステロール': 'LDLコレステロール',
 };
 
 function seriesKey(r: { canonical_name: string | null; item_name?: string | null }): string | null {
