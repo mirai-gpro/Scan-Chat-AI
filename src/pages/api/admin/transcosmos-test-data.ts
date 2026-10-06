@@ -7,6 +7,8 @@
  *        → 署名つき upload URL を 10 本返す (**PDF 本体はこの関数を通らない**)
  *   POST { action: 'genetics-finalize', files: [{ slot, path, sizeBytes, sha256, pageCount }] }
  *        → Storage の実体を確かめてから artifact と原本行を作る
+ *   POST { action: 'blood-rebuild',     slots: ['01', …] }
+ *        → **既登録の健診から血液 (派生 blood) だけ作り直す**
  *
  * ══════════════════════════════════════════════════════════════════════
  * 【健康診断はこの口を通らない】
@@ -33,10 +35,11 @@ import { refreshConfig } from '../../../lib/app-config';
 import { getServerSupabase } from '../../../lib/supabase';
 import { decideOriginalRegistration } from '../../../lib/additional-originals';
 import { checkAdditionalTarget, resolveAdditionalArtifact } from '../../../lib/special-additional-tests';
+import { persistDerivedBloodArtifact, toDerivedBloodGroups } from '../../../lib/scan-persist';
 import {
   TRANSCOS_GENETICS_BUCKET, TRANSCOS_GENETICS_LAB, TRANSCOS_GENETICS_NOTE,
   TRANSCOS_IMPORTED_BY, TRANSCOS_SLOT_IDS,
-  checkGeneticsInput, geneticsStoragePath, isGeneticsStoragePath, uidFromGeneticsPath,
+  checkGeneticsInput, geneticsStoragePath, isGeneticsStoragePath, transcosSlotInfo, uidFromGeneticsPath,
 } from '../../../lib/transcosmos-test-data';
 
 export const prerender = false;
@@ -70,7 +73,7 @@ export const POST: APIRoute = async ({ request }) => {
   catch { return json({ ok: false, error: 'invalid_json' }, 400); }
 
   const action = String(body.action ?? '');
-  if (action !== 'genetics-plan' && action !== 'genetics-finalize') {
+  if (action !== 'genetics-plan' && action !== 'genetics-finalize' && action !== 'blood-rebuild') {
     return json({ ok: false, error: 'unknown_action', detail: action || null }, 400);
   }
 
@@ -80,6 +83,74 @@ export const POST: APIRoute = async ({ request }) => {
    * `not_special_account` になる (2026-10-06 の P0)。
    */
   await refreshConfig(true);
+
+  /*
+   * ══════════════════════════════════════════════════════════════════
+   * **blood-rebuild — 既登録の健診から血液だけ作り直す**
+   * ══════════════════════════════════════════════════════════════════
+   * 血液は健診の `finalize` が自動生成する (`persistDerivedBloodArtifact`) が、
+   * **健診を登録し直さないと作り直せなかった**。1 人だけ血液が未完のとき、
+   * 再スキャン (Gemini) までやり直すのは重く、原因も分からないままになる。
+   *
+   * ここは **保存済みの測定値と `scan_md` だけ**を材料にする:
+   *   - **再解析しない** (Gemini を呼ばない・画像も原本も触らない)
+   *   - **健診の artifact を書き換えない** (読むだけ)
+   *   - 同じ受診日に**本物の血液**が在れば作らない (`normal_blood_exists`・仕様どおり)
+   *   - 何度流しても増えない (`persistDerivedBloodArtifact` が同日の派生を片付ける)
+   *
+   * uid は**番号から引き直す** (クライアント申告の uid を使わない)。
+   */
+  if (action === 'blood-rebuild') {
+    const slots = (Array.isArray(body.slots) ? body.slots : []).map((v) => String(v ?? ''));
+    if (slots.length === 0) return json({ ok: false, error: 'no_slots' }, 400);
+    const bad = slots.find((x) => !transcosSlotInfo(x));
+    if (bad !== undefined) return json({ ok: false, error: 'unknown_slot', detail: bad }, 400);
+
+    const sbRb = getServerSupabase();
+    if (!sbRb) return json({ ok: false, error: 'supabase_not_configured' }, 503);
+    const dsbRb = sbRb.schema('diagnosis');
+
+    const out: {
+      slot: string; uid: string; artifacts: number;
+      results: { testDate: string; created: boolean; reason: string | null; rows: number; items: string[]; skipped: number }[];
+    }[] = [];
+
+    for (const slot of slots) {
+      const info = transcosSlotInfo(slot)!;
+      const target = checkAdditionalTarget(info.uid);
+      if (!target.ok) return json({ ok: false, error: target.error, detail: slot }, 403);
+
+      // **読むだけ。** 健診の行は 1 列も変えない。
+      const { data: arts, error: artErr } = await dsbRb
+        .from('test_artifacts')
+        .select('id, test_date, scan_md, measurements')
+        .eq('diagnostic_user_id', info.uid)
+        .eq('test_type', 'health_checkup')
+        .eq('status', 'active');
+      if (artErr) return json({ ok: false, error: 'artifact_lookup_failed', detail: artErr.message, slot }, 500);
+
+      const results: typeof out[number]['results'] = [];
+      for (const a of (arts ?? []) as Array<Record<string, unknown>>) {
+        const testDate = String(a.test_date ?? '').slice(0, 10);
+        if (!testDate) continue;   // 受診日の無い行からは作らない (日付単位の判断ができない)
+        const r = await persistDerivedBloodArtifact(sbRb as never, {
+          diagnosticUserId: info.uid,
+          testDate,
+          parentArtifactId: String(a.id),
+          sourceGroups: toDerivedBloodGroups({
+            scanMd: a.scan_md as string | null,
+            measurements: (Array.isArray(a.measurements) ? a.measurements : []) as never,
+          }),
+        });
+        results.push({
+          testDate, created: r.created, reason: r.reason ?? null,
+          rows: r.rows ?? 0, items: r.items ?? [], skipped: r.skipped ?? 0,
+        });
+      }
+      out.push({ slot, uid: info.uid, artifacts: (arts ?? []).length, results });
+    }
+    return json({ ok: true, count: out.length, results: out });
+  }
 
   const checked = checkAll(body.files);
   if (!checked.ok) return json({ ok: false, error: checked.error, detail: checked.detail }, 400);

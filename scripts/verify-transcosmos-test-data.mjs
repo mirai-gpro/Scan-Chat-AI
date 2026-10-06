@@ -334,6 +334,96 @@ async function planned(over = {}) {
 }
 
 /* ══════════════════════════════════════════════════════════════════════
+ * F'. blood-rebuild — 既登録の健診から血液だけ作り直す (2026-10-06)
+ *
+ * 血液は健診の finalize が自動生成するので、**健診を登録し直さないと
+ * 作り直せなかった**。1 人だけ血液が未完のときに再スキャンまでやり直すのは重い。
+ * ここは **保存済みの測定値と scan_md だけ**を材料にする (再解析しない)。
+ * ════════════════════════════════════════════════════════════════════ */
+console.log("\nF'. blood-rebuild\n");
+{
+  /** 健診の artifact を 1 件置く (血液 15 項目のうち 3 つを持つ)。 */
+  const seedHc = (uid, date) => {
+    M.db.TABLES.test_artifacts = [{
+      id: 'hc-1', diagnostic_user_id: uid, test_type: 'health_checkup', test_date: date,
+      status: 'active', source: 'admin_batch', display_mode: 'single', imported_by: 'admin',
+      scan_md: '',
+      measurements: [
+        { name: 'AST(GOT)', value: '22', unit: 'U/L' },
+        { name: 'ALT(GPT)', value: '18', unit: 'U/L' },
+        { name: 'HbA1c(NGSP)', value: '5.4', unit: '%' },
+      ],
+    }];
+  };
+
+  seedSpecial();
+  const uid = uidOf('05');
+  const date = LIB.TRANSCOS_SLOTS['05'].healthDate;
+  seedHc(uid, date);
+  const r = await call({ action: 'blood-rebuild', slots: ['05'] });
+  eq("F'1 既登録の健診から作り直せる", [r.status, r.json.ok], [200, true]);
+  const res = (r.json.results ?? [])[0] ?? {};
+  eq("F'1-2 対象は番号から引いた uid", res.uid, uid);
+  eq("F'1-3 健診 1 件ぶんの結果が返る", (res.results ?? []).length, 1);
+  ok("F'1-4 作られた件数と拾えた項目が返る",
+    (res.results ?? [])[0]?.created === true && ((res.results ?? [])[0]?.items ?? []).length > 0,
+    JSON.stringify(res.results));
+  const blood = (M.db.TABLES.test_artifacts ?? []).filter((a) => a.test_type === 'blood');
+  eq("F'2 blood artifact が 1 件できる", blood.length, 1);
+  ok("F'2-2 健診由来と分かる印が付く", String(blood[0]?.imported_by ?? '').includes('derived'));
+
+  // **健診の行は 1 列も変えない** (読むだけ)
+  const hc = (M.db.TABLES.test_artifacts ?? []).find((a) => a.id === 'hc-1');
+  eq("F'3 健診の測定値を書き換えない", (hc?.measurements ?? []).length, 3);
+  eq("F'3-2 健診の受診日も変えない", hc?.test_date, date);
+
+  // **何度流しても増えない**
+  const r2 = await call({ action: 'blood-rebuild', slots: ['05'] });
+  eq("F'4 2 回目も成功する", [r2.status, r2.json.ok], [200, true]);
+  eq("F'4-2 blood が増えない", (M.db.TABLES.test_artifacts ?? []).filter((a) => a.test_type === 'blood').length, 1);
+
+  // **15 項目が 1 つも無ければ作らない** (捏造しない)
+  seedSpecial();
+  M.db.TABLES.test_artifacts = [{
+    id: 'hc-2', diagnostic_user_id: uid, test_type: 'health_checkup', test_date: date,
+    status: 'active', source: 'admin_batch', display_mode: 'single', imported_by: 'admin',
+    scan_md: '', measurements: [{ name: '身長', value: '170', unit: 'cm' }],
+  }];
+  const r3 = await call({ action: 'blood-rebuild', slots: ['05'] });
+  eq("F'5 15 項目が 1 つも無ければ作らない",
+    [(r3.json.results ?? [])[0]?.results?.[0]?.created, (r3.json.results ?? [])[0]?.results?.[0]?.reason],
+    [false, 'no_items']);
+  eq("F'5-2 blood を作っていない", (M.db.TABLES.test_artifacts ?? []).filter((a) => a.test_type === 'blood').length, 0);
+
+  // **同じ受診日に本物の血液が在れば作らない** (仕様どおり)
+  seedSpecial();
+  seedHc(uid, date);
+  M.db.TABLES.test_artifacts.push({
+    id: 'bl-real', diagnostic_user_id: uid, test_type: 'blood', test_date: date,
+    status: 'active', source: 'wellfort_lab', display_mode: 'single', imported_by: 'admin',
+  });
+  const r4 = await call({ action: 'blood-rebuild', slots: ['05'] });
+  eq("F'6 本物の血液が在る日は作らない (通常 blood 優先)",
+    (r4.json.results ?? [])[0]?.results?.[0]?.reason, 'normal_blood_exists');
+
+  // **番号の検め / 資格**
+  seedSpecial();
+  const r5 = await call({ action: 'blood-rebuild', slots: ['11'] });
+  eq("F'7 未知の番号は 400", [r5.status, r5.json.error], [400, 'unknown_slot']);
+  const r6 = await call({ action: 'blood-rebuild', slots: [] });
+  eq("F'7-2 空なら 400", [r6.status, r6.json.error], [400, 'no_slots']);
+
+  resetAll();
+  M.db.TABLES.app_config = [];
+  const r7 = await call({ action: 'blood-rebuild', slots: ['05'] });
+  eq("F'8 special でなければ 403", [r7.status, r7.json.error], [403, 'not_special_account']);
+
+  const api = code('src/pages/api/admin/transcosmos-test-data.ts');
+  ok("F'9 **再解析しない** (Gemini も画像も呼ばない)",
+    !/scanImageToParsed|scan-part|imageBase64/.test(api));
+}
+
+/* ══════════════════════════════════════════════════════════════════════
  * G. 冪等 (§18 / §19 / §31)
  * ════════════════════════════════════════════════════════════════════ */
 console.log('\nG. 冪等\n');
