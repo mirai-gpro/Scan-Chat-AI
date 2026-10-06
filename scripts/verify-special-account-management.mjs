@@ -335,6 +335,40 @@ console.log('\nI. 一覧の集計 (getAccountProgress を実際に動かす)\n')
     [p.scan.count, p.scan.latest], [p.byTestType.health_checkup.count, p.byTestType.health_checkup.latest]);
   eq('I-33 最終更新は問診と検査 5 種の最大', p.latestActivity, '2026-09-08T01:00:00Z');
 
+  // I-33b — **報告書 (PDF) の有無** (2026-10-06 発注者指示)
+  //   一覧の「AI疾病予測」列を「完了」と出すための元データ。
+  //   `test_artifacts` とは別物なので **byTestType を水増ししない**ことも見る。
+  seed();
+  M.db.TABLES.diagnosis_results = [
+    { diagnostic_user_id: U, report_pdf_url: 'manual/transcosmos/20260928/' + U + '/x.pdf',
+      report_pdf_received_at: '2026-10-05T23:00:00Z', received_at: '2026-09-28T00:00:00+09:00', status: 'received' },
+    // PDF の無い行 (受領 JSON だけ) は数えない
+    { diagnostic_user_id: U, report_pdf_url: null, report_pdf_received_at: null, received_at: '2026-08-01T00:00:00Z', status: 'received' },
+    // 旧世代は数えない
+    { diagnostic_user_id: U, report_pdf_url: 's3://b/old.pdf', report_pdf_received_at: '2026-07-01T00:00:00Z', received_at: null, status: 'superseded' },
+    // 他人の行を混ぜない
+    { diagnostic_user_id: V, report_pdf_url: 's3://b/v.pdf', report_pdf_received_at: '2026-10-01T00:00:00Z', received_at: null, status: 'received' },
+  ];
+  p = (await M.progress.getAccountProgress([U, V]))[U];
+  eq('I-33b 報告書 PDF が在れば done / 最新日は受領日時',
+    [p.report.done, p.report.count, p.report.latest], [true, 1, '2026-10-05T23:00:00Z']);
+  eq('I-33b **検査の件数を水増ししない** (AI疾病予測の artifact は 1 件のまま)',
+    p.byTestType.ai_prediction.count, 1);
+  eq('I-33b 他人の報告書を数えない',
+    (await M.progress.getAccountProgress([U, V]))[V].report.count, 1);
+
+  seed();
+  p = (await M.progress.getAccountProgress([U]))[U];
+  eq('I-33b 行が無ければ「未完了」のまま (存在しない完了を済みと偽らない)',
+    [p.report.done, p.report.count, p.report.latest], [false, 0, null]);
+
+  seed();
+  M.db.FAIL.select = 'diagnosis_results';
+  p = (await M.progress.getAccountProgress([U]))[U];
+  M.db.FAIL.select = null;
+  eq('I-33b 報告書だけ引けなくても他を道連れにしない',
+    [p.report.done, p.interview.done, p.byTestType.health_checkup.count], [false, true, 2]);
+
   // I-34 — 納品は 2 表の和
   seed();
   M.db.TABLES.elith_deliveries = [{ diagnostic_user_id: U, delivered_at: '2026-08-15T14:00:00Z', status: 'delivered' }];

@@ -51,6 +51,14 @@ export interface AccountProgress {
   byTestType: Record<ArtifactTestType, CompletionStat>;
   /** Elith 納品済みか。バンドル単位と検査単位の**両方**を見る。 */
   delivered: CompletionStat;
+  /**
+   * **本人へ出す報告書 (PDF) が入っているか。**
+   * `diagnosis.diagnosis_results` の `report_pdf_url` が在る行を数える
+   * (Elith 受領ぶんでも、完成済み PDF の手動登録ぶんでも同じ扱い)。
+   * `status='superseded'` の旧世代は数えない。**検査 (`test_artifacts`) とは別物**
+   * なので `byTestType` には混ぜない (件数を水増ししない)。
+   */
+  report: CompletionStat;
   /** 問診・検査 5 種を通した最新日 (一覧の「最終更新」)。 */
   latestActivity: string | null;
 }
@@ -65,6 +73,7 @@ function emptyProgress(): AccountProgress {
     scan: byTestType.health_checkup,   // 同じ実体を指す (二重に数えない)
     byTestType,
     delivered: stat(),
+    report: stat(),
     latestActivity: null,
   };
 }
@@ -98,6 +107,9 @@ export async function getAccountProgress(
       test_type?: string | null;
       delivered_at?: string | null;
       status?: string | null;
+      report_pdf_url?: string | null;
+      report_pdf_received_at?: string | null;
+      received_at?: string | null;
     };
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const diagnosis = (sb as any).schema('diagnosis');
@@ -111,7 +123,7 @@ export async function getAccountProgress(
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const safe = (p: Promise<any>) => p.then((r: any) => r ?? { data: null }).catch(() => ({ data: null }));
 
-    const [iv, sc, dl, di] = await Promise.all([
+    const [iv, sc, dl, di, rp] = await Promise.all([
       safe(diagnosis.from('interview_completions')
         .select('diagnostic_user_id, completed_at')
         .in('diagnostic_user_id', clean)),
@@ -131,6 +143,17 @@ export async function getAccountProgress(
         .select('diagnostic_user_id, delivered_at')
         .eq('status', 'delivered')
         .in('diagnostic_user_id', clean)),
+      /*
+       * **第 5 の問い合わせ。報告書 (PDF) が本人に出ているか。**
+       * 受領 JSON の回も、完成済み PDF を手で入れた回も同じ表に入る
+       * (`diagnosis_results.report_pdf_url`)。**読むのは有無と日時だけ**で、
+       * 本文・測定値・ファイル名は取らない。
+       * 旧世代 (`status='superseded'`) を外すのは**取得後に JS 側**で行う
+       * — `.not()` / `.neq()` を増やさず、1 本の select で済ませる。
+       */
+      safe(diagnosis.from('diagnosis_results')
+        .select('diagnostic_user_id, report_pdf_url, report_pdf_received_at, received_at, status')
+        .in('diagnostic_user_id', clean)),
     ]);
 
     for (const r of (iv.data ?? []) as Row[]) {
@@ -146,6 +169,13 @@ export async function getAccountProgress(
     for (const r of [...((dl.data ?? []) as Row[]), ...((di.data ?? []) as Row[])]) {
       const p = out[r.diagnostic_user_id];
       if (p) bump(p.delivered, r.delivered_at);
+    }
+
+    for (const r of (rp.data ?? []) as Row[]) {
+      const p = out[r.diagnostic_user_id];
+      // **PDF が無い行は数えない** (受領しただけで報告書が出ていない回がある)。
+      if (!p || !r.report_pdf_url || r.status === 'superseded') continue;
+      bump(p.report, r.report_pdf_received_at ?? r.received_at);
     }
 
     for (const p of Object.values(out)) {
