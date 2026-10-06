@@ -36,6 +36,7 @@ import { getServerSupabase } from '../../../lib/supabase';
 import { decideOriginalRegistration } from '../../../lib/additional-originals';
 import { checkAdditionalTarget, resolveAdditionalArtifact } from '../../../lib/special-additional-tests';
 import { persistDerivedBloodArtifact, toDerivedBloodGroups } from '../../../lib/scan-persist';
+import { findByAlias } from '../../../lib/standard-master';
 import {
   TRANSCOS_GENETICS_BUCKET, TRANSCOS_GENETICS_LAB, TRANSCOS_GENETICS_NOTE,
   TRANSCOS_IMPORTED_BY, TRANSCOS_SLOT_IDS,
@@ -112,7 +113,7 @@ export const POST: APIRoute = async ({ request }) => {
 
     const out: {
       slot: string; uid: string; artifacts: number;
-      results: { testDate: string; created: boolean; reason: string | null; rows: number; items: string[]; skipped: number }[];
+      results: { testDate: string; created: boolean; reason: string | null; rows: number; items: string[]; skipped: number; unmatched: string[] }[];
     }[] = [];
 
     for (const slot of slots) {
@@ -133,18 +134,32 @@ export const POST: APIRoute = async ({ request }) => {
       for (const a of (arts ?? []) as Array<Record<string, unknown>>) {
         const testDate = String(a.test_date ?? '').slice(0, 10);
         if (!testDate) continue;   // 受診日の無い行からは作らない (日付単位の判断ができない)
+        const groups = toDerivedBloodGroups({
+          scanMd: a.scan_md as string | null,
+          measurements: (Array.isArray(a.measurements) ? a.measurements : []) as never,
+        });
+        /*
+         * **「何を見て 0 件になったのか」を画面に出すための内訳** (2026-10-06)。
+         * `no_items` は「対象 15 項目が 1 件も取れなかった」としか言わないので、
+         * **標準マスタに当たらなかった項目名**をそのまま返す。
+         * 2026-10-06 の実害 (原本が `空腹時血糖 (mg/dL)` のように項目名へ単位を
+         * 同居させる様式で、完全一致が 1 件も当たらなかった) は、これが見えていれば
+         * 1 回で分かった。**項目名は PII ではない** (氏名・社員番号は返さない)。
+         * サーバのログには出さない — 返すのは admin 画面だけ。
+         */
+        const unmatched = Array.from(new Set(
+          groups.flatMap((g) => g.measurements.map((x) => String(x?.name ?? '').trim()))
+            .filter((n) => n !== '' && findByAlias(n) == null),
+        )).slice(0, 40);
         const r = await persistDerivedBloodArtifact(sbRb as never, {
           diagnosticUserId: info.uid,
           testDate,
           parentArtifactId: String(a.id),
-          sourceGroups: toDerivedBloodGroups({
-            scanMd: a.scan_md as string | null,
-            measurements: (Array.isArray(a.measurements) ? a.measurements : []) as never,
-          }),
+          sourceGroups: groups,
         });
         results.push({
           testDate, created: r.created, reason: r.reason ?? null,
-          rows: r.rows ?? 0, items: r.items ?? [], skipped: r.skipped ?? 0,
+          rows: r.rows ?? 0, items: r.items ?? [], skipped: r.skipped ?? 0, unmatched,
         });
       }
       out.push({ slot, uid: info.uid, artifacts: (arts ?? []).length, results });
