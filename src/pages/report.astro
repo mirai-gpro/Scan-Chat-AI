@@ -176,9 +176,17 @@ const vm = localInput != null
  *   作成日と版は表紙に印字してあるので (spec §4.4)、そこが欠けることもない。
  * - 氏名は**本人の紙面**にしか出ない (PII 分離は外部への受け渡しの話・spec §1.0.2)。
  */
-/** 走りフッターの書体。和文の受け皿を明示する (既定任せにしない)。 */
+/**
+ * 走りフッターの書体。和文の受け皿を明示する (既定任せにしない)。
+ *
+ * **末尾は tailwind の `sans` / `mono` と同じ並びで閉じる** (spec §4.12)。
+ * ここだけ `"Noto Sans CJK JP"` を欠いていたため、BIZ UDGothic も游ゴシックも
+ * 無い環境では `sans-serif` に落ち、**走りフッターの和文だけが中国語フォント**で
+ * 出ていた (実測 2026-10-07: この作業環境の PDF で 2〜21 ページの帯が
+ * WenQuanYi Zen Hei。表紙は `@page :first` で帯が無いため 1 ページだけ無事だった)。
+ */
 const FOOT_FONT = 'font-family: system-ui, "BIZ UDGothic", "Hiragino Sans", "Noto Sans JP",'
-  + ' "Yu Gothic UI", sans-serif; font-size: 9pt; color: #55636A;';
+  + ' "Yu Gothic UI", "Meiryo", "Noto Sans CJK JP", sans-serif; font-size: 9pt; color: #55636A;';
 const footLeft = cssStr(`${AI_PREVENTION_REPORT_LABEL}｜${vm.cover.name}`);
 const footRight = cssStr(formatJpDate(vm.cover.issuedOn) || vm.cover.issuedOn);
 /*
