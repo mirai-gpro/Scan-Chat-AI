@@ -33,13 +33,27 @@ const MAX_PROSE = 720;
 // 紙面の上限 = 62.5rem。器がこれより狭い端末では発火しない (スマホ・タブレット)。
 const MAX_SHEET = 1000;
 /*
- * **印刷の行長の下限** (発注者指示 2026-10-07・spec §4.3.7)。
- * 旧裁定の 38em = 608px に戻ったら落とす。これが戻るとページ数が増えるのに
- * **画面はまったく正常に見える**ので、人の目では守れない。
- * 1280px のビューポートでは器が広いので 45em (720px) が当たる。
+ * **印刷の組版** (発注者指示 2026-10-07・spec §4.3.7)。**目的はページ数 20。**
+ * 旧裁定の 38em = 608px に戻ったら落とす。**ページ数が増えるのに画面はまったく
+ * 正常に見える**ので、人の目では守れない。1280px のビューポートでは `44rem` が当たる。
+ *
+ * **級数と行送りも対で見る** — 行長だけ戻しても、級数が 16px へ戻れば 29 ページに
+ * 戻る (実測: 行長 +17% だけでは 30→29 の 1 ページしか減らなかった)。
  */
-const PRINT_PROSE_MIN = 609;
-/** 印刷の出典の級数。画面 13px / 紙 11px (ページ数削減・同指示)。 */
+/*
+ * 下限は **680px**。608 (38em) だけでなく **`em` へ戻した退行も捕まえる**ため —
+ * `45em` のままだと 14px × 45 = **630px** になり、609 では素通りした (実測)。
+ * 44rem = 704px なので 680 なら左右余白の微調整には耐える。
+ */
+const PRINT_PROSE_MIN = 680;
+/*
+ * **級数の階層** (spec §4.3.7)。発注者:「ページ数が目的じゃない。読み易くするのが真の狙い」。
+ *   - **ダイジェスト = 読む部分。紙でも画面と同じ 16px** (ここを縮めたら目的に反する)。
+ *   - **全編 = 巻末の全文 = 参照用の付録。紙だけ 14px** (紙面の高さの 87% がここ)。
+ * **この 2 つを別に見張るのが要点** — 一律に下げてページ数だけ合わせる退行を捕まえる。
+ */
+const DIGEST_PX = 16, ZENPEN_PRINT_PX = 14, ZENPEN_SCREEN_PX = 16;
+/** 出典の級数。画面 13px / 紙 11px (発注者指示。ページ数への寄与はほぼ 0)。 */
 const SRC_PRINT = 11, SRC_SCREEN = 13;
 
 const SIZES = [
@@ -373,10 +387,18 @@ for (const [width, height, label] of SIZES) {
     return page.evaluate(() => {
       const els = [...document.querySelectorAll('.report-prose')];
       const src = document.querySelector('.rp-src');
+      const body = document.querySelector('.rp-sheet .report-prose');
+      const st = body ? getComputedStyle(body) : null;
       return {
         prose: els.length ? Math.max(...els.map((e) => Math.round(e.getBoundingClientRect().width))) : null,
         src: src ? Math.round(parseFloat(getComputedStyle(src).fontSize)) : null,
         pad: Math.round(parseFloat(getComputedStyle(document.querySelector('.rp-inner')).paddingLeft)),
+        body: st ? Math.round(parseFloat(st.fontSize)) : null,
+        lh: st ? Math.round(parseFloat(st.lineHeight)) : null,
+        zenpen: (() => {
+          const z = document.querySelector('.rp-sheet .md-region p');
+          return z ? Math.round(parseFloat(getComputedStyle(z).fontSize)) : null;
+        })(),
       };
     });
   };
@@ -386,8 +408,9 @@ for (const [width, height, label] of SIZES) {
   const wOk = pr.prose !== null && pr.prose >= PRINT_PROSE_MIN;
   console.log(`${wOk ? '✓' : '✗'} 印刷の行長      ?print=1 の本文=${pr.prose ?? '-'}px (38em=608px へ戻っていないこと)`);
   if (!wOk) {
-    fails.push(`?print=1 の行長が ${pr.prose}px — 38em に戻っている。`
-      + '紙は 45em まで使う (ページ数が増える・画面は正常に見えるので気づけない)');
+    fails.push(`?print=1 の行長が ${pr.prose}px — A4 の本文領域 (約 704px) を使い切っていない。`
+      + '旧裁定の 38em か、`em` 指定 (級数ダウンで一緒に縮む) に戻っていないか見る。'
+      + '紙は 44rem (ページ数が増えるのに画面は正常に見えるので気づけない)');
   }
 
   const padOk = pr.pad !== null && pr.pad < sc.pad;
@@ -395,6 +418,40 @@ for (const [width, height, label] of SIZES) {
   if (!padOk) {
     fails.push(`?print=1 の .rp-inner の左右余白が ${pr.pad}px で画面 (${sc.pad}px) より狭くない`
       + ' — report.astro の PRINT_SIDE_PAD が効いていない');
+  }
+
+  /*
+   * ① **読む部分 (ダイジェスト) を紙で縮めていないこと。**
+   * ページ数を合わせるために一律で級数を下げると、まさに発注者が却下した
+   * 「文字が小さく行間が詰まって読みにくい」形になる。**ここが一番大事。**
+   */
+  const dOk = pr.body === DIGEST_PX && pr.lh !== null && pr.lh >= 24;
+  console.log(`${dOk ? '✓' : '✗'} 紙のダイジェスト ${pr.body ?? '-'}px / 行送り ${pr.lh ?? '-'}px `
+    + `(期待 ${DIGEST_PX}px・画面と同じ据え置き)`);
+  if (!dOk) {
+    fails.push(`?print=1 のダイジェストが ${pr.body}px / 行送り ${pr.lh}px — `
+      + `読む部分は紙でも ${DIGEST_PX}px / 行送り 1.7 に据え置く。`
+      + 'ページ数のために一律で級数を下げるのは却下された形 (spec §4.3.7)');
+  }
+
+  /*
+   * ② **全編 (巻末の全文・参照用) は紙だけ付録の級数。**
+   * 紙面の高さの 87% がここなので、画面の 16px へ戻ると 21 → 25 ページへ戻る。
+   */
+  const zOk = pr.zenpen === ZENPEN_PRINT_PX;
+  console.log(`${zOk ? '✓' : '✗'} 紙の全編        ${pr.zenpen ?? '-'}px (期待 ${ZENPEN_PRINT_PX}px・付録の級数)`);
+  if (!zOk) {
+    fails.push(`?print=1 の全編が ${pr.zenpen}px — 紙は ${ZENPEN_PRINT_PX}px。`
+      + '紙面の 87% がここなので、戻るとページ数が 21 → 25 に増える (画面は正常に見える)');
+  }
+
+  /* ③ **画面は 1px も動かさない** (CLAUDE.md「本文 16px は据え置き」)。 */
+  const scOk2 = sc.body === DIGEST_PX && sc.zenpen === ZENPEN_SCREEN_PX;
+  console.log(`${scOk2 ? '✓' : '✗'} 画面の本文      ダイジェスト ${sc.body ?? '-'}px / 全編 ${sc.zenpen ?? '-'}px `
+    + `(期待 ${DIGEST_PX}px / ${ZENPEN_SCREEN_PX}px)`);
+  if (!scOk2) {
+    fails.push(`画面の本文が ダイジェスト ${sc.body}px / 全編 ${sc.zenpen}px — `
+      + '印刷用の級数ダウンが画面まで効いている (CLAUDE.md「本文 16px は据え置き」に反する)');
   }
 
   const sOk = pr.src === SRC_PRINT;
