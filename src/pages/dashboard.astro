@@ -98,7 +98,12 @@ const needsSignIn = authEnabled && !u;
  * 後ろに置くと初回リクエストで admin 画面からの登録が効かない (コード既定に落ちる)。
  */
 await refreshConfig();
-const result = needsSignIn ? null : await loadDashboard(u, viewer.origin);
+/*
+ * 第 3 引数 = **未承認の報告書も `latestResult` に載せるか**。
+ * 管理者が確認するときだけ true (`docs/elith/AI疾病予防報告書_承認と再作成_仕様書.md` §8)。
+ * 一般利用者・外部共有リンクには渡らないので、未承認は**サーバで返らない**。
+ */
+const result = needsSignIn ? null : await loadDashboard(u, viewer.origin, viewer.isAdmin);
 
 const hasError = result ? 'error' in result : false;
 const data = !result || hasError ? null : (result as Exclude<typeof result, { error: string }>);

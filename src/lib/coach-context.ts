@@ -10,6 +10,7 @@
  */
 
 import { getServerSupabase } from './supabase';
+import { isApprovedRow } from './report-approval';
 import { extractMetricCards, extractUrgentAlert, type ElithSection } from './elith-parser';
 import { AI_PREDICTION_REPORT_LABEL } from './display-names';
 
@@ -55,7 +56,7 @@ export async function buildCoachContext(
     sb
       .schema('diagnosis')
       .from('diagnosis_results')
-      .select('report, summary_text, status, received_at')
+      .select('report, summary_text, status, received_at, publish_status')
       .eq('diagnostic_user_id', diagnosticUserId)
       .in('status', ['published', 'extracted'])
       .order('received_at', { ascending: false })
@@ -75,10 +76,17 @@ export async function buildCoachContext(
 
   if (!customer && !latestResult) return null;
 
+  /*
+   * **未承認 (`pending`) の報告書は読まない** (`docs/elith/AI疾病予防報告書_承認と再作成_仕様書.md` §8)。
+   * ユーザー向けに報告書の中身を返す口なので、承認の境界をここでも揃える。
+   * 列が無い環境は承認済相当 (`isApprovedRow`) = 従来どおりの挙動。
+   */
+  const approvedResult = latestResult && isApprovedRow(latestResult) ? latestResult : null;
+
   const displayName = customer ? `${customer.family_name}様` : 'お客様';
   const age = customer?.date_of_birth ? calcAge(customer.date_of_birth) : null;
   const sex = sexLabel(customer?.sex);
-  const sections = (latestResult?.report as ElithSection[] | null) ?? [];
+  const sections = (approvedResult?.report as ElithSection[] | null) ?? [];
   const metrics = extractMetricCards(sections);
   const urgentAlert = extractUrgentAlert(sections);
   const testHistory = (artifacts ?? []).map((a) => ({
@@ -91,8 +99,8 @@ export async function buildCoachContext(
   const lines: string[] = [];
   lines.push(`【ユーザープロフィール】`);
   lines.push(`氏名: ${displayName}${age != null ? ` / ${age}歳` : ''}${sex ? ` / ${sex}` : ''}`);
-  if (latestResult?.received_at) {
-    const d = new Date(latestResult.received_at);
+  if (approvedResult?.received_at) {
+    const d = new Date(approvedResult.received_at);
     lines.push(`最新 AI 診断: ${d.getFullYear()}年${d.getMonth() + 1}月${d.getDate()}日 受領`);
   }
   lines.push('');

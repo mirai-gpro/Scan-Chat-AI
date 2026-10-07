@@ -10,6 +10,7 @@ import type { AppIconName } from '../components/AppIcon.astro';
 import { getServerSupabase, isBridgeConfigured, type BridgeOrigin } from './supabase';
 import { loadBridgeBundle, type CustomerBundle } from './bridge-queries';
 import { buildDemoDashboard, demoFallbackEnabled, demoMetricTrend } from './demo-data';
+import { isPubliclyVisibleRow } from './report-approval';
 import type {
   AppUser,
   CustomerProfile,
@@ -118,6 +119,15 @@ export async function loadDashboard(
    * フォールバックは production 利用者と staging 利用者の混線を招くため。
    */
   origin: BridgeOrigin = 'production',
+  /**
+   * **未承認 (`pending`) の報告書も `latestResult` に載せるか。既定 false** (fail-closed)。
+   *
+   * 正本: `docs/elith/AI疾病予防報告書_承認と再作成_仕様書.md` §8。
+   * `latestResult` は報告書タイルの可否・受領日・進捗の「報告書」行を決めるので、
+   * 未承認を載せると**押せるのに中身が無いタイル**と「完了済」が出る。
+   * 立てるのは管理者が確認するときだけ (`viewer.isAdmin`)。
+   */
+  includeUnapprovedReport = false,
 ): Promise<DashboardData | { error: string }> {
   const normalized = diagnosticUserId ? normalizeDiagnosticUserId(diagnosticUserId) : null;
   const uid = normalized ?? DEFAULT_USER;
@@ -184,7 +194,25 @@ export async function loadDashboard(
     }
 
     const artifacts = orderDerivedSiblings(artifactsRaw ?? []);
-    const results = resultsRaw ?? [];
+    /*
+     * **未承認の報告書と、承認した紙面と違うものをここで落とす** (仕様書 §8)。
+     * select は `*` なので `publish_status` / `approved_report_hash` が無い環境では
+     * undefined = 承認済相当・指紋なし (fail-open・§13.1)。
+     * **フロントで隠すのではなくサーバで返さない。**
+     *
+     * 【なぜダッシュボードでも指紋を見るか】`latestResult` が報告書タイルを
+     * 押せるかどうかと受領日・進捗の「報告書」行を決める。指紋が合わない回に
+     * タイルを押せるままにすると、**押した先が帯だけの紙面**になる
+     * (`reportAvailable` が防いでいるはずの状態)。
+     *
+     * 【コスト】`isPubliclyVisibleRow` は `approved_report_hash` が入っている行だけ
+     * `buildReportVM` を通す。移行した既存行は NULL なのでコスト 0
+     * (`report-fingerprint.ts` の `hashGateOk`)。
+     */
+    const results: DiagnosisResult[] = [];
+    for (const r of resultsRaw ?? []) {
+      if (includeUnapprovedReport || await isPubliclyVisibleRow(r)) results.push(r);
+    }
     const resultUid = uid;
     const usingDemoData = false;
 

@@ -101,6 +101,50 @@ export function classifyFile(name: string): 'report' | (typeof LAB_FILES)[number
   return null;
 }
 
+/** 1 フォルダから読み出した材料。**中身は 1 バイトも加工しない。** */
+export interface FolderMaterial {
+  report: unknown | null;
+  checkup: LabFiles | null;
+  schemaVersion: string;
+}
+
+/**
+ * **S3 の 1 フォルダを読んで取り込む材料にする (唯一の実装)。**
+ *
+ * 【なぜ切り出したか】報告書の**再作成** (`report-approval.ts`) も、
+ * 「その報告書に対応する現在の受領 JSON」を**この同じ読み方**で取り直す。
+ * 読み方が 2 つあると、再作成だけ別の解釈をして静かに食い違う。
+ * **挙動は切り出し前と 1 バイトも変えていない** (固定名だけ読む・大きすぎれば throw・
+ * report は object か array・lab は object)。
+ */
+export async function readFolderMaterial(folder: string, files: string[]): Promise<FolderMaterial> {
+  let report: unknown = null;
+  let schemaVersion = 'elith-v1.0';
+  const lab: Record<string, unknown> = {};
+
+  for (const name of files) {
+    const kind = classifyFile(name);
+    if (!kind) continue; // 固定名以外は読まない (推測しない)
+    const text = await getObjectText(`${folder}${name}`);
+    if (new TextEncoder().encode(text).length > MAX_BYTES) {
+      throw new Error(`${name} が大きすぎる`);
+    }
+    const value = JSON.parse(text) as unknown;
+    if (kind === 'report') {
+      if (!value || typeof value !== 'object') throw new Error(`${name} が object / array でない`);
+      report = value;
+      schemaVersion = Array.isArray(value) ? 'elith-v1.0' : 'elith-v2.0';
+    } else {
+      if (!value || typeof value !== 'object' || Array.isArray(value)) {
+        throw new Error(`${name} が object でない`);
+      }
+      lab[kind] = value;
+    }
+  }
+
+  return { report, checkup: Object.keys(lab).length ? (lab as LabFiles) : null, schemaVersion };
+}
+
 type Db = { from: (t: string) => any };
 
 /** 既に取り込んだフォルダの集合。 */
@@ -171,35 +215,13 @@ export async function runElithIntake(
 
     // ここから実取り込み。**1 件が落ちても残りは続ける** (黙って止めない)。
     try {
-      let report: unknown = null;
-      let schemaVersion = 'elith-v1.0';
-      const lab: Record<string, unknown> = {};
-
-      for (const name of e.files) {
-        const kind = classifyFile(name);
-        if (!kind) continue; // 固定名以外は読まない (推測しない)
-        const text = await getObjectText(`${folder}${name}`);
-        if (new TextEncoder().encode(text).length > MAX_BYTES) {
-          throw new Error(`${name} が大きすぎる`);
-        }
-        const value = JSON.parse(text) as unknown;
-        if (kind === 'report') {
-          if (!value || typeof value !== 'object') throw new Error(`${name} が object / array でない`);
-          report = value;
-          schemaVersion = Array.isArray(value) ? 'elith-v1.0' : 'elith-v2.0';
-        } else {
-          if (!value || typeof value !== 'object' || Array.isArray(value)) {
-            throw new Error(`${name} が object でない`);
-          }
-          lab[kind] = value;
-        }
-      }
+      const material = await readFolderMaterial(folder, e.files);
 
       const result = await ingestElithReport(sb, {
         diagnosticUserId: e.clientId,
-        report,
-        checkup: Object.keys(lab).length ? (lab as LabFiles) : null,
-        schemaVersion,
+        report: material.report,
+        checkup: material.checkup,
+        schemaVersion: material.schemaVersion,
         sourceKey: folder,
       });
       if (!result.ok) { items.push({ ...base, status: 'failed', reason: result.detail ?? result.error, result }); continue; }

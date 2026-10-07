@@ -290,6 +290,23 @@ function demoLatestResult(uid: string): DiagnosisResult {
     report_pdf_pages: null,
     report_pdf_received_at: null,
     source_key: null,
+    checkup_values: null,
+    /*
+     * **デモは承認済として見せる** (承認と再作成 仕様書 §8)。
+     * デモ用アカウントは UI の確認・お披露目のための枠なので、
+     * 承認ゲートで紙面が消えると目的を果たせない。
+     * これは DB の行ではなく**組込みダミー**なので、本物の承認状態には影響しない。
+     */
+    publish_status: 'approved',
+    approved_at: daysAgo(18),
+    approved_by: null,
+    publish_rev: 0,
+    /**
+     * **指紋は持たない (null)。** これは DB の行ではなく組込みダミーなので、
+     * 「指紋なし = 従来どおり公開」の扱いに乗せる (`report-fingerprint.ts`)。
+     * 指紋を入れると生成ロジックを直すたびにデモの報告書が消える。
+     */
+    approved_report_hash: null,
   };
 }
 

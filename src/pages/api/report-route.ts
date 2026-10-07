@@ -2,6 +2,7 @@ import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../lib/viewer';
 import { getServerSupabase } from '../../lib/supabase';
 import { getOriginalSignedUrl } from '../../lib/originals-storage';
+import { isApprovedRow } from '../../lib/report-approval';
 
 export const prerender = false;
 
@@ -73,18 +74,42 @@ export const GET: APIRoute = async (ctx) => {
   const sb = getServerSupabase();
   if (!sb) return redirect(fallback);
 
-  const { data, error } = await sb
-    .schema('diagnosis')
-    .from('diagnosis_results')
-    .select('report_pdf_url, source_key')
-    .eq('diagnostic_user_id', uid)
-    .like('source_key', 'manual:transcosmos:%')
-    .not('report_pdf_url', 'is', null)
-    .order('received_at', { ascending: false })
-    .limit(1)
-    .maybeSingle();
+  /*
+   * `publish_status` は 20261007000010 で足した列。**未適用の環境では select ごと
+   * 失敗する**ので、そのときだけ列を外して引き直す (`elith-report-queries.ts` と同じ流儀)。
+   * 無いと 10 名の公開中の PDF が「開けない」に化ける — 列が無い環境には
+   * `pending` の行も無いので、承認ゲートとしては何も緩まない。
+   */
+  interface PdfRow { report_pdf_url: string | null; source_key: string | null; publish_status?: unknown }
+  const targetUid = uid;
+  const fetchRow = async (cols: string): Promise<{ data: PdfRow | null; error: unknown }> => {
+    const r = await (sb.schema('diagnosis') as any)
+      .from('diagnosis_results')
+      .select(cols)
+      .eq('diagnostic_user_id', targetUid)
+      .like('source_key', 'manual:transcosmos:%')
+      .not('report_pdf_url', 'is', null)
+      .order('received_at', { ascending: false })
+      .limit(1)
+      .maybeSingle();
+    return { data: (r.data ?? null) as PdfRow | null, error: r.error ?? null };
+  };
+
+  let { data, error } = await fetchRow('report_pdf_url, source_key, publish_status');
+  if (error) ({ data, error } = await fetchRow('report_pdf_url, source_key'));
 
   if (error || !data?.report_pdf_url) return redirect(fallback);
+
+  /*
+   * **未承認 (`pending`) の報告書は、URL を直接叩いても渡さない**
+   * (`docs/elith/AI疾病予防報告書_承認と再作成_仕様書.md` §8・受入条件 10)。
+   * ここは署名付き URL を発行する口なので、**この手前で止めるのが唯一の境界**。
+   * 管理者は代理表示で本番の `/report` を開いて確認する。
+   * 列が無い環境は承認済相当 (`isApprovedRow`) = 従来どおり開ける。
+   */
+  if (!viewer.isAdmin && !isApprovedRow(data as { publish_status?: unknown })) {
+    return redirect(fallback);
+  }
 
   const signed = await getOriginalSignedUrl(data.report_pdf_url, 300);
   if (!signed) return text('報告書を開けませんでした。管理者へご連絡ください。', 503);
