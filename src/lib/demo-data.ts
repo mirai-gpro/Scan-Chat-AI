@@ -301,6 +301,12 @@ function demoLatestResult(uid: string): DiagnosisResult {
     approved_at: daysAgo(18),
     approved_by: null,
     publish_rev: 0,
+    /**
+     * **指紋は持たない (null)。** これは DB の行ではなく組込みダミーなので、
+     * 「指紋なし = 従来どおり公開」の扱いに乗せる (`report-fingerprint.ts`)。
+     * 指紋を入れると生成ロジックを直すたびにデモの報告書が消える。
+     */
+    approved_report_hash: null,
   };
 }
 

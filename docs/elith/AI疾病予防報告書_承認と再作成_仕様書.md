@@ -19,7 +19,7 @@
 | 節 | 内容 |
 |---|---|
 | §0 | **【最重要】紙面は保存されていない** という前提 |
-| §3 | 公開状態 (状態遷移 / 既存 `status` を使わない理由) |
+| §3 | 公開状態 (状態遷移 / 既存 `status` を使わない理由 / **§3.3 承認した紙面の指紋**) |
 | §4 | 既存報告書の扱い (導入時に消さない) |
 | §5 | 管理画面 (1 画面・一覧 / 確認 / 承認 / 再作成) |
 | §6 | 1 件再作成の処理 |
@@ -29,7 +29,7 @@
 | §10 | 権限 |
 | §11 | 実装上の重要原則と、実装していないもの |
 | §12 | 検証と受入条件 |
-| §13 | 申し送り |
+| §13 | **§13.1 本番反映の順序 (必須)** / 申し送り |
 
 ---
 
@@ -70,7 +70,8 @@ Elith 受領 JSON (S3)
 ## 3. 公開状態
 
 `diagnosis.diagnosis_results` に専用の列を足す
-(migration `supabase/migrations/20261007000010_diagnosis_report_approval.sql`)。
+(migration `20261007000010_diagnosis_report_approval.sql` ＋
+`20261007000020_diagnosis_report_approval_hash.sql`)。
 
 | 列 | 意味 |
 |---|---|
@@ -78,14 +79,20 @@ Elith 受領 JSON (S3)
 | `approved_at` | 承認日時。`pending` のときは null |
 | `approved_by` | 承認した管理者。**`adminIdentity()` の HMAC digest だけ** (生メールは入れない) |
 | `publish_rev` | 再作成のたびに +1 するカウンタ。**履歴ではない** (§9 の競合検知用) |
+| `approved_report_hash` | **承認した紙面の指紋** (SHA-256 16進 64文字)。表示時に一致しなければ公開しない (§3.3)。NULL = 指紋なし = 従来どおり公開 |
 
 ### 3.1 状態遷移
 
 ```
 新しい Elith 受領 JSON → 報告書の行を insert → pending   (DB の既定。追加処理なし)
-pending  → 管理者が承認 → approved (+ approved_at / approved_by)
-approved or pending → 再作成成功 → 上書き → pending (approved_at / approved_by は null へ)
-再作成失敗 → 報告書・承認状態とも一切変更しない
+pending  → 管理者が承認 → approved (+ approved_at / approved_by / approved_report_hash)
+approved or pending → 再作成成功 → 上書き → pending
+                      (approved_at / approved_by / approved_report_hash は null へ)
+再作成失敗 → 報告書・承認状態・指紋とも一切変更しない
+
+approved かつ 指紋が現在の紙面と一致     → ユーザーに出る
+approved だが 指紋が一致しない           → **出ない** (生成ロジック / 章立ての設定が変わった)
+                                           → 管理者が再確認して再承認すれば戻る
 ```
 
 ---
@@ -102,6 +109,133 @@ approved or pending → 再作成成功 → 上書き → pending (approved_at /
 **その 4 経路の挙動が黙って変わる**。
 
 → 承認は専用列に分け、**`status` は 1 文字も触らない**。
+
+### 3.3 承認した紙面の指紋 (`approved_report_hash`)
+
+**§0 のとおり紙面は保存されていない。** だから `publish_status='approved'` だけでは
+「管理者が実際に確認した報告書だけを公開する」を満たさない —
+**一度承認したあとに生成ロジックを直してデプロイすると、状態は `approved` のまま
+紙面だけが変わる**。
+
+→ **承認した時点の `ReportVM` の指紋 (SHA-256) を控え、表示時に同じ方法で算出した
+指紋と一致しなければ公開しない。**
+
+- 報告書そのものは保存しない・版も持たない。控えるのは **64 文字のハッシュ 1 本だけ**
+  (§11.3 のとおり revision テーブルも過去版も作らない)。
+- 「生成ロジックを直せば過去分の紙面も自動的に新しくなる」仕組みは**変えない**。
+  変わったことを**検知して非公開に戻す**のがここの役目で、そのあと管理者が
+  新しい紙面を確認して再承認する。
+- 実装は `src/lib/report-fingerprint.ts` 1 本。承認・一覧・表示が**同じ関数**を呼ぶ。
+
+#### 3.3.1 指紋の対象 (= 生成ロジックが作る部分だけ)
+
+`buildReportVM` の入力 7 件の使われ方を実測して決めた (`report-adapter.ts`)。
+
+| 入力 | 紙面への影響 | 扱い |
+|---|---|---|
+| `reportText` / `checkup` (受領 JSON) | digest・chapters・`cover.testedOn` の全部 | **含む** |
+| `readConfig` (app_config `report.sections.*`) | 章の順序・表示可否・見出し・開閉 | **含む** |
+| `issuedOn` | `cover.issuedOn` (= その行の `received_at`。承認時も表示時も同値) | **含む** |
+| `hasCancerRisk` | **`reportType` にしか入らない** (`:915`)。`reportType` は**レンダラが 1 度も読んでいない** (`report.astro` に 0 件。使うのは audit / debug API だけ) | 除外 |
+| `isSample` | 「サンプル表示」バッジのみ。承認対象は実データ行なので常に false | 除外 |
+| `name` / `cycleSeq` / `chronologicalAge` | `cover` にそのまま入る (`:891,895,898`)。閲覧者の氏名・契約の回・当社 `health_age_scores` | 除外 |
+| `ourWellnessAge` | `cover.wellnessAge` の**フォールバック** (`:885`) と `audit.anomalies` (`:661,887`) | 除外 |
+| `selfReported` | 本文に「（問診時）」を付ける = **紙面を変える**。ただし表示経路の `common()` は渡していない (開発用の PDF 生成だけが使う) | 除外 (検査で固定) |
+
+コードの定数 (`sheetVersion` / `cycleTotal` / `axes` の見出し) は**含む** — 変えれば紙面が変わる。
+`audit` は紙面に出ない (`report.astro` に 0 件) ので**除外**。
+
+**この分け方が成り立つ要点**: 除外する値はどれも `buildReportVM` の入力をそのまま写して
+いるだけなので、**指紋は閲覧者の文脈に依存しない**。だから
+
+```
+承認 API (中立の文脈で組んだ VM) の指紋  ==  表示経路 (本人の文脈で組んだ VM) の指紋
+```
+
+となり、**承認側が閲覧者の文脈 (氏名・実年齢・第 N 回・がんリスク検査の有無) を
+再現する必要がない**。再現を要求する設計にすると、承認 API が `loadDashboard` +
+`getHealthAge` + bridge origin の組み立てを複製することになり、**少しでも食い違った瞬間に
+指紋が永久に一致せず承認済みの報告書が全件消える** (静かに起きる最悪の形)。
+加えて、利用者が 1 歳年を取る / 検査サイクルが進む / がんリスク検査が 1 件増える、
+だけで公開が落ちる。どれも「生成ロジックが変わった」ではない。
+
+この性質は `verify:report-approval` ⑪ が**本物のアダプタ**で固定する
+(文脈を全部変えても指紋が同じ / 本文を 1 文字変えると指紋が変わる)。
+
+#### 3.3.2 この指紋が保証する範囲 (「紙面の完全一致」ではない)
+
+**保証するのは「受領 JSON・生成ロジック・app_config から生成される承認対象部分の一致」**で、
+紙面の完全一致ではない。
+
+**対象外の紙面要素 = 表紙の 2 値** (ウェルネス年齢・実年齢) **と、そこから描く数直線**。
+どちらも閲覧者側の値で描かれるため。具体的なギャップ:
+
+- `health_age: null` の回は `cover.wellnessAge` が当社 CABA の値へフォールバックする
+  (**意図された現行仕様**。§3.3.3) ので、後日その値が 58→56 に変われば
+  **表紙の大数字と数直線だけが変わって指紋は変わらない**。
+- 実年齢も同様で、こちらは Elith の値の有無に関係なく誕生日を越えれば動く。
+- 本文・章・検査値の表は**すべて対象内**なので、文が 1 文字でも変われば検知する。
+
+含めない理由は §3.3.1 のとおり (新しいスキャンで CABA が再計算された／1 歳年を取った
+だけで承認済み報告書が全件非公開になり、かつ承認側が閲覧者の値を再現できない)。
+**恒久解消は「Elith に `health_age` を必ず返してもらう」側** — フォールバックが
+発火しなくなればこのギャップは消える (§6.4 の Elith 確認事項へ追記)。
+
+#### 3.3.3 `ourWellnessAge` のフォールバックは意図された現行仕様 (2026-10-07 確認)
+
+今回の対応で「過去実装の残存ではないか」を疑い、一次資料で確認した結果:
+
+1. `report-adapter.ts:877-884` のコメントが **発注者指示 2026-09-01** を明示
+2. 仕様書 `docs/elith/AI疾病予防報告書_仕様書.md:167` に**専用の節**
+   「`health_age` が `null` の回は当社の元の値で埋める【発注者指示 2026-09-01】」がある
+3. **コードと仕様書の節が同一コミット `9a047ca`** で入っている (残骸なら片方だけ残る)
+4. 根拠も記録されている — ウェルネス年齢は当社が CABA で算出して `HealthAgeData` として
+   Elith へ渡した値で **Elith は計算しない**ので、返さなかった回に当社の元の値を出すのは
+   新しい数字を作ることではない。実測で 2026-08-24 受領のタイプ1 が `health_age: null`、
+   補完が無いと表紙が空になる
+
+**`report.astro:234-236` の「当社 CABA 値を持ち込まない」とは矛盾しない。** あれは数直線の
+実装規律で、「ダッシュボードが別に持っている `healthAge.latest.biologicalAge` を直接使わず、
+アダプタが決めた 1 つの値 `vm.cover.wellnessAge` を使え」という意味
+(実コードも `gWell = vm.cover.wellnessAge`)。アダプタ内部のフォールバックを禁じる文ではない。
+
+→ **挙動は変更していない。** 今回は §3.3.2 のとおり**保証の範囲を明文化**しただけ。
+
+#### 3.3.4 正規化の方法
+
+鍵の挿入順が指紋に混ざらないよう、**明示的に配列 (タプル) へ写してから**
+`JSON.stringify` → UTF-8 → SHA-256 → hex 64 文字。
+
+```
+[ v, sheetVersion, issuedOn, testedOn, cycleTotal,
+  [[axisKey, title], …],
+  [[key, title, axis, source, detailAnchor, lead, blocks], …],       // digest
+  [[key, title, axis, collapsed, [[anchor,heading,body],…], [[name,value,date],…]], …] ]  // chapters
+```
+
+`blocks` は判別共用体を `[kind, …payload]` で畳む (`paragraphs`/`steps`/`weeks`/`table`/`pairs`)。
+先頭の `v` (`FINGERPRINT_VERSION`) は**正規化そのものの版**で、
+**ここを上げると全件が再承認待ちになる** (指紋が一斉に変わる)。
+
+#### 3.3.5 指紋が無い行は従来どおり公開する
+
+`approved_report_hash` が NULL / 列ごと無い行は**照合せずに公開する**。理由 2 つ:
+
+1. `20261007000010` が `approved` へ移行した**既存行**と、この機能より前に承認された行は
+   承認時の紙面を控えていないので照合できない (§4・受入条件 1)
+2. 列がまだ無い環境 (migration 未適用) — fail-open (§13.1)
+
+**ハッシュのゲートは新しい承認 API で承認した回から効く。**
+
+#### 3.3.6 app_config を変えると全件が再承認待ちになる
+
+`report.sections.{order,hidden,labels,collapsed}` は紙面の構成そのものを変えるので
+指紋の対象に入れている。つまり**章立ての設定を 1 つ変えると、承認済みの報告書が
+全件「紙面が変わったため非公開」になり再承認が必要**になる。
+
+「admin から即時に見せ方を変えられる」という利点と衝突するが、設定変更は紙面を実際に
+変えるので「管理者が確認した紙面だけを公開する」を優先した (発注者了承 2026-10-07)。
+管理一覧に **「紙面が変わった（非公開）」** を出すので、admin は原因を辿れる。
 
 ## 4. 既存報告書の扱い (導入時に消さない)
 
@@ -129,6 +263,11 @@ CLAUDE.md の migration 規約どおり **DB を先に適用する**。
 - `/api/report-route` も列を外して引き直す (**無いと 10 名の公開中 PDF が「開けない」に化ける**)
 - 管理一覧は引けたら `migrationApplied: false` を返し、画面に「未適用」と出す
   (**「対象 0 件」と混同させない**)
+- `approved_report_hash` が無い環境では**指紋の照合もしない** (指紋なし扱い・§3.3.5)。
+  承認 API は**この状態では承認しない** (`migration_required`) — 指紋を書けないまま
+  承認すると「生成ロジックが変わっても公開され続ける」状態になるため
+
+**どちらも fail-open なので、本番は必ず migration を先に当てる (§13.1)。**
 
 ---
 
@@ -169,6 +308,15 @@ CLAUDE.md の migration 規約どおり **DB を先に適用する**。
 行の「承認してダッシュボードへ反映」。確認ダイアログを 1 枚出す。
 一覧で見た `publish_rev` を `expectedRev` として送り、**その間に再作成が入っていたら 409**
 (§9)。409 のときは一覧を読み込み直して、もう一度確認してもらう。
+
+承認 API は **その時点の紙面を組んで指紋を取り、同じ 1 本の update で
+`publish_status` / `approved_at` / `approved_by` / `approved_report_hash` を書く** (§3.3)。
+`report.sections.*` も紙面を決めるので、**指紋を取る前に `refreshConfig()`** を通す
+(一覧・表示経路と同じ app_config を見るため)。
+
+一覧の各行には**指紋の状態**を出す: `公開中` (`match`) /
+**`紙面が変わった（非公開）`** (`mismatch`) / 表示なし (`none` = 指紋なし)。
+**これが無いと「承認済なのに利用者に出ない」理由を admin が辿れない。**
 
 ### 5.4 再作成
 
@@ -228,7 +376,8 @@ S3 の読み取りは**取り込みと同じ関数**を通す
 → 材料を取り直す
 → 本番と同じ buildReportVM() で生成
 → 生成が最後まで通ったことを確認
-→ 【ここで初めて書く】1 本の update で 上書き + pending + approved_* を null + rev+1
+→ 【ここで初めて書く】1 本の update で
+   上書き + pending + approved_at/approved_by/approved_report_hash を null + rev+1
 ```
 
 **上書きと `pending` 化は同じ 1 本の update。** 分けると
@@ -294,12 +443,27 @@ S3 の読み取りは**取り込みと同じ関数**を通す
 
 | 経路 | 絞り方 |
 |---|---|
-| `loadReportVM()` (紙面の本体) | `publish_status` を引き、`isApprovedRow()` で採用を決める |
-| `loadDashboard()` → `latestResult` | 取得後に `isApprovedRow()` で絞る (タイルの可否・受領日・進捗がこれで決まる) |
-| `/api/report-route` (完成済み PDF の署名 URL) | **署名を発行する手前**で止める |
-| `coach-context.ts` (AI コーチ) | 同 |
+| `loadReportVM()` (紙面の本体) | 紙面を組んだあと **`isPubliclyVisibleRow(row, vm)`** = 承認状態 ＋ **指紋の一致** |
+| `loadDashboard()` → `latestResult` | 同じ **`isPubliclyVisibleRow(row)`** で絞る (タイルの可否・受領日・進捗がこれで決まる) |
+| `/api/report-route` (完成済み PDF の署名 URL) | **署名を発行する手前**で `isApprovedRow()`。**指紋は見ない** (下記) |
+| `coach-context.ts` (AI コーチ) | `isApprovedRow()` のみ (VM を持たない死蔵経路) |
 | `chat-context.ts` (AI 問診) | 同 |
 | `result-queries.ts` (`/result/[id]` の 3 モード) | 同 |
+
+**承認状態と指紋の合成は `report-approval.ts` の `isPubliclyVisibleRow()` 1 本**。
+表示経路が `hashGateOk()` を直接呼ばないことを検査で固定する (判定を 2 つ持たない)。
+
+**`loadReportVM` は組み上がった `vm` をそのまま渡す** — 指紋は閲覧者の文脈に依存しない
+(§3.3.1) ので、本人の文脈で組んだ VM の指紋は承認時の指紋と一致する。二度組まない。
+
+**`/api/report-route` が指紋を見ない理由**: トランスコスモス 10 名の紙面は S3 の
+組版済み PDF で、生成ロジックを通らない。**照合する対象が無い。**
+(再作成も禁止・§6.6。`publish_status` の判定は従来どおり効く。)
+
+**`loadDashboard` でも指紋を見る理由**: `latestResult` が報告書タイルを押せるかどうかを
+決めるので、指紋が合わない回に押せるままにすると**押した先が帯だけの紙面**になる
+(`reportAvailable` が防いでいるはずの状態)。コストは `approved_report_hash` が
+入っている行だけ `buildReportVM` を通す形に抑える (移行した既存行は NULL = コスト 0)。
 
 **未承認を見られるのは管理者だけ** — `report.astro` が `includeUnapproved: viewer.isAdmin`、
 `loadDashboard(u, viewer.origin, viewer.isAdmin)` を渡す。既定は false (fail-closed) なので、
@@ -411,6 +575,7 @@ DB も鍵も要らない。
 | ⑧ | ユーザー向け 6 経路の承認ゲートと、既定が fail-closed であること |
 | ⑨ | API の認可 / 受け取るのは resultId だけ / 一括 API が無い / 画面の形 |
 | ⑩ | 既存の取り込みを壊していないこと (S3 の読み方が 1 つ) |
+| ⑪ | **指紋の性質を本物のアダプタで見る** — 文脈 (氏名・実年齢・第 N 回・`reportType`・`isSample`・当社 CABA) を全部変えても指紋が同じ / 本文を 1 文字変えると変わる / 検査値・章立ての設定でも変わる / 正規化に閲覧者の値が入っていない / `common()` が `selfReported` を渡していない |
 
 **退行注入 15 種とも名指しで落ちることを確認済み。**
 うち 2 件はこの注入で穴が見つかり、検査を直してある:
@@ -445,6 +610,7 @@ wellfort-site: `astro build` 成功・verify 10 本。
 | 12 | 管理者の確認表示はユーザーと同じ報告書データ / 表示処理を使う | PASS | 代理表示で本番 `/report` を開く (§5.2) |
 | 13 | 通常の再作成で複製・バージョン履歴が増えない | PASS | UPDATE のみ ・同 ⑤ (行数不変・insert 0 回) |
 | 14 | 再作成と承認が競合しても、新報告書が自動的に承認済になる事故がない | PASS | `publish_rev` 条件付き更新 (§9) ・同 ④ |
+| **15** | **承認後に生成ロジックを直してデプロイしても、承認した紙面と違うものは公開されない** | PASS | `approved_report_hash` (§3.3) ・同 ④/⑪ |
 
 **この環境で確認できていないこと**: 実 DB への migration 適用後の挙動・S3 からの実再取得・
 署名 URL の実挙動・admin 画面の実ブラウザ操作 (Supabase / S3 / 鍵がこの作業環境に無い)。
@@ -452,11 +618,44 @@ wellfort-site: `astro build` 成功・verify 10 本。
 
 ## 13. 申し送り (人の判断が要る)
 
-1. **migration の適用が必要** —
-   `supabase/migrations/20261007000010_diagnosis_report_approval.sql`。
-   **アプリより先に DB へ適用する** (後方互換な列追加なので先に当てて問題ない)。
+### 13.1 【必須】本番反映の順序
+
+**必ずこの順で入れる。** 手順の正本は
+`docs/operations/AI疾病予防報告書_承認機能_本番反映手順.md`。
+
+```
+① DB migration   20261007000010_diagnosis_report_approval.sql
+                 20261007000020_diagnosis_report_approval_hash.sql
+② Scan-Chat-AI   (API と承認ゲート)
+③ wellfort-site  (管理画面)
+```
+
+**なぜ DB が先か。** アプリ側は列が無い環境を **fail-open** で扱う (§4.1・§3.3.5) ——
+既存の公開中の報告書を落とさないための保険だが、**承認ゲートとしては穴になる**。
+
+> **migration 適用前に新規の Elith 取込が発生すると、その報告書は承認ゲートを
+> 通らずユーザーへ公開され得る。**
+>
+> `publish_status` 列が無い間、取り込みは列を書けないので新しい行の
+> `publish_status` は存在しない。`isApprovedRow()` は「列なし = 承認済相当」と
+> 判定するので、**管理者が一度も確認していない報告書がそのまま出る**。
+> 取り込みは毎日 9:00 JST の cron (`/api/cron/elith-intake`) で自動で走るため、
+> **適用を翌日へ持ち越さない**。
+
+`approved_report_hash` だけが無い状態 (① の 1 本目だけ適用) では、
+未承認/承認済のゲートは効くが**指紋の照合が効かない** (指紋なし扱い)。
+この状態では承認 API が `migration_required` で止まるので、承認操作はできない。
+
+**②→③ の順**: 管理画面 (③) は Scan-Chat-AI の API (②) を叩くだけなので、
+逆順だと画面だけ出て API が 404 になる。
+
+### 13.2 残っている確認事項
+
+1. **migration の適用が必要 (2 本)** — `20261007000010_diagnosis_report_approval.sql` と
+   `20261007000020_diagnosis_report_approval_hash.sql`。
+   **アプリより先に DB へ適用する** (§13.1。後方互換な列追加なので先に当てて問題ない)。
    未適用のままアプリが出ても公開中の報告書は消えないが、**承認・再作成はできない**
-   (一覧に「未適用」と出る)。
+   (一覧に「未適用」と出る) し、**その間の新規取込は承認ゲートを通らず公開され得る**。
 2. **「確認」は代理表示のダッシュボードに着地する** — handoff の着地先は
    `/admin-view/<ctx>/dashboard` 固定なので、紙面までは**タブ内で 1 クリック**が要る。
    報告書へ直接着地させるには handoff に行き先を持たせる改修が必要で、

@@ -10,7 +10,7 @@ import type { AppIconName } from '../components/AppIcon.astro';
 import { getServerSupabase, isBridgeConfigured, type BridgeOrigin } from './supabase';
 import { loadBridgeBundle, type CustomerBundle } from './bridge-queries';
 import { buildDemoDashboard, demoFallbackEnabled, demoMetricTrend } from './demo-data';
-import { isApprovedRow } from './report-approval';
+import { isPubliclyVisibleRow } from './report-approval';
 import type {
   AppUser,
   CustomerProfile,
@@ -195,13 +195,24 @@ export async function loadDashboard(
 
     const artifacts = orderDerivedSiblings(artifactsRaw ?? []);
     /*
-     * **未承認の報告書はここで落とす** (仕様書 §8)。select は `*` なので
-     * `publish_status` が無い環境では undefined = 承認済相当 (`isApprovedRow`)。
+     * **未承認の報告書と、承認した紙面と違うものをここで落とす** (仕様書 §8)。
+     * select は `*` なので `publish_status` / `approved_report_hash` が無い環境では
+     * undefined = 承認済相当・指紋なし (fail-open・§13.1)。
      * **フロントで隠すのではなくサーバで返さない。**
+     *
+     * 【なぜダッシュボードでも指紋を見るか】`latestResult` が報告書タイルを
+     * 押せるかどうかと受領日・進捗の「報告書」行を決める。指紋が合わない回に
+     * タイルを押せるままにすると、**押した先が帯だけの紙面**になる
+     * (`reportAvailable` が防いでいるはずの状態)。
+     *
+     * 【コスト】`isPubliclyVisibleRow` は `approved_report_hash` が入っている行だけ
+     * `buildReportVM` を通す。移行した既存行は NULL なのでコスト 0
+     * (`report-fingerprint.ts` の `hashGateOk`)。
      */
-    const results = (resultsRaw ?? []).filter(
-      (r: { publish_status?: unknown }) => includeUnapprovedReport || isApprovedRow(r),
-    );
+    const results: DiagnosisResult[] = [];
+    for (const r of resultsRaw ?? []) {
+      if (includeUnapprovedReport || await isPubliclyVisibleRow(r)) results.push(r);
+    }
     const resultUid = uid;
     const usingDemoData = false;
 

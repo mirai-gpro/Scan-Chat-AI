@@ -16,6 +16,7 @@ import type { APIRoute } from 'astro';
 import { isAdminAuthorized } from '../../../../lib/api-auth';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { listReportsForApproval, PENDING, APPROVED } from '../../../../lib/report-approval';
+import { refreshConfig } from '../../../../lib/app-config';
 
 export const prerender = false;
 
@@ -38,6 +39,12 @@ export const GET: APIRoute = async ({ request }) => {
 
   const sb = getServerSupabase();
   if (!sb) return json({ ok: false, error: 'supabase_not_configured' }, 503);
+
+  /*
+   * **app_config を先に読む。** 一覧は各行の指紋を取り直して承認時の値と比べるので、
+   * 承認 API・表示経路と同じ `report.sections.*` を見ていなければならない。
+   */
+  await refreshConfig();
 
   const r = await listReportsForApproval(sb as never, { status, limit });
   if (!r.ok) return json(r, 500);

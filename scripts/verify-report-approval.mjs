@@ -53,7 +53,21 @@ const FOLDER = `output/user/${U1}/date/2026_09_16/`;
    ══════════════════════════════════════════════════════════════════════ */
 const M = await (async () => {
   writeFileSync(resolve(CACHE, 'ra-adapter.mjs'), `
-export let __vm = { audit: { sections: ['a'], measurementCount: 3, topicCount: 5, digestCards: ['x'] } };
+/** 指紋が取れる最小の ReportVM。setVm で中身を差し替えると指紋も変わる。 */
+const baseVm = (tag) => ({
+  reportType: 2, isSample: false,
+  cover: { name: '', issuedOn: '2026-09-16', sheetVersion: 'v1.0', testedOn: null,
+    cycleSeq: null, cycleTotal: 4, wellnessAge: null, chronologicalAge: null },
+  axes: [{ key: 'a', title: 'A' }, { key: 'b', title: 'B' }],
+  digest: [{ key: 'abstract', title: '', axis: 'a', source: 's', detailAnchor: null, lead: true,
+    blocks: [{ kind: 'paragraphs', items: [tag] }] }],
+  chapters: [{ key: 'summary', title: 'T', axis: 'b', collapsed: false,
+    topics: [{ anchor: '#t', heading: 'h', body: tag }] }],
+  audit: { sections: ['a'], measurementCount: 3, topicCount: 5, digestCards: ['x'], emptyCards: [],
+    hiddenChapters: [], unknownChapterKeys: [], anomalies: [] },
+});
+export let __vm = baseVm('原文');
+export const makeVm = baseVm;
 export let __throw = false;
 export const __calls = [];
 export const setVm = (v) => { __vm = v; };
@@ -96,11 +110,26 @@ export const groupByFolder = (keys) => {
 };
 export const readFolderMaterial = async (folder, files) => { __read.push({ folder, files }); return __material; };
 `);
+  /*
+   * **指紋の実装はスタブにしない** (実物を transpile する)。
+   * `report-adapter` だけ上のスタブへ向けるので、`fingerprintOfRow` は
+   * スタブ VM の指紋を返す = 配線 (保存・照合・null 化) を実物で動かせる。
+   * 正規化そのものの性質 (文脈非依存・中身に敏感) は ⑪ で**本物のアダプタ**で見る。
+   */
+  writeFileSync(resolve(CACHE, 'report-fingerprint.mjs'),
+    js(read('src/lib/report-fingerprint.ts')
+      .replace(/from '\.\/report-adapter'/g, "from './ra-adapter.mjs'")
+      .replace(/from '\.\/report-model'/g, "from './ra-model.mjs'")));
+  writeFileSync(resolve(CACHE, 'ra-model.mjs'), 'export {};\n');
+
   const body = js(read('src/lib/report-approval.ts')
     .replace(/from '\.\/report-adapter'/g, "from './ra-adapter.mjs'")
+    .replace(/from '\.\/report-model'/g, "from './ra-model.mjs'")
+    .replace(/from '\.\/report-fingerprint'/g, "from './report-fingerprint.mjs'")
     .replace(/from '\.\/elith-intake'/g, "from './ra-intake.mjs'")
     .replace(/from '\.\/s3'/g, "from './ra-s3.mjs'"));
-  if (!/ra-adapter/.test(body) || !/ra-intake/.test(body) || !/ra-s3/.test(body)) {
+  if (!/ra-adapter/.test(body) || !/ra-intake/.test(body) || !/ra-s3/.test(body)
+      || !/report-fingerprint\.mjs/.test(body)) {
     fails.push('verify: import の差し替えに失敗 (import 文の形が変わった)');
   }
   const out = resolve(CACHE, 'ra-lib.mjs');
@@ -164,6 +193,7 @@ const baseRow = (over = {}) => ({
   schema_version: 'elith-v2.0', source_key: FOLDER,
   report: { abstract: { text: 'x' } }, checkup_values: { health_checkup: {} },
   report_pdf_url: null, publish_status: 'pending', approved_at: null, approved_by: null, publish_rev: 0,
+  approved_report_hash: null,
   ...over,
 });
 
@@ -274,6 +304,55 @@ console.log('\n④ 承認\n');
   const sb5 = makeSb([baseRow()]);
   await M.lib.approveReport(sb5, { resultId: R1, expectedRev: 0, approvedBy: 'admin@example.com' });
   eq('**生のメールアドレスは approved_by に入らない**', sb5.__state.rows.get(R1).approved_by, null);
+
+  // ── 承認した紙面の指紋 (仕様書 §3.3) ──────────────────────────
+  {
+    M.adapter.setVm(M.adapter.makeVm('承認したときの本文'));
+    const sbh = makeSb([baseRow()]);
+    const r = await M.lib.approveReport(sbh, { resultId: R1, expectedRev: 0, approvedBy: IDENT });
+    const row = sbh.__state.rows.get(R1);
+    ok('**承認で紙面の指紋を控える** (SHA-256 16進 64文字)',
+      /^[0-9a-f]{64}$/.test(String(row.approved_report_hash)), String(row.approved_report_hash));
+    eq('  応答にも同じ指紋を返す', r.approvedReportHash, row.approved_report_hash);
+    eq('  承認と指紋は**同じ 1 本の update**', sbh.__state.writes.length, 1);
+    const vals = sbh.__state.writes[0].values;
+    ok('  その 1 本に publish_status と指紋が同居している',
+      vals.publish_status === 'approved' && /^[0-9a-f]{64}$/.test(String(vals.approved_report_hash)));
+    eq('  何を承認したかを返す (章/検査値の件数)', [r.approved?.sections, r.approved?.measurements], [1, 3]);
+
+    // 生成ロジックが変わった = 紙面が変わった → 公開しない
+    const approvedRow = { ...row };
+    eq('承認した紙面と同じなら公開する', await M.lib.isPubliclyVisibleRow(approvedRow), true);
+    M.adapter.setVm(M.adapter.makeVm('デプロイ後に変わった本文'));
+    eq('**紙面が変わったら公開しない** (approved のままでも)',
+      await M.lib.isPubliclyVisibleRow(approvedRow), false);
+    eq('  publish_status は approved のまま (DB は書き換えない)', approvedRow.publish_status, 'approved');
+
+    // 指紋が無い行 (migration で移行した既存行) は従来どおり公開
+    eq('**指紋が無い承認済行は公開する** (既存の公開を落とさない)',
+      await M.lib.isPubliclyVisibleRow({ ...approvedRow, approved_report_hash: null }), true);
+    eq('  列ごと無い環境でも公開する',
+      await M.lib.isPubliclyVisibleRow(
+        { publish_status: 'approved', report: {}, received_at: '2026-09-16' }), true);
+    eq('  未承認は指紋があっても公開しない',
+      await M.lib.isPubliclyVisibleRow({ ...approvedRow, publish_status: 'pending' }), false);
+
+    // 列が無い環境では承認しない (指紋を書けない = ゲートが効かない)
+    const noCol = (() => { const b = baseRow(); delete b.publish_status; return b; })();
+    const sbn = makeSb([noCol]);
+    const rn = await M.lib.approveReport(sbn, { resultId: R1, expectedRev: 0, approvedBy: IDENT });
+    eq('**承認用の列が無ければ承認しない**', rn.error, 'migration_required');
+    eq('  DB を 1 度も書かない', sbn.__state.writes.length, 0);
+
+    // 紙面が組めない回は承認しない
+    M.adapter.setThrow(true);
+    const sbt = makeSb([baseRow()]);
+    const rt = await M.lib.approveReport(sbt, { resultId: R1, expectedRev: 0, approvedBy: IDENT });
+    eq('紙面が組めない回は承認しない', rt.error, 'fingerprint_failed');
+    eq('  DB を 1 度も書かない', sbt.__state.writes.length, 0);
+    M.adapter.setThrow(false);
+    M.adapter.setVm(M.adapter.makeVm('原文'));
+  }
   eq('  safeApprovedBy は digest だけ通す', M.lib.safeApprovedBy(IDENT), IDENT);
   eq('  43 文字でないものは通さない', M.lib.safeApprovedBy('A'.repeat(42)), null);
   eq('  氏名も通さない', M.lib.safeApprovedBy('山田太郎'), null);
@@ -289,7 +368,15 @@ console.log('\n⑤ 再作成 (成功)\n');
   M.s3.setS3(true, [`${FOLDER}report_text.json`, `${FOLDER}health_checkup.json`]);
   M.intake.setMaterial({ report: { s3: true }, checkup: { health_checkup: { x: [] } }, schemaVersion: 'elith-v2.0' });
 
-  const sb = makeSb([baseRow({ publish_status: 'approved', approved_at: '2026-09-20T00:00:00.000Z', approved_by: IDENT, publish_rev: 0 })]);
+  /*
+   * **指紋を持った承認済の行から始める。** 指紋なしの行で試すと、
+   * 「null へ戻す」コードを消しても元から null なので退行が検出できない
+   * (退行注入 20 で実証)。
+   */
+  const sb = makeSb([baseRow({
+    publish_status: 'approved', approved_at: '2026-09-20T00:00:00.000Z', approved_by: IDENT,
+    publish_rev: 0, approved_report_hash: 'a'.repeat(64),
+  })]);
   const r = await M.lib.recreateReport(sb, { resultId: R1 });
   eq('再作成できる', r.ok, true);
   eq('材料は S3 から取り直す', r.source, 's3');
@@ -297,6 +384,7 @@ console.log('\n⑤ 再作成 (成功)\n');
   eq('**pending に戻る**', row.publish_status, 'pending');
   eq('approved_at を消す', row.approved_at, null);
   eq('approved_by を消す', row.approved_by, null);
+  eq('**承認した紙面の指紋も消す**', row.approved_report_hash, null);
   eq('publish_rev が進む', row.publish_rev, 1);
   eq('受領 JSON を上書きする', row.report, { s3: true });
   eq('検査値も上書きする', row.checkup_values, { health_checkup: { x: [] } });
@@ -328,13 +416,15 @@ console.log('\n⑤ 再作成 (成功)\n');
 console.log('\n⑥ 再作成 (失敗しても公開中の報告書を壊さない)\n');
 {
   const approved = () => baseRow({
-    publish_status: 'approved', approved_at: '2026-09-20T00:00:00.000Z', approved_by: IDENT, publish_rev: 1,
+    publish_status: 'approved', approved_at: '2026-09-20T00:00:00.000Z', approved_by: IDENT,
+    publish_rev: 1, approved_report_hash: 'f'.repeat(64),
   });
   const intact = (sb, label) => {
     const row = sb.__state.rows.get(R1);
     eq(`${label}: 承認済のまま`, row.publish_status, 'approved');
     eq(`${label}: approved_at が残る`, row.approved_at, '2026-09-20T00:00:00.000Z');
     eq(`${label}: 報告書の中身が残る`, row.report, { abstract: { text: 'x' } });
+    eq(`${label}: 承認した指紋が残る`, row.approved_report_hash, 'f'.repeat(64));
     eq(`${label}: DB を 1 度も書かない`, sb.__state.writes.length, 0);
   };
 
@@ -447,6 +537,7 @@ console.log('\n⑦ 一覧\n');
   eq('rev を返す (承認の条件付き更新に使う)', r.rows[0].publishRev, 0);
   eq('再作成できるかを返す', r.rows[0].recreatable, true);
   eq('migration 適用済', r.migrationApplied, true);
+  eq('未承認の行の指紋は見ない', r.rows[0].hashState, 'none');
   ok('**氏名を返さない**', !JSON.stringify(r.rows).includes('name'));
 
   const sb2 = makeSb([baseRow()], { selectFails: 'publish_status' });
@@ -465,17 +556,26 @@ console.log('\n⑦ 一覧\n');
 console.log('\n⑧ ユーザー向け取得経路の承認ゲート\n');
 {
   const q = code('src/lib/elith-report-queries.ts');
-  ok('loadReportVM が publish_status を引いている', /publish_status/.test(q));
-  ok('loadReportVM が承認済だけ採用している',
-    /includeUnapproved[\s\S]{0,80}isApprovedRow/.test(q));
+  ok('loadReportVM が publish_status と指紋を引いている',
+    /publish_status/.test(q) && /approved_report_hash/.test(q));
+  ok('loadReportVM が**合成ゲート**を通している (承認状態 + 指紋)',
+    /includeUnapproved[\s\S]{0,80}isPubliclyVisibleRow\(row, vm\)/.test(q));
+  ok('  組み上がった VM を渡している (二度組まない)',
+    /const vm = buildReportVM\(/.test(q) && /isPubliclyVisibleRow\(row, vm\)/.test(q));
+  ok('  ゲートは VM を組んだ**あと** (指紋を取る相手が要る)',
+    q.indexOf('const vm = buildReportVM(') < q.indexOf('isPubliclyVisibleRow(row, vm)'));
   ok('既定は承認済だけ (`includeUnapproved?` は任意 = fail-closed)',
     /includeUnapproved\?: boolean/.test(read('src/lib/elith-report-queries.ts')));
 
   const d = code('src/lib/dashboard-queries.ts');
-  ok('loadDashboard が latestResult を承認済だけに絞っている',
-    /resultsRaw[\s\S]{0,160}isApprovedRow/.test(d));
+  ok('loadDashboard が latestResult を合成ゲートで絞っている',
+    /resultsRaw[\s\S]{0,200}isPubliclyVisibleRow/.test(d));
   ok('  既定は false (引数を渡さない呼び出しは承認済だけ)',
     /includeUnapprovedReport = false/.test(d));
+  ok('**承認状態と指紋の合成は 1 本だけ** (各経路で組み直さない)',
+    /export async function isPubliclyVisibleRow/.test(code('src/lib/report-approval.ts'))
+    && !/hashGateOk/.test(q) && !/hashGateOk/.test(d),
+    '表示経路が hashGateOk を直接呼んでいる');
 
   const rr = code('src/pages/api/report-route.ts');
   ok('report-route (PDF の署名 URL) が承認済だけ通している', /isApprovedRow/.test(rr));
@@ -543,6 +643,10 @@ console.log('\n⑨ API / 管理画面\n');
   ok('確認は本番の画面を代理表示で開く (報告書を再実装しない)',
     /impersonation-handoff/.test(page));
   ok('承認は一覧で見た rev を渡す', /expectedRev: r\.publishRev/.test(page));
+  ok('**「紙面が変わった（非公開）」を行に出す** (承認済なのに出ない理由を admin が辿れる)',
+    /hashState === 'mismatch'/.test(page) && /紙面が変わった/.test(page));
+  ok('  まとめても出す', /hashState === 'mismatch'; \}\).length/.test(page));
+  ok('  公開中の行には「公開中」と出す', /hashState === 'match'/.test(page) && /公開中/.test(page));
   ok('メニューに載っている', /report-approval/.test(read('/home/user/wellfort-site/src/components/AdminLayout.astro')));
 }
 
@@ -560,6 +664,122 @@ console.log('\n⑩ 既存の取り込み\n');
   ok('  runElithIntake がその関数を使っている', /await readFolderMaterial\(folder, e\.files\)/.test(intake));
   ok('  読み方を 2 つ持っていない',
     (intake.match(/classifyFile\(name\)/g) || []).length === 1);
+}
+
+
+/* ══════════════════════════════════════════════════════════════════════
+   ⑪ 指紋の性質 — **本物のアダプタ**で見る (ここが機能の成立条件)
+   ══════════════════════════════════════════════════════════════════════
+   スタブ VM では「配線」しか見られない。正規化そのものの性質は実物でないと
+   意味がないので、`report-adapter` / `report-sections` / `report-view` /
+   `standard-master` / `report-fingerprint` を transpile して動かす
+   (app_config だけスタブ = DB も鍵も要らない)。
+
+   **最重要 = 文脈非依存**: 承認 API は閲覧者の文脈 (氏名・実年齢・第 N 回・
+   がんリスク検査の有無) を持たない。指紋が文脈に依存したら、承認側の指紋と
+   表示側の指紋が永久に一致せず**承認済みの報告書が全件消える**。
+   ══════════════════════════════════════════════════════════════════════ */
+console.log('\n⑪ 指紋の性質 (本物のアダプタ)\n');
+{
+  const RF = await (async () => {
+    const stub = (name, src) => writeFileSync(resolve(CACHE, name), src);
+    // app_config は読み取り関数だけ差し替える (DB を触らない)。
+    stub('app-config.mjs', `
+export let __cfg = {};
+export const setCfg = (v) => { __cfg = v; };
+export const cfg = (k) => __cfg[k] ?? '';
+export const refreshConfig = async () => {};
+`);
+    const fix = (src) => src
+      .replace(/from '\.\/app-config'/g, "from './app-config.mjs'")
+      .replace(/from '\.\/report-sections'/g, "from './report-sections.mjs'")
+      .replace(/from '\.\/report-view'/g, "from './report-view.mjs'")
+      .replace(/from '\.\/standard-master'/g, "from './standard-master.mjs'")
+      .replace(/from '\.\/report-adapter'/g, "from './report-adapter.mjs'")
+      .replace(/from '\.\/elith-parser'/g, "from './elith-parser.mjs'")
+      .replace(/from '\.\/report-model'/g, "from './report-model.mjs'");
+    stub('elith-parser.mjs', 'export {};\n');
+    stub('report-model.mjs', 'export {};\n');
+    for (const f of ['report-sections', 'report-view', 'standard-master', 'report-adapter',
+                     'report-fingerprint']) {
+      stub(`${f}.mjs`, js(fix(read(`src/lib/${f}.ts`))));
+    }
+    return {
+      fp: await import(resolve(CACHE, 'report-fingerprint.mjs')),
+      ad: await import(resolve(CACHE, 'report-adapter.mjs')),
+      cfg: await import(resolve(CACHE, 'app-config.mjs')),
+    };
+  })();
+
+  const reportText = JSON.parse(read('src/data/elith/report_text_20260826.json'));
+  const checkup = JSON.parse(read('src/data/elith/health_checkup_20260826.json'));
+  const base = { reportText, checkup, issuedOn: '2026-08-26' };
+  const build = (over = {}) => RF.ad.buildReportVM({ ...RF.fp.FINGERPRINT_CONTEXT, ...base, ...over });
+  const fp = (vm) => RF.fp.reportFingerprint(vm);
+
+  const neutral = await fp(build());
+  ok('本物の受領 JSON で指紋が取れる', /^[0-9a-f]{64}$/.test(neutral), neutral);
+  eq('同じ入力なら同じ指紋 (決定論)', await fp(build()), neutral);
+
+  /* ── 文脈を変えても指紋は変わらない (承認側 == 表示側) ── */
+  const wild = await fp(build({
+    name: '相川 佳之様', isSample: true, hasCancerRisk: true, cycleSeq: 3,
+    chronologicalAge: 54, ourWellnessAge: 58,
+  }));
+  eq('**閲覧者の文脈を全部変えても指紋は同じ**', wild, neutral);
+  for (const [label, over] of [
+    ['氏名', { name: '別の人様' }],
+    ['実年齢 (誕生日を越えた)', { chronologicalAge: 56 }],
+    ['第 N 回 (サイクルが進んだ)', { cycleSeq: 4 }],
+    ['がんリスク検査の有無 (reportType)', { hasCancerRisk: true }],
+    ['サンプル表示', { isSample: true }],
+    ['当社 CABA の値', { ourWellnessAge: 56 }],
+  ]) eq(`  ${label} が変わっても同じ`, await fp(build(over)), neutral);
+
+  /* ── 紙面の中身が変われば指紋は変わる ── */
+  const firstKey = Object.keys(reportText).find((k) => reportText[k]?.text);
+  const edited = structuredClone(reportText);
+  edited[firstKey].text = `${edited[firstKey].text}。`;   // 句点 1 文字だけ足す
+  ok('**本文を 1 文字変えると指紋が変わる**',
+    (await fp(build({ reportText: edited }))) !== neutral);
+
+  const editedLab = structuredClone(checkup);
+  const labKey = Object.keys(editedLab)[0];
+  if (Array.isArray(editedLab[labKey]) && editedLab[labKey][0]) {
+    editedLab[labKey][0].value = `${editedLab[labKey][0].value} `;
+    ok('検査値を変えると指紋が変わる', (await fp(build({ checkup: editedLab }))) !== neutral);
+  }
+
+  /* ── app_config (章立て) も紙面を決めるので対象に入る ── */
+  RF.cfg.setCfg({ 'report.sections.hidden': 'lifestyle' });
+  const hidden = await fp(build());
+  ok('**章を隠すと指紋が変わる** (app_config も対象)', hidden !== neutral);
+  RF.cfg.setCfg({ 'report.sections.labels': 'summary=別の見出し' });
+  ok('見出しを変えると指紋が変わる', (await fp(build())) !== neutral);
+  RF.cfg.setCfg({ 'report.sections.collapsed': 'summary' });
+  ok('開閉を変えると指紋が変わる', (await fp(build())) !== neutral);
+  RF.cfg.setCfg({});
+  eq('app_config を戻せば指紋も戻る', await fp(build()), neutral);
+
+  /* ── 対象外にした値が指紋に出ていないこと (正規化の中身を直接見る) ── */
+  /*
+   * **本文に偶然現れない値を使う。** `54` のような普通の数字で部分一致を見ると
+   * 本文中の「54歳」等に当たって必ず落ちる (`verify:report-verbatim` で踏んだのと同じ罠)。
+   */
+  const canon = JSON.stringify(RF.fp.canonicalizeReport(build({
+    name: '照合用ノ氏名ZZQ', chronologicalAge: 1234567, ourWellnessAge: 7654321, cycleSeq: 987654,
+  })));
+  for (const [label, needle] of [
+    ['氏名', '照合用ノ氏名ZZQ'], ['実年齢', '1234567'],
+    ['ウェルネス年齢の補完値', '7654321'], ['第 N 回', '987654'],
+  ]) ok(`正規化に ${label} が入っていない`, !canon.includes(needle));
+  ok('正規化に本文は入っている', canon.includes(String(reportText[firstKey].text).slice(0, 20)));
+  ok('正規化の版が先頭に在る (形を変えたら全件再承認)',
+    canon.startsWith(`[${RF.fp.FINGERPRINT_VERSION},`));
+
+  /* ── 表示経路の文脈が指紋の対象へ漏れていないこと ── */
+  ok('表示経路は `selfReported` を渡していない (渡すなら承認側にも同じ値が要る)',
+    !/selfReported/.test(code('src/lib/elith-report-queries.ts')));
 }
 
 rmSync(CACHE, { recursive: true, force: true });

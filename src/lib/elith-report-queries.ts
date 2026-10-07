@@ -21,7 +21,7 @@ import {
   ELITH_REPORT_SAMPLE_TEXT_TYPE1, ELITH_REPORT_SAMPLE_LAB_TYPE1, ELITH_SAMPLE_ISSUED_ON_TYPE1,
 } from './elith-report-sample';
 import { buildReportVM, type BuildInput } from './report-adapter';
-import { isApprovedRow } from './report-approval';
+import { isPubliclyVisibleRow } from './report-approval';
 import type { ReportVM } from './report-model';
 // `cfg` は `ui.cancer_screening_not_included` のためだけに使っていた (2026-09-18 に削除)。
 
@@ -133,7 +133,10 @@ export async function loadReportVM(ctx: ReportContext): Promise<ReportVM> {
   const sb = getServerSupabase();
   if (!sb || !ctx.diagnosticUserId) return sample(ctx);
 
-  interface Row { report: unknown; checkup_values?: unknown; received_at: string; publish_status?: unknown }
+  interface Row {
+    report: unknown; checkup_values?: unknown; received_at: string;
+    publish_status?: unknown; approved_report_hash?: unknown;
+  }
 
   /**
    * `checkup_values` は `20260829000010` で追加した列。
@@ -156,13 +159,16 @@ export async function loadReportVM(ctx: ReportContext): Promise<ReportVM> {
   /**
    * 列の有無で 3 段に落とす。**どの段でも「引けなかった」を 0 件と混同しない**
    * (最後まで失敗したら catch がサンプル/空へ落ちる)。
-   *   ① publish_status + checkup_values … 承認ゲート適用後の通常の形
-   *   ② checkup_values だけ             … 承認の migration 未適用の環境
-   *   ③ 素の report だけ                … checkup_values も未適用の環境
-   * ②③ では `publish_status` が取れないので `isApprovedRow()` が**承認済相当**と
-   * 判定する。列が無い環境には `pending` の行も存在しないので未承認は漏れない。
+   *   ① publish_status + approved_report_hash + checkup_values … 通常の形
+   *   ② approved_report_hash だけ無い  … `20261007000020` 未適用の環境
+   *   ③ publish_status も無い          … `20261007000010` 未適用の環境
+   *   ④ 素の report だけ               … checkup_values も未適用の環境
+   * ② は指紋の照合が効かず (指紋なし扱い)、③④ は**承認済相当**と判定される。
+   * 列が無い環境には `pending` の行も指紋も存在しないので未承認は漏れないが、
+   * **どちらも fail-open なので本番は必ず migration を先に当てる** (仕様書 §13.1)。
    */
   const COLS = [
+    'report, checkup_values, publish_status, approved_report_hash, received_at, status',
     'report, checkup_values, publish_status, received_at, status',
     'report, checkup_values, received_at, status',
     'report, received_at, status',
@@ -176,19 +182,6 @@ export async function loadReportVM(ctx: ReportContext): Promise<ReportVM> {
     }
     if (lastErr) throw lastErr;
     if (!row) return sample(ctx); // デモ用アカウント以外は sample() 内で emptyVM になる
-
-    /*
-     * **未承認はユーザーに返さない** (仕様書 §8・受入条件 2/10)。
-     * 管理者が確認するときだけ `includeUnapproved` が立つ。
-     *
-     * 【ここで 1 件前に遡らない】取り込みは既存行を `superseded` に落としてから
-     * 新しい行を足すので、1 つ前の承認済の行は既に世代落ちしている。
-     * 「上書き → 未承認 → 再承認まで非表示」が仕様 (§3.1) なので、
-     * **承認されるまでは何も出さない**のが正しい。
-     */
-    if (!ctx.includeUnapproved && !isApprovedRow(row as { publish_status?: unknown })) {
-      return sample(ctx);
-    }
 
     /*
      * **旧形式 (`elith-v1.0` の配列) の行は、報告書を作り直す前の seed / デモの残骸。**
@@ -207,13 +200,35 @@ export async function loadReportVM(ctx: ReportContext): Promise<ReportVM> {
       return sample(ctx);
     }
 
-    return buildReportVM({
+    const vm = buildReportVM({
       ...common(ctx),
       reportText: row.report,
       checkup: asCheckup(row.checkup_values),
       issuedOn: String(row.received_at).slice(0, 10),
       isSample: false,
     });
+
+    /*
+     * **未承認も「承認した紙面と違うもの」もユーザーに返さない**
+     * (仕様書 §8・受入条件 2/10/15)。管理者が確認するときだけ `includeUnapproved` が立つ。
+     *
+     * 【組み上がった `vm` をそのまま渡す】指紋は閲覧者の文脈に依存しないので
+     * (`report-fingerprint.ts` 冒頭)、本人の文脈で組んだこの VM の指紋は、
+     * 承認時に中立の文脈で取った指紋と一致する。**だから二度組まない。**
+     *
+     * 【判定をここに書かない】承認状態と指紋の合成は
+     * `report-approval.ts` の `isPubliclyVisibleRow()` 1 本 (判定を 2 つ持たない)。
+     *
+     * 【ここで 1 件前に遡らない】取り込みは既存行を `superseded` に落としてから
+     * 新しい行を足すので、1 つ前の承認済の行は既に世代落ちしている。
+     * 「上書き → 未承認 → 再承認まで非表示」が仕様 (§3.1) なので、
+     * **承認されるまでは何も出さない**のが正しい。
+     */
+    if (!ctx.includeUnapproved && !(await isPubliclyVisibleRow(row, vm))) {
+      return sample(ctx);
+    }
+
+    return vm;
   } catch {
     return sample(ctx);
   }

@@ -34,10 +34,15 @@
  */
 
 import { buildReportVM, type LabFiles } from './report-adapter';
+import type { ReportVM } from './report-model';
 import {
   OUTPUT_ROOT, REPORT_FILE, MIN_FILES_COMPLETE, groupByFolder, readFolderMaterial,
 } from './elith-intake';
 import { isS3Configured, listObjects } from './s3';
+import {
+  FINGERPRINT_CONTEXT, hashGateOk, hashState, reportFingerprint,
+  type FingerprintRow, type HashState,
+} from './report-fingerprint';
 
 /** 公開状態。**この 2 つだけ** (migration の CHECK と一致させる)。 */
 export const PENDING = 'pending';
@@ -58,6 +63,14 @@ export interface ReportApprovalRow {
   /** 取り込み元 (S3 フォルダ / `manual:transcosmos:…` / 手動は null)。 */
   sourceKey: string | null;
   hasPdf: boolean;
+  /**
+   * **承認した紙面の指紋の状態** (仕様書 §3.3)。
+   *   `match`    … 承認した紙面と同じ = 公開中
+   *   `mismatch` … 生成ロジック / app_config が変わって紙面が変わった = **非公開**
+   *   `none`     … 指紋なし (移行した既存行・列未適用) = 従来どおり公開
+   * **これを一覧に出さないと「承認済なのに利用者に出ない」理由を admin が辿れない。**
+   */
+  hashState: HashState;
   /** 再作成できる行か。false の行にはボタンを出さない (押しても必ず失敗する)。 */
   recreatable: boolean;
   /** 再作成できない理由。`recreatable` が true なら null。 */
@@ -99,6 +112,24 @@ export function isApprovedRow(row: { publish_status?: unknown } | null | undefin
 }
 
 /**
+ * **ユーザーへ出してよい行か (唯一の合成ゲート)。**
+ *
+ * 承認状態 (`publish_status`) と**承認した紙面の指紋**の両方を見る (仕様書 §8)。
+ * 指紋だけを別に見る実装を各経路へ散らすと、1 か所で絞り忘れても他が正しければ
+ * 画面は正常に見える。**判定はここ 1 本**。
+ *
+ * @param vm 既に組み上がっている紙面 (表示経路はこれを渡す = 二度組まない)。
+ *           指紋は閲覧者の文脈に依存しないので、本人の文脈で組んだ VM を渡してよい。
+ */
+export async function isPubliclyVisibleRow(
+  row: { publish_status?: unknown } & FingerprintRow,
+  vm?: ReportVM,
+): Promise<boolean> {
+  if (!isApprovedRow(row)) return false;
+  return hashGateOk(row, vm);
+}
+
+/**
  * **トランスコスモス 10 名の行**か (組版済み PDF だけを持ち、受領 JSON を持たない)。
  * 正本: `transcosmos-reports.ts`。**ここで再作成を走らせると、公開中の PDF が
  * pending になって 10 名のダッシュボードから消える。**
@@ -130,9 +161,11 @@ export function recreatability(
   return { recreatable: false, reason: '元になる受領 JSON が見つかりません' };
 }
 
+/** `checkup_values` と `approved_report_hash` は**指紋の算出に要る**ので一緒に引く。 */
 const LIST_COLS =
   'id, diagnostic_user_id, diagnostic_id, received_at, status, schema_version, source_key,'
-  + ' report, report_pdf_url, publish_status, approved_at, publish_rev';
+  + ' report, checkup_values, report_pdf_url, publish_status, approved_at, publish_rev,'
+  + ' approved_report_hash';
 /** `publish_status` 等が無い環境でもう一度引くための列。 */
 const LIST_COLS_LEGACY =
   'id, diagnostic_user_id, diagnostic_id, received_at, status, schema_version, source_key,'
@@ -176,9 +209,16 @@ export async function listReportsForApproval(
     }
   }
 
-  const rows: ReportApprovalRow[] = raw.map((r) => {
+  const rows: ReportApprovalRow[] = [];
+  for (const r of raw) {
     const rec = recreatability(r);
-    return {
+    /*
+     * **指紋の照合は承認済の行だけ**。`pending` の行は照合する相手がいないし、
+     * 指紋が無い行 (移行した既存行) は `hashState()` が 'none' を即返すので
+     * `buildReportVM` は走らない = 既存行ばかりの環境ではコスト 0。
+     */
+    const hs = r.publish_status === APPROVED ? await hashState(r as FingerprintRow) : 'none';
+    rows.push({
       id: String(r.id),
       diagnosticUserId: String(r.diagnostic_user_id),
       diagnosticId: String(r.diagnostic_id ?? ''),
@@ -190,10 +230,11 @@ export async function listReportsForApproval(
       schemaVersion: String(r.schema_version ?? ''),
       sourceKey: typeof r.source_key === 'string' ? r.source_key : null,
       hasPdf: !!r.report_pdf_url,
+      hashState: hs,
       recreatable: rec.recreatable,
       notRecreatableReason: rec.reason,
-    };
-  });
+    });
+  }
 
   // 列が無い環境では SQL で絞れないので、ここで絞る (全部 approved 相当)。
   const filtered = migrationApplied || !opts.status
@@ -208,6 +249,10 @@ export interface ApproveResult {
   id: string;
   publishStatus?: string;
   approvedAt?: string;
+  /** 控えた紙面の指紋。**秘密ではない** (監査で突き合わせられるように返す)。 */
+  approvedReportHash?: string;
+  /** 承認した紙面の中身 (表示と同じアダプタで数えたもの)。 */
+  approved?: { sections: number; measurements: number; topics: number; digestCards: string[] };
   error?: string;
   detail?: string;
 }
@@ -231,6 +276,53 @@ export async function approveReport(
     return { ok: false, id: input.resultId, error: 'invalid_expected_rev' };
   }
 
+  /*
+   * ── ① 承認する紙面を**いまの生成ロジックで組み、指紋を取る** (仕様書 §3.3) ──
+   *
+   * 紙面は保存されていないので、「承認した紙面」は**この指紋だけ**が表す。
+   * 表示経路と同じ `buildReportVM()` を通すので、別の生成ロジックは作らない。
+   * **app_config (`report.sections.*`) も紙面を決める**ので、呼び出し側 (API) が
+   * `refreshConfig()` を済ませてからここへ来る。
+   */
+  const { data: row, error: selErr } = await db(sb)
+    .from('diagnosis_results')
+    .select('id, received_at, report, checkup_values, publish_status, publish_rev')
+    .eq('id', input.resultId)
+    .maybeSingle();
+  if (selErr) return { ok: false, id: input.resultId, error: 'db_failed', detail: selErr.message };
+  if (!row) return { ok: false, id: input.resultId, error: 'not_found' };
+
+  /*
+   * **列が無い環境では承認しない。** 指紋を書けないので、承認しても
+   * 「生成ロジックが変わっても公開され続ける」状態になる (ゲートが効かない)。
+   * 黙って進めずに止め、migration を当ててもらう。
+   */
+  if ((row as { publish_status?: unknown }).publish_status == null) {
+    return {
+      ok: false, id: input.resultId, error: 'migration_required',
+      detail: '20261007000010 / 20261007000020 を適用してください',
+    };
+  }
+
+  let built: { vm: ReportVM; hash: string } | null = null;
+  let failure = '';
+  try {
+    const vm = buildReportVM({
+      ...FINGERPRINT_CONTEXT,
+      reportText: row.report ?? null,
+      checkup: (row.checkup_values ?? null) as LabFiles | null,
+      issuedOn: String(row.received_at ?? '').slice(0, 10),
+    });
+    built = { vm, hash: await reportFingerprint(vm) };
+  } catch (e) {
+    failure = e instanceof Error ? e.message : String(e);
+  }
+  // 紙面が組めないものは承認できない (何を承認したのか言えない)。
+  if (!built) {
+    return { ok: false, id: input.resultId, error: 'fingerprint_failed', detail: failure };
+  }
+
+  // ── ② 承認と指紋を**同じ 1 本の update** で書く ────────────────
   const approvedAt = new Date().toISOString();
   const { data, error } = await db(sb)
     .from('diagnosis_results')
@@ -239,22 +331,36 @@ export async function approveReport(
       approved_at: approvedAt,
       /** **生のメールアドレスは入れない。** `adminIdentity()` の HMAC digest だけ。 */
       approved_by: safeApprovedBy(input.approvedBy),
+      approved_report_hash: built.hash,
     })
     .eq('id', input.resultId)
     .eq('publish_status', PENDING)
     .eq('publish_rev', input.expectedRev)
-    .select('id, publish_status, approved_at');
+    .select('id, publish_status, approved_at, approved_report_hash');
 
   if (error) return { ok: false, id: input.resultId, error: 'db_failed', detail: error.message };
-  const row = (data ?? [])[0] as { publish_status?: string; approved_at?: string } | undefined;
-  if (!row) {
+  const saved = (data ?? [])[0] as
+    { publish_status?: string; approved_at?: string; approved_report_hash?: string } | undefined;
+  if (!saved) {
     /*
      * 0 行 = ①既に承認済 ②その間に再作成が入って rev が進んだ ③id が無い。
      * **どれでも「承認しなかった」**ので、画面は一覧を引き直してもう一度確認する。
      */
     return { ok: false, id: input.resultId, error: 'not_pending_or_changed' };
   }
-  return { ok: true, id: input.resultId, publishStatus: row.publish_status, approvedAt: row.approved_at };
+  return {
+    ok: true,
+    id: input.resultId,
+    publishStatus: saved.publish_status,
+    approvedAt: saved.approved_at,
+    approvedReportHash: saved.approved_report_hash ?? built.hash,
+    approved: {
+      sections: built.vm.audit.sections.length,
+      measurements: built.vm.audit.measurementCount,
+      topics: built.vm.audit.topicCount,
+      digestCards: built.vm.audit.digestCards,
+    },
+  };
 }
 
 /**
@@ -403,6 +509,8 @@ export async function recreateReport(
       publish_status: PENDING,
       approved_at: null,
       approved_by: null,
+      /** **承認した紙面の指紋も捨てる** (仕様書 §3.1)。再承認で改めて控える。 */
+      approved_report_hash: null,
       publish_rev: prevRev + 1,
     })
     .eq('id', input.resultId)
