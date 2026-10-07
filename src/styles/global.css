@@ -823,7 +823,8 @@
   border: 1px solid #C9D0D0; border-bottom-width: 2px; border-radius: 4px;
   background: #F7F8F8; color: #102B3A;                /* navy-800 */
   /* 和文の受け皿を必ず置く (Tailwind 既定の mono には無く、中国語フォントに落ちる)。 */
-  font-family: ui-monospace, SFMono-Regular, "BIZ UDGothic", "Hiragino Sans", "Noto Sans JP", monospace;
+  font-family: ui-monospace, SFMono-Regular, "BIZ UDGothic", "Hiragino Sans", "Noto Sans JP",
+    "Yu Gothic UI", "Noto Sans CJK JP", monospace;
   font-size: .85em; font-weight: 500;
 }
 .rp-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: .5rem; }

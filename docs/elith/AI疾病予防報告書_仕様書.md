@@ -1110,11 +1110,56 @@ PDF に**実際に埋め込まれた**フォント名を見て、中国語・韓
 **壊して落ちることを確認済み**: `mono` から和文を外すと
 「中国語・韓国語向けフォントが埋め込まれている: WenQuanYiZenHei」で落ちる。
 
+### 4.12.1 走りフッターだけが残っていた【確定・発注者指摘 2026-10-07】
+
+> 「**日本語が一部、中国語になっている。確認して**」（こちらが送った控えの PDF について）
+
+**2026-09-03 で塞いだつもりだった穴が 1 か所残っていた。** 上の箇条書きは
+「`.rp-kbd` と `@page` の走りフッターにも**同じ**受け皿を明示する」と書いているが、
+**実際の並びが `sans` / `mono` と同じになっていなかった**:
+
+| 宣言 | 2026-10-07 以前の末尾 | 欠けていた受け皿 |
+|---|---|---|
+| `fontFamily.sans` | … Meiryo, "Noto Sans CJK JP", sans-serif | （なし） |
+| `fontFamily.mono` | … "Yu Gothic UI", "Noto Sans CJK JP", monospace | （なし） |
+| `report.astro` の `FOOT_FONT` | … "Yu Gothic UI", **sans-serif** | **`"Noto Sans CJK JP"`** |
+| `global.css` の `.rp-kbd` | … "Noto Sans JP", **monospace** | **`"Yu Gothic UI"` / `"Noto Sans CJK JP"`** |
+
+**症状が「一部」だった理由**は、落ちていたのが**走りフッターの帯だけ**だったこと。
+`@page :first` は帯を出さないので**表紙だけ無事**で、2 ページ目以降の帯の和文
+（「AI疾病予防報告書｜〇〇様」）が中国字形になる。実測（この作業環境・21 ページ）:
+**2〜21 ページに `WenQuanYiZenHei` が埋め込まれ、1 ページ目には無い**。
+受け皿を足すと**埋め込みから完全に消える**（6 種・和文は NotoSansCJKjp のみ）。
+
+**発注者の Windows では BIZ UDGothic が当たるのでこの帯は正しく出ていた**
+（Windows 10 October 2018 Update 以降に標準搭載）。中国字形が出たのは
+**こちらが送った控えの PDF** のほうで、原因は下の検証環境。
+**ただし穴は穴**で、BIZ UDGothic も游ゴシックも無い環境（Android・Linux・
+古い Windows）では帯が中国字形になる。だから並びを揃えた。
+
+**`.rp-kbd` は `verify:print` の ⓪ では守れない** —
+保存手順は印刷ビューに出さない仕様（§4.4・`verify:screen` ②）なので、
+PDF に現れず検出対象にならない。並びを揃えたのは**規律の一貫性のため**で、
+機械の見張りは付いていない。
+
 ### 検証環境について
 
-この作業環境には和文フォントが IPAGothic しか無く、既定の `sans-serif` が
-**WenQuanYi Zen Hei に解決される**。そのままだと控えの PDF が中国字形になるので、
-**BIZ UDGothic（Google Fonts・SIL OFL）を入れて Windows と同じ見え方で確認している**。
+この作業環境には **`fontFamily.sans` / `mono` が名指しする和文フォントが 1 つも無く**
+（`fc-list :lang=ja` = IPAGothic / IPAPGothic / Unifont / WenQuanYi Zen Hei）、
+既定の `sans-serif` が **WenQuanYi Zen Hei に解決される**。
+そのままだと控えの PDF が**全文**中国字形になるので、**和文フォントを入れてから確認する**。
+
+- **入れるのは、既存のスタックが既に名指ししているもの**。新しい書体を足さない
+  （足すと「この環境でだけ直る」ことになり、本番の見え方を測れない）。
+  → `fonts-noto-cjk`（`"Noto Sans CJK JP"` = `sans` / `mono` の最後の受け皿）。
+- **BIZ UDGothic（Google Fonts）は取得できなかった** — `github.com/google/fonts/raw/…` が
+  プロキシに **403** で弾かれる（2026-10-07 実測）。
+  したがって**控えの PDF の字形は Noto Sans CJK JP**であって、
+  **発注者の Windows（BIZ UDGothic）と字形は同じではない**。
+  見るのは**組版（行長・級数・改ページ・ページ数）**で、**字形そのものの判断には使えない**。
+- **和文フォントが 1 つも無い状態で `verify:print` の ⓪ を「環境のせい」と流さない** —
+  ⓪ が落ちていると、**本当の指定漏れ（今回の走りフッター）がその陰に隠れる**。
+  実際この穴は、和文フォントを入れて ⓪ が通る状態にして初めて見えた。
 
 ## 4.10 改ページ・余白・ページ番号【確定・発注者指摘 2026-09-03】
 
