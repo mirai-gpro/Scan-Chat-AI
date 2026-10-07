@@ -129,6 +129,16 @@ export interface LiveRefs {
    * 本人の uid が出ていた。サーバ (`chat.astro`) が `viewerLinkQuery()` の値を渡す。
    */
   dashboardLinkQuery?: string;
+  /**
+   * **代理表示の path prefix** (`''` か `/admin-view/<ctx>`)。`dashboardLinkQuery` と対で
+   * サーバ (`chat.astro`) が `viewerPathPrefix()` の値を渡す。
+   *
+   * 代理表示は URL path だけが対象者を持つので、**素の `/dashboard` を書くと
+   * そのタブだけ代理表示から抜けて admin 本人のダッシュボードへ出る**
+   * (2026-10-07 の実障害と同型・正本
+   * `secure_shared_access_and_admin_impersonation_spec_20260930.md` §13.0)。
+   */
+  dashboardLinkPrefix?: string;
 }
 
 const SESSION_ID = 'default';
@@ -1501,7 +1511,7 @@ export async function initLiveController(refs: LiveRefs): Promise<void> {
     // テスト用途のため fire-and-forget (失敗してもUIは止めない)。
     void exportInterviewToS3({ answers, completedAt });
 
-    const dashUrl = `/dashboard${refs.dashboardLinkQuery ?? ''}`;
+    const dashUrl = `${refs.dashboardLinkPrefix ?? ''}/dashboard${refs.dashboardLinkQuery ?? ''}`;
 
     refs.questionText.innerHTML = `
       <div class="flex flex-col items-center gap-3 py-2">

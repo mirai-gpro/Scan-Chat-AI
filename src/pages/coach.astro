@@ -97,7 +97,7 @@ const initialGreeting = urgentAlert
       <AppIcon name="lock" size={32} class="text-slate-500" />
       <h2 class="text-base font-semibold">ユーザー指定が必要です</h2>
       <p class="text-xs text-slate-500">ダッシュボードから AI ヘルスコーチを開いてください。</p>
-      <a href="/dashboard" class="btn-primary mt-2">ダッシュボードへ</a>
+      <a href={`${linkPrefix}/dashboard${linkQuery}`} class="btn-primary mt-2">ダッシュボードへ</a>
     </main>
   )}
 
@@ -107,7 +107,7 @@ const initialGreeting = urgentAlert
       <h2 class="text-base font-semibold">AI疾病予防報告書が見つかりません</h2>
       <p class="text-xs text-slate-500">検査結果が表示されているかダッシュボードでご確認ください。</p>
       <a
-        href={`/dashboard${linkQuery}`}
+        href={`${linkPrefix}/dashboard${linkQuery}`}
         class="btn-primary mt-2"
       >ダッシュボードへ</a>
     </main>

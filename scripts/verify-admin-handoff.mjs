@@ -26,7 +26,7 @@
  * 【DB は要らない】スタブなので CI の A 層（静的）に置ける。
  */
 import { build } from 'esbuild';
-import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, readdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { webcrypto } from 'node:crypto';
 import { pathToFileURL } from 'node:url';
@@ -838,6 +838,150 @@ console.log('\n⑧ 受入条件の残り\n');
   eq('X-14 admin credential の Cookie 名', ident.ADMIN_COOKIE, 'welltect_admin_v');
   eq('X-15 pending の Cookie 名', imp.HANDOFF_PENDING_COOKIE, 'welltect_handoff_pending');
   eq('X-16 本人の Cookie 名（既存・変えない）', viewerMod.VIEWER_COOKIE, 'welltect_v');
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑬ 画面のリンクが prefix を落としていないか（**ここは静かに壊れる**）
+ *
+ * 【なぜ要るか】L-7 / L-8 は `viewerPathPrefix()` という**関数の戻り値**しか
+ * 見ていなかった。「各ページが実際にそれを使っているか」を見る検査が 1 本も
+ * 無く、**実際に 11 か所で付け忘れていた**（2026-10-07 の実障害）。
+ *
+ * 実害の形: 承認メニューの「確認」→ 代理表示で A さんの紙面を開き、その同じ
+ * タブで「PDF にして保存する」を押すと、飛び先が素の `/report?print=1` なので
+ * `middleware.ts`（`/admin-view/` 以外には触らない）を通らず、
+ * **admin 本人の、しかも未承認の報告書が PDF になっていた**。
+ * 仕様書 §13.0 が「admin が『A さんの画面のつもりで自分の画面を見る』のが
+ * 最悪の事故」と名指ししている形そのもの。
+ *
+ * 【見かた】コメントを落としたうえで、**文字列リテラルの先頭が内部ルートで
+ * 始まるもの**を拾う。prefix が付いていれば直前が `}`（`${linkPrefix}/report`）
+ * になるので、引用符の直後に `/report` が来るものだけが「素のパス」。
+ * 短い語の部分一致に頼らない = 言い換えでごまかせない。
+ *
+ * 【ALLOW には理由を書く】理由を書けないものは通さない。しかも ALLOW した行が
+ * 安全であり続けることを**別の検査で裏打ちする**（描いていないはずの
+ * コンポーネントが復活していないか / 既定値を上書きする呼び出しが在るか）。
+ * ════════════════════════════════════════════════════════════════════ */
+console.log('\n⑬ 画面のリンクが代理表示の prefix を落としていないか\n');
+{
+  /** 利用者向けの内部ルート。`/admin-view/<ctx>` を前に付けないと代理表示から抜ける。 */
+  const ROUTES = ['dashboard', 'report', 'result', 'trend', 'kit', 'scan', 'chat', 'coach', 'notices'];
+  const BARE = new RegExp(`(["'\`])(/(?:${ROUTES.join('|')}))(?![A-Za-z0-9_-])`, 'g');
+
+  /**
+   * **理由つきの ALLOW。** `file` と `needle`（その行に必ず含まれる文字列）で狙い撃つ。
+   * 行番号は使わない（1 行ずれるだけで検査が無言で緩むため）。
+   */
+  const ALLOW = [
+    // AppNav の「いま居るページ」マーカー。リンクではない（`href` に入らない）。
+    { file: '*', needle: 'current="/', why: 'AppNav の現在ページ判定。href ではない' },
+    // サインイン前・代理表示を抜ける導線。**ここは本物の `/dashboard` へ行くのが正しい。**
+    { file: 'src/pages/index.astro', needle: 'const target =', why: '素の `/` を `/dashboard` へ 302 する入口そのもの。viewer はまだ無い' },
+    { file: 'src/components/EmailPasswordAuth.astro', needle: 'SIGNUP_REDIRECT', why: 'サインアップ後の戻り先。認証前なので代理表示は存在しない' },
+    { file: 'src/components/EmailPasswordAuth.astro', needle: "url.pathname === '/'", why: '同上（サインイン後の遷移先の既定）' },
+    { file: 'src/components/GoogleOneTap.astro', needle: "url.pathname === '/'", why: '同上（Google サインイン後の遷移先の既定）' },
+    { file: 'src/components/ImpersonationBanner.astro', needle: 'window.location.replace', why: '「代理表示をやめる」。**抜けるのが目的**なので prefix を付けない' },
+    { file: 'src/components/ShareBanner.astro', needle: 'window.location.replace', why: '共有セッションを抜ける導線。同上' },
+    // 管理者だけに出るデバッグ欄。素の `?u=` で検体を切り替えるための切り分け導線。
+    { file: 'src/pages/dashboard.astro', needle: 'class="chip"', why: 'admin 専用デバッグ欄の検体切替。意図して素のパス' },
+    // dashboard.astro が必ず上書きする Props の既定値（下の L-15 が裏打ち）。
+    { file: 'src/components/dashboard/ProgressSection.astro', needle: 'detailHref =', why: 'Props の既定値。dashboard.astro が prefix 付きで必ず渡す（L-15）' },
+    { file: 'src/components/dashboard/KitProgressCard.astro', needle: 'detailHref =', why: 'Props の既定値。同上（L-15）' },
+    // 画面に描いていないコンポーネント（下の L-16 / L-17 が裏打ち）。
+    { file: 'src/components/dashboard/HealthInsightCard.astro', needle: '/chat', why: 'dashboard.astro で描いていない（L-16）' },
+    { file: 'src/components/dashboard/HealthCoachPreview.astro', needle: '/coach', why: 'どこからも import されていない（L-17）' },
+    { file: 'src/components/dashboard/TestHistoryList.astro', needle: '/result/', why: 'どこからも import されていない（L-17）' },
+  ];
+
+  /** 利用者向けのファイルだけを見る（`src/pages/admin/**` と API は対象外）。 */
+  const lsAstro = (dir) => {
+    let out = [];
+    for (const e of readdirSync(resolve(ROOT, dir), { withFileTypes: true })) {
+      if (e.isFile() && e.name.endsWith('.astro')) out.push(`${dir}/${e.name}`);
+    }
+    return out;
+  };
+  const FILES = [
+    ...lsAstro('src/pages'),
+    ...lsAstro('src/pages/result'),
+    ...lsAstro('src/components'),
+    ...lsAstro('src/components/dashboard'),
+    'src/scripts/chat/live-controller.ts',
+  ];
+
+  /** 行コメント・ブロックコメント・JSX コメントを落とす（文章中の `/report` を拾わない）。 */
+  const stripForLinkScan = (src) => src
+    .replace(/\{\/\*[\s\S]*?\*\/\}/g, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .split('\n')
+    .map((ln) => (/^\s*(\*|\/\/)/.test(ln) ? '' : ln.replace(/\/\/.*$/, '')))
+    .join('\n');
+
+  const hits = [];
+  for (const f of FILES) {
+    const lines = stripForLinkScan(read(f)).split('\n');
+    lines.forEach((ln, i) => {
+      if (!BARE.test(ln)) return;
+      BARE.lastIndex = 0;
+      const allowed = ALLOW.some((a) => (a.file === '*' || a.file === f) && ln.includes(a.needle));
+      if (!allowed) hits.push(`${f}:${i + 1} ${ln.trim().slice(0, 100)}`);
+    });
+  }
+  ok('L-12 **素の内部パスが 1 本も無い**（prefix を落としたリンクはそのタブだけ代理表示から抜ける）',
+    hits.length === 0, hits.join('\n    '));
+
+  // 検査そのものが空振りしていないこと（ALLOW を全部外せば必ず当たる = 走っている証拠）。
+  const sanity = [];
+  for (const f of FILES) {
+    const lines = stripForLinkScan(read(f)).split('\n');
+    for (const ln of lines) { if (BARE.test(ln)) sanity.push(f); BARE.lastIndex = 0; }
+  }
+  ok('L-13 検査が実際に走っている（ALLOW 抜きなら検出がある）', sanity.length > 0);
+
+  // **prefix を使うべきページが全部使っていること。** import 漏れを拾う。
+  const needPrefix = [
+    'src/pages/dashboard.astro', 'src/pages/report.astro', 'src/pages/kit.astro',
+    'src/pages/trend.astro', 'src/pages/scan.astro', 'src/pages/chat.astro',
+    'src/pages/coach.astro', 'src/pages/notices.astro', 'src/pages/result/[id].astro',
+  ];
+  const noPrefix = needPrefix.filter((f) => !/viewerPathPrefix\(/.test(read(f)));
+  ok('L-14 利用者向けページは全部 `viewerPathPrefix()` を引いている', noPrefix.length === 0, noPrefix.join(', '));
+
+  // ALLOW の裏打ち ①: Props の既定値は呼び出し側が prefix 付きで上書きする。
+  const dash = code('src/pages/dashboard.astro');
+  ok('L-15 `detailHref` を prefix 付きで渡している（既定値 `/kit` に落ちない）',
+    /detailHref=\{`\$\{linkPrefix\}\/kit/.test(dash), 'dashboard.astro が detailHref を渡していない');
+
+  // ALLOW の裏打ち ②: 描いていないコンポーネントが復活していないか。
+  // **コメントアウトを外したら落ちる** = そのとき prefix を足す判断を強制する。
+  for (const c of ['HealthInsightCard', 'SituationalCards']) {
+    ok(`L-16 ${c} は画面に描かれていない（復活させたら prefix を足す）`,
+      !new RegExp(`^(?!\\s*(\\*|//|\\{/\\*)).*<${c}[\\s/>]`, 'm').test(stripForLinkScan(read('src/pages/dashboard.astro'))),
+      `${c} が描かれている。リンクの prefix を足してから ALLOW を外すこと`);
+  }
+  // ALLOW の裏打ち ③: 未参照のコンポーネントが import されていないか。
+  for (const c of ['HealthCoachPreview', 'TestHistoryList', 'MetricCard']) {
+    const refs = execSync(`grep -rl "${c}" src/pages src/components || true`, { cwd: ROOT })
+      .toString().trim().split('\n').filter((x) => x && !x.endsWith(`${c}.astro`));
+    ok(`L-17 ${c} はどこからも import されていない（使うなら prefix を足す）`,
+      refs.length === 0, refs.join(', '));
+  }
+
+  // 問診完了画面のリンクは**サーバから prefix を受け取る**（uid から組み立てない）。
+  ok('L-18 `live-controller` は `dashboardLinkPrefix` を使う',
+    /dashboardLinkPrefix/.test(read('src/scripts/chat/live-controller.ts')));
+  ok('L-19 `chat.astro` が `dashboardLinkPrefix` を渡している',
+    /data-dashboard-link-prefix=\{linkPrefix\}/.test(read('src/pages/chat.astro'))
+    && /dashboardLinkPrefix,/.test(read('src/pages/chat.astro')));
+
+  // 報告書の「PDF にして保存する」= 実害が出た導線。**ここだけは名指しで固定する。**
+  const rep = code('src/pages/report.astro');
+  ok('L-20 **報告書の `q()` が prefix を前に付ける**（PDF ボタンの飛び先。2026-10-07 の実障害）',
+    /return s \? `\$\{linkPrefix\}\/report\?\$\{s\}` : `\$\{linkPrefix\}\/report`/.test(rep),
+    'q() が素の /report を返している');
+  ok('L-21 PDF ボタンの href 書き換えが素のパスへ落ちない（取れなければ何もしない）',
+    !/getAttribute\('href'\) \?\? '\/report'/.test(rep));
 }
 
 console.log('');

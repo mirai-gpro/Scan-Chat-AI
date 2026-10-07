@@ -93,6 +93,7 @@ const linkPrefix = viewerPathPrefix(viewer);
     id="chat-main"
     class="flex flex-1 flex-col gap-3 px-5 pt-3 pb-4"
     data-dashboard-link-query={linkQuery}
+    data-dashboard-link-prefix={linkPrefix}
     data-interview-allowed={interviewAllowed ? '1' : '0'}
   >
     {!interviewAllowed && (
@@ -397,9 +398,13 @@ const linkPrefix = viewerPathPrefix(viewer);
     }
     // ダッシュボードへ戻るリンクのクエリ。**uid から組み立てない** (2026-09-29)。
     const dashboardLinkQuery = main?.dataset.dashboardLinkQuery || '';
+    // **代理表示の prefix も対で渡す。** これが無いと問診完了画面の「ダッシュボードへ」で
+    // そのタブだけ代理表示から抜ける (2026-10-07 の実障害と同型)。
+    const dashboardLinkPrefix = main?.dataset.dashboardLinkPrefix || '';
 
     void initLiveController({
       dashboardLinkQuery,
+      dashboardLinkPrefix,
       log: $('chat-log'),
       status: $('chat-status'),
       resetBtn: $<HTMLButtonElement>('reset-btn'),

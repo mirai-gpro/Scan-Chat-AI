@@ -64,7 +64,7 @@ function noticesHref(overrides: Record<string, string | null>): string {
     else p.set(k, v);
   }
   const qs = p.toString();
-  return qs ? `/notices?${qs}` : '/notices';
+  return qs ? `${linkPrefix}/notices?${qs}` : `${linkPrefix}/notices`;
 }
 
 const importantTitle = data ? `${data.userName}への重要なお知らせ` : '重要なお知らせ';

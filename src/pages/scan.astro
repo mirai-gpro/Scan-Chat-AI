@@ -73,7 +73,7 @@ const MAX_ROUNDS = 5;
  */
 const roundsDone = uploads.filter((a) => a.test_type === 'health_checkup').length;
 const canAddMore = multiYear && roundsDone < MAX_ROUNDS;
-const dashUrl = `/dashboard${linkQuery}`;
+const dashUrl = `${linkPrefix}/dashboard${linkQuery}`;
 ---
 
 <BaseLayout title="AI スキャン | Welltect" width="app">
@@ -200,7 +200,7 @@ const dashUrl = `/dashboard${linkQuery}`;
           <ul class="space-y-1.5">
             {uploads.slice(0, 5).map((a) => {
               const tt = testTypeLabel(a.test_type);
-              const href = `/result/${a.id}${linkQuery}`;
+              const href = `${linkPrefix}/result/${a.id}${linkQuery}`;
               return (
                 <li>
                   <a
@@ -586,7 +586,7 @@ const dashUrl = `/dashboard${linkQuery}`;
             <AppIcon name="add" size={20} /> 別の年度を続けて登録する
           </button>
         )}
-        <a href="/chat" class="btn-secondary flex items-center justify-center gap-1.5">
+        <a href={`${linkPrefix}/chat${linkQuery}`} class="btn-secondary flex items-center justify-center gap-1.5">
           <AppIcon name="interview" size={20} /> AI 問診へ進む
         </a>
         <a href={dashUrl} class="text-sm font-medium text-brand-700 hover:underline">
@@ -630,7 +630,7 @@ const dashUrl = `/dashboard${linkQuery}`;
               <AppIcon name="add" size={20} /> 別の年度を続けて登録する
             </button>
           )}
-          <a href="/chat" class="btn-secondary flex items-center justify-center gap-1.5">
+          <a href={`${linkPrefix}/chat${linkQuery}`} class="btn-secondary flex items-center justify-center gap-1.5">
             <AppIcon name="interview" size={20} /> AI 問診へ進む
           </a>
           <a href={dashUrl} class="text-sm font-medium text-brand-700 hover:underline">
@@ -653,7 +653,7 @@ const dashUrl = `/dashboard${linkQuery}`;
       </div>
       <div class="mt-auto flex w-full flex-col gap-2">
         <button id="error-retry" class="btn-primary w-full !py-4 text-lg">再試行</button>
-        <a href={`/${linkQuery}`} class="btn-secondary text-center">トップへ戻る</a>
+        <a href={`${linkPrefix}/${linkQuery}`} class="btn-secondary text-center">トップへ戻る</a>
       </div>
     </section>
   </main>

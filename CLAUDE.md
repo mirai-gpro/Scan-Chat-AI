@@ -1384,6 +1384,30 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     `/api/admin/report-approval/{list,approve,recreate}`。
     **「確認」は既存の代理表示 (handoff) で本番の `/report` をそのまま開く** —
     管理画面に報告書の表示処理を複製しない (「管理画面では正常でも本番では違う」を作らない)。
+  - **【代理表示から抜けるリンクが 11 か所あった 2026-10-07・発注者指摘「PDF ボタンで
+    氏名が異なる PDF が作成される」】正本
+    `docs/specs/secure_shared_access_and_admin_impersonation_spec_20260930.md` §13.0.1。**
+    承認画面の「確認」で A さんの紙面を HTML で確認したタブで
+    「PDF にして保存する」を押すと、**admin 本人の、しかも未承認の報告書が PDF になっていた**
+    (氏名だけでなく中身ごと別人)。
+    - **真因 = `report.astro` の `q()` が `linkPrefix` を使っていなかった**。代理表示は
+      URL path の `/admin-view/<ctx>` だけが対象者を持ち (`?u=` は 2026-09-30 に撤去)、
+      `middleware.ts` は `/admin-view/` 以外に 1 バイトも触らないので、素のパスを書くと
+      **そのタブだけ代理表示から抜けて admin 本人へ戻る**。仕様書 §13.0 が
+      「admin が『A さんの画面のつもりで自分の画面を見る』のが最悪の事故」と
+      名指ししている形そのもの。
+    - **承認そのものは汚染されていない** — `approveReport` は `resultId` で引いた行から
+      閲覧者に依らない `FINGERPRINT_CONTEXT` で VM を組んで指紋を取る
+      (`report-approval.ts:283`)。**誤った報告書を承認した、ということは起きていない。**
+    - **同じ付け忘れが 11 か所**: `report.astro` (`q()` ×2 導線 / client script の既定値 /
+      がんリスク結果) / `result/[id].astro` ×2 / `scan.astro` ×5 / `notices.astro` /
+      `coach.astro` ×2 / `chat.astro`+`live-controller.ts` (`dashboardLinkPrefix` を対で渡す)。
+      **一般利用者の出力は 1 文字も変わらない** (`linkPrefix` が `''`・実測で確認)。
+    - **なぜ検査をすり抜けたか**: L-7 / L-8 は `viewerPathPrefix()` という**関数の戻り値**
+      しか見ておらず、**各ページが実際に使っているかを見る検査が 1 本も無かった**。
+      → `verify:admin-handoff` に **⑬ L-12〜L-21** を追加 (コメントを落として
+      文字列リテラルの先頭が内部ルートのものを拾う・**ALLOW は理由つき**・
+      ALLOW した行の安全を別の検査で裏打ちする)。**退行注入 11 種**とも名指しで落ちる。
   - 検証 `npm run verify:report-approval` (A 層)・**退行注入 15 種**とも名指しで落ちることを確認済み
     (うち 2 件はこの注入で検査の穴が見つかり直した)。
   - **【本番反映の順序は必須・仕様書 §13.1】手順書
