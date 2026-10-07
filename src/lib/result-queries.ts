@@ -11,7 +11,7 @@
  */
 
 import { getServerSupabase } from './supabase';
-import { isApprovedRow } from './report-approval';
+import { isApprovedRow } from './report-gate';
 import { getOriginalSignedUrl } from './originals-storage';
 import type { TestArtifact, DiagnosisResult } from '../types/supabase';
 import { findSection, type ElithSection } from './elith-parser';

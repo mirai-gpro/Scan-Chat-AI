@@ -2,7 +2,7 @@ import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../lib/viewer';
 import { getServerSupabase } from '../../lib/supabase';
 import { getOriginalSignedUrl } from '../../lib/originals-storage';
-import { isApprovedRow } from '../../lib/report-approval';
+import { isApprovedRow } from '../../lib/report-gate';
 
 export const prerender = false;
 

@@ -21,8 +21,8 @@
  * だから**実物を transpile して動かす**。Supabase / S3 / 生成本体だけスタブに
  * 差し替えるので、DB も鍵も要らない (verify:elith-intake と同じ流儀)。
  */
-import { readFileSync, writeFileSync, mkdirSync, rmSync } from 'node:fs';
-import { resolve } from 'node:path';
+import { readFileSync, writeFileSync, mkdirSync, rmSync, existsSync } from 'node:fs';
+import { resolve, dirname } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
 const read = (p) => readFileSync(resolve(ROOT, p), 'utf8');
@@ -121,14 +121,24 @@ export const readFolderMaterial = async (folder, files) => { __read.push({ folde
       .replace(/from '\.\/report-adapter'/g, "from './ra-adapter.mjs'")
       .replace(/from '\.\/report-model'/g, "from './ra-model.mjs'")));
   writeFileSync(resolve(CACHE, 'ra-model.mjs'), 'export {};\n');
+  /*
+   * `report-gate` は **leaf** (report-fingerprint までしか引かない)。
+   * スタブにせず実物を transpile する — ユーザー向けの判定そのものを動かす。
+   */
+  writeFileSync(resolve(CACHE, 'report-gate.mjs'),
+    js(read('src/lib/report-gate.ts')
+      .replace(/from '\.\/report-fingerprint'/g, "from './report-fingerprint.mjs'")
+      .replace(/from '\.\/report-model'/g, "from './ra-model.mjs'")));
 
   const body = js(read('src/lib/report-approval.ts')
     .replace(/from '\.\/report-adapter'/g, "from './ra-adapter.mjs'")
     .replace(/from '\.\/report-model'/g, "from './ra-model.mjs'")
     .replace(/from '\.\/report-fingerprint'/g, "from './report-fingerprint.mjs'")
     .replace(/from '\.\/elith-intake'/g, "from './ra-intake.mjs'")
+    .replace(/from '\.\/report-gate'/g, "from './report-gate.mjs'")
     .replace(/from '\.\/s3'/g, "from './ra-s3.mjs'"));
   if (!/ra-adapter/.test(body) || !/ra-intake/.test(body) || !/ra-s3/.test(body)
+      || !/report-gate\.mjs/.test(body)
       || !/report-fingerprint\.mjs/.test(body)) {
     fails.push('verify: import の差し替えに失敗 (import 文の形が変わった)');
   }
@@ -573,7 +583,7 @@ console.log('\n⑧ ユーザー向け取得経路の承認ゲート\n');
   ok('  既定は false (引数を渡さない呼び出しは承認済だけ)',
     /includeUnapprovedReport = false/.test(d));
   ok('**承認状態と指紋の合成は 1 本だけ** (各経路で組み直さない)',
-    /export async function isPubliclyVisibleRow/.test(code('src/lib/report-approval.ts'))
+    /export async function isPubliclyVisibleRow/.test(code('src/lib/report-gate.ts'))
     && !/hashGateOk/.test(q) && !/hashGateOk/.test(d),
     '表示経路が hashGateOk を直接呼んでいる');
 
@@ -602,6 +612,58 @@ console.log('\n⑧ ユーザー向け取得経路の承認ゲート\n');
     /loadDashboard\(u, viewer\.origin, viewer\.isAdmin\)/.test(code('src/pages/dashboard.astro')));
   ok('**CSS / JS で隠していない** (display:none で未承認を隠す実装を作らない)',
     !/pending[\s\S]{0,40}display:\s*none/i.test(read('src/pages/report.astro')));
+
+  /*
+   * ══════════════════════════════════════════════════════════════════
+   * **ユーザー経路から AWS SDK へ静的に届かないこと。**
+   * ══════════════════════════════════════════════════════════════════
+   * 実害 (2026-10-07): ユーザー向けの判定を `report-approval.ts` に置いたまま
+   * `elith-report-queries` / `dashboard-queries` が import した結果、
+   * **再作成のための `elith-intake` → `s3` → `@aws-sdk/client-s3` が
+   * ダッシュボードと報告書の SSR グラフに入った** (この検査の trace で実測。
+   * 承認機能を入れる前は 3 経路とも届いていなかった)。関数のサイズと
+   * コールドスタートに効くのに、画面はまったく正常に見える = 静かに壊れる。
+   * → ユーザー向けの判定は leaf の `report-gate.ts` が持つ。**在処を戻すと
+   * ここが落ちる**ので、気づかないまま SDK が混ざり込むことはない。
+   */
+  const reaches = (entry) => {
+    const seen = new Set();
+    const walk = (file, trail) => {
+      if (seen.has(file)) return null;
+      seen.add(file);
+      let src;
+      try { src = readFileSync(file, 'utf8'); } catch { return null; }
+      const re = /(?:^|\n)\s*import\s+(?:type\s+)?[^;]*?from\s+'([^']+)'/g;
+      let m;
+      while ((m = re.exec(src))) {
+        // `import type` は実行時に残らないので辿らない。
+        if (/import\s+type\s/.test(m[0])) continue;
+        const spec = m[1];
+        if (spec === '@aws-sdk/client-s3') return [...trail, file, spec];
+        if (!spec.startsWith('.')) continue;
+        for (const ext of ['.ts', '.astro', '/index.ts']) {
+          const abs = resolve(dirname(file), spec + ext);
+          if (existsSync(abs)) {
+            const hit = walk(abs, [...trail, file]);
+            if (hit) return hit;
+            break;
+          }
+        }
+      }
+      return null;
+    };
+    return walk(resolve(ROOT, entry), []);
+  };
+  for (const entry of [
+    'src/pages/report.astro',
+    'src/pages/dashboard.astro',
+    'src/lib/elith-report-queries.ts',
+    'src/lib/dashboard-queries.ts',
+  ]) {
+    const hit = reaches(entry);
+    ok(`${entry} は AWS SDK を静的に引かない`, hit === null,
+      hit ? hit.map((x) => x.replace(ROOT + '/', '')).join(' → ') : '');
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════
@@ -621,7 +683,22 @@ console.log('\n⑨ API / 管理画面\n');
   const ap = code('src/pages/api/admin/report-approval/approve.ts');
   ok('承認 API は digest を自分で作る (中継に作らせない)', /adminIdentity\(/.test(ap));
 
-  const relay = code('/home/user/wellfort-site/src/pages/api/admin/report-approval/[action].ts'.replace(ROOT + '/', ''));
+  /*
+   * ここから下は **wellfort-site がこの作業ツリーに在るときだけ** 見る。
+   * CI では Scan-Chat-AI しか checkout されないので、無ければ飛ばす
+   * (画面側の回帰は wellfort-site 自身の verify が見る)。
+   * **「見られなかった」を「合格」と混同しない**ので、飛ばしたことは必ず出す。
+   */
+  const WELLFORT = resolve(ROOT, '..', 'wellfort-site');
+  const RELAY = resolve(WELLFORT, 'src/pages/api/admin/report-approval/[action].ts');
+  const PAGE = resolve(WELLFORT, 'src/pages/admin/report-approval.astro');
+  const MENU = resolve(WELLFORT, 'src/components/AdminLayout.astro');
+  if (!existsSync(RELAY) || !existsSync(PAGE) || !existsSync(MENU)) {
+    console.log('  — wellfort-site が隣に無いので中継と管理画面は飛ばす (向こうの repo が見る)');
+  } else {
+  const wfRead = (abs) => readFileSync(abs, 'utf8');
+  const wfCode = (abs) => wfRead(abs).split('\n').filter((ln) => !/^\s*(\*|\/\/|\/\*)/.test(ln)).join('\n');
+  const relay = wfCode(RELAY);
   ok('中継が admin を確認している', /verifyAdmin\(request\)/.test(relay));
   ok('中継の action は allow-list', /ALLOWED_GET|ALLOWED_POST/.test(relay));
   ok('中継はサーバ検証済みの email だけを送る',
@@ -630,7 +707,7 @@ console.log('\n⑨ API / 管理画面\n');
   ok('中継が body を素通ししない', /const payload: Record<string, unknown> = \{ resultId \}/.test(relay));
   ok('**鍵をブラウザへ出さない**', !/PUBLIC_SCAN_CHAT_AI/.test(relay));
 
-  const page = read('/home/user/wellfort-site/src/pages/admin/report-approval.astro');
+  const page = wfRead(PAGE);
   ok('管理画面は 1 枚 (未承認/承認済 の切替)', /ra-tab-pending/.test(page) && /ra-tab-approved/.test(page));
   ok('行にチェックボックスがある', /ra-pick/.test(page));
   ok('確認・承認・再作成のボタンがある',
@@ -647,7 +724,8 @@ console.log('\n⑨ API / 管理画面\n');
     /hashState === 'mismatch'/.test(page) && /紙面が変わった/.test(page));
   ok('  まとめても出す', /hashState === 'mismatch'; \}\).length/.test(page));
   ok('  公開中の行には「公開中」と出す', /hashState === 'match'/.test(page) && /公開中/.test(page));
-  ok('メニューに載っている', /report-approval/.test(read('/home/user/wellfort-site/src/components/AdminLayout.astro')));
+  ok('メニューに載っている', /report-approval/.test(wfRead(MENU)));
+  }
 }
 
 /* ══════════════════════════════════════════════════════════════════════

@@ -10,7 +10,7 @@
  */
 
 import { getServerSupabase } from './supabase';
-import { isApprovedRow } from './report-approval';
+import { isApprovedRow } from './report-gate';
 import { extractMetricCards, extractUrgentAlert, type ElithSection } from './elith-parser';
 import { AI_PREDICTION_REPORT_LABEL } from './display-names';
 

@@ -40,13 +40,18 @@ import {
 } from './elith-intake';
 import { isS3Configured, listObjects } from './s3';
 import {
-  FINGERPRINT_CONTEXT, hashGateOk, hashState, reportFingerprint,
+  FINGERPRINT_CONTEXT, hashState, reportFingerprint,
   type FingerprintRow, type HashState,
 } from './report-fingerprint';
+import { PENDING, APPROVED } from './report-gate';
 
-/** 公開状態。**この 2 つだけ** (migration の CHECK と一致させる)。 */
-export const PENDING = 'pending';
-export const APPROVED = 'approved';
+/*
+ * 公開状態と**ユーザー向けの判定は `report-gate.ts` (leaf) が持つ**。
+ * このモジュールは再作成のため `elith-intake` → `s3` → AWS SDK を静的に引くので、
+ * ユーザー取得経路がここを import すると**ダッシュボードの SSR グラフに
+ * AWS SDK が入る** (実測で入った)。判定を 2 つ持たないよう、ここは再 export だけ。
+ */
+export { PENDING, APPROVED, isApprovedRow, isPubliclyVisibleRow } from './report-gate';
 
 /** 一覧に出す 1 行。**氏名は含めない** — 識別は uid と受領日で行う。 */
 export interface ReportApprovalRow {
@@ -95,38 +100,6 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 /** `diagnosis_results.id` として受け付ける形。**それ以外は DB へ渡さない。** */
 export function isResultId(v: unknown): v is string {
   return typeof v === 'string' && UUID_RE.test(v.trim());
-}
-
-/**
- * **ユーザーに見せてよい行か。**
- *
- * 【列が無い環境は approved 扱いにする】migration 適用前にアプリが出ても
- * **公開中の報告書を消さない**ため (CLAUDE.md の migration 規約では DB が先だが、
- * 順序が入れ替わったときに利用者の画面が落ちる方が重い)。
- * 列が無ければ `pending` の行も存在しないので、これで未承認が漏れることはない。
- */
-export function isApprovedRow(row: { publish_status?: unknown } | null | undefined): boolean {
-  if (!row) return false;
-  const v = (row as { publish_status?: unknown }).publish_status;
-  return v == null || v === APPROVED;
-}
-
-/**
- * **ユーザーへ出してよい行か (唯一の合成ゲート)。**
- *
- * 承認状態 (`publish_status`) と**承認した紙面の指紋**の両方を見る (仕様書 §8)。
- * 指紋だけを別に見る実装を各経路へ散らすと、1 か所で絞り忘れても他が正しければ
- * 画面は正常に見える。**判定はここ 1 本**。
- *
- * @param vm 既に組み上がっている紙面 (表示経路はこれを渡す = 二度組まない)。
- *           指紋は閲覧者の文脈に依存しないので、本人の文脈で組んだ VM を渡してよい。
- */
-export async function isPubliclyVisibleRow(
-  row: { publish_status?: unknown } & FingerprintRow,
-  vm?: ReportVM,
-): Promise<boolean> {
-  if (!isApprovedRow(row)) return false;
-  return hashGateOk(row, vm);
 }
 
 /**

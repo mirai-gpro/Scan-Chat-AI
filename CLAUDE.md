@@ -1289,6 +1289,13 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     表示時に一致しなければ公開しない** (migration `20261007000020`)。
     報告書そのものは保存しない・版も持たない (**控えるのは 64 文字 1 本だけ**)。
     実装は `src/lib/report-fingerprint.ts` 1 本で、**承認・一覧・表示が同じ関数を呼ぶ**。
+    - **ユーザー向けの判定 (`isApprovedRow` / `isPubliclyVisibleRow`) は leaf の
+      `src/lib/report-gate.ts` が持つ。`report-approval.ts` に置かない** — あちらは
+      再作成のため `elith-intake` → `s3` → `@aws-sdk/client-s3` を**静的に**引くので、
+      ユーザー経路が import すると **`/report` と `/dashboard` の SSR グラフに AWS SDK が
+      入る** (2026-10-07 に実測して是正。入れる前は 3 経路とも届いていなかった)。
+      関数のサイズとコールドスタートに効くのに**画面は正常に見える**ので、
+      `verify:report-approval` が import を辿って見張る。
     - **指紋の対象 = 生成ロジックが作る部分だけ**。受領 JSON・app_config
       (`report.sections.*`)・コードの定数・`cover.testedOn`/`issuedOn` は**含む**。
       **閲覧者ごとに注入される値は除外** (`cover.name` / `cycleSeq` /
