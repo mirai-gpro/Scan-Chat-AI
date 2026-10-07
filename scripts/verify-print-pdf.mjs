@@ -28,6 +28,13 @@ const DPI = 40, MM = DPI / 25.4;
 const MARGIN_TOP_MM = 16, MARGIN_BOTTOM_MM = 14;
 /** 本文領域がこれを下回るページは「改ページの取りこぼし」とみなす。 */
 const MIN_FILL = 50;
+/*
+ * **ページ数の上限** (発注者指示 2026-10-07・spec §4.3.7)。
+ * 印刷だけ 行長 38em → 45em / 左右 8.1% → 5% / 出典 13px → 11px にして
+ * **タイプ1 = 28 ページ (実測・直前は 29)**。ここが増えたら横幅の指定が戻ったか、
+ * 紙面に何かが足されたかなので、気づけるように上限を置く (実測 + 余裕 2)。
+ */
+const MAX_PAGES = 30;
 
 for (const bin of ['pdftoppm', 'pdftotext']) {
   try { execSync(`command -v ${bin}`, { stdio: 'ignore' }); } catch {
@@ -139,6 +146,16 @@ console.log(`${thin.length === 0 ? '✓' : '✗'} 改ページの取りこぼし
 if (thin.length) {
   fails.push(`スカスカのページ: ${thin.map((r) => `p${r.page}=${r.fill}%`).join(' ')}`
     + ' — 大きい塊に break-inside: avoid が掛かっていないか');
+}
+
+// ── ④ ページ数 ──────────────────────────────────────────────
+{
+  const ok = rows.length <= MAX_PAGES;
+  console.log(`${ok ? '✓' : '✗'} ページ数        ${rows.length} ページ (上限 ${MAX_PAGES})`);
+  if (!ok) {
+    fails.push(`${rows.length} ページ — 上限 ${MAX_PAGES} を超えた。`
+      + '印刷の行長 (45em) と左右余白 (PRINT_SIDE_PAD) が戻っていないか見る');
+  }
 }
 
 const bleed = rows.filter((r) => r.page > 1 && r.edgeInk);

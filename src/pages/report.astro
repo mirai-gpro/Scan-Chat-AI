@@ -181,12 +181,32 @@ const FOOT_FONT = 'font-family: system-ui, "BIZ UDGothic", "Hiragino Sans", "Not
   + ' "Yu Gothic UI", sans-serif; font-size: 9pt; color: #55636A;';
 const footLeft = cssStr(`${AI_PREVENTION_REPORT_LABEL}｜${vm.cover.name}`);
 const footRight = cssStr(formatJpDate(vm.cover.issuedOn) || vm.cover.issuedOn);
+/*
+ * **印刷の左右余白 (発注者指示 2026-10-07・spec §4.3.7)**。
+ *
+ * 画面の紙面は `.rp-inner` が 8.1% (見本 p1 の本文左端の実測) を持つが、
+ * **印刷だけ 5% に詰めて本文と表の横幅を広げる** = ページ数削減の本体。
+ * A4 210mm なら 本文領域 176mm (665px) → **189mm (714px)**。
+ *
+ * **ここ 1 か所で持つ理由**: 同じ値を `@page` の走りフッターの `margin-left/right`
+ * にも使う。別々に書くと**帯だけが本文とずれる** (フッターは CSS 変数を読めないので
+ * 値を文字列で埋める必要がある)。だから紙の余白に関わる 2 か所を同じ定数から出す。
+ */
+const PRINT_SIDE_PAD = '5%';
+
 const pageCss = `
 @page {
   size: A4;
-  /* 左右は紙面側の余白 (.rp-inner の 8.1%) が持つので 0。上下だけここで確保する。 */
+  /* 左右は紙面側の余白 (印刷時の .rp-inner = ${PRINT_SIDE_PAD}) が持つので 0。上下だけここで確保する。 */
   margin: 16mm 0 14mm;
 }
+/*
+ * 印刷だけ本文の左右を詰める (画面の 8.1% は触らない)。
+ * **表紙 (.rp-cover) も同じ値に揃える** — 本文だけ詰めると表紙の文字が
+ * 2 ページ目以降より内側に寄って、1 ページ目だけ左端が食い違う。
+ */
+.rp-plain .rp-inner,
+.rp-plain .rp-cover { padding-left: ${PRINT_SIDE_PAD}; padding-right: ${PRINT_SIDE_PAD}; }
 /* 表紙は teal の帯を紙の端まで出す (見本 p1)。 */
 @page :first { margin-top: 0; }
 
@@ -198,9 +218,9 @@ const pageCss = `
 @page {
   /* 帯には氏名 (和文) が入る。**和文の受け皿を明示する** — 既定任せにすると
      環境によって中国語フォントに落ちる (2026-09-03 の実測)。 */
-  @bottom-left   { content: ${footLeft};  ${FOOT_FONT} margin-left: 8.1%; }
+  @bottom-left   { content: ${footLeft};  ${FOOT_FONT} margin-left: ${PRINT_SIDE_PAD}; }
   @bottom-center { content: counter(page) " / " counter(pages); ${FOOT_FONT} }
-  @bottom-right  { content: ${footRight}; ${FOOT_FONT} margin-right: 8.1%; }
+  @bottom-right  { content: ${footRight}; ${FOOT_FONT} margin-right: ${PRINT_SIDE_PAD}; }
 }
 /* 表紙には番号も帯も振らない (見本 p1 も帯を持たない)。 */
 @page :first {
@@ -420,7 +440,7 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
             ))}
           </>
         ))}
-        <p class="mt-0.5 font-mono text-[13px] text-slate-600">{leadCard.source}</p>
+        <p class="rp-src mt-0.5 font-mono text-slate-600">{leadCard.source}</p>
       </section>
     )}
 
@@ -544,8 +564,12 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
                 <AppIcon name="next" size={18} class="shrink-0 text-brand-600" />
               </a>
             ) : card.source ? (
-              /* 13px 以上にする。11px は禁止事項「12px 以下を作らない」に触れていた。 */
-              <p class="mt-0.5 font-mono text-[13px] text-slate-600">{card.source}</p>
+              /*
+                級数は `.rp-src` (global.css) が持つ — **画面 13px / 印刷 11px**。
+                画面を 13px 以上に保つのは禁止事項「12px 以下を作らない」のため。
+                印刷だけ下げるのは発注者指示 2026-10-07 (ページ数削減)。
+              */
+              <p class="rp-src mt-0.5 font-mono text-slate-600">{card.source}</p>
             ) : null}
           </article>
         ))}

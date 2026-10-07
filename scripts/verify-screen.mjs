@@ -28,13 +28,19 @@ import { chromium, devices } from 'playwright';
 
 const BASE = process.env.VERIFY_URL ?? 'http://localhost:4321';
 const EXEC = process.env.CHROMIUM_PATH ?? '/opt/pw-browsers/chromium';
-/** 本文の行長上限。`global.css` の `.report-prose { max-width: 38em }` × 16px。 */
-// 行長の上限 = 45em (16px * 45)。印刷 (`?print=1`) だけは 38em = 608px に据え置き。
+// 行長の上限 = 45em (16px * 45)。**印刷も同じ 45em まで使う** (発注者指示 2026-10-07)。
 const MAX_PROSE = 720;
 // 紙面の上限 = 62.5rem。器がこれより狭い端末では発火しない (スマホ・タブレット)。
 const MAX_SHEET = 1000;
-// 印刷の行長。ここが動くと紙面のページ割りが変わる (verify:print の前提) ので別に見張る。
-const PRINT_PROSE = 608;
+/*
+ * **印刷の行長の下限** (発注者指示 2026-10-07・spec §4.3.7)。
+ * 旧裁定の 38em = 608px に戻ったら落とす。これが戻るとページ数が増えるのに
+ * **画面はまったく正常に見える**ので、人の目では守れない。
+ * 1280px のビューポートでは器が広いので 45em (720px) が当たる。
+ */
+const PRINT_PROSE_MIN = 609;
+/** 印刷の出典の級数。画面 13px / 紙 11px (ページ数削減・同指示)。 */
+const SRC_PRINT = 11, SRC_SCREEN = 13;
 
 const SIZES = [
   [1440, 900, 'PC 1440'],
@@ -348,23 +354,59 @@ for (const [width, height, label] of SIZES) {
   await ctx.close();
 }
 
-// ── ③′ 印刷の行長は 38em に据え置き ───────────────────────────
+// ── ③′ 印刷は横幅を広く・出典は小さく ─────────────────────────
 /*
- * 画面は 45em にしたが、**紙 (`?print=1`) は 38em のまま**にしてある (裁定 2026-09-05)。
- * ここが一緒に動くと A4 のページ割りが変わり、`verify:print` が測った
- * 「30 ページ / 使用率 96.5%」の前提が黙って崩れる。だから別に見張る。
+ * **発注者指示 2026-10-07 (spec §4.3.7)**: 紙のページ数を減らすため、
+ * 印刷だけ ①本文の行長を 38em → 45em ②出典の級数を 13px → 11px にした。
+ * **2026-09-05 の「印刷は 38em に据え置く」と禁止事項「12px 以下を作らない」を、
+ * 発注者が明示的に上書きしたもの。**
+ *
+ * ここを**画面と対で見張る**のが要点 — 印刷だけ下げたはずの級数が画面にも
+ * 効いていたら、禁止事項を破ったまま誰も気づかない (画面は小さくなるだけで
+ * エラーにならない)。だから「紙は小さい / 画面は 13px のまま」を両方固定する。
  */
 {
   const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
   const page = await ctx.newPage();
-  await page.goto(`${BASE}/report?print=1`, { waitUntil: 'networkidle' });
-  const w = await page.evaluate(() => {
-    const els = [...document.querySelectorAll('.report-prose')];
-    return els.length ? Math.max(...els.map((e) => Math.round(e.getBoundingClientRect().width))) : null;
-  });
-  const ok = w === PRINT_PROSE;
-  console.log(`${ok ? '✓' : '✗'} 印刷の行長      ?print=1 の本文=${w ?? '-'}px (期待 ${PRINT_PROSE}px = 38em)`);
-  if (!ok) fails.push(`?print=1 の行長が ${w}px — 紙は 38em (${PRINT_PROSE}px) に据え置く裁定`);
+  const read = async (url) => {
+    await page.goto(url, { waitUntil: 'networkidle' });
+    return page.evaluate(() => {
+      const els = [...document.querySelectorAll('.report-prose')];
+      const src = document.querySelector('.rp-src');
+      return {
+        prose: els.length ? Math.max(...els.map((e) => Math.round(e.getBoundingClientRect().width))) : null,
+        src: src ? Math.round(parseFloat(getComputedStyle(src).fontSize)) : null,
+        pad: Math.round(parseFloat(getComputedStyle(document.querySelector('.rp-inner')).paddingLeft)),
+      };
+    });
+  };
+  const pr = await read(`${BASE}/report?preview=1&print=1`);
+  const sc = await read(`${BASE}/report?preview=1`);
+
+  const wOk = pr.prose !== null && pr.prose >= PRINT_PROSE_MIN;
+  console.log(`${wOk ? '✓' : '✗'} 印刷の行長      ?print=1 の本文=${pr.prose ?? '-'}px (38em=608px へ戻っていないこと)`);
+  if (!wOk) {
+    fails.push(`?print=1 の行長が ${pr.prose}px — 38em に戻っている。`
+      + '紙は 45em まで使う (ページ数が増える・画面は正常に見えるので気づけない)');
+  }
+
+  const padOk = pr.pad !== null && pr.pad < sc.pad;
+  console.log(`${padOk ? '✓' : '✗'} 印刷の左右余白  紙=${pr.pad}px / 画面=${sc.pad}px (紙のほうが狭いこと)`);
+  if (!padOk) {
+    fails.push(`?print=1 の .rp-inner の左右余白が ${pr.pad}px で画面 (${sc.pad}px) より狭くない`
+      + ' — report.astro の PRINT_SIDE_PAD が効いていない');
+  }
+
+  const sOk = pr.src === SRC_PRINT;
+  console.log(`${sOk ? '✓' : '✗'} 印刷の出典      ${pr.src ?? '-'}px (期待 ${SRC_PRINT}px)`);
+  if (!sOk) fails.push(`?print=1 の出典が ${pr.src}px — 紙は ${SRC_PRINT}px (ページ数削減)`);
+
+  const scOk = sc.src === SRC_SCREEN;
+  console.log(`${scOk ? '✓' : '✗'} 画面の出典      ${sc.src ?? '-'}px (期待 ${SRC_SCREEN}px・12px 以下を作らない)`);
+  if (!scOk) {
+    fails.push(`画面の出典が ${sc.src}px — 印刷用の級数ダウンが画面まで効いている。`
+      + '禁止事項「12px 以下を作らない」に触れる');
+  }
   await ctx.close();
 }
 
