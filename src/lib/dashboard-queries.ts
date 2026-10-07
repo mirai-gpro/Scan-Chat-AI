@@ -10,6 +10,7 @@ import type { AppIconName } from '../components/AppIcon.astro';
 import { getServerSupabase, isBridgeConfigured, type BridgeOrigin } from './supabase';
 import { loadBridgeBundle, type CustomerBundle } from './bridge-queries';
 import { buildDemoDashboard, demoFallbackEnabled, demoMetricTrend } from './demo-data';
+import { isApprovedRow } from './report-approval';
 import type {
   AppUser,
   CustomerProfile,
@@ -118,6 +119,15 @@ export async function loadDashboard(
    * フォールバックは production 利用者と staging 利用者の混線を招くため。
    */
   origin: BridgeOrigin = 'production',
+  /**
+   * **未承認 (`pending`) の報告書も `latestResult` に載せるか。既定 false** (fail-closed)。
+   *
+   * 正本: `docs/elith/AI疾病予防報告書_承認と再作成_仕様書.md` §8。
+   * `latestResult` は報告書タイルの可否・受領日・進捗の「報告書」行を決めるので、
+   * 未承認を載せると**押せるのに中身が無いタイル**と「完了済」が出る。
+   * 立てるのは管理者が確認するときだけ (`viewer.isAdmin`)。
+   */
+  includeUnapprovedReport = false,
 ): Promise<DashboardData | { error: string }> {
   const normalized = diagnosticUserId ? normalizeDiagnosticUserId(diagnosticUserId) : null;
   const uid = normalized ?? DEFAULT_USER;
@@ -184,7 +194,14 @@ export async function loadDashboard(
     }
 
     const artifacts = orderDerivedSiblings(artifactsRaw ?? []);
-    const results = resultsRaw ?? [];
+    /*
+     * **未承認の報告書はここで落とす** (仕様書 §8)。select は `*` なので
+     * `publish_status` が無い環境では undefined = 承認済相当 (`isApprovedRow`)。
+     * **フロントで隠すのではなくサーバで返さない。**
+     */
+    const results = (resultsRaw ?? []).filter(
+      (r: { publish_status?: unknown }) => includeUnapprovedReport || isApprovedRow(r),
+    );
     const resultUid = uid;
     const usingDemoData = false;
 

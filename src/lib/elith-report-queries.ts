@@ -21,6 +21,7 @@ import {
   ELITH_REPORT_SAMPLE_TEXT_TYPE1, ELITH_REPORT_SAMPLE_LAB_TYPE1, ELITH_SAMPLE_ISSUED_ON_TYPE1,
 } from './elith-report-sample';
 import { buildReportVM, type BuildInput } from './report-adapter';
+import { isApprovedRow } from './report-approval';
 import type { ReportVM } from './report-model';
 // `cfg` は `ui.cancer_screening_not_included` のためだけに使っていた (2026-09-18 に削除)。
 
@@ -35,6 +36,15 @@ export interface ReportContext {
   /** その回の入力にがんリスク検査があったか。**アプリが判定する** (spec §1.0.3)。 */
   hasCancerRisk: boolean;
   cycleSeq: number | null;
+  /**
+   * **未承認 (`pending`) の報告書も読むか。既定 false = 承認済だけ** (fail-closed)。
+   *
+   * 正本: `docs/elith/AI疾病予防報告書_承認と再作成_仕様書.md` §8。
+   * 立てるのは**管理者が確認するときだけ** (`report.astro` が `viewer.isAdmin` を渡す /
+   * admin 専用の抽出監査 API)。一般利用者・外部共有リンク・代理表示でない閲覧者には
+   * 渡さない。**フロントで隠すのではなくここで返さない。**
+   */
+  includeUnapproved?: boolean;
 }
 
 type CheckupValues = Record<string, { date?: string; value?: unknown }[]>;
@@ -123,17 +133,14 @@ export async function loadReportVM(ctx: ReportContext): Promise<ReportVM> {
   const sb = getServerSupabase();
   if (!sb || !ctx.diagnosticUserId) return sample(ctx);
 
-  interface Row { report: unknown; checkup_values?: unknown; received_at: string }
+  interface Row { report: unknown; checkup_values?: unknown; received_at: string; publish_status?: unknown }
 
   /**
    * `checkup_values` は `20260829000010` で追加した列。
    * **マイグレーション未適用の環境では select ごと失敗する**ので、そのときだけ列を外して
    * 引き直す。実データがあるのに黙ってサンプルへ落ちるのを防ぐため (spec §1.3.6 の趣旨)。
    */
-  const fetchRow = async (withCheckup: boolean): Promise<Row | null> => {
-    const cols = withCheckup
-      ? 'report, checkup_values, received_at, status'
-      : 'report, received_at, status';
+  const fetchRow = async (cols: string): Promise<Row | null> => {
     const { data, error } = await (sb.schema('diagnosis') as any)
       .from('diagnosis_results')
       .select(cols)
@@ -146,14 +153,42 @@ export async function loadReportVM(ctx: ReportContext): Promise<ReportVM> {
     return ((data ?? [])[0] as Row | undefined) ?? null;
   };
 
+  /**
+   * 列の有無で 3 段に落とす。**どの段でも「引けなかった」を 0 件と混同しない**
+   * (最後まで失敗したら catch がサンプル/空へ落ちる)。
+   *   ① publish_status + checkup_values … 承認ゲート適用後の通常の形
+   *   ② checkup_values だけ             … 承認の migration 未適用の環境
+   *   ③ 素の report だけ                … checkup_values も未適用の環境
+   * ②③ では `publish_status` が取れないので `isApprovedRow()` が**承認済相当**と
+   * 判定する。列が無い環境には `pending` の行も存在しないので未承認は漏れない。
+   */
+  const COLS = [
+    'report, checkup_values, publish_status, received_at, status',
+    'report, checkup_values, received_at, status',
+    'report, received_at, status',
+  ];
+
   try {
-    let row: Row | null;
-    try {
-      row = await fetchRow(true);
-    } catch {
-      row = await fetchRow(false);
+    let row: Row | null = null;
+    let lastErr: unknown = null;
+    for (const cols of COLS) {
+      try { row = await fetchRow(cols); lastErr = null; break; } catch (e) { lastErr = e; }
     }
+    if (lastErr) throw lastErr;
     if (!row) return sample(ctx); // デモ用アカウント以外は sample() 内で emptyVM になる
+
+    /*
+     * **未承認はユーザーに返さない** (仕様書 §8・受入条件 2/10)。
+     * 管理者が確認するときだけ `includeUnapproved` が立つ。
+     *
+     * 【ここで 1 件前に遡らない】取り込みは既存行を `superseded` に落としてから
+     * 新しい行を足すので、1 つ前の承認済の行は既に世代落ちしている。
+     * 「上書き → 未承認 → 再承認まで非表示」が仕様 (§3.1) なので、
+     * **承認されるまでは何も出さない**のが正しい。
+     */
+    if (!ctx.includeUnapproved && !isApprovedRow(row as { publish_status?: unknown })) {
+      return sample(ctx);
+    }
 
     /*
      * **旧形式 (`elith-v1.0` の配列) の行は、報告書を作り直す前の seed / デモの残骸。**

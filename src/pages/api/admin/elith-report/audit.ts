@@ -40,6 +40,12 @@ export const GET: APIRoute = async ({ request }) => {
     hasCancerRisk: false, cycleSeq: null,
     // この API は Bearer ADMIN_API_KEY で保護された admin 専用。
     // 受領前でも抽出規則の効きを確認できるよう、サンプルを組ませる。
+    /*
+     * **未承認 (`pending`) の報告書も見る** (承認と再作成 仕様書 §8)。
+     * 承認する前に「黙って空になっていないか」を確かめるのがこの API の仕事なので、
+     * ここで承認済だけに絞ると**承認前の確認ができない**。
+     */
+    includeUnapproved: true,
   });
 
   const shown = new Set(vm.chapters.map((c) => c.key));

@@ -71,6 +71,11 @@ jobs:
       # 紙面に当社の文言を足していないか (2026-09-18 の捏造の再発防止)
       - run: npm run verify:report-verbatim
       - run: npm run verify:sheet-contract
+      # AI疾病予防報告書の承認ゲート。**ここは静かに壊れる** —
+      # 列の既定を pending にするだけで**公開中の報告書が全部消える**し、
+      # 取得経路の 1 つで絞り忘れても他が正しければ画面は正常に見える。
+      # 再作成が失敗したときに既存を壊していないかも、目視では守れない。
+      - run: npm run verify:report-approval
       - run: npm run verify:demo-gate
       - run: npm run verify:special-accounts
       - run: npm run verify:transcosmos-reports

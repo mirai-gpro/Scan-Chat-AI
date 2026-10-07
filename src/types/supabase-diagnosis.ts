@@ -151,6 +151,17 @@ export type Database = {
           report_pdf_pages: number | null;
           report_pdf_received_at: string | null;
           source_key: string | null;
+          /*
+           *   checkup_values … 20260829000010_diagnosis_report_checkup.sql
+           *   publish_status / approved_at / approved_by / publish_rev
+           *                  … 20261007000010_diagnosis_report_approval.sql
+           * ここも**型だけ**を実 DDL に合わせる。**DB 側は 1 文字も変えない。**
+           */
+          checkup_values: Json | null;
+          publish_status: string;
+          approved_at: string | null;
+          approved_by: string | null;
+          publish_rev: number;
         };
         Insert: {
           id?: string;
@@ -171,6 +182,11 @@ export type Database = {
           report_pdf_pages?: number | null;
           report_pdf_received_at?: string | null;
           source_key?: string | null;
+          checkup_values?: Json | null;
+          publish_status?: string;
+          approved_at?: string | null;
+          approved_by?: string | null;
+          publish_rev?: number;
         };
         Update: Partial<Database['diagnosis']['Tables']['diagnosis_results']['Insert']>;
         Relationships: [];

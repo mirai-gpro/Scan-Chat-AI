@@ -303,7 +303,7 @@ async function inspectReport(viewerUid: string | null, origin: BridgeOrigin): Pr
     try {
       const { data, error } = await (sb.schema('diagnosis') as any)
         .from('diagnosis_results')
-        .select('report, received_at, schema_version, status')
+        .select('report, received_at, schema_version, status, publish_status')
         .eq('diagnostic_user_id', uid)
         .neq('status', 'superseded')
         .not('report', 'is', null)
@@ -325,6 +325,12 @@ async function inspectReport(viewerUid: string | null, origin: BridgeOrigin): Pr
         out.rows = 1;
         out.latest_received_at = String(row.received_at).slice(0, 10);
         out.schema_version = row.schema_version ?? null;
+        /*
+         * **承認ゲート** (承認と再作成 仕様書 §8)。`pending` の回は
+         * ユーザーのダッシュボードに出ない。「紙面が空」の切り分けで
+         * 「取り込めていない」と**混同させない**ための手がかり。
+         */
+        out.publish_status = row.publish_status ?? '(列なし = 承認済相当)';
         out.shape = legacy ? '旧形式 (配列・elith-v1.0)' : '現行形式 (dict)';
         out.sections = legacy ? rep.length : Object.keys(rep ?? {}).length;
         out.chars = chars;

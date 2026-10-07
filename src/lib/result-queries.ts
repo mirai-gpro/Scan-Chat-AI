@@ -11,6 +11,7 @@
  */
 
 import { getServerSupabase } from './supabase';
+import { isApprovedRow } from './report-approval';
 import { getOriginalSignedUrl } from './originals-storage';
 import type { TestArtifact, DiagnosisResult } from '../types/supabase';
 import { findSection, type ElithSection } from './elith-parser';
@@ -207,7 +208,7 @@ export async function loadResult(
 
   // 同 diagnostic_user_id の最新 published diagnosis_results を取得
   // (Phase 1.0 簡略: artifact と diagnosis_results の直接紐付けはまだ無いため)
-  const { data: latestResult } = await sb
+  const { data: latestResultRaw } = await sb
     .schema('diagnosis')
     .from('diagnosis_results')
     .select('*')
@@ -216,6 +217,14 @@ export async function loadResult(
     .order('received_at', { ascending: false })
     .limit(1)
     .maybeSingle();
+
+  /*
+   * **未承認 (`pending`) の報告書は返さない**
+   * (`docs/elith/AI疾病予防報告書_承認と再作成_仕様書.md` §8・受入条件 10)。
+   * この画面の 3 モード (a/b/c) は報告書の中身を描くので、承認の境界を揃える。
+   * select は `*` なので、列が無い環境では undefined = 承認済相当。
+   */
+  const latestResult = latestResultRaw && isApprovedRow(latestResultRaw) ? latestResultRaw : null;
 
   /*
    * この画面は「この検査 1 件」を見る場所なので、**その検査の原本 (PDF/CSV) を主役にする**。

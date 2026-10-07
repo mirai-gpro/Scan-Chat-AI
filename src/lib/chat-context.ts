@@ -9,6 +9,7 @@
  */
 
 import { getServerSupabase } from './supabase';
+import { isApprovedRow } from './report-approval';
 import {
   extractMetricCards,
   extractUrgentAlert,
@@ -110,7 +111,7 @@ export async function buildUserContextForChat(
     sb
       .schema('diagnosis')
       .from('diagnosis_results')
-      .select('report, status')
+      .select('report, status, publish_status')
       .eq('diagnostic_user_id', diagnosticUserId)
       .eq('status', 'published')
       .order('received_at', { ascending: false })
@@ -119,6 +120,13 @@ export async function buildUserContextForChat(
   ]);
 
   if (!customer && !latestResult) return null;
+
+  /*
+   * **未承認 (`pending`) の報告書は読まない** (`docs/elith/AI疾病予防報告書_承認と再作成_仕様書.md` §8)。
+   * ユーザー向けに報告書の中身を返す口なので、承認の境界をここでも揃える。
+   * 列が無い環境は承認済相当 (`isApprovedRow`) = 従来どおりの挙動。
+   */
+  const approvedResult = latestResult && isApprovedRow(latestResult) ? latestResult : null;
 
   // 1 行のコンパクトな自己紹介
   const profileBits: string[] = [];
@@ -133,7 +141,7 @@ export async function buildUserContextForChat(
 
   // 注目すべき所見だけ 3 件まで
   const notable: string[] = [];
-  const sections = (latestResult?.report as ElithSection[] | null) ?? [];
+  const sections = (approvedResult?.report as ElithSection[] | null) ?? [];
   if (sections.length > 0) {
     const metrics = extractMetricCards(sections)
       .filter((m) => m.level !== 'normal')
