@@ -1069,6 +1069,61 @@ pathname が /admin-view/ で始まらない → 即 next()      ← **既存の
 付け忘れたリンクは**そのタブだけ代理表示から抜ける**（他人のデータが出るのではなく、
 admin 本人の画面に戻る＝安全側）。
 
+#### 13.0.1 実際に 11 か所で付け忘れていた【実障害 2026-10-07・発注者指摘】
+
+> 「AI疾病予防報告書 承認 メニューで確認したところ、ダッシュボード HTML で見れてる報告書を
+> PDF ボタンで PDF 作成すると**氏名が異なる PDF が作成される**」
+
+**上の「安全側」は正しいが、「軽い」ではなかった。** この節が「最悪の事故」と名指しした
+**admin が「A さんの画面のつもりで自分の画面を見る」**が、そのまま起きていた。
+
+経路: 承認画面の「確認」→ handoff → `/admin-view/<ctx>/dashboard`（`AppNav` と
+`ReportLinkCard` は prefix 付きなので A さんのまま）→ `/admin-view/<ctx>/report` で
+A さんの紙面を確認 → **同じタブで「PDF にして保存する」** → 飛び先が
+`report.astro` の `q()` が返す**素の `/report?print=1&autoprint=1`** →
+`middleware.ts`（`/admin-view/` 以外には 1 バイトも触らない）を通らず →
+`resolveViewer` が admin 本人の Cookie で解決 → **admin 自身の、しかも未承認の報告書**が
+PDF になる（`includeUnapproved: viewer.isAdmin`）。**氏名だけでなく中身ごと別人。**
+
+**承認そのものは汚染されていない。** `approveReport()` は `resultId` で引いた行から、
+閲覧者に依らない `FINGERPRINT_CONTEXT` で VM を組んで指紋を取る
+（`src/lib/report-approval.ts:283-288`）。PDF に何が出たかは承認に入らないので、
+**誤った報告書を承認した、ということは起きていない。**
+
+**なぜ検査をすり抜けたか**: L-7 / L-8 は `viewerPathPrefix()` という**関数の戻り値**しか
+見ていなかった。「各ページが実際にそれを使っているか」を見る検査が 1 本も無かった。
+
+**直した 11 か所**（`${linkPrefix}` を前に付けた）:
+
+| ファイル | リンク |
+|---|---|
+| `report.astro` `q()` | **PDF にして保存する / 印刷用の紙面をひらく**（実害が出た導線） |
+| `report.astro` client script | PDF ボタンの href 書き換えの既定値 `'/report'` を撤去（取れなければ何もしない） |
+| `report.astro` | がんリスク検査の結果へ（`/result/<id>`） |
+| `result/[id].astro` ×2 | 報告書へ / 同じ検査の別の回へ（`siblingHref`） |
+| `scan.astro` ×5 | ダッシュボード / 検査結果 / AI 問診 ×2 / トップへ戻る |
+| `notices.astro` | 開閉を保つ自分自身へのリンク（`noticesHref`） |
+| `coach.astro` ×2 | ダッシュボードへ |
+| `chat.astro` + `live-controller.ts` | 問診完了画面の「ダッシュボードへ」（`dashboardLinkPrefix` を対で渡す） |
+
+**一般利用者の挙動は 1 px も変わらない**（`linkPrefix` が `''` なので出力は同一。
+実測: `/report?preview=1` は `href="/report?print=1"`、`/scan` は `href="/chat"`）。
+
+**再発防止 = `verify:admin-handoff` の ⑬ L-12〜L-21**（§ 下の検査表）。
+利用者向けのページ・コンポーネント・`live-controller.ts` から**コメントを落として
+文字列リテラルの先頭が内部ルートで始まるもの**を拾い、prefix 付き
+（直前が `}`）でなければ落とす。**ALLOW は理由つき**で、しかも
+ALLOW した行が安全であり続けることを別の検査で裏打ちする
+（L-15 既定値を上書きする呼び出しが在る / L-16 描いていないコンポーネントが
+復活していない / L-17 未参照のコンポーネントが import されていない）。
+**退行注入 11 種**とも名指しで落ちることを確認済み。
+
+**残っている ALLOW**（理由を書けないものは通さない）:
+`AppNav` の `current=`（href ではない）/ 認証前・代理表示を**抜ける**導線
+（`index.astro` の 302・`EmailPasswordAuth`・`GoogleOneTap`・`ImpersonationBanner`・
+`ShareBanner`）/ admin 専用デバッグ欄の検体切替 / Props の既定値 2 件 /
+画面に描いていないコンポーネント 3 件。
+
 ### 13.1 セッションの持ち方（**案 B 採用時 = Cookie を使わない**）
 
 | 項目 | 案 B（推奨） | 案 A（不採用） |
@@ -2200,9 +2255,10 @@ Admin 代理表示ぶんは**実装と同時に入れた**。外部共有ぶん�
 | ⑥-2 `M-1〜M-18` | 18 | **middleware（認可はここ 1 か所）**。Cookie を入れて 403 / 通過を実際に見る（**credential だけで通る** / **`welltect_v` だけでは 403** / 別 admin 403 / **剥奪後は既存 context にも入れない** / **`/admin-view` 以外は素通し** / `/admin-view/<ctx>/api/…` も通る） |
 | ⑥-3 `W-1〜W-12` | 21 | **read-only の保証（U27）**。番人の判定 / **書き込み 6 本すべてが通していること** / **書く前に居ること** / fetch 載せ替えの範囲 |
 | ⑦ `S-1〜S-25` | 25 | 構造（**GET が claim/consume/Cookie/DB に触れない** / claim は POST だけ / **cred は早期 return より前** / `welltect_v` 不変 / middleware の範囲 / RLS と RPC と UNIQUE / **raw 列が無い**） |
+| ⑬ `L-12〜L-21` | 13 | **画面のリンクが prefix を落としていないか**（§13.0.1 の実障害の固定）。素の内部パスが 1 本も無い / 利用者向けページが全部 `viewerPathPrefix()` を引く / **ALLOW の裏打ち**（既定値を上書きする呼び出しが在る・描いていないコンポーネントが復活していない・未参照のものが import されていない）/ **報告書の `q()` と PDF ボタン**を名指しで固定 |
 | ⑧ `X-1〜X-16` | 17 | 残りの受入条件（**同時 consume でも context 1 件** / **INSERT 失敗で ROLLBACK** / **uid 無し admin でも通る** / **剥奪で credential 削除** / URL に uid が出ない / **reload では数えない** / 対象保持 Cookie 0 件 / **生 email をログへ出す行が無い**） |
 
-**退行注入 20 種で名指しに落ちることを確認済み**（SQL 4 種・TS 16 種）:
+**退行注入 31 種で名指しに落ちることを確認済み**（SQL 4 種・TS 16 種 ＋ §13.0.1 のリンク 11 種）:
 claim の排他条件を外す / consume の identity 照合を外す / attempts を `= 1` にする /
 `handoff_id` の UNIQUE を外す / `resolveImpersonationContext` の照合を外す /
 revoke の `admin_identity` 絞りを外す / 代理表示でも書けるようにする /

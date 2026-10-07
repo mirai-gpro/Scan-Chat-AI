@@ -99,7 +99,7 @@ const siblingHref = (sid: string) => {
   const qs = new URLSearchParams(linkQuery.replace(/^\?/, ''));
   if (mode !== 'summary') qs.set('mode', mode);
   const query = qs.toString();
-  return `/result/${sid}${query ? `?${query}` : ''}`;
+  return `${linkPrefix}/result/${sid}${query ? `?${query}` : ''}`;
 };
 
 const pdfSrcWithPage = data?.samplePdfUrl
@@ -328,7 +328,7 @@ const pdfSrcWithPage = data?.samplePdfUrl
           この画面は検査 1 件の原本を見せる場所なので、報告書の本体は /report に置く。
         */}
         <a
-          href={`/report${linkQuery}`}
+          href={`${linkPrefix}/report${linkQuery}`}
           class="flex min-h-touch items-center gap-3 rounded-2xl border border-brand-200 bg-brand-50 px-4 py-3 text-slate-800 transition hover:border-brand-400 hover:bg-brand-100"
         >
           <AppIcon name="report" size={24} class="shrink-0 text-brand-700" />

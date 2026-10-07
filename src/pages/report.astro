@@ -243,11 +243,25 @@ const linkQuery = viewerLinkQuery(viewer);
 // **代理表示の path prefix**。一般ユーザーは `''`（`viewer.ts` に集約・2026-09-30）。
 const linkPrefix = viewerPathPrefix(viewer);
 
+/**
+ * この紙面の中から**この紙面へ**戻るリンク (印刷ビューなど)。
+ *
+ * **`linkPrefix` を必ず前に付ける** — 代理表示は URL path の `/admin-view/<ctx>` だけが
+ * 対象者を持ち (`?u=` は 2026-09-30 に撤去)、`middleware.ts` は `/admin-view/` 以外に
+ * 1 バイトも触らない。素のパスを書くと**そのタブだけ代理表示から抜けて admin 本人の
+ * 紙面が出る** (正本 `secure_shared_access_and_admin_impersonation_spec_20260930.md`
+ * §13.0「admin が『A さんの画面のつもりで自分の画面を見る』のが最悪の事故」)。
+ *
+ * **実障害 (2026-10-07・発注者指摘)**: ここが prefix を落としていたため、承認メニューの
+ * 「確認」→ 代理表示で A さんの紙面を見ているタブで「PDF にして保存する」を押すと、
+ * **admin 本人の (しかも未承認の) 報告書が PDF になっていた**。氏名だけでなく中身ごと別人。
+ * 承認そのものは行から組むので汚染されていない (`report-approval.ts:283`)。
+ */
 const q = (extra: Record<string, string>) => {
   const p = new URLSearchParams(linkQuery.replace(/^\?/, ''));
   for (const [k, v] of Object.entries(extra)) p.set(k, v);
   const s = p.toString();
-  return s ? `/report?${s}` : '/report';
+  return s ? `${linkPrefix}/report?${s}` : `${linkPrefix}/report`;
 };
 
 /*
@@ -593,7 +607,7 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
         */}
         {!vm.isSample && cancerArtifact && (
           <p class="px-1 text-sm text-slate-600">
-            <a class="font-semibold text-brand-700 underline" href={`/result/${cancerArtifact.id}${linkQuery}`}>
+            <a class="font-semibold text-brand-700 underline" href={`${linkPrefix}/result/${cancerArtifact.id}${linkQuery}`}>
               がんリスク検査の結果を見る →
             </a>
           </p>
@@ -812,8 +826,16 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
        */
       const desktop = plat === 'windows' || plat === 'mac';
       for (const li of saveSection.querySelectorAll<HTMLElement>('[data-opens-dialog]')) li.hidden = desktop;
-      if (goBtn) {
-        const u = new URL(goBtn.getAttribute('href') ?? '/report', location.href);
+      /*
+       * **サーバが描いた href を組み替えるだけ** — `autoprint` の有無しか触らない。
+       * 既定値に `'/report'` のような素のパスを置かないこと: 代理表示
+       * (`/admin-view/<ctx>/report`) で href が取れなかった回に**そのタブだけ
+       * 代理表示から抜けて admin 本人の紙面が PDF になる** (2026-10-07 の実障害と同型)。
+       * 取れなければ何もしない = サーバが描いた飛び先がそのまま残る。
+       */
+      const href = goBtn?.getAttribute('href');
+      if (goBtn && href) {
+        const u = new URL(href, location.href);
         if (desktop) u.searchParams.set('autoprint', '1');
         else u.searchParams.delete('autoprint');
         goBtn.setAttribute('href', u.pathname + u.search);
