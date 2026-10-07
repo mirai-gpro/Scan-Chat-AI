@@ -121,7 +121,7 @@ export async function reportFingerprint(vm: ReportVM): Promise<string> {
   return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, '0')).join('');
 }
 
-/** 指紋の照合に要る列だけ。`publish_status` の判定は `report-approval.ts` が持つ。 */
+/** 指紋の照合に要る列だけ。`publish_status` の判定は `report-gate.ts` が持つ。 */
 export interface FingerprintRow {
   report?: unknown;
   checkup_values?: unknown;
@@ -144,7 +144,7 @@ export async function fingerprintOfRow(row: FingerprintRow): Promise<string> {
 
 /**
  * **指紋のゲート。** 承認状態 (`publish_status`) は見ない — 合成は
- * `report-approval.ts` の `isPubliclyVisibleRow()` が行う (判定を 2 つ持たない)。
+ * `report-gate.ts` の `isPubliclyVisibleRow()` が行う (判定を 2 つ持たない)。
  *
  * 【指紋が無い行は通す】理由 2 つ。どちらも**既存の公開を落とさない**ため (§4)。
  *   ① `approved_report_hash` 列がまだ無い環境 (migration 未適用) → `undefined`

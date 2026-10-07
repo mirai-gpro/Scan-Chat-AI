@@ -450,8 +450,19 @@ S3 の読み取りは**取り込みと同じ関数**を通す
 | `chat-context.ts` (AI 問診) | 同 |
 | `result-queries.ts` (`/result/[id]` の 3 モード) | 同 |
 
-**承認状態と指紋の合成は `report-approval.ts` の `isPubliclyVisibleRow()` 1 本**。
+**承認状態と指紋の合成は `report-gate.ts` の `isPubliclyVisibleRow()` 1 本**。
 表示経路が `hashGateOk()` を直接呼ばないことを検査で固定する (判定を 2 つ持たない)。
+
+**ユーザー向けの判定を `report-approval.ts` に置かない (leaf に切り出す)。**
+あのモジュールは再作成のために `elith-intake` → `s3` → `@aws-sdk/client-s3` を
+**静的に**引く。最初の実装はユーザー経路からそこを import していたため、
+**`/report` と `/dashboard` の SSR グラフに AWS SDK が入っていた**
+(2026-10-07 に実測して是正。承認機能を入れる前は 3 経路とも届いていなかった)。
+関数のサイズとコールドスタートに効くのに**画面はまったく正常に見える**ので、
+`verify:report-approval` が「ユーザー経路から `@aws-sdk/client-s3` へ静的に
+届かない」ことを import を辿って見張る (退行注入で落ちることを確認済み)。
+`report-gate.ts` が import してよいのは `report-fingerprint` までで、
+**S3・Supabase・取り込みを引いてはいけない**。
 
 **`loadReportVM` は組み上がった `vm` をそのまま渡す** — 指紋は閲覧者の文脈に依存しない
 (§3.3.1) ので、本人の文脈で組んだ VM の指紋は承認時の指紋と一致する。二度組まない。

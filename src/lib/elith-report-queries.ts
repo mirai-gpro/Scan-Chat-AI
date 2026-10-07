@@ -21,7 +21,7 @@ import {
   ELITH_REPORT_SAMPLE_TEXT_TYPE1, ELITH_REPORT_SAMPLE_LAB_TYPE1, ELITH_SAMPLE_ISSUED_ON_TYPE1,
 } from './elith-report-sample';
 import { buildReportVM, type BuildInput } from './report-adapter';
-import { isPubliclyVisibleRow } from './report-approval';
+import { isPubliclyVisibleRow } from './report-gate';
 import type { ReportVM } from './report-model';
 // `cfg` は `ui.cancer_screening_not_included` のためだけに使っていた (2026-09-18 に削除)。
 
@@ -217,7 +217,7 @@ export async function loadReportVM(ctx: ReportContext): Promise<ReportVM> {
      * 承認時に中立の文脈で取った指紋と一致する。**だから二度組まない。**
      *
      * 【判定をここに書かない】承認状態と指紋の合成は
-     * `report-approval.ts` の `isPubliclyVisibleRow()` 1 本 (判定を 2 つ持たない)。
+     * `report-gate.ts` の `isPubliclyVisibleRow()` 1 本 (判定を 2 つ持たない)。
      *
      * 【ここで 1 件前に遡らない】取り込みは既存行を `superseded` に落としてから
      * 新しい行を足すので、1 つ前の承認済の行は既に世代落ちしている。

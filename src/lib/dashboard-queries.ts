@@ -10,7 +10,7 @@ import type { AppIconName } from '../components/AppIcon.astro';
 import { getServerSupabase, isBridgeConfigured, type BridgeOrigin } from './supabase';
 import { loadBridgeBundle, type CustomerBundle } from './bridge-queries';
 import { buildDemoDashboard, demoFallbackEnabled, demoMetricTrend } from './demo-data';
-import { isPubliclyVisibleRow } from './report-approval';
+import { isPubliclyVisibleRow } from './report-gate';
 import type {
   AppUser,
   CustomerProfile,

@@ -9,7 +9,7 @@
  */
 
 import { getServerSupabase } from './supabase';
-import { isApprovedRow } from './report-approval';
+import { isApprovedRow } from './report-gate';
 import {
   extractMetricCards,
   extractUrgentAlert,
