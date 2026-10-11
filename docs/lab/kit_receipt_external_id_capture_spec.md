@@ -3,14 +3,27 @@
 | 項目 | 内容 |
 |---|---|
 | 目的 | 外部検査キットをユーザーが**受け取った時点**で、検査会社がキットに付与した外部IDをスマホで撮影・読取し、Wellfort 内部の「今回の検査」へ**安全かつ一意に**紐づける。物理検体・問診データ・検査結果を、推測ではなく**機械的なキー**で同一検査へ戻せる状態を作る。 |
-| 版 | **v0.1（Draft・2026-10-11）**。実装はまだ 1 行も無い（§3 の調査結果のとおり）。 |
+| 版 | **v1.0（2026-10-11・実装済み／既定 off）**。発注者裁定 **D-1=案A（登録時に `lab_tests` 行を作る）** / **D-4=サーバ側 Gemini** を受けて実装した。**app_config の `labid.*_capture` が既定 off** なので、実物の書面とバーコード規格を確認するまで誰にも出ない（§9）。 |
 | 上位文書 | **`docs/lab/lab_data_pipeline_master_spec.md` §4-5（v2.1・4検査横断の正本）**。本書はその §4-5.7 の詳細。矛盾したら上位が勝つ。 |
 | 対象 | **P0＝① がんリスク（プリベント / ALA-PDS）のバーコードNo.** ／ **P1＝② 血液（リージャー / デメカル）の 15桁「問合せ番号」（Secondary）** |
 | 対象外 | **④ 遺伝子（Genoplan）**。正本は**タカセ返送CSV 方式**（上位 §4-5.6）。**ユーザー撮影方式へ置き換えない。** |
 | 関連 | `docs/lab/lab_data_reception_overview.md §2`（プリベント受取方式）・`§5`（ID 連携の実務断面）／`docs/lab/questionnaire_to_lab_csv_spec.md §4.2`（プリベント上り33項目）／`docs/lab/demecal_unattended_spec.md`（血液の正本）／`docs/architecture/id_management_and_correlation_spec.md`（ID 体系）／`docs/lab/kit_progress_management.md`（キット進捗・受取確認） |
 
-> **この文書は「実装前の設計」であって「実装の記録」ではない。**
-> §3 の調査で **着手を止める構造的ブロッカー 1 件**が見つかっているので、**§4 の設計を書く前に §3 を読むこと。**
+> ## 実装の地図（v1.0・2026-10-11）
+>
+> | ファイル | 役割 |
+> |---|---|
+> | `src/lib/external-test-id.ts` | **純関数**。正規化 / 構造ガード / 期待パターン / 採否判定 / 問診CSV ゲート |
+> | `src/lib/external-id-evidence.ts` | 証跡画像の presigned PUT と読み出し（`scan-upload-ticket.ts` の形を流用） |
+> | `src/lib/external-id-read.ts` | **サーバ側 Gemini** で読む（候補だけ返す・確定しない） |
+> | `src/lib/external-id-persist.ts` | 台帳への記録 ＋ **案A** の `lab_tests` 紐付け |
+> | `src/pages/api/kit/[id]/external-id.ts` | `mode: ticket / read / register`（認可は `self-report.ts` の 3 段ガードを流用） |
+> | `src/components/dashboard/ExternalIdCapture.astro` ／ `src/scripts/external-id-capture.ts` | 画面と処理 |
+> | `supabase/migrations/20261011000010_lab_test_id_captures.sql` | 撮影台帳（**service_role だけ**・ポリシー 0 件） |
+> | `scripts/verify-external-id-capture.mjs` | `npm run verify:external-id-capture`（**200 件**・CI の A 層） |
+>
+> **§3.2 のブロッカーは「案A ＋ 紐付け失敗を deferred で残す」で解いた**（§3.2 の末尾）。
+> **実装の前提と残っている未確認は §9 と §12。**
 
 ---
 
@@ -125,7 +138,33 @@
 | **案 B** | **出荷指示の時点で `lab_tests` 行を作る**（上位 ③-1 の本筋）。登録は update だけ | 筋が通る。ただし上位 ③-1（タカセ連携）の実装が先行条件になり、本書は待ちになる |
 | **案 C** | **当面 `lab_tests` を使わず、受取確認の単位（`kit_shipments.id` / `orders.id`）へ外部IDを控える**。`lab_tests` が整備された時点で移行 | すぐ作れる。ただし **`unique (lab_company_id, external_test_id)` による重複検出が効かない**ので、重複は別途の一意制約が要る |
 
-**どれを採るかで DB 設計・API 形状・migration が変わるため、決まるまで §4 以降は「案 A を仮置き」として読むこと。**
+**【裁定 2026-10-11・発注者】案A を採る。** 以下はその実装。
+
+`persistExternalIdCapture()` → `linkLabTest()`（`src/lib/external-id-persist.ts`）が、
+**本番の形で使えない材料をその場で引き直す**。本番の shipment は `app_bridge`（= `orders` のミラー）
+由来なので、そのまま使うと 3 か所で壊れる:
+
+| 列 | 本番の shipment の値 | どう解いたか |
+|---|---|---|
+| `lab_company_id` (NOT NULL FK) | **`''`**（`bridge-queries.ts:75` — app_bridge は検査会社を持たない） | `customer.lab_companies.test_types` に当該 `test_type` を含む行から引く。**1 件でなければ作らない** |
+| `customer_id` (NOT NULL FK) | 実は **`diagnostic_user_id`**（同 `:74`） | `customer.customer_profiles` を `diagnostic_user_id` で引き直す |
+| `shipment_id` (FK → `kit_shipments`) | **`orders.id`**（`customer.kit_shipments` に無い） | **その ID で実在を確かめた時だけ入れ、無ければ NULL**（列は nullable）。埋めに行くと本番で必ず FK 違反 |
+
+**材料が揃わない回は登録ごと失敗させない。** 台帳には必ず記録し、
+`lab_test_link_status='deferred'` と理由を残す（「サイレント脱落ゼロ」を採る）。
+`linked` / `deferred` / `conflict` を返すので、**どこまでできたかが呼び出し側に分かる**。
+
+| 状況 | `lab_tests` | 台帳 | status |
+|---|---|---|---|
+| 材料そろい・既存 0 件 | **作って紐付け** | 記録 | `confirmed`（判定が通れば） |
+| 既存 1 件 | **その行へ入れる** | 記録 | 同上 |
+| 既存 **2 件以上** | **触らない**（どれが今回かを機械が決めてよい場面ではない） | 記録 | `review_required` |
+| `customer_profiles` / `lab_companies` が引けない | **作らない** | 記録 | `review_required` |
+| 同じ値が**別の検査**に在る | **1 バイトも触らない** | 記録（`conflict`） | `review_required` |
+| 台帳が引けない（migration 未適用） | 触らない | — | **503 で失敗**（黙って成功を装わない） |
+
+これらは `verify:external-id-capture` の ⑩ が **実物の `persistExternalIdCapture` を動かして**
+確認している（(a)〜(k)）。
 
 ---
 
@@ -315,8 +354,23 @@
 
 → **結論: 二段にする。** ①**CSV 生成側が fail-closed**（ID 未登録なら生成しない＝これが要件）
 ②**AI問診の画面には案内だけ**出す（開始は止めない）。
-**①は本書の範囲外**（プリベント問診CSV 生成そのものが未実装＝上位 §4-5.9 の P0-2）なので、
-**本書では「②の案内」と「①が参照する登録状態の供給」までを実装し、①の fail-closed は CSV 生成と同時に入れる。**
+
+**【v1.0 で用意したもの】** プリベント問診CSV の生成そのものは**まだ存在しない**
+（上位 §4-5.9 の P0-2・実測 grep で生成処理 0 件）。だから①のゲートを**先に部品として置いた**:
+
+- **`checkPreventQuestionnaireGate()`**（`src/lib/external-test-id.ts`・純関数）
+  — 未登録 / 数字にならない / 短すぎる を **`allowed:false`** で返す。
+  **パターン外は通す** — 止めると実物の形式が既定と違う回に CSV が永久に作れない（§2.3）。
+- **`loadCapturedExternalId()`**（`src/lib/external-id-persist.ts`）
+  — その人のその provider の有効な登録値を引く。ゲートの入力はこれ。
+
+**CSV 生成を実装する人は、出力の前にこの 2 つを必ず通すこと。**
+`verify:external-id-capture` の ⑦ がゲートの挙動を固定し、
+**`interview-cycle.ts` にゲートを足していないこと**も機械で見ている
+（足すと fail-safe の向きが逆なので fail-open になる）。
+
+**②の案内はまだ画面に出していない。** 出すのは `labid.prevent_capture` を on にする段
+（それまで撮影導線そのものが出ないので、案内だけ先に出すと行き先が無い）。
 
 ### 7.2 デメカル
 
@@ -365,13 +419,17 @@ UI で次を区別できること。
 
 ## 9. 着手前に決めること（発注者判断）
 
-| # | 論点 | 本書の既定 | なぜ決めが要るか |
+| # | 論点 | 状態 | 中身 |
 |---|---|---|---|
-| **D-1** | **`lab_tests` 行を誰がいつ作るか**（§3.2 の案 A / B / C） | **仮置き = 案 A** | **DB 設計・API 形状・migration・重複検出の方式が全部変わる。** 決まるまで実装に入れない |
-| **D-2** | プリベント バーコードの**実フォーマット**（総桁数・prefix・チェックディジット・バーコード規格） | 検証しない（形式不一致は自動確定しない、だけ実装） | 推測で validator を固定すると**実物が全部弾かれる**（§2.3） |
-| **D-3** | **撮影証跡画像の保存期間** | **決めない**（確認事項） | 医療関連画像のポリシーに属する。既存ルールが無い（§6.2） |
-| **D-4** | バーコードデコードの方式（§6.4 の案 1/2/3） | **案 3（サーバ側 Gemini）を本線** | 案 2 は追加依存。`CLAUDE.md` の「追加依存なし方針」に関わる |
-| **D-5** | デメカル 15桁 と DSS `指図番号` の同一性 | **同一と断定しない** | Primary 照合を置き換える判断に直結（§2.3） |
+| **D-1** | **`lab_tests` 行を誰がいつ作るか**（§3.2 の案 A / B / C） | **裁定済み 2026-10-11 = 案A** | 登録時に作る。本番で使えない材料は引き直し、揃わない回は `deferred` で台帳に残す（§3.2 の末尾） |
+| **D-4** | バーコードデコードの方式（§6.4 の案 1/2/3） | **裁定済み 2026-10-11 = 案3（サーバ側 Gemini）** | 追加依存ゼロ・iOS Safari でも動く。`BarcodeDetector` の併用は**入れていない**（要るか実機で見てから） |
+| **D-2** | プリベント バーコードの**実フォーマット**（総桁数・prefix・チェックディジット・バーコード規格） | **未確認**（先方資料 or 実物 1 枚が要る） | コードに固定していない。app_config `labid.prevent_pattern`（既定 `^704000[0-9]{3}$` = **仕様書の表示例の写し**）。**外れても登録は通り `review_required`** になるだけなので、実物が違っても運用が止まらず admin が即日直せる |
+| **D-3** | **撮影証跡画像の保存期間** | **未決**（こちらで決めない） | 医療関連画像・検査証跡のポリシーに属する。**ライフサイクルを前提にした実装をしていない**（`external-id-evidence.ts` 冒頭）。決まり次第バケット側で設定する |
+| **D-5** | デメカル 15桁 と DSS `指図番号` の同一性 | **未確認・断定しない** | `external_test_id` へ**独立に**保存し、Primary（氏名＋生年月日）を置き換えない（§2.3） |
+
+**D-2 / D-3 / D-5 が未確認のままでも安全に出せるように、`labid.prevent_capture` /
+`labid.demecal_capture` の既定を `off` にしてある**（画面にも API にも出ない）。
+**実物の書面を 1 枚見てから on にする。**
 
 ---
 
@@ -422,9 +480,30 @@ UI で次を区別できること。
 
 ## 12. 申し送り（この版で確認できていないこと）
 
-- **実物の同梱書面を 1 枚も見ていない。** プリベントのバーコード規格・桁数・レイアウト、
-  デメカルの用紙上の「問合せ番号」の位置は、**いずれも先方資料または実物での確定が要る**（D-2）。
-- **カメラ・OCR の実挙動はこの作業環境で確認できない**（Gemini の鍵が無い・実機の WebKit が無い）。
-  §10 の 17（PWA / iPhone Safari）は**実機で 1 回通すのが完了条件**。
-- **`lab_tests` に本番の行が 1 行も無い**（§3.2）。D-1 が決まるまで、§6.3 の登録APIは
-  **「登録先が無い API」**になる。
+**どれも「実装が足りない」ではなく「この環境では測れない」もの。** 既定 off にしてあるので、
+確認が済むまで利用者には 1 行も出ない。
+
+- **実物の同梱書面を 1 枚も見ていない**（D-2）。プリベントのバーコード規格・総桁数・
+  レイアウト、デメカルの用紙上の「問合せ番号」の位置。**先方資料または実物 1 枚で確定する。**
+  → 確定したら `labid.prevent_pattern` を admin から直す（デプロイ不要）。
+- **Gemini の読み取り精度を測っていない**（この環境に `GEMINI_API_KEY` が無い）。
+  プロンプトとスキーマは固定したが、**実際に 1次元バーコードを読めるか・QR に引っ張られないか**は
+  実物の写真 1 枚で確かめる。読めなければ §6.4 の案2（`@zxing/library`）を再検討する。
+- **S3 の実挙動も未確認**（鍵が無い）。presigned PUT・**バケットの CORS**（無いとブラウザの
+  PUT が黙って失敗する）・`kit-id-captures/` のライフサイクル。
+  手順は `docs/operations/スキャンS3直アップロード_バケット設定手順書.md` と同じ形。
+- **実機（PWA / iPhone Safari）のカメラ動作は未確認**（手元に WebKit が無い）。
+  §10 の 17 は**実機で 1 回ずつ通すのが完了条件**。
+- **本番 DB での通し確認は未実施**。とくに
+  **`customer.customer_profiles` / `customer.lab_companies` に本番の行が在るか**は
+  この環境から引けない。無ければ登録は `deferred` になる（**撮影は失わない**）が、
+  `lab_tests` への紐付けは別途の工程が要る。
+
+### 発注者の操作が要るもの
+
+1. **migration の適用** — `supabase/migrations/20261011000010_lab_test_id_captures.sql`。
+   **アプリより先に当てる**（additive なので旧アプリは無害）。未適用のままだと登録 API は
+   **503 で明示的に失敗する**（黙って成功しない）。
+2. **実物の書面 1 枚**（D-2）→ 確認後に `labid.prevent_capture` を on。
+3. **バケットの CORS**（`kit-id-captures/` への PUT を許可）。
+4. **証跡画像の保存期間の判断**（D-3）。

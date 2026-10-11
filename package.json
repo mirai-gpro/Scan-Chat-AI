@@ -71,7 +71,8 @@
     "verify:special-additional-tests": "node scripts/verify-special-additional-tests.mjs",
     "verify:special-account-management": "node scripts/verify-special-account-management.mjs",
     "verify:email-auth": "node scripts/verify-email-auth.mjs",
-    "verify:transcosmos-test-data": "node scripts/verify-transcosmos-test-data.mjs"
+    "verify:transcosmos-test-data": "node scripts/verify-transcosmos-test-data.mjs",
+    "verify:external-id-capture": "node scripts/verify-external-id-capture.mjs"
   },
   "dependencies": {
     "@astrojs/check": "^0.9.9",

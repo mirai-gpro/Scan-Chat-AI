@@ -142,6 +142,10 @@ jobs:
       # 409 で止めるべき回が通って `auth_user_id` / `google_sub` を書き換える。
       # 画面はどちらでも「サインインできた」ように見えるので目視では守れない。
       - run: npm run verify:email-auth
+      # 受取時・外部検査ID 撮影／登録 (正本 docs/lab/kit_receipt_external_id_capture_spec.md)。
+      # **ここは静かに壊れる** — 撮れたつもりで読めていない / QR の値を相関キーにする /
+      # 他人の検査へ紐付く / 台帳が anon キーで読める。どれも画面はエラーを出さない。
+      - run: npm run verify:external-id-capture
 
   # ── PowerShell 必須の検査 (初回 non-required) ──────────────────
   # ubuntu-24.04 ランナーには PowerShell 7.6.5 が同梱されている見込み

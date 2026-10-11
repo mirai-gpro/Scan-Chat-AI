@@ -175,6 +175,31 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     description: 'レンジ値(A〜B)/未設定/男性女性基準名 をドロップ(B3基準値表)。' },
   { key: 'fabgate.adjacent', type: 'bool', group: '捏造ゲート', label: 'G4 隣接漏れ監査(体脂肪率==BMI)', default: 'off',
     description: '偶然一致し得るため明示on時のみ(anomalies 監査へ)。' },
+
+  // ── 受取時・外部検査ID 撮影／登録 (正本 docs/lab/kit_receipt_external_id_capture_spec.md) ──
+  // **実物の形式が未確認なので env でもコード定数でもなく app_config に置く**。
+  // 外れても登録は止めず `review_required` にするだけなので、admin が即日直せることが要点。
+  // パターンを壊しても落ちない (コンパイル不能な正規表現は「判定不能」= review_required)。
+  { key: 'labid.prevent_pattern', type: 'string', group: '外部検査ID',
+    label: 'プリベント バーコードNo. の期待パターン',
+    default: '^704000[0-9]{3}$',
+    description: '正規表現。既定は仕様書の表示例 `704000xxx` をそのまま写したもの (**実物は未確認**)。'
+      + ' 外れた値も登録は通し `review_required` にする (止めると実物の形式が違う回に何も記録できない)。'
+      + ' 空にすると「判定不能」= 常に review_required。' },
+  { key: 'labid.demecal_pattern', type: 'string', group: '外部検査ID',
+    label: 'デメカル 問合せ番号の期待パターン',
+    default: '^[0-9]{15}$',
+    description: '正規表現。既定は「15桁の問合せ番号」という記載どおり。'
+      + ' **DSS の `指図番号` と同一だと断定していない** (実値は 15 桁前後で fixture は 16/17 桁)。' },
+  { key: 'labid.prevent_capture', type: 'bool', group: '外部検査ID',
+    label: 'プリベント 受取時バーコード撮影を出す',
+    default: 'off',
+    description: '受取確認の画面に撮影導線を出すか。**既定 off = 従来どおりの受取確認のまま**。'
+      + ' 実物の書面とバーコード規格を確認してから on にする。' },
+  { key: 'labid.demecal_capture', type: 'bool', group: '外部検査ID',
+    label: 'デメカル 受取時 問合せ番号撮影を出す (Secondary)',
+    default: 'off',
+    description: 'Secondary なので AI問診のハードゲートにはしない。既定 off。' },
 ];
 
 const DEFAULTS: Record<string, string> = Object.fromEntries(CONFIG_SPECS.map((s) => [s.key, s.default]));

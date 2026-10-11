@@ -1,0 +1,329 @@
+/**
+ * 受取時に撮影した**外部検査ID**の正規化・検証・採否判定（**純関数・I/O なし**）。
+ *
+ * 正本: `docs/lab/kit_receipt_external_id_capture_spec.md`
+ *       ＋ `docs/lab/lab_data_pipeline_master_spec.md` §4-5（4検査横断の v2.1 正本）
+ *
+ * 【このファイルが引き受けること】
+ *   ① 読み取り値の正規化（全角→半角・区切りの除去）
+ *   ② **構造ガード**（これだけは絶対に間違えない条件＝数字のみ・長さの範囲）
+ *   ③ **期待パターン**との照合（app_config から来る・**外れても登録は止めない**）
+ *   ④ バーコードと印字IDの一致確認 → **自動確定してよいかの判定**
+ *   ⑤ プリベントの問診CSV 生成を止める fail-closed ゲート
+ *
+ * 【なぜ期待パターンをコードに焼かないか】
+ * `704000xxx` は**業務上の形式例**にすぎず、総桁数・prefix の固定範囲・チェックディジットの
+ * 有無・1次元バーコードの規格は**未確認**（`704000` の文字列は両リポジトリに 0 件＝実測 grep）。
+ * しかも dev seed の `customer.lab_companies` にはプリベントの `external_id_pattern` が
+ * **`^K[0-9]{4}$`** と入っており（`supabase/seed.sql:21`）、これは `704000123` を**弾く**。
+ * つまり「DB に在るパターン」を信じると実物が通らない。
+ *
+ * → **2 段構えにする**:
+ *   - **構造ガード（ハード）**= 数字のみ・長さ 4〜20。形式が何であれ成り立つ条件だけを見る。
+ *     ここを外れた値は**そもそも受け付けない**。
+ *   - **期待パターン（ソフト）**= app_config `labid.prevent_pattern` / `labid.demecal_pattern`。
+ *     外れたら**登録は通すが `review_required` にする**（自動確定しない）。
+ *     実物の形式が既定と違っても**運用が止まらず**、admin が即日パターンを直せる。
+ *
+ * 仕様 §1-3「0 件・複数件・重複・不一致は自動確定しない」をここで機械化している。
+ */
+
+/** 対応する検査会社。**Genoplan は入れない**（正本はタカセ返送CSV 方式・仕様 §2.3）。 */
+export const EXTERNAL_ID_PROVIDERS = ['prevent', 'demecal'] as const;
+export type ExternalIdProvider = (typeof EXTERNAL_ID_PROVIDERS)[number];
+
+/**
+ * provider ↔ `test_type` の対応。**片方だけ送られても整合を検証できるようにする**
+ * （仕様 §6.3「provider と test_type の整合を検証する」）。
+ * `test_type` の値は `customer.kit_shipments.test_type` / `customer.lab_companies.test_types`
+ * と同じ語彙（`supabase/seed.sql:20-21`）。
+ */
+export const PROVIDER_TEST_TYPE: Record<ExternalIdProvider, string> = {
+  prevent: 'cancer_urine',
+  demecal: 'blood',
+};
+
+/** その検査で取る ID の種類。先方の呼び方をそのまま使う（当社で言い換えない）。 */
+export const PROVIDER_ID_KIND: Record<ExternalIdProvider, string> = {
+  prevent: 'barcode_no',   // 先方名称「バーコードNo.」
+  demecal: 'inquiry_no',   // 先方名称「問合せ番号」
+};
+
+/** どの列へ入れるか。物理キットの番号は `external_barcode`、外部照会系の番号は `external_test_id`。 */
+export const PROVIDER_ID_COLUMN: Record<ExternalIdProvider, 'external_barcode' | 'external_test_id'> = {
+  // バーコードNo. は**検体に貼付される物理バーコード**なので物理キットID の列（仕様 §6.2）。
+  prevent: 'external_barcode',
+  // 15桁「問合せ番号」は外部照会／注文系のID（仕様 §6.2）。
+  // **DSS の `指図番号` と同一だと断定していない**（桁数が一致しない・仕様 §2.3）。
+  demecal: 'external_test_id',
+};
+
+/** 構造ガード（ハード）。形式が何であれ成り立つ条件だけ。 */
+export const ID_MIN_DIGITS = 4;
+export const ID_MAX_DIGITS = 20;
+
+/**
+ * 期待パターンのコード既定（app_config `labid.*_pattern` の `default`）。
+ *
+ * - prevent: **仕様書に出ている表示例 `704000xxx` をそのまま写したもの**。
+ *   当社が桁数を発明したのではなく「`704000` ＋ 3 桁」という**記載どおり**。
+ *   実物が違えば `review_required` が増えるだけで**登録は止まらない** → admin が直す。
+ * - demecal: **「15桁の問合せ番号」という記載どおり**の 15 桁。
+ */
+export const DEFAULT_EXPECTED_PATTERN: Record<ExternalIdProvider, string> = {
+  prevent: '^704000[0-9]{3}$',
+  demecal: '^[0-9]{15}$',
+};
+
+export function isExternalIdProvider(v: unknown): v is ExternalIdProvider {
+  return typeof v === 'string' && (EXTERNAL_ID_PROVIDERS as readonly string[]).includes(v);
+}
+
+/** provider と test_type が噛み合っているか。*/
+export function providerMatchesTestType(provider: ExternalIdProvider, testType: unknown): boolean {
+  return typeof testType === 'string' && PROVIDER_TEST_TYPE[provider] === testType;
+}
+
+/** `test_type` から provider を引く（対応が無ければ null＝この検査は撮影の対象外）。 */
+export function providerForTestType(testType: unknown): ExternalIdProvider | null {
+  if (typeof testType !== 'string') return null;
+  for (const p of EXTERNAL_ID_PROVIDERS) {
+    if (PROVIDER_TEST_TYPE[p] === testType) return p;
+  }
+  return null;
+}
+
+/**
+ * 読み取り値を数字列へ正規化する。
+ *
+ * - **全角数字を半角へ**（スマホの手入力・OCR で混ざる）
+ * - 空白（半角/全角）・ハイフン類（`-` `‐` `‑` `–` `—` `ー` `−`）・`.` を**区切りとして捨てる**
+ * - それ以外の文字が残ったら **null**（数字列にならないものを通さない＝構造ガード）
+ *
+ * **数字以外を黙って削らない**のが要点。`O`→`0` のような「親切な補正」は、
+ * 別の番号に化ける可能性があるので**やらない**（捏造ゼロ）。
+ */
+export function normalizeExternalId(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  let s = raw.trim();
+  if (!s) return null;
+  // 全角数字 → 半角
+  s = s.replace(/[０-９]/g, (c) => String.fromCharCode(c.charCodeAt(0) - 0xfee0));
+  // 区切りとして捨ててよい文字だけを除去する
+  s = s.replace(/[\s　\-‐‑‒–—―ー−.]/g, '');
+  if (!/^[0-9]+$/.test(s)) return null;
+  return s;
+}
+
+/** 構造ガードを通るか（数字のみ・長さの範囲内）。 */
+export function passesStructuralGuard(normalized: string | null): boolean {
+  if (!normalized) return false;
+  return /^[0-9]+$/.test(normalized)
+    && normalized.length >= ID_MIN_DIGITS
+    && normalized.length <= ID_MAX_DIGITS;
+}
+
+/**
+ * 期待パターン（app_config の文字列）にマッチするか。
+ *
+ * **パターンが壊れていても落ちない**。コンパイルできない正規表現は「判定不能」として
+ * `null` を返し、呼び出し側は `review_required` に倒す（**誤って自動確定しない**）。
+ * 空文字は「パターン未設定」＝判定不能。
+ */
+export function matchesExpectedPattern(normalized: string, pattern: string | null | undefined): boolean | null {
+  const p = (pattern ?? '').trim();
+  if (!p) return null;
+  let re: RegExp;
+  try {
+    re = new RegExp(p);
+  } catch {
+    return null;
+  }
+  return re.test(normalized);
+}
+
+/** 外部IDの表示用マスク。**全文を画面・ログ・分析イベントへ出さない**（仕様 §6.1）。 */
+export function maskExternalId(normalized: string | null | undefined, keep = 4): string {
+  const s = (normalized ?? '').trim();
+  if (!s) return '';
+  if (s.length <= keep) return '*'.repeat(s.length);
+  return '*'.repeat(s.length - keep) + s.slice(-keep);
+}
+
+/** 読み取り経路。`manual` は手入力補正。 */
+export type DecodeMethod = 'barcode' | 'ocr' | 'barcode+ocr' | 'manual';
+/** 撮影経路。 */
+export type CaptureMethod = 'camera' | 'file' | 'manual';
+
+/** 採否の判定結果。`confirmed` は「ユーザーが確認すれば確定してよい」という意味。 */
+export type CaptureStatus = 'confirmed' | 'review_required';
+
+/** 判定が `review_required` になった理由コード（画面と監査の両方で使う）。 */
+export type ReviewReason =
+  | 'barcode_ocr_mismatch'   // バーコードと印字IDが食い違う
+  | 'single_source'          // 片方しか読めていない
+  | 'pattern_mismatch'       // 期待パターンに合わない
+  | 'pattern_unknown'        // 期待パターンが未設定／壊れている＝判定不能
+  | 'manual_entry';          // 手入力で入れた値
+
+export interface EvaluateInput {
+  provider: ExternalIdProvider;
+  /** 1次元バーコードのデコード結果（無ければ null）。 */
+  barcode?: unknown;
+  /** 印字された「ユーザーID」等の OCR 結果（無ければ null）。 */
+  ocr?: unknown;
+  /** 手入力の補正値（あればこれを採る）。 */
+  manual?: unknown;
+  /** 期待パターン（app_config 由来）。 */
+  expectedPattern?: string | null;
+}
+
+/** 正規化できた各経路の値（監査用。画面には出さない）。 */
+export interface EvaluateSources {
+  barcode: string | null;
+  ocr: string | null;
+  manual: string | null;
+}
+
+/**
+ * **`ok` で絞れる判別可能ユニオン**にしてある。
+ * `value: string | null` を 1 つの型に同居させると、呼び出し側が `ok` を見たあとでも
+ * `null` を外せず、**チェックを忘れたコードが型で通ってしまう**。
+ */
+export type EvaluateResult =
+  | {
+      ok: true;
+      /** 採った値（正規化済み）。 */
+      value: string;
+      status: CaptureStatus;
+      decodeMethod: DecodeMethod;
+      reasons: ReviewReason[];
+      sources: EvaluateSources;
+    }
+  | {
+      ok: false;
+      value: null;
+      status: CaptureStatus;
+      decodeMethod: DecodeMethod;
+      reasons: ReviewReason[];
+      sources: EvaluateSources;
+      /** 構造ガードを通る値が 1 つも無い。 */
+      error: 'no_readable_value';
+    };
+
+/**
+ * バーコード／OCR／手入力から**採る値**と**自動確定してよいか**を決める。
+ *
+ * 優先順位（仕様 §5.1）: ① 手入力補正 ② 1次元バーコード ③ 印字IDの OCR。
+ *
+ * **自動確定（`confirmed`）になるのは、両方読めて一致し、期待パターンにも合うときだけ。**
+ * それ以外は全部 `review_required`。`review_required` でも**登録は通す** —
+ * 止めてしまうと実物の形式が既定と違う回に**何も記録できなくなる**（仕様 §2.3）。
+ */
+export function evaluateExternalId(input: EvaluateInput): EvaluateResult {
+  const barcode = normalizeExternalId(input.barcode);
+  const ocr = normalizeExternalId(input.ocr);
+  const manual = normalizeExternalId(input.manual);
+  const sources = { barcode, ocr, manual };
+
+  const reasons: ReviewReason[] = [];
+  let value: string | null = null;
+  let decodeMethod: DecodeMethod = 'manual';
+
+  if (manual && passesStructuralGuard(manual)) {
+    value = manual;
+    decodeMethod = 'manual';
+    reasons.push('manual_entry');
+  } else {
+    const bOk = barcode && passesStructuralGuard(barcode) ? barcode : null;
+    const oOk = ocr && passesStructuralGuard(ocr) ? ocr : null;
+    if (bOk && oOk) {
+      value = bOk;                       // バーコードを採る（印字より機械可読が確実）
+      if (bOk === oOk) {
+        decodeMethod = 'barcode+ocr';
+      } else {
+        decodeMethod = 'barcode';
+        reasons.push('barcode_ocr_mismatch');
+      }
+    } else if (bOk) {
+      value = bOk;
+      decodeMethod = 'barcode';
+      reasons.push('single_source');
+    } else if (oOk) {
+      value = oOk;
+      decodeMethod = 'ocr';
+      reasons.push('single_source');
+    }
+  }
+
+  if (!value) {
+    return {
+      ok: false, value: null, status: 'review_required',
+      decodeMethod: 'manual', reasons: [], sources, error: 'no_readable_value',
+    };
+  }
+
+  const pattern = input.expectedPattern ?? DEFAULT_EXPECTED_PATTERN[input.provider];
+  const m = matchesExpectedPattern(value, pattern);
+  if (m === null) reasons.push('pattern_unknown');
+  else if (m === false) reasons.push('pattern_mismatch');
+
+  return {
+    ok: true,
+    value,
+    status: reasons.length === 0 ? 'confirmed' : 'review_required',
+    decodeMethod,
+    reasons,
+    sources,
+  };
+}
+
+/**
+ * プリベント向け問診CSV の **fail-closed ゲート**（仕様 §7.1 の①）。
+ *
+ * 【ここが本当のゲート】UI で案内を出すだけでは「問診データをプリベントへ出す前に必ず
+ * ブロック」を満たせない（API 直叩き・admin 経路・将来のバッチで迂回できる）。
+ * **CSV を生成する側がこの関数を通す**ことで、どの経路からでも止まる。
+ *
+ * **`interview-cycle.ts` には足さない。** あちらは「この回の問診が済んだか」の純関数で、
+ * 回窓が取れないときに **`done_this_cycle`（＝催促しない）へ倒す fail-safe** を持つ
+ * （`interview-cycle.ts:16-18`）。そこへゲートを足すと、回窓が読めない回に
+ * **ゲートが素通りする（fail-open）**。向きが逆なので混ぜてはいけない。
+ *
+ * @param captured 対象検査に紐づいた、確定済みの外部ID（`confirmed` / `review_required` とも可）。
+ *                 **null / 空は未取得**として必ずブロックする。
+ */
+export interface PreventGateInput {
+  /** その回のプリベント検査に紐づいている外部ID（正規化済み・未取得なら null）。 */
+  capturedBarcodeNo: string | null | undefined;
+  /** 期待パターン（app_config 由来）。 */
+  expectedPattern?: string | null;
+}
+
+export interface PreventGateResult {
+  allowed: boolean;
+  reason: 'ok' | 'barcode_no_missing' | 'barcode_no_malformed';
+  /** 画面・PR に出せる説明（**外部IDの全文は入れない**）。 */
+  detail: string;
+}
+
+export function checkPreventQuestionnaireGate(input: PreventGateInput): PreventGateResult {
+  const v = normalizeExternalId(input.capturedBarcodeNo);
+  if (!v) {
+    return {
+      allowed: false,
+      reason: 'barcode_no_missing',
+      detail: 'プリベントのバーコードNo. が未登録です。受取確認で撮影・登録してください。',
+    };
+  }
+  if (!passesStructuralGuard(v)) {
+    return {
+      allowed: false,
+      reason: 'barcode_no_malformed',
+      detail: `登録済みのバーコードNo. が数字 ${ID_MIN_DIGITS}〜${ID_MAX_DIGITS} 桁の形になっていません (${maskExternalId(v)})。`,
+    };
+  }
+  // **期待パターン外でも通す。** パターンは未確認（仕様 §2.3）なので、ここで止めると
+  // 実物の形式が既定と違う回に CSV が永久に作れなくなる。review_required は別途 admin が見る。
+  return { allowed: true, reason: 'ok', detail: '' };
+}

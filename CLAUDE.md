@@ -54,7 +54,7 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
   GET でカタログ+現在値、POST で upsert。**UI は wellfort-site admin 側** (この作業ツリーには
   未取得のため実装状況は未確認)。
 
-**app_config の現行キー (32 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
+**app_config の現行キー (38 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
 `demo.account_emails` / `demo.account_uids` / `demo.account_denied_uids` / `demo.seeded_from_admins` /
 `special.account_emails` / `special.account_uids` / `special.account_denied_uids` / `special.account_dob` /
 `ui.single_purchase_plan_name` /
@@ -63,7 +63,10 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
 `scan.model` / `live.model` / `scan.output_format` / `scan.boundary_recheck` / `scan.obs_dedup` /
 `scan.scramble_fix` / `scan.eye_resolve` / `scan.lipid_fix` / `scan.canonicalize` /
 `scan.perception_repair` / `scan.vqa_rowcrop` / `scan.ai_prediction_dedup` /
-`fabgate.unperformed` / `fabgate.refbleed` / `fabgate.reftable` / `fabgate.adjacent`
+`fabgate.unperformed` / `fabgate.refbleed` / `fabgate.reftable` / `fabgate.adjacent` /
+`ui.report_new_days` / `elith.plan_formats` /
+**`labid.prevent_pattern` / `labid.demecal_pattern` / `labid.prevent_capture` / `labid.demecal_capture`**
+(受取時・外部検査ID 撮影。**撮影の 2 つは既定 off**)
 
 **【重要】この文書の下の方に残っている `env SCAN_XXX` という表記は、すべて app_config キーの
 読み替え**で理解すること (`SCAN_BOUNDARY_RECHECK` → `scan.boundary_recheck` のように
@@ -2538,7 +2541,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/旧版・ボツ/ai_prevention_report_generation_spec.md` | **AI疾病予防報告書 生成機能の仕様 (パイプライン⑥・2026-08-28)**。受領 JSON 3 点 → アプリが可読な報告書を生成。入力仕様/出力は HTML+印刷CSS(PDF生成しない)/章立て/決定論の変換規則/**作れないもの①〜④と捏造ゼロの境界**/受領データの既知不具合/実装計画/Elith 確認事項 |
 | `docs/elith/batch_scan_to_elith_usage.md` | サンプル一括スキャン→S3 バッチ手順 (`scripts/batch-scan-to-elith.mjs`) |
 | **`docs/lab/lab_data_pipeline_master_spec.md`** | **検査データ・パイプライン 総合仕様書(E2E正本・上位文書)・現行 v2.1 / 基準日 2026-10-09**。EC購入→キット/タイミング→発送指示/進捗→AI問診/検体返送→各社受渡→受領チェック(週次)→Elithラップ/S3書出→AI診断PDF受取/表示 を6ステップで連結。詳細は(a)(b)(c)へ委譲(二重管理しない)。**【v2.1 で追加】§4-5 = 4検査横断の「検査ID紐づけ／問診受渡／結果受領」の正本**(優先順位 = §4-5 ＞ 会社別詳細仕様 ＞ 旧版。上書き箇所は §4-5.11 に列挙)。**§4-5.8 = v2.1 原案の実装状況を実コードで再確認した訂正 4 件** — ①Partner Portal は本番画面でサンプルは上り入力ファイルの取得だけ ②LAiF XLSX に入るのは人単位の仮名ID 1 か所で**② 整理番号の採番機構は未実装** ③血液の氏名列は**実在する**(`姓`/`名`/`姓かな`/`名かな`)ので残るゲートはパーサ改修と実受領CSV確認 ④**「Scan-Chat-AI は `customer` を読み取り専用でしか触れない」は誤り**(`HP_BRIDGE_READONLY_KEY` は wellfort-site の `app_bridge` 用)。**§4-5.12 の 3 = 最重要の未決**: `customer.lab_tests` に**行を作るコードが両リポジトリに 0 件**(SELECT は `src/lib/chat-context.ts:79-80` の 1 か所だけ)＝**外部ID紐づけ全体の先行条件** |
-| **`docs/lab/kit_receipt_external_id_capture_spec.md`** | **【受取時・外部検査ID 撮影／登録の正本。触る前に必読・v0.1 Draft・未実装】**ユーザーがキットを受け取った時点で外部IDをスマホ撮影・読取し、`lab_tests.id` へ紐づける。**P0 = プリベントのバーコードNo.(例 `704000xxx`)** / **P1 = デメカル 15桁「問合せ番号」(Secondary)** / **対象外 = Genoplan**(正本はタカセ返送CSV 方式。**ユーザー撮影方式へ置き換えない**)。**【UI の確定事項】プリベントの撮影対象に QR コードを据えない** — 書面全体を見せ「ユーザーID」と**1次元バーコード**を枠で囲う。**§3.2 = 着手を止めるブロッカー**: 紐づけ先の `lab_tests` 行を作るコードが存在せず本番に 1 行も無い(解き方 3 案と発注者判断 §9 の D-1)。**§6.2 = 画像は `scan-upload-ticket.ts` の形を流用**(サーバ採番キー+完全一致 validator+署名に Content-Type/長さ固定)。**`putOriginal()` は使わない**(Object Lock 10年=撮り直しが消せない)。**§6.4 = バーコードデコードの方式比較**(`BarcodeDetector` は iOS Safari 非対応＝単独では不可。本線はサーバ側 Gemini)。**§7.1 = AI問診ゲートは二段**(本当のゲートは**プリベント問診CSV 生成側の fail-closed**。`interview-cycle.ts` には足さない＝fail-safe が「催促しない」側なので fail-open になる) |
+| **`docs/lab/kit_receipt_external_id_capture_spec.md`** | **【受取時・外部検査ID 撮影／登録の正本。触る前に必読・v1.0 実装済み／既定 off】**ユーザーがキットを受け取った時点で外部IDをスマホ撮影・読取し、`lab_tests.id` へ紐づける。**P0 = プリベントのバーコードNo.(例 `704000xxx`)** / **P1 = デメカル 15桁「問合せ番号」(Secondary)** / **対象外 = Genoplan**(正本はタカセ返送CSV 方式。**ユーザー撮影方式へ置き換えない**)。**【UI の確定事項】プリベントの撮影対象に QR コードを据えない** — 書面全体を見せ「ユーザーID」と**1次元バーコード**を枠で囲う。**§3.2 = 裁定 D-1 = 案A (登録時に `lab_tests` 行を作る)**: 本番の shipment は `app_bridge`(= `orders` のミラー)由来で `lab_company_id` が空・`customer_id` が実は `diagnostic_user_id`・受取 ID が `customer.kit_shipments` に無いので、**材料はその場で引き直し `shipment_id` は実在を確かめた時だけ入れる**(埋めに行くと本番で FK 違反)。材料が揃わない回は **`deferred` で台帳に残し撮影を失わない**。**§6.2 = 画像は `scan-upload-ticket.ts` の形を流用**(サーバ採番キー+完全一致 validator+署名に Content-Type/長さ固定)。**`putOriginal()` は使わない**(Object Lock 10年=撮り直しが消せない)。**§6.4 = 裁定 D-4 = サーバ側 Gemini**(`BarcodeDetector` は iOS Safari 非対応＝単独では不可。`/scan` と同じ「ブラウザ → S3 → Gemini」で追加依存ゼロ)。**§7.1 = AI問診ゲートは二段**(本当のゲートは**プリベント問診CSV 生成側の fail-closed**。`interview-cycle.ts` には足さない＝fail-safe が「催促しない」側なので fail-open になる)。**ゲートは部品として先に置いた** = `checkPreventQuestionnaireGate()`(純関数) ＋ `loadCapturedExternalId()`。**CSV 生成を実装する人は出力前に必ず通すこと**(CSV 生成そのものは未実装)。**【既定 off】`labid.prevent_capture` / `labid.demecal_capture` が off なので画面にも API にも出ない** — **実物の同梱書面 1 枚でバーコード規格と桁数を確定してから on にする**(`704000xxx` は業務上の形式例にすぎない)。桁数は app_config `labid.prevent_pattern` で、**外れても登録は通り `review_required` になるだけ**(止めると実物の形式が違う回に何も記録できない)。検証 `npm run verify:external-id-capture` 200 件 (CI の A 層)・**退行注入 18 種** |
 | `docs/lab/lab_data_reception_overview.md` | **4検査のデータ受取 詳細**(血液=リージャー/**PowerShell**・がん=プリベント/専用ポータル+S3+パスキー=**採用方式(v2.1 で「提案中」は失効)**・AI疾病予測=LAiF/専用ポータル+S3・遺伝子=Genoplan/**サーバ側API取得**。方式/経路/現状/課題/次アクション)。**§5 = ID 連携の実務断面**(3 層の ID・`customer.lab_tests`・② 上りIDの採番規則案 §5.3・実装ギャップ §5.4)。E2E全体像は上記 master_spec が上位で、**検査ID紐づけ/問診受渡/結果受領の横断は同書 §4-5 が正本**(本書は §4-5 と矛盾しない範囲で有効) |
 | `docs/lab/questionnaire_to_lab_csv_spec.md` | **AI問診回答→各社CSV 変換仕様(実装用)**。共通設問No→各社必要行のマスターマッピング表+各社項目リスト+生成ルール(フリー/選択/範囲/複数)+PII確認事項。元=Wellfort問診項目マトリクスExcel |
 | `docs/lab/demecal_auto_download_overview_spec.md` | 血液検査データ自動DL (デメカル/mTLS) 概要 |

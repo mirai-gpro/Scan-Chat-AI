@@ -391,8 +391,28 @@ Wellfort 内部の「今回の検査」へ安全かつ一意に紐づける。
 ガイドは**書面全体**を見せ、その中の「ユーザーID」と**その近傍の 1次元バーコード**を枠で囲って示す。
 ユーザーに QR コードを撮影対象と誤認させない。
 
-**正本＝`docs/lab/kit_receipt_external_id_capture_spec.md`。** 実装前に必読。
-同書に、**着手前に解かねばならない構造的ブロッカー**（`customer.lab_tests` に行を作るコードが存在しないこと）を含む。
+**正本＝`docs/lab/kit_receipt_external_id_capture_spec.md`（v1.0・実装済み／既定 off）。** 触る前に必読。
+
+**【実装済み 2026-10-11・発注者裁定を受けて】**
+
+| 裁定 | 内容 |
+|---|---|
+| **D-1 = 案A** | **登録時に `lab_tests` 行を作る。** 本番の shipment は `app_bridge`（= `orders` のミラー）由来で `lab_company_id` が空・`customer_id` が実は `diagnostic_user_id`・受取 ID が `customer.kit_shipments` に無いので、**材料はその場で引き直し、`shipment_id` は実在を確かめた時だけ入れる**（埋めに行くと本番で FK 違反）。揃わない回は `deferred` で台帳に残し**撮影を失わない** |
+| **D-4 = サーバ側 Gemini** | `BarcodeDetector` は **iOS Safari に無い**ので単独では成立しない。`/scan` が本番で使っている「ブラウザ → S3 → Gemini」と同じ形にした＝**追加依存ゼロ・端末差なし** |
+
+→ **§4-5.3 の「受取時バーコード撮影／ID登録: 未実装」はこれで解消**（ただし下記のとおり**既定 off**）。
+
+**既定は off のまま。** `app_config` の `labid.prevent_capture` / `labid.demecal_capture` が
+`off` なので、**画面にも API にも出ない**（UI だけ隠して API を開けた状態にしない）。
+**実物の同梱書面 1 枚でバーコード規格と桁数を確定してから on にする**
+（`704000xxx` は**業務上の形式例**にすぎない＝§4-5.12 の 1）。
+
+**プリベント問診CSV のゲートは部品として先に置いた** — `checkPreventQuestionnaireGate()`
+（純関数・fail-closed）と `loadCapturedExternalId()`。**CSV 生成を実装する人は出力前に必ず通すこと**
+（CSV 生成そのものは未実装＝§4-5.9 の P0-2）。
+
+検証 = `npm run verify:external-id-capture`（**200 件**・CI の A 層）・**退行注入 18 種**とも
+名指しで落ちることを確認済み。
 
 ### 4-5.8 実装状況の実測訂正（v2.1 原案からの差分）
 
@@ -452,12 +472,19 @@ v2.1 原案の記述を実コードで再確認し、**4 件を訂正**した。
    → 確定するまで**桁数と prefix をコードへ固定しない**（設定または共通 validator に置く）。
 2. **デメカル 15桁「問合せ番号」と DSS `指図番号` の関係**（未確認・§4-5.4）。
    実受領CSV と実物の用紙を 1 件突き合わせる。**同一と断定して Primary を置き換えない。**
-3. **`lab_tests` の行を誰がいつ作るか（最重要・未決）**。
-   `customer.lab_tests` を **SELECT している箇所は 1 つだけ**（`src/lib/chat-context.ts:79-80`）で、
-   **INSERT / UPDATE / UPSERT するコードは両リポジトリに 0 件**（実測 grep）。
-   既存行は seed だけ（`supabase/seed.sql:128`／`supabase/seed_admin_users.sql:127`／`supabase/demo_oem_account.sql:73`）。
-   → **外部IDの紐づけ先が本番に 1 行も無い。** 採番タイミングと工程の確定が、
-   §4-5.9 の P0 1〜4 **すべての先行条件**になる（`id_management_and_correlation_spec §7-3` が未実装のまま）。
+3. **`lab_tests` の行を誰がいつ作るか** → **裁定済み 2026-10-11 = 案A（登録時に作る）。**
+   以前はここが「最重要・未決」だった（`customer.lab_tests` を SELECT している箇所は
+   `src/lib/chat-context.ts:79-80` の 1 つだけで、INSERT / UPDATE / UPSERT は両リポジトリに 0 件・
+   既存行は seed だけ＝`supabase/seed.sql:128` 他）。
+   **§4-5.7 の実装が「登録時に作る」側を引き受けた**ので、
+   **プリベントの受取時 ID 取得（P0-1）はこの先行条件に縛られなくなった。**
+   - **ただし ②③④ の P0 は依然この工程を必要とする**。プリベントは「ユーザーが受取時に
+     撮る」ので登録のきっかけが画面に在るが、**LAiF の往復キー・Genoplan のボックスナンバー・
+     デメカルの本人照合は、受領側から `lab_tests` を逆引きする**ので、
+     出荷・受領の工程で行が作られていないと引く相手が無い
+     （`id_management_and_correlation_spec §7-3` は未実装のまま）。
+   - **本番に `customer.customer_profiles` / `customer.lab_companies` の行が在るかは未確認**
+     （この環境から引けない）。無い回は `deferred` になり撮影は残るが紐付かない。
 4. **② 上りID（整理番号）の採番規則**（未決）。書式案と単位案は `lab_data_reception_overview.md §5.3`。
    LAiF が経年で同一人物として突合する必要があるか（レポートの昨年比欄）の回答待ち。
 5. **キット個体ID の捕捉**: タカセの返送CSV に 1 列足す合意（タカセ側の運用調整）。
