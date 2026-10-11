@@ -3,7 +3,7 @@
 | 項目 | 内容 |
 |---|---|
 | 目的 | 外部検査キットをユーザーが**受け取った時点**で、検査会社がキットに付与した外部IDをスマホで撮影・読取し、Wellfort 内部の「今回の検査」へ**安全かつ一意に**紐づける。物理検体・問診データ・検査結果を、推測ではなく**機械的なキー**で同一検査へ戻せる状態を作る。 |
-| 版 | **v1.1（2026-10-11・実装済み／既定 off）**。v1.0 = 発注者裁定 **D-1=案A（登録時に `lab_tests` 行を作る）** / **D-4=サーバ側 Gemini**。**v1.1 = 実装レビューの是正 2 点**（発注者指示 2026-10-11）: **①`lab_tests` を「人 + 検査種別で 1 件だから」という理由で使い回さない**（前年の外部IDを上書きし得た＝§3.2.1） **②プリベント問診CSV のゲートを `confirmed` ∧ `linked` ∧ `lab_test_id` 非 null の 3 条件へ**（§7.1）。**migration の構造は変えていない**（additive のまま）。**app_config の `labid.*_capture` は既定 off のまま** なので、実物の書面とバーコード規格を確認するまで誰にも出ない（§9）。 |
+| 版 | **v1.2（2026-10-11・コードは v1.1 のまま／既定 off）**。v1.0 = 発注者裁定 **D-1=案A（登録時に `lab_tests` 行を作る）** / **D-4=サーバ側 Gemini**。**v1.1 = 実装レビューの是正 2 点**（**①`lab_tests` を「人 + 検査種別で 1 件だから」で使い回さない**＝§3.2.1 / **②問診CSV のゲートを `confirmed` ∧ `linked` ∧ `lab_test_id` 非 null の 3 条件へ**＝§7.1）。**v1.2 = 発注者指示 2026-10-11 の 2 件（コード変更なし）**: **③`review_required` を解決する admin の確認・訂正経路を ON の必須条件へ格上げ**（§8.4 / §12.1 — ゲートが fail-closed になった以上、例外系に出口が無いまま on にできない） / **④③-1（出荷時に `lab_tests` 行を作る）の正本キーの設計原則を確定**（`test_instance_ref` 相当・`orders.id` も `shipment_id` も流用しない＝§12 の申し送り）。**migration の構造は v1.0 から 1 バイトも変えていない**（additive のまま）。**app_config の `labid.*_capture` は既定 off** なので、ON の条件（§12.1）が揃うまで誰にも出ない。 |
 | 上位文書 | **`docs/lab/lab_data_pipeline_master_spec.md` §4-5（v2.1・4検査横断の正本）**。本書はその §4-5.7 の詳細。矛盾したら上位が勝つ。 |
 | 対象 | **P0＝① がんリスク（プリベント / ALA-PDS）のバーコードNo.** ／ **P1＝② 血液（リージャー / デメカル）の 15桁「問合せ番号」（Secondary）** |
 | 対象外 | **④ 遺伝子（Genoplan）**。正本は**タカセ返送CSV 方式**（上位 §4-5.6）。**ユーザー撮影方式へ置き換えない。** |
@@ -20,7 +20,7 @@
 > | `src/pages/api/kit/[id]/external-id.ts` | `mode: ticket / read / register`（認可は `self-report.ts` の 3 段ガードを流用） |
 > | `src/components/dashboard/ExternalIdCapture.astro` ／ `src/scripts/external-id-capture.ts` | 画面と処理 |
 > | `supabase/migrations/20261011000010_lab_test_id_captures.sql` | 撮影台帳（**service_role だけ**・ポリシー 0 件） |
-> | `scripts/verify-external-id-capture.mjs` | `npm run verify:external-id-capture`（**257 件**・CI の A 層。⑭ が年跨ぎの回帰①〜⑤） |
+> | `scripts/verify-external-id-capture.mjs` | `npm run verify:external-id-capture`（**259 件**・CI の A 層。⑭ が年跨ぎの回帰①〜⑤）・**退行注入 23 種** |
 >
 > **§3.2 のブロッカーは「案A ＋ 紐付け失敗を deferred で残す」で解いた**（§3.2 の末尾）。
 > **実装の前提と残っている未確認は §9 と §12。**
@@ -446,6 +446,10 @@ UI で次を区別できること。
 
 ### 8.4 管理者訂正
 
+**【ON の必須条件・発注者指示 2026-10-11】これは「あとで足す UI」ではない。**
+v1.1 でゲートが 3 条件になり `review_required` / `deferred` / `conflict` が問診CSV へ出なくなったので、
+**この経路が無いと例外系に出口が無い**（詳細と受け皿の一覧は §12.1）。**未実装。**
+
 **既存 admin 機能へ統合できるかを先に確認する。**
 ただし §3.1 のとおり**汎用の監査ログ表が無い**ので、最低限として
 
@@ -550,24 +554,66 @@ UI で次を区別できること。
   **`customer.customer_profiles` / `customer.lab_companies` に本番の行が在るか**は
   この環境から引けない。無ければ登録は `deferred` になる（**撮影は失わない**）が、
   `lab_tests` への紐付けは別途の工程が要る。
-- **【確認事項・v1.1】③-1（出荷時に `lab_tests` 行を作る）が実装された後の二重行。**
-  いま初回撮影は**必ず新しい行を作る**（§3.2.1）。③-1 が入ると出荷側が先に行を作るので、
-  同じ検査に 2 行できる。**出荷側の行と撮影を突き合わせるキーが仕様に無い**ので、
-  **ここで推測して作らない**（`shipment_id` は本番だと `orders.id` で `kit_shipments` に
-  無いため、そのままでは突き合わせに使えない）。③-1 の設計時に決める。
-  それまでは重複は admin が見る（**前年を上書きするより軽い事故**を選んでいる）。
+- **【③-1 の設計原則は確定した・2026-10-11 発注者指示】** v1.1 の時点では
+  「突き合わせキーが仕様に無いので推測で作らない」までだったが、**原則だけは先に決まった**。
+  正本 = 上位 `lab_data_pipeline_master_spec.md` §4-5.12 の 3。
+  - **正本キーは「1 回・1 検査」を一意に示す cross-system key**（`test_instance_ref` 相当。
+    名前は既存命名を調べてから決める）。**`orders.id` 単独は使わない**（1 注文に複数検査が
+    含まれ得る）・**`shipment_id` も流用しない**（本番の受取 ID は `orders.id` で
+    `customer.kit_shipments.id` とは別物＝配送の単位は検査の単位ではない）。
+  - **③-1 が入ったら、出荷時にそのキーで `lab_tests` を作り、受取撮影側は新規作成せず
+    その行を更新する。** いまの「初回撮影は必ず新しい行を作る」（§3.2.1）は ③-1 が無い間の形。
+    これで二重行の懸念は消える。
+  - **今回の範囲では ③-1 まで拡張しない**（発注者指示）。キーの実体が無いうちに突き合わせを
+    作ると `shipment_id` / `orders.id` の流用に戻る。それまでは重複は admin が見る
+    （**前年を上書きするより軽い事故**を選んでいる）。
 
 ### 発注者の操作が要るもの
 
 1. **migration の適用** — `supabase/migrations/20261011000010_lab_test_id_captures.sql`。
    **アプリより先に当てる**（additive なので旧アプリは無害）。未適用のままだと登録 API は
    **503 で明示的に失敗する**（黙って成功しない）。
-2. **実物の書面 1 枚**（D-2）→ 確認後に `labid.prevent_capture` を on。
-3. **バケットの CORS**。**S3 の CORS はバケット単位で、オブジェクトの prefix 単位では
+2. **実物の書面 1 枚**（D-2）→ `labid.prevent_pattern` を直す。
+3. **`review_required` を解決する admin の確認・訂正経路**（§8.4）。
+   **これは「あとで足す UI」ではなく ON の必須条件**（発注者指示 2026-10-11・下記 §12.1）。
+   → 1〜3 が揃ってから `labid.prevent_capture` を on にする。
+4. **バケットの CORS**。**S3 の CORS はバケット単位で、オブジェクトの prefix 単位では
    絞れない**（`PutBucketCors` に prefix の概念が無い）。設定するのは
    **対象バケットに対して Wellfort の Origin / `PUT` / 必要な header だけを許可する**こと。
    **`kit-id-captures/` に限定するのは CORS の仕事ではない** —
    prefix の制約は **presigned URL を発行するサーバ側のキー検証**
    （`isEvidenceKey` の完全一致・§6.2）が持つ。署名の無いリクエストは
    そもそも S3 に通らないので、CORS が広いこと自体が書き込み権限にはならない。
-4. **証跡画像の保存期間の判断**（D-3）。
+5. **証跡画像の保存期間の判断**（D-3）。
+
+### 12.1 ON の必須条件 =『`review_required` の出口』（発注者指示 2026-10-11）
+
+**v1.1 でゲートが 3 条件（`confirmed` ∧ `linked` ∧ `lab_test_id` 非 null）になったので、
+`review_required` / `deferred` / `conflict` の回は問診CSV へ出なくなった（§7.1）。**
+これは意図どおりで**正常系は問題ない**。ただし**例外系の出口が無い**:
+
+| 例外系 | いまの状態 | 利用者・運用から見えること |
+|---|---|---|
+| バーコードと印字IDが食い違う（`barcode_ocr_mismatch`） | `review_required` | **撮影はできたが先へ進めない** |
+| 片方しか読めない（`single_source`） | `review_required` | 同上 |
+| 期待パターン外（`pattern_mismatch` / `pattern_unknown`） | `review_required` | **実物の形式が既定と違う間は全件がこれ** |
+| 手入力で入れた（`manual_entry`） | `review_required` | 同上 |
+| `lab_tests` を作れなかった（材料欠落） | `deferred` | 同上 |
+| 同じIDが別の検査に在る | `conflict` | 同上 |
+
+→ **本番 ON の前に、管理者が `review_required` → `confirmed` を証跡つきで解決できる経路が要る。**
+要件は上位 §4-5.10 と同じ = **理由・操作者・時刻を監査ログへ残す**・**0 件/複数件を自動確定しない**。
+
+**台帳側の受け皿は実装済み**なので、要るのは **admin 画面（wellfort-site）と それを呼ぶ API** だけ:
+
+- 列 = `previous_value` / `corrected_at` / `corrected_by` / `correction_reason`
+  （migration `20261011000010`・**追加の DDL は要らない**）。
+- 関数 = `persistExternalIdCapture()` の **`correction: { by, reason }`** 引数
+  （渡すと旧行を `superseded` にして新行へ `previous_value` を残す）。
+- **`status` を admin が直に書き換える口を作らない** — 同じ `persistExternalIdCapture` を通す
+  （整形・重複判定・紐付けを二重に持たないため。`sanitizeMeasurementsForDelivery` と同じ規律）。
+- **`lab_test_link_status` を手で `linked` にしない** — `lab_tests` への紐付けが実際に
+  できたかどうかは関数の戻り値が決める（**画面の表示だけ `linked` にすると黙って壊れる**）。
+
+**ゲートを緩めて回避しない。** 「`review_required` でも CSV に出す」は、
+**この検査のものだと確定していない番号をプリベントへ渡すこと**そのもの（§7.1 の 2 行目）。
