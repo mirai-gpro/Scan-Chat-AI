@@ -411,8 +411,19 @@ Wellfort 内部の「今回の検査」へ安全かつ一意に紐づける。
 （純関数・fail-closed）と `loadCapturedExternalId()`。**CSV 生成を実装する人は出力前に必ず通すこと**
 （CSV 生成そのものは未実装＝§4-5.9 の P0-2）。
 
-検証 = `npm run verify:external-id-capture`（**200 件**・CI の A 層）・**退行注入 18 種**とも
-名指しで落ちることを確認済み。
+**【v1.1 の是正 2 点・発注者指示 2026-10-11】** 実装レビューで出た 2 件を直した。
+**どちらも「今回の検査」の同一性に関わる**ので、ON の前に閉じておく必要があった。
+
+| # | 直したこと | 直さないと何が起きるか |
+|---|---|---|
+| 1 | **`lab_tests` 行を「人 + 検査種別で 1 件だから」という理由で使い回さない。** 使い回す根拠は、同じ `(diagnostic_user_id, shipment_ref, provider)` の台帳行が既に持っている `lab_test_id` だけ（＝同じ回の撮り直し）。初回撮影は**今回用の行を作る** | プリベントは**年 1 回**なので、2 年目の撮影で前年の行がちょうど 1 件ヒットし、**前年の `external_barcode` を今年の値で上書きする**。前年の結果PDF を辿るキーが消え、画面も台帳も `linked` と表示するので**黙って壊れる** |
+| 2 | **問診CSV のゲートを `status='confirmed'` ∧ `lab_test_link_status='linked'` ∧ `lab_test_id` 非 null の 3 条件へ**。`review_required` / `deferred` / `conflict` は fail-closed でブロック。`loadCapturedExternalId()` は **`shipmentRef` か `labTestId` が必須**（「その人の最新」を返さない） | ①値が読めていても**この検査のものだと確定していない**番号で問診CSV が出る ②前年の confirmed なレコードで**今年未撮影のまま CSV が通る** |
+
+→ これで **受取撮影 → 今回の `lab_tests.id` → 問診CSV → 結果PDF** が一本線になる。
+詳細は `kit_receipt_external_id_capture_spec.md` §3.2.1 / §7.1。
+
+検証 = `npm run verify:external-id-capture`（**257 件**・CI の A 層。**⑭ が年跨ぎの回帰①〜⑤**）・
+**退行注入 22 種**とも名指しで落ちることを確認済み。
 
 ### 4-5.8 実装状況の実測訂正（v2.1 原案からの差分）
 

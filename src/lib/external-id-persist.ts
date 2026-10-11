@@ -29,6 +29,13 @@
  * 【重複は自動で上書きしない】
  * 同じ値が別の検査に既に在れば `conflict` にして `lab_tests` は触らない（仕様 §8.2）。
  * ユーザーには一般化したエラーを返す（他人の検査の存在を漏らさない）。
+ *
+ * 【既存の `lab_tests` 行を使い回すのは「同じ回の撮り直し」だけ（発注者指示 2026-10-11）】
+ * **`(diagnostic_user_id, test_type)` で引いた既存行を「今回の検査」とみなしてはいけない。**
+ * プリベントは年 1 回 → 2 年目の撮影で前年の行が 1 件だけヒットし、
+ * **前年の `external_barcode` を今年の値で上書きする**（前年の結果PDF が辿れなくなる）。
+ * 使い回すのは**同じ `(diagnostic_user_id, shipment_ref, provider)` の台帳行が
+ * 既に持っている `lab_test_id`** だけ。それが無ければ**今回用の行を新しく作る**。
  */
 
 import type { SupabaseClient } from '@supabase/supabase-js';
@@ -36,7 +43,7 @@ import type { Database } from '../types/supabase';
 import {
   PROVIDER_ID_COLUMN, PROVIDER_ID_KIND, PROVIDER_TEST_TYPE,
   maskExternalId, type CaptureMethod, type CaptureStatus, type DecodeMethod,
-  type ExternalIdProvider, type ReviewReason,
+  type ExternalIdProvider, type LabTestLinkStatus, type ReviewReason,
 } from './external-test-id';
 
 /** 1 行ぶんの台帳レコード（返す形）。**外部IDの全文は入れない。** */
@@ -47,7 +54,7 @@ export interface CaptureRecord {
   masked: string;
   reviewReasons: ReviewReason[];
   labTestId: string | null;
-  labTestLinkStatus: 'linked' | 'deferred' | 'conflict';
+  labTestLinkStatus: LabTestLinkStatus;
   labTestLinkDetail: string | null;
 }
 
@@ -81,8 +88,9 @@ const TABLE = 'lab_test_id_captures';
  *
  * 処理順（**失敗したら前の段を巻き戻さず、どこまで進んだかを残す**）:
  *   1. 同じ値が**別の検査**に在るか見る → 在れば `conflict` で確定し `lab_tests` は触らない
- *   2. 既に有効な撮影行があるか見る（二重 submit / 撮り直し）
- *   3. `lab_tests` の行を確定（案A・引けなければ `deferred`）
+ *   2. 既に有効な撮影行があるか見る（二重 submit / 撮り直し）。
+ *      **ここで引いた `lab_test_id` が、行を使い回してよい唯一の根拠。**
+ *   3. `lab_tests` の行を確定（2 の `lab_test_id` があれば更新・無ければ新規作成）
  *   4. 台帳へ upsert（旧行は `superseded` に落とす）
  */
 export async function persistExternalIdCapture(input: PersistInput): Promise<PersistResult> {
@@ -110,29 +118,17 @@ export async function persistExternalIdCapture(input: PersistInput): Promise<Per
     (r) => (r as Row).diagnostic_user_id !== diagnosticUserId || (r as Row).shipment_ref !== shipmentRef,
   );
 
-  let linkStatus: 'linked' | 'deferred' | 'conflict' = 'deferred';
+  let linkStatus: LabTestLinkStatus = 'deferred';
   let linkDetail: string | null = null;
   let labTestId: string | null = null;
 
-  if (foreign.length > 0) {
-    // **自動上書き禁止。** `lab_tests` は 1 バイトも触らない。
-    linkStatus = 'conflict';
-    linkDetail = `同じ外部IDが他の検査に ${foreign.length} 件登録されています (自動では紐付けません)`;
-    status = 'review_required';
-    if (!reasons.includes('pattern_mismatch')) { /* 理由コードは増やさない */ }
-  } else {
-    // ── 3) lab_tests の行を確定（案A） ──────────────────────────────
-    const link = await linkLabTest({ sb, diagnosticUserId, shipmentRef, provider, testType, value });
-    linkStatus = link.linkStatus;
-    linkDetail = link.detail;
-    labTestId = link.labTestId;
-    if (link.linkStatus !== 'linked') status = 'review_required';
-  }
-
-  // ── 2/4) 旧行を superseded に落として入れ直す ────────────────────
+  // ── 2) 同じ回（この人・この受取・この provider）の有効な撮影行 ──────
+  // **`lab_tests` の行を使い回してよいかは、ここで引いた `lab_test_id` だけが決める。**
+  // `(diagnostic_user_id, test_type)` で既存行を探してはいけない
+  // （年 1 回の検査では前年の行が 1 件ヒットし、前年の外部IDを上書きする）。
   const prior = await cust
     .from(TABLE)
-    .select('id, normalized_value')
+    .select('id, normalized_value, lab_test_id')
     .eq('diagnostic_user_id', diagnosticUserId)
     .eq('shipment_ref', shipmentRef)
     .eq('provider', provider)
@@ -143,6 +139,34 @@ export async function persistExternalIdCapture(input: PersistInput): Promise<Per
   }
 
   const priorRow = prior.data as Row | null;
+  const priorLabTestIdRaw = priorRow?.lab_test_id;
+  const priorLabTestId = typeof priorLabTestIdRaw === 'string' && priorLabTestIdRaw
+    ? priorLabTestIdRaw
+    : null;
+
+  if (foreign.length > 0) {
+    // **自動上書き禁止。** `lab_tests` は 1 バイトも触らない。
+    linkStatus = 'conflict';
+    linkDetail = `同じ外部IDが他の検査に ${foreign.length} 件登録されています (自動では紐付けません)`;
+    status = 'review_required';
+    // **既に紐づいていた `lab_test_id` は消さない**（admin が追う手がかりを失わない）。
+    // ゲートは `lab_test_link_status === 'linked'` を要求するので、
+    // `lab_test_id` が残っていても **`conflict` の回は通らない**（§7.1）。
+    labTestId = priorLabTestId;
+    if (!reasons.includes('pattern_mismatch')) { /* 理由コードは増やさない */ }
+  } else {
+    // ── 3) lab_tests の行を確定（案A） ──────────────────────────────
+    const link = await linkLabTest({
+      sb, diagnosticUserId, shipmentRef, provider, testType, value,
+      existingLabTestId: priorLabTestId,
+    });
+    linkStatus = link.linkStatus;
+    linkDetail = link.detail;
+    labTestId = link.labTestId;
+    if (link.linkStatus !== 'linked') status = 'review_required';
+  }
+
+  // ── 4) 旧行を superseded に落として入れ直す ──────────────────────
   if (priorRow) {
     const priorValue = String(priorRow.normalized_value ?? '');
     // **同じ値の再送はそのまま成功扱い**（二重 submit で行が増えない・仕様 §6.3）。
@@ -218,7 +242,7 @@ export async function persistExternalIdCapture(input: PersistInput): Promise<Per
 function toRecord(
   id: string, provider: ExternalIdProvider, status: CaptureStatus, value: string,
   reasons: ReviewReason[], labTestId: string | null,
-  linkStatus: 'linked' | 'deferred' | 'conflict', linkDetail: string | null,
+  linkStatus: LabTestLinkStatus, linkDetail: string | null,
 ): CaptureRecord {
   return {
     id, provider, status,
@@ -239,9 +263,23 @@ interface LinkResult {
 /**
  * **案A の本体** — `customer.lab_tests` の行を確定して外部IDを入れる。
  *
- * - 既存行（同じ人・同じ `test_type`）が 1 件ならそこへ入れる。
- * - **2 件以上なら触らない**（どれが今回かを機械が決めてよい場面ではない）。
- * - 無ければ作る。**材料が揃わなければ作らず `deferred`**。
+ * 【行を使い回す条件は 1 つだけ】
+ * `existingLabTestId`（= 同じ `(diagnostic_user_id, shipment_ref, provider)` の台帳行が
+ * 既に持っている `lab_test_id`）が在るときだけ、その行を更新する
+ * ＝ **同じ回の撮り直し／二重 submit**。それ以外は**今回用の行を新しく作る**。
+ *
+ * **`(diagnostic_user_id, test_type)` で既存行を探す実装に戻してはいけない**
+ * （発注者指示 2026-10-11）。プリベントは年 1 回なので、2 年目の撮影で
+ * 前年の行が 1 件だけヒットし、**前年の `external_barcode` を今年の値で上書きする**。
+ * 前年の結果PDF を辿るキーが消え、しかも画面も台帳も `linked` と表示するので**黙って壊れる**。
+ * 「1 件だからこれだろう」は推測であって、今回の検査である根拠ではない。
+ *
+ * 【材料が揃わなければ作らず `deferred`】撮影は台帳に残るので失わない。
+ *
+ * 【申し送り】③-1（出荷時に `lab_tests` 行を作る）が実装されたら、
+ * 初回撮影でも**出荷側が作った行**を使うべきで、ここで常に新規作成すると二重になる。
+ * その突き合わせ方（`shipment_id` か別のキーか）は**仕様に無いので作らない**
+ * （仕様 §12 の確認事項）。今は「新規作成」で一貫させ、重複は admin が見る。
  */
 async function linkLabTest(args: {
   sb: SupabaseClient<Database>;
@@ -250,6 +288,8 @@ async function linkLabTest(args: {
   provider: ExternalIdProvider;
   testType: string;
   value: string;
+  /** 同じ回の台帳行が既に持っている `lab_tests.id`（無ければ null）。 */
+  existingLabTestId: string | null;
 }): Promise<LinkResult> {
   const cust = args.sb.schema('customer');
   /**
@@ -263,29 +303,29 @@ async function linkLabTest(args: {
       ? { external_barcode: v }
       : { external_test_id: v };
 
-  // 既存の lab_tests（この人・この検査種別）
-  const existing = await cust
-    .from('lab_tests')
-    .select('id')
-    .eq('diagnostic_user_id', args.diagnosticUserId)
-    .eq('test_type', args.testType);
-  if (existing.error) {
-    return { labTestId: null, linkStatus: 'deferred', detail: `lab_tests 照会に失敗: ${existing.error.message}` };
-  }
-  const rows = existing.data ?? [];
-  if (rows.length > 1) {
-    return {
-      labTestId: null, linkStatus: 'deferred',
-      detail: `lab_tests が ${rows.length} 件あり、どれが今回かを自動で決められません`,
-    };
-  }
-  if (rows.length === 1) {
-    const id = String((rows[0] as Row).id);
-    const upd = await cust.from('lab_tests').update(idPatch(args.value)).eq('id', id);
-    if (upd.error) {
-      return { labTestId: null, linkStatus: 'deferred', detail: `lab_tests 更新に失敗: ${upd.error.message}` };
+  // ── 同じ回の撮り直し = 既に紐づいている行を更新する ─────────────────
+  if (args.existingLabTestId) {
+    // **実在を確かめてから更新する。** 行が消えていたら（`on delete set null` は
+    // 台帳側にしか効かない）更新が 0 行で静かに成功したように見えるため。
+    const cur = await cust
+      .from('lab_tests')
+      .select('id')
+      .eq('id', args.existingLabTestId)
+      .maybeSingle();
+    if (cur.error) {
+      return { labTestId: null, linkStatus: 'deferred', detail: `lab_tests 照会に失敗: ${cur.error.message}` };
     }
-    return { labTestId: id, linkStatus: 'linked', detail: null };
+    if (cur.data) {
+      const upd = await cust
+        .from('lab_tests')
+        .update(idPatch(args.value))
+        .eq('id', args.existingLabTestId);
+      if (upd.error) {
+        return { labTestId: null, linkStatus: 'deferred', detail: `lab_tests 更新に失敗: ${upd.error.message}` };
+      }
+      return { labTestId: args.existingLabTestId, linkStatus: 'linked', detail: null };
+    }
+    // 行が無くなっている → 下で作り直す（黙って `linked` を装わない）。
   }
 
   // ── 新規作成。NOT NULL の材料を引き直す ──────────────────────────
@@ -354,27 +394,72 @@ async function linkLabTest(args: {
 }
 
 /**
- * プリベントの問診CSV 生成が参照する「この人のこの回のバーコードNo.」を引く。
+ * プリベントの問診CSV 生成が参照する「**この回の**外部ID」を台帳から引く。
  * **ゲートの判定そのものは `checkPreventQuestionnaireGate()`**（純関数）で行う。
+ *
+ * 【「その人の最新」を返してはいけない（発注者指示 2026-10-11）】
+ * 以前は `(diagnostic_user_id, provider)` を `captured_at desc limit 1` で引いていた。
+ * これだと**前年の confirmed なレコード**が今年の回の問診CSV を通してしまう
+ * （＝今年は未撮影なのに、前年の番号でプリベントへ出る）。
+ * → **`shipmentRef` か `labTestId` のどちらかを必ず渡す**。どちらも無い呼び出しは
+ * 型で弾き、実行時にも null を返す（fail-closed）。
+ *
+ * 返すのは**ゲートが必要とする 4 つ**。値だけを返すと、呼び側が
+ * `status` / `lab_test_link_status` を見ずに通してしまえる（それが元の穴）。
  */
-export async function loadCapturedExternalId(args: {
+export interface CapturedExternalId {
+  normalizedValue: string;
+  status: CaptureStatus | string;
+  labTestLinkStatus: LabTestLinkStatus | string;
+  labTestId: string | null;
+}
+
+export type LoadCapturedArgs = {
   sb: SupabaseClient<Database>;
   diagnosticUserId: string;
   provider: ExternalIdProvider;
-}): Promise<string | null> {
-  const r = await args.sb
+} & (
+  /** 受取確認の対象 ID（dev=`kit_shipments.id` / 本番=`orders.id`）。 */
+  | { shipmentRef: string; labTestId?: string | null }
+  /** 既に確定している `customer.lab_tests.id`。 */
+  | { labTestId: string; shipmentRef?: string | null }
+);
+
+export async function loadCapturedExternalId(
+  args: LoadCapturedArgs,
+): Promise<CapturedExternalId | null> {
+  const shipmentRef = typeof args.shipmentRef === 'string' ? args.shipmentRef.trim() : '';
+  const labTestId = typeof args.labTestId === 'string' ? args.labTestId.trim() : '';
+  // **どちらも無ければ引かない。** 「人だけ」で引くと前年のレコードが混ざる。
+  if (!shipmentRef && !labTestId) return null;
+
+  let q = args.sb
     .schema('customer')
     .from(TABLE)
-    .select('normalized_value, captured_at')
+    .select('normalized_value, status, lab_test_id, lab_test_link_status')
     .eq('diagnostic_user_id', args.diagnosticUserId)
     .eq('provider', args.provider)
-    .neq('status', 'superseded')
-    .order('captured_at', { ascending: false })
-    .limit(1);
+    .neq('status', 'superseded');
+  // 両方あれば両方で絞る（取り違えを機械で防ぐ）。
+  if (shipmentRef) q = q.eq('shipment_ref', shipmentRef);
+  if (labTestId) q = q.eq('lab_test_id', labTestId);
+
+  const r = await q.limit(2);
   if (r.error) return null;
-  const row = (r.data ?? [])[0] as Row | undefined;
-  const v = row?.normalized_value;
-  return typeof v === 'string' && v ? v : null;
+  const rows = r.data ?? [];
+  // 有効行は部分 unique 制約で 1 件のはずだが、**2 件見えたら選ばない**。
+  if (rows.length !== 1) return null;
+
+  const row = rows[0] as Row;
+  const v = row.normalized_value;
+  if (typeof v !== 'string' || !v) return null;
+  const linkedId = row.lab_test_id;
+  return {
+    normalizedValue: v,
+    status: String(row.status ?? ''),
+    labTestLinkStatus: String(row.lab_test_link_status ?? ''),
+    labTestId: typeof linkedId === 'string' && linkedId ? linkedId : null,
+  };
 }
 
 /** provider に対応する `test_type`（API の整合検証で使う）。 */

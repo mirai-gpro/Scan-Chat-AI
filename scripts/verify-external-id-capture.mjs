@@ -199,16 +199,60 @@ console.log('\n⑥ マスク\n');
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n⑦ AI問診 → 問診CSV のゲート\n');
 {
-  const g = (v, p) => core.checkPreventQuestionnaireGate({ capturedBarcodeNo: v, expectedPattern: p });
-  eq('未登録 → ブロック', [g(null).allowed, g(null).reason], [false, 'barcode_no_missing']);
-  eq('空文字 → ブロック', g('').allowed, false);
-  eq('undefined → ブロック', g(undefined).allowed, false);
-  eq('数字にならない → ブロック', [g('ABC').allowed, g('ABC').reason], [false, 'barcode_no_missing']);
-  eq('短すぎる → ブロック', [g('12').allowed, g('12').reason], [false, 'barcode_no_malformed']);
-  eq('登録済み → 通す', g('704000123').allowed, true);
-  // **パターン外でも通す**。止めると実物の形式が既定と違う回に CSV が永久に作れない。
-  eq('パターン外でも通す (登録はされているので)', g('999999999').allowed, true);
-  ok('ブロックの説明に外部IDの全文が入らない', !g('123456789').detail.includes('123456789'));
+  /** 台帳レコードの形で渡す（**値だけを渡す API に戻してはいけない**）。 */
+  const cap = (over = {}) => ({
+    normalizedValue: '704000123',
+    status: 'confirmed',
+    labTestLinkStatus: 'linked',
+    labTestId: 'lt-1',
+    ...over,
+  });
+  const g = (capture, p) => core.checkPreventQuestionnaireGate({ capture, expectedPattern: p });
+
+  eq('撮影レコードが無い → ブロック', [g(null).allowed, g(null).reason], [false, 'capture_missing']);
+  eq('undefined → ブロック', [g(undefined).allowed, g(undefined).reason], [false, 'capture_missing']);
+  eq('値が空 → ブロック',
+    [g(cap({ normalizedValue: '' })).allowed, g(cap({ normalizedValue: '' })).reason],
+    [false, 'barcode_no_missing']);
+  eq('数字にならない → ブロック',
+    [g(cap({ normalizedValue: 'ABC' })).allowed, g(cap({ normalizedValue: 'ABC' })).reason],
+    [false, 'barcode_no_missing']);
+  eq('短すぎる → ブロック',
+    [g(cap({ normalizedValue: '12' })).allowed, g(cap({ normalizedValue: '12' })).reason],
+    [false, 'barcode_no_malformed']);
+
+  // ── ここが本題（発注者指示 2026-10-11）: 3 つ揃ったときだけ通す ──────
+  eq('confirmed + linked + lab_test_id → 通す', [g(cap()).allowed, g(cap()).reason], [true, 'ok']);
+
+  for (const st of ['review_required', 'superseded', '', 'unknown']) {
+    const r = g(cap({ status: st }));
+    eq(`status=${st || '(空)'} → **ブロック**`, [r.allowed, r.reason], [false, 'capture_not_confirmed']);
+  }
+  for (const ls of ['deferred', 'conflict', '', 'unknown']) {
+    const r = g(cap({ labTestLinkStatus: ls }));
+    eq(`link=${ls || '(空)'} → **ブロック**`, [r.allowed, r.reason], [false, 'lab_test_not_linked']);
+  }
+  for (const id of [null, undefined, '', '   ']) {
+    const r = g(cap({ labTestId: id }));
+    eq(`lab_test_id=${JSON.stringify(id)} → **ブロック**`, [r.allowed, r.reason], [false, 'lab_test_not_linked']);
+  }
+
+  // **パターン外は台帳側で review_required になっている**ので、この段で止まる。
+  // ゲートがパターンを再判定して独自に通す／止めることはしない。
+  eq('パターン外でも台帳が confirmed なら通す (判定の二重化をしない)',
+    g(cap({ normalizedValue: '999999999' })).allowed, true);
+  eq('パターン外で review_required なら止まる',
+    g(cap({ normalizedValue: '999999999', status: 'review_required' })).allowed, false);
+
+  ok('ブロックの説明に外部IDの全文が入らない',
+    !g(cap({ normalizedValue: '123456789', status: 'review_required' })).detail.includes('123456789'));
+
+  // **値だけを受ける旧シグネチャが残っていないこと**（残っていると
+  // 呼び側が status / link を見ずに通せる = 元の穴がそのまま再発する）。
+  const gateSrc = read('src/lib/external-test-id.ts');
+  ok('旧 `capturedBarcodeNo` 引数を復活させていない', !/capturedBarcodeNo/.test(gateSrc));
+  ok('ゲートが status を見ている', /cap\.status !== 'confirmed'/.test(gateSrc));
+  ok('ゲートが lab_test_link_status を見ている', /labTestLinkStatus !== 'linked'/.test(gateSrc));
 
   // **`interview-cycle.ts` に足していないこと**。あちらは fail-safe が
   // 「催促しない」側なので、ゲートを置くと fail-open になる。
@@ -316,6 +360,8 @@ console.log('\n⑨ 読み取り (Gemini)\n');
 // ⑩ 登録の挙動 — 実物の persist を**スタブ DB で動かす**
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n⑩ 登録 (persistExternalIdCapture を実際に動かす)\n');
+/** ⑭ でも同じ実物・同じスタブを使うため外へ出す（別に書き写すと検査が実装から離れる）。 */
+let PERSIST; let MAKE_STUB; let BASE;
 {
   const persist = await load('src/lib/external-id-persist.ts', [
     [/^import type \{ SupabaseClient \}[\s\S]*?;$/m, ''],
@@ -483,19 +529,26 @@ console.log('\n⑩ 登録 (persistExternalIdCapture を実際に動かす)\n');
     ok('(e) 台帳には書いている (サイレント脱落ゼロ)', !!cap);
   }
 
-  // (f) lab_tests が 2 件 → どれが今回か決めない
+  // (f) **過去の lab_tests が在っても使い回さない**（前年上書きの直接の回帰）
   {
     const stub = makeStub({
       lab_test_id_captures: (st) => st.op === 'insert' ? { data: [{ id: 'cap4' }], error: null } : { data: [], error: null },
-      lab_tests: { data: [{ id: 'lt1' }, { id: 'lt2' }], error: null },
+      // 前年ぶんが 2 件ある状態。どちらにも触ってはいけない。
+      lab_tests: (st) => st.op === 'insert'
+        ? { data: [{ id: 'lt-new' }], error: null }
+        : { data: [{ id: 'lt-2024' }, { id: 'lt-2025' }], error: null },
       customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
       lab_companies: { data: [{ id: 'co-1' }], error: null },
       kit_shipments: { data: [], error: null },
     });
     const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
-    eq('(f) 2 件あったら deferred', r.ok && r.record.labTestLinkStatus, 'deferred');
-    const w = stub.calls.filter((c) => c.table === 'lab_tests' && c.op !== 'select');
-    eq('(f) **lab_tests を書き換えない**', w.length, 0);
+    eq('(f) 今回用の行を作って linked', r.ok && r.record.labTestLinkStatus, 'linked');
+    eq('(f) **既存行ではなく新しい行**', r.ok && r.record.labTestId, 'lt-new');
+    const upd = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'update');
+    eq('(f) **既存の lab_tests を update しない**', upd.length, 0);
+    // **`test_type` で既存行を探す問い合わせ自体を出していないこと。**
+    const byType = stub.calls.filter((c) => c.table === 'lab_tests' && c.filters.test_type !== undefined);
+    eq('(f) test_type で lab_tests を引いていない', byType.length, 0);
   }
 
   // (g) lab_companies が 1 件でない → 決めない
@@ -512,29 +565,75 @@ console.log('\n⑩ 登録 (persistExternalIdCapture を実際に動かす)\n');
     ok('(g) 理由に lab_companies が入る', /lab_companies/.test((r.ok && r.record.labTestLinkDetail) ?? ''));
   }
 
-  // (h) 既存 lab_tests が 1 件 → そこへ入れる (作らない)
+  // (h) **既存が「1 件だけ」でも使い回さない** — 前年のプリベント検査がちょうど 1 件、
+  //     という最も起こりやすい形。ここを update してしまうのが今回直した穴。
   {
     const stub = makeStub({
       lab_test_id_captures: (st) => st.op === 'insert' ? { data: [{ id: 'cap6' }], error: null } : { data: [], error: null },
-      lab_tests: { data: [{ id: 'lt-existing' }], error: null },
+      lab_tests: (st) => st.op === 'insert'
+        ? { data: [{ id: 'lt-new' }], error: null }
+        : { data: [{ id: 'lt-existing' }], error: null },
       customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
       lab_companies: { data: [{ id: 'co-1' }], error: null },
       kit_shipments: { data: [], error: null },
     });
     const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
-    eq('(h) 既存行へ linked', r.ok && r.record.labTestLinkStatus, 'linked');
-    eq('(h) lab_test_id は既存のもの', r.ok && r.record.labTestId, 'lt-existing');
+    eq('(h) linked になる', r.ok && r.record.labTestLinkStatus, 'linked');
+    eq('(h) **既存 1 件を流用しない**', r.ok && r.record.labTestId, 'lt-new');
+    const upd = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'update');
+    eq('(h) **既存行を update しない (前年の外部IDを消さない)**', upd.length, 0);
+    const ins = stub.calls.find((c) => c.table === 'lab_tests' && c.op === 'insert');
+    ok('(h) 今回用に insert する', !!ins);
+    eq('(h) 今回の値を入れる', ins?.values?.external_barcode, '704000123');
+  }
+
+  // (h2) **同じ回の撮り直しだけは既存行を使う** — 台帳の lab_test_id が根拠
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => {
+        if (st.op === 'insert') return { data: [{ id: 'cap_new' }], error: null };
+        if (st.filters.normalized_value) return { data: [], error: null };
+        // 同じ (uid, shipment_ref, provider) の有効行が lab_test_id を持っている
+        return { data: [{ id: 'cap_prev', normalized_value: '704000999', lab_test_id: 'lt-same' }], error: null };
+      },
+      lab_tests: (st) => st.op === 'insert' ? { data: [{ id: 'lt-should-not' }], error: null } : { data: [{ id: 'lt-same' }], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    eq('(h2) 同じ回なので既存行を使う', r.ok && r.record.labTestId, 'lt-same');
     const ins = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'insert');
-    eq('(h) 新規作成しない', ins.length, 0);
+    eq('(h2) **新しい lab_tests を作らない**', ins.length, 0);
     const upd = stub.calls.find((c) => c.table === 'lab_tests' && c.op === 'update');
-    eq('(h) external_barcode を更新する', upd?.values?.external_barcode, '704000123');
+    eq('(h2) その行を今回の値で更新する', upd?.values?.external_barcode, '704000123');
+    eq('(h2) 更新先は台帳が指していた行', upd?.filters?.id, 'lt-same');
+  }
+
+  // (h3) 台帳が指す行が**消えている** → 黙って linked を装わず作り直す
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => {
+        if (st.op === 'insert') return { data: [{ id: 'cap_new' }], error: null };
+        if (st.filters.normalized_value) return { data: [], error: null };
+        return { data: [{ id: 'cap_prev', normalized_value: '704000999', lab_test_id: 'lt-gone' }], error: null };
+      },
+      lab_tests: (st) => st.op === 'insert' ? { data: [{ id: 'lt-remade' }], error: null } : { data: [], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    eq('(h3) 作り直して linked', [r.ok && r.record.labTestLinkStatus, r.ok && r.record.labTestId], ['linked', 'lt-remade']);
+    const upd = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'update');
+    eq('(h3) 消えた行を update しない', upd.length, 0);
   }
 
   // (i) demecal は external_test_id 側へ入る
   {
     const stub = makeStub({
       lab_test_id_captures: (st) => st.op === 'insert' ? { data: [{ id: 'cap7' }], error: null } : { data: [], error: null },
-      lab_tests: { data: [{ id: 'lt-b' }], error: null },
+      lab_tests: (st) => st.op === 'insert' ? { data: [{ id: 'lt-b' }], error: null } : { data: [], error: null },
       customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
       lab_companies: { data: [{ id: 'co-b' }], error: null },
       kit_shipments: { data: [], error: null },
@@ -542,10 +641,10 @@ console.log('\n⑩ 登録 (persistExternalIdCapture を実際に動かす)\n');
     const r = await persist.persistExternalIdCapture({
       sb: stub, ...base, provider: 'demecal', testType: 'blood', value: '123456789012345',
     });
-    ok('(i) demecal も登録できる', r.ok === true);
-    const upd = stub.calls.find((c) => c.table === 'lab_tests' && c.op === 'update');
-    eq('(i) **external_test_id** へ入れる', upd?.values?.external_test_id, '123456789012345');
-    ok('(i) external_barcode は触らない', upd?.values?.external_barcode === undefined);
+    ok('(i) demecal も登録できる', r.ok === true, JSON.stringify(r));
+    const ins = stub.calls.find((c) => c.table === 'lab_tests' && c.op === 'insert');
+    eq('(i) **external_test_id** へ入れる', ins?.values?.external_test_id, '123456789012345');
+    ok('(i) external_barcode は触らない', ins?.values?.external_barcode === undefined);
   }
 
   // (j) kit_shipments に実在すれば shipment_id を入れる (dev の形)
@@ -578,6 +677,8 @@ console.log('\n⑩ 登録 (persistExternalIdCapture を実際に動かす)\n');
     const w = stub.calls.filter((c) => c.table === 'lab_tests' && c.op !== 'select');
     eq('(k) lab_tests を触らない', w.length, 0);
   }
+
+  PERSIST = persist; MAKE_STUB = makeStub; BASE = base;
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -683,6 +784,188 @@ console.log('\n⑬ UI の契約\n');
   ok('発送前には出さない', /if \(!s\.shipped_at\) return null;/.test(kit));
   ok('provider は test_type から引く (名前で推測しない)', /providerForTestType\(s\.test_type\)/.test(kit));
   ok('全文ではなくマスクを渡す', /maskExternalId/.test(kit) && !/normalized_value\s*\}\s*\)/.test(kit));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑭ 年跨ぎの回帰（発注者指示 2026-10-11）— 「前年を上書きしない」を固定する
+//
+// プリベントは年 1 回。**ここが壊れると画面も台帳も `linked` と表示したまま
+// 前年の `external_barcode` が消える**（＝前年の結果PDF を辿るキーが無くなる）。
+// 目視では絶対に気づけないので、5 本とも名指しで落ちるようにしておく。
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑭ 年跨ぎ / ゲートの回帰 (①〜⑤)\n');
+{
+  const persist = PERSIST;
+  const makeStub = MAKE_STUB;
+  const base = BASE;
+
+  /** 台帳と lab_tests を**状態として持つ**スタブ（2 年ぶんを順に流すため）。 */
+  function makeStatefulStub(seed = {}) {
+    const db = {
+      lab_test_id_captures: [...(seed.captures ?? [])],
+      lab_tests: [...(seed.labTests ?? [])],
+      customer_profiles: [{ user_id: 'cust-1', diagnostic_user_id: base.diagnosticUserId }],
+      lab_companies: [{ id: 'co-1', test_types: ['cancer_urine', 'blood'] }],
+      kit_shipments: [],
+    };
+    let seq = 0;
+    const match = (row, filters) => Object.entries(filters).every(([k, v]) => {
+      if (k.startsWith('!')) return row[k.slice(1)] !== v;
+      if (Array.isArray(v)) return Array.isArray(row[k]) && v.every((x) => row[k].includes(x));
+      return row[k] === v;
+    });
+    const handler = (st) => {
+      const rows = db[st.table] ?? [];
+      if (st.op === 'insert') {
+        const id = `${st.table}-${++seq}`;
+        const row = { id, ...st.values };
+        rows.push(row);
+        return { data: [{ id }], error: null };
+      }
+      if (st.op === 'update') {
+        const hit = rows.filter((r) => match(r, st.filters));
+        for (const r of hit) Object.assign(r, st.values);
+        return { data: hit.map((r) => ({ id: r.id })), error: null };
+      }
+      return { data: rows.filter((r) => match(r, st.filters)), error: null };
+    };
+    const stub = makeStub({
+      lab_test_id_captures: handler, lab_tests: handler,
+      customer_profiles: handler, lab_companies: handler, kit_shipments: handler,
+    });
+    return { stub, db };
+  }
+
+  // ── ① 同一人物が 2 年連続プリベント → lab_tests が 2 行・前年を上書きしない ──
+  {
+    const { stub, db } = makeStatefulStub();
+    const y1 = await persist.persistExternalIdCapture({
+      sb: stub, ...base, shipmentRef: 'ord_2025', value: '704000111',
+    });
+    const y2 = await persist.persistExternalIdCapture({
+      sb: stub, ...base, shipmentRef: 'ord_2026', value: '704000222',
+    });
+    ok('① 1 年目が成功する', y1.ok === true, JSON.stringify(y1));
+    ok('① 2 年目が成功する', y2.ok === true, JSON.stringify(y2));
+    eq('① **lab_tests が 2 行になる**', db.lab_tests.length, 2);
+    eq('① 1 年目と 2 年目で lab_test_id が違う',
+      y1.ok && y2.ok && y1.record.labTestId !== y2.record.labTestId, true);
+    const bars = db.lab_tests.map((r) => r.external_barcode).sort();
+    eq('① **前年の external_barcode が残っている**', bars, ['704000111', '704000222']);
+    const upd = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'update');
+    eq('① 既存行への update は 0 件', upd.length, 0);
+    eq('① 台帳も 2 行 (前年を superseded にしない)', db.lab_test_id_captures.length, 2);
+    eq('① 前年の台帳行は有効なまま',
+      db.lab_test_id_captures.filter((r) => r.status !== 'superseded').length, 2);
+  }
+
+  // ── ② 前年 confirmed・今年未撮影 → **前年IDを使わずブロック** ──────────
+  {
+    const { stub } = makeStatefulStub({
+      captures: [{
+        id: 'cap-2025', diagnostic_user_id: base.diagnosticUserId, shipment_ref: 'ord_2025',
+        provider: 'prevent', normalized_value: '704000111', status: 'confirmed',
+        lab_test_id: 'lt-2025', lab_test_link_status: 'linked',
+      }],
+      labTests: [{ id: 'lt-2025', external_barcode: '704000111' }],
+    });
+    // 今年の回（`ord_2026`）で引く = 前年のレコードは**出てこない**
+    const cur = await persist.loadCapturedExternalId({
+      sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent', shipmentRef: 'ord_2026',
+    });
+    eq('② 今年の回では null (前年を拾わない)', cur, null);
+    const gate = core.checkPreventQuestionnaireGate({ capture: cur });
+    eq('② **ゲートがブロックする**', [gate.allowed, gate.reason], [false, 'capture_missing']);
+    // 前年の回を指せば当然引ける（＝引けないのではなく「今年ではない」を表せている）
+    const prev = await persist.loadCapturedExternalId({
+      sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent', shipmentRef: 'ord_2025',
+    });
+    eq('② 前年の回を指せば引ける', prev?.normalizedValue, '704000111');
+    // **「人だけ」で引く呼び出しは通らない**（旧シグネチャの封じ込め）
+    const loose = await persist.loadCapturedExternalId({
+      sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent',
+    });
+    eq('② shipmentRef も labTestId も無ければ引かない', loose, null);
+    const persistSrc = read('src/lib/external-id-persist.ts');
+    ok('② `captured_at desc limit 1` で最新を拾う実装に戻していない',
+      !/order\('captured_at'/.test(persistSrc));
+  }
+
+  // ── ③ 今年 review_required → ブロック ────────────────────────────────
+  {
+    const { stub } = makeStatefulStub({
+      captures: [{
+        id: 'cap-2026', diagnostic_user_id: base.diagnosticUserId, shipment_ref: 'ord_2026',
+        provider: 'prevent', normalized_value: '704000222', status: 'review_required',
+        lab_test_id: 'lt-2026', lab_test_link_status: 'linked',
+      }],
+    });
+    const cur = await persist.loadCapturedExternalId({
+      sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent', shipmentRef: 'ord_2026',
+    });
+    eq('③ レコードは引ける', cur?.status, 'review_required');
+    const gate = core.checkPreventQuestionnaireGate({ capture: cur });
+    eq('③ **review_required はブロック**', [gate.allowed, gate.reason], [false, 'capture_not_confirmed']);
+  }
+
+  // ── ④ 今年 deferred / conflict → ブロック ────────────────────────────
+  for (const link of ['deferred', 'conflict']) {
+    const { stub } = makeStatefulStub({
+      captures: [{
+        id: 'cap-2026', diagnostic_user_id: base.diagnosticUserId, shipment_ref: 'ord_2026',
+        provider: 'prevent', normalized_value: '704000222',
+        // **status だけ confirmed に見える回**でも link で止まることを見る
+        status: 'confirmed', lab_test_id: null, lab_test_link_status: link,
+      }],
+    });
+    const cur = await persist.loadCapturedExternalId({
+      sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent', shipmentRef: 'ord_2026',
+    });
+    eq(`④ ${link} でもレコードは引ける`, cur?.labTestLinkStatus, link);
+    eq(`④ lab_test_id は null`, cur?.labTestId, null);
+    const gate = core.checkPreventQuestionnaireGate({ capture: cur });
+    eq(`④ **${link} はブロック**`, [gate.allowed, gate.reason], [false, 'lab_test_not_linked']);
+
+    // **`lab_test_id` が残っていても通さない。** conflict の回は台帳の
+    // `lab_test_id` を消さない（admin の手がかり）ので、ここが `lab_test_id` の
+    // 有無だけを見ていると**競合したまま CSV が出る**。
+    const withId = core.checkPreventQuestionnaireGate({
+      capture: { normalizedValue: '704000222', status: 'confirmed', labTestLinkStatus: link, labTestId: 'lt-2026' },
+    });
+    eq(`④ ${link} + lab_test_id あり でも **ブロック**`,
+      [withId.allowed, withId.reason], [false, 'lab_test_not_linked']);
+  }
+
+  // ── ⑤ 同じ shipment の二重 submit → 同じ lab_test_id を維持 ───────────
+  {
+    const { stub, db } = makeStatefulStub();
+    const a = await persist.persistExternalIdCapture({
+      sb: stub, ...base, shipmentRef: 'ord_2026', value: '704000222',
+    });
+    const b = await persist.persistExternalIdCapture({
+      sb: stub, ...base, shipmentRef: 'ord_2026', value: '704000222',
+    });
+    ok('⑤ 2 回とも成功する', a.ok === true && b.ok === true, JSON.stringify([a, b]));
+    eq('⑤ **同じ lab_test_id を維持する**', a.ok && b.ok && a.record.labTestId === b.record.labTestId, true);
+    eq('⑤ lab_tests は 1 行のまま', db.lab_tests.length, 1);
+    eq('⑤ 台帳も 1 行のまま', db.lab_test_id_captures.length, 1);
+    eq('⑤ ゲートを通る', core.checkPreventQuestionnaireGate({
+      capture: await persist.loadCapturedExternalId({
+        sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent', shipmentRef: 'ord_2026',
+      }),
+    }).allowed, true);
+
+    // 撮り直し（値が変わる）でも**同じ行**を使い続ける
+    const c = await persist.persistExternalIdCapture({
+      sb: stub, ...base, shipmentRef: 'ord_2026', value: '704000333',
+    });
+    ok('⑤ 撮り直しも成功する', c.ok === true, JSON.stringify(c));
+    eq('⑤ 撮り直しでも lab_test_id は同じ', c.ok && c.record.labTestId === (a.ok && a.record.labTestId), true);
+    eq('⑤ 撮り直し後も lab_tests は 1 行', db.lab_tests.length, 1);
+    eq('⑤ lab_tests の値が今回のものに更新される', db.lab_tests[0].external_barcode, '704000333');
+    eq('⑤ 旧台帳行は superseded', db.lab_test_id_captures.filter((r) => r.status === 'superseded').length, 1);
+    eq('⑤ 有効な台帳行は 1 件', db.lab_test_id_captures.filter((r) => r.status !== 'superseded').length, 1);
+  }
 }
 
 console.log(`\n${fails.length === 0 ? `✓ ${pass} / ${pass} passed` : `✗ ${fails.length} 件 FAIL (${pass} passed)`}`);

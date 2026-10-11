@@ -158,6 +158,13 @@ export type CaptureMethod = 'camera' | 'file' | 'manual';
 /** 採否の判定結果。`confirmed` は「ユーザーが確認すれば確定してよい」という意味。 */
 export type CaptureStatus = 'confirmed' | 'review_required';
 
+/**
+ * `lab_tests` への紐付け結果（台帳 `lab_test_link_status`）。
+ * **`linked` 以外は「この番号がこの検査のものだと確定していない」** という意味なので、
+ * プリベント問診CSV のゲートは `linked` だけを通す（§7.1）。
+ */
+export type LabTestLinkStatus = 'linked' | 'deferred' | 'conflict';
+
 /** 判定が `review_required` になった理由コード（画面と監査の両方で使う）。 */
 export type ReviewReason =
   | 'barcode_ocr_mismatch'   // バーコードと印字IDが食い違う
@@ -290,25 +297,66 @@ export function evaluateExternalId(input: EvaluateInput): EvaluateResult {
  * （`interview-cycle.ts:16-18`）。そこへゲートを足すと、回窓が読めない回に
  * **ゲートが素通りする（fail-open）**。向きが逆なので混ぜてはいけない。
  *
- * @param captured 対象検査に紐づいた、確定済みの外部ID（`confirmed` / `review_required` とも可）。
- *                 **null / 空は未取得**として必ずブロックする。
+ * 【通す条件は 3 つ揃ったときだけ（発注者指示 2026-10-11）】
+ *   - `status === 'confirmed'`
+ *   - `labTestLinkStatus === 'linked'`
+ *   - `labTestId` が非 null
+ *
+ * **値だけを見て通してはいけない。** 値が読めていても
+ * `review_required`（パターン外・読取が怪しい）や `deferred`（`lab_tests` を作れなかった）
+ * `conflict`（同じIDが別の検査に在る）の回は、**その番号がこの検査のものだと確定していない**。
+ * ここで通すと、問診CSV が**別人・別回の番号で**プリベントへ渡り得る。
+ * どれも admin が見て決める事柄なので、**判断を機械に代行させずブロックする**。
+ *
+ * @param input.capture 「**今回の検査**」に紐づいた台帳レコード
+ *   （`loadCapturedExternalId()` が `shipmentRef` か `labTestId` で引いたもの）。
+ *   **「その人の最新」を渡してはいけない** — 前年の確定済みレコードで今年が通る。
+ *   null / undefined は未取得として必ずブロックする。
  */
+export interface PreventGateCapture {
+  /** 正規化済みの外部ID。 */
+  normalizedValue: string | null | undefined;
+  /** 台帳の `status`。 */
+  status: CaptureStatus | string | null | undefined;
+  /** 台帳の `lab_test_link_status`。 */
+  labTestLinkStatus: LabTestLinkStatus | string | null | undefined;
+  /** 台帳の `lab_test_id`。 */
+  labTestId: string | null | undefined;
+}
+
 export interface PreventGateInput {
-  /** その回のプリベント検査に紐づいている外部ID（正規化済み・未取得なら null）。 */
-  capturedBarcodeNo: string | null | undefined;
+  /** **今回の検査**の台帳レコード（未取得なら null）。 */
+  capture: PreventGateCapture | null | undefined;
   /** 期待パターン（app_config 由来）。 */
   expectedPattern?: string | null;
 }
 
+export type PreventGateReason =
+  | 'ok'
+  | 'capture_missing'
+  | 'barcode_no_missing'
+  | 'barcode_no_malformed'
+  | 'capture_not_confirmed'
+  | 'lab_test_not_linked';
+
 export interface PreventGateResult {
   allowed: boolean;
-  reason: 'ok' | 'barcode_no_missing' | 'barcode_no_malformed';
+  reason: PreventGateReason;
   /** 画面・PR に出せる説明（**外部IDの全文は入れない**）。 */
   detail: string;
 }
 
 export function checkPreventQuestionnaireGate(input: PreventGateInput): PreventGateResult {
-  const v = normalizeExternalId(input.capturedBarcodeNo);
+  const cap = input.capture;
+  if (!cap) {
+    return {
+      allowed: false,
+      reason: 'capture_missing',
+      detail: 'この回のプリベント検査に紐づく外部ID の登録がありません。受取確認で撮影・登録してください。',
+    };
+  }
+
+  const v = normalizeExternalId(cap.normalizedValue);
   if (!v) {
     return {
       allowed: false,
@@ -323,7 +371,25 @@ export function checkPreventQuestionnaireGate(input: PreventGateInput): PreventG
       detail: `登録済みのバーコードNo. が数字 ${ID_MIN_DIGITS}〜${ID_MAX_DIGITS} 桁の形になっていません (${maskExternalId(v)})。`,
     };
   }
-  // **期待パターン外でも通す。** パターンは未確認（仕様 §2.3）なので、ここで止めると
-  // 実物の形式が既定と違う回に CSV が永久に作れなくなる。review_required は別途 admin が見る。
+
+  // **期待パターン外は `review_required` になっている** ので、次の段で止まる。
+  // ここでパターンを再判定して独自にブロックしない（台帳の status を正とする）。
+  if (cap.status !== 'confirmed') {
+    return {
+      allowed: false,
+      reason: 'capture_not_confirmed',
+      detail: `外部ID の登録が確定していません (status=${String(cap.status ?? 'unknown')})。管理画面で確認してください。`,
+    };
+  }
+
+  const labTestId = typeof cap.labTestId === 'string' ? cap.labTestId.trim() : '';
+  if (cap.labTestLinkStatus !== 'linked' || !labTestId) {
+    return {
+      allowed: false,
+      reason: 'lab_test_not_linked',
+      detail: `外部ID が検査レコードへ紐づいていません (link=${String(cap.labTestLinkStatus ?? 'unknown')})。管理画面で確認してください。`,
+    };
+  }
+
   return { allowed: true, reason: 'ok', detail: '' };
 }
