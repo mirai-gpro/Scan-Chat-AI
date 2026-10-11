@@ -694,6 +694,14 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
     実装に要るのはこれだけ。**専用PCでの実行が要る**(証明書がその PC にしかない)。
 - 遺伝子 (`GeneticTestResultData`) … Genoplan。**【判定済み 2026-09-01・実測】RPA も PowerShell も専用PC も不要。
   サーバ側 (Vercel) から API 取得で確定。** 正本=`docs/lab/lab_data_reception_overview.md §4`。
+  - **【ID 紐づけの確定 v2.1・2026-10-09】タカセ出荷時に「ヤマト運輸送り状番号 + ボックスナンバー」を
+    既存の出荷指示CSV の同一行へ追記し、返送CSV を Wellfort が取り込む**。API が返すボックスナンバーで
+    `lab_tests` を逆引きして結果PDF を割り当てる。**ボックスナンバー=`external_barcode` /
+    認証キー(`serialNumber`)=`external_test_id`。業務上の主照合キーはボックスナンバー**。
+    正本=`docs/lab/lab_data_pipeline_master_spec.md` §4-5.6。
+    **Genoplan をユーザー撮影方式へ置き換えない** (撮影は**プリベントの P0 主経路**としてだけ採用)。
+    **タカセ返送CSV の取込・顧客割当は未実装** (取得時は `external_test_id`/`external_barcode` を
+    S3 の横の JSON に控えるだけ=`api/admin/genoplan-fetch.ts:274-275`・割当は意図的に未実施=同 `:281`)。
   - **画面は Vue SPA だが背後は素の PHP REST API** (`https://bizapi.genoplan.com`)。
     `POST /api/biz/login.php` (`lang`/`loginid`/`password`・form-urlencoded) → `accesskey`。
     **以降は `accesskey` + `partner_seq` を body に載せるだけ**で、**Cookie セッション無し・
@@ -2529,8 +2537,9 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/elith/mock/ai_prevention_report_type2.html` | **紙面モック (タイプ2)。飾りではなく契約の入力**。`npm run verify:sheet-contract` がここから紙面契約を抽出し実装と突き合わせる (spec §1.3.10)。冒頭コメントに annotation の意味とモック補正の記録 |
 | `docs/旧版・ボツ/ai_prevention_report_generation_spec.md` | **AI疾病予防報告書 生成機能の仕様 (パイプライン⑥・2026-08-28)**。受領 JSON 3 点 → アプリが可読な報告書を生成。入力仕様/出力は HTML+印刷CSS(PDF生成しない)/章立て/決定論の変換規則/**作れないもの①〜④と捏造ゼロの境界**/受領データの既知不具合/実装計画/Elith 確認事項 |
 | `docs/elith/batch_scan_to_elith_usage.md` | サンプル一括スキャン→S3 バッチ手順 (`scripts/batch-scan-to-elith.mjs`) |
-| `docs/lab/lab_data_pipeline_master_spec.md` | **検査データ・パイプライン 総合仕様書(E2E正本・上位文書)**。EC購入→キット/タイミング→発送指示/進捗→AI問診/検体返送→各社受渡→受領チェック(週次)→Elithラップ/S3書出→AI診断PDF受取/表示 を6ステップで連結。詳細は(a)(b)(c)へ委譲(二重管理しない) |
-| `docs/lab/lab_data_reception_overview.md` | **4検査のデータ受取 詳細**(血液=リージャー/RPA・がん=プリベント/専用ポータル+S3を提案中・AI疾病予測=LAiF/S3 URL・遺伝子=Genoplan/RPA。方式/経路/現状/課題/次アクション)。E2E全体像は上記 master_spec が上位 |
+| **`docs/lab/lab_data_pipeline_master_spec.md`** | **検査データ・パイプライン 総合仕様書(E2E正本・上位文書)・現行 v2.1 / 基準日 2026-10-09**。EC購入→キット/タイミング→発送指示/進捗→AI問診/検体返送→各社受渡→受領チェック(週次)→Elithラップ/S3書出→AI診断PDF受取/表示 を6ステップで連結。詳細は(a)(b)(c)へ委譲(二重管理しない)。**【v2.1 で追加】§4-5 = 4検査横断の「検査ID紐づけ／問診受渡／結果受領」の正本**(優先順位 = §4-5 ＞ 会社別詳細仕様 ＞ 旧版。上書き箇所は §4-5.11 に列挙)。**§4-5.8 = v2.1 原案の実装状況を実コードで再確認した訂正 4 件** — ①Partner Portal は本番画面でサンプルは上り入力ファイルの取得だけ ②LAiF XLSX に入るのは人単位の仮名ID 1 か所で**② 整理番号の採番機構は未実装** ③血液の氏名列は**実在する**(`姓`/`名`/`姓かな`/`名かな`)ので残るゲートはパーサ改修と実受領CSV確認 ④**「Scan-Chat-AI は `customer` を読み取り専用でしか触れない」は誤り**(`HP_BRIDGE_READONLY_KEY` は wellfort-site の `app_bridge` 用)。**§4-5.12 の 3 = 最重要の未決**: `customer.lab_tests` に**行を作るコードが両リポジトリに 0 件**(SELECT は `src/lib/chat-context.ts:79-80` の 1 か所だけ)＝**外部ID紐づけ全体の先行条件** |
+| **`docs/lab/kit_receipt_external_id_capture_spec.md`** | **【受取時・外部検査ID 撮影／登録の正本。触る前に必読・v0.1 Draft・未実装】**ユーザーがキットを受け取った時点で外部IDをスマホ撮影・読取し、`lab_tests.id` へ紐づける。**P0 = プリベントのバーコードNo.(例 `704000xxx`)** / **P1 = デメカル 15桁「問合せ番号」(Secondary)** / **対象外 = Genoplan**(正本はタカセ返送CSV 方式。**ユーザー撮影方式へ置き換えない**)。**【UI の確定事項】プリベントの撮影対象に QR コードを据えない** — 書面全体を見せ「ユーザーID」と**1次元バーコード**を枠で囲う。**§3.2 = 着手を止めるブロッカー**: 紐づけ先の `lab_tests` 行を作るコードが存在せず本番に 1 行も無い(解き方 3 案と発注者判断 §9 の D-1)。**§6.2 = 画像は `scan-upload-ticket.ts` の形を流用**(サーバ採番キー+完全一致 validator+署名に Content-Type/長さ固定)。**`putOriginal()` は使わない**(Object Lock 10年=撮り直しが消せない)。**§6.4 = バーコードデコードの方式比較**(`BarcodeDetector` は iOS Safari 非対応＝単独では不可。本線はサーバ側 Gemini)。**§7.1 = AI問診ゲートは二段**(本当のゲートは**プリベント問診CSV 生成側の fail-closed**。`interview-cycle.ts` には足さない＝fail-safe が「催促しない」側なので fail-open になる) |
+| `docs/lab/lab_data_reception_overview.md` | **4検査のデータ受取 詳細**(血液=リージャー/**PowerShell**・がん=プリベント/専用ポータル+S3+パスキー=**採用方式(v2.1 で「提案中」は失効)**・AI疾病予測=LAiF/専用ポータル+S3・遺伝子=Genoplan/**サーバ側API取得**。方式/経路/現状/課題/次アクション)。**§5 = ID 連携の実務断面**(3 層の ID・`customer.lab_tests`・② 上りIDの採番規則案 §5.3・実装ギャップ §5.4)。E2E全体像は上記 master_spec が上位で、**検査ID紐づけ/問診受渡/結果受領の横断は同書 §4-5 が正本**(本書は §4-5 と矛盾しない範囲で有効) |
 | `docs/lab/questionnaire_to_lab_csv_spec.md` | **AI問診回答→各社CSV 変換仕様(実装用)**。共通設問No→各社必要行のマスターマッピング表+各社項目リスト+生成ルール(フリー/選択/範囲/複数)+PII確認事項。元=Wellfort問診項目マトリクスExcel |
 | `docs/lab/demecal_auto_download_overview_spec.md` | 血液検査データ自動DL (デメカル/mTLS) 概要 |
 | **`docs/lab/demecal_unattended_spec.md`** | **【無人定期取得の正本 2026-08-31】** 発注者判断「最初から無人」。無人にしてよい根拠(`last_to` 単調前進=走らない日があっても取り漏れゼロ)/取り込み専用キー `LAB_INTAKE_API_KEY`(**未実装・ADMIN_API_KEY を PC に置かないため必須**)/実行ログAPI/秘密の保管(DPAPI)/タスク設定/監視(GitHub Actions を見張りにして通知基盤を作らない)/失敗時の挙動表/未確定と実装TODO |
@@ -2545,7 +2554,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | **`docs/operations/がんリスク検査_ALA-PDS_追加登録手順書.md`** | **検査済みなのにダッシュボードに出ていないがんリスク検査 (ALA-PDS) を、原本 PDF から後追いで登録する運用手順**。コード変更なしで既存 admin 画面 2 つだけで完結する (**①`/admin/elith-batch` で回を作り数値を入れる → ②`/admin/lab-results` で原本 PDF を付ける** の順。逆順は必ず `artifact_not_found` で止まる)。**受診日を空欄にすると 2 件が同じ日付になり片方が S3 キー衝突で消える**・`external_test_id` はこの口では入らない・切り分け表つき。ALA 方式の判定 (日付でなく項目名の完全一致)・推移グラフは ALA 最新 2 件だけ、というコード側の前提も記載 (`808e27a`) |
 | `docs/operations/S3原本ストレージ_構築手順書.md` | **原本を S3 ap-northeast-1 へ置くためのインフラ手順** (Object Lock / ライフサイクル / IAM / Vercel env / 動作確認)。Compliance モードの不可逆性に注意 |
 | **`docs/operations/スキャンS3直アップロード_バケット設定手順書.md`** | **スキャンで 10MB を通すための AWS 側作業** (①CORS=必須・無いと PDF は 3.2MB のまま / ②ライフサイクル=推奨)。バケット・プレフィックス・CORS 未設定は**本番の実測値**。設定前後を同じコマンドで判定できる確認手順つき。**CORS はバケットを公開しない**・ライフサイクルの prefix を誤ると Elith 納品が消える、の 2 点が要注意 |
-| `docs/architecture/id_management_and_correlation_spec.md` | **ID体系の正本**(顧客ID/診断ユーザーID=diagnostic_user_id/注文/契約/出荷/検査/各社上りID/Elith client_id を層別整理・採番=現状全てWellfort・相関マップ・PII境界・**将来の各社独自ID/キット物理ID(POS/バーコード)連携=受け皿カラム`lab_tests.external_test_id`/`external_barcode`実在**) |
+| `docs/architecture/id_management_and_correlation_spec.md` | **ID体系の正本**(顧客ID/診断ユーザーID=diagnostic_user_id/注文/契約/出荷/検査/各社上りID/Elith client_id を層別整理・相関マップ・PII境界・受け皿カラム`lab_tests.external_test_id`/`external_barcode` は**実在**)。**【§0 が一部失効・2026-10-09】「現時点＝全ID は Wellfort 側で採番・管理」は外部ID運用については失効**し、**外部検査会社の番号も実運用に入る**(内部主キー=`lab_tests.id` は不変・外部IDは相関キーとして併置)。外部ID運用の現行正本=`docs/lab/lab_data_pipeline_master_spec.md` §4-5。**§1.1 の「customer スキーマ = HP/wellfort-site Supabase」も不正確**(`customer` は Scan-Chat-AI 自身のプロジェクト。詳細は §0 の注記) |
 | `docs/architecture/diagnostic_session_data_spec.md` | 診断セッションのデータ構造 |
 | `docs/scan/scan_feature_requirements.md` / `docs/scan/scan_s3_export.md` | AIスキャン機能要件 / S3書き出し |
 | `docs/scan/health_age_caba_v5.4_spec.md` | **ウェルネス年齢 ①正規版(CABA v5.4)確定事項** (免責2文/WBC桁正規化/補完定数/SBP・FEV補正・Wellfort確認2026-08) |
