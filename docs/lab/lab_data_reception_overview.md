@@ -4,8 +4,8 @@
 |---|---|
 | 目的 | Wellfort が外部検査会社から受け取る **4 検査**のデータ受取方式・経路・現状・課題を一枚に集約する。各検査は最終的に **Elith 形式 JSON（`elith-handoff-v0.1`）へ変換し S3 経由で Elith へ受け渡す**（詳細=`docs/elith/elith_s3_data_handoff_spec.md` / `docs/elith/elith_assembly_wrapping_spec.md`）。 |
 | 対象 | ①血液検査（リージャー）②がんリスク検査・尿（プリベント）③AI疾病発症予測（LAiF）④遺伝子検査（Genoplan）。※健診・人間ドックは会員がアプリでAIスキャンするため本書対象外。 |
-| 版 | **2026-09-01c（遺伝子=Wellfort 提供の操作動画を確認。突合キー＝ボックスナンバー(`extchar03`)と判明・PDF は 208 頁で 2 頁目に認証キー/顧客名・§4.1.2 追加）**<br>2026-09-01b（遺伝子=実アカウントで疎通確認。許諾取得済・partner選択不要・`kit_status='600'`で72件・PDF実体21MBを確認。§4.1.1／§4.2／§4.4 を更新）<br>2026-09-01（遺伝子=Genoplan の受取方式を実測で判定。**RPA も PowerShell も不要でサーバ側完結**・§4 を全面改訂／§0.1 追随）<br>2026-08-31（血液=受取方式を RPA/PAD から **PowerShell 方式**へ変更・§1/§0.1/§7 を更新）<br>2026-08-26（Draft・LAiF 実データ疎通の結果／ID 連携仕様／問診データの渡し方マトリクスを追記） |
-| 上位文書 | **本書は「受取方式（各社別）」に特化した詳細。EC購入→キット→問診→受取→Elith→表示の E2E 全体像は `docs/lab/lab_data_pipeline_master_spec.md`（総合仕様書）が正本。** |
+| 版 | **v2.1 overlay 2026-10-09（§2 プリベントの「提案中」を失効させ採用方式へ／§4.2(e) に Genoplan の運用工程確定を追記／§5.4 項目2 を現行コードに合わせて訂正。4検査横断の正本は `lab_data_pipeline_master_spec.md` §4-5）**<br>**2026-09-01c（遺伝子=Wellfort 提供の操作動画を確認。突合キー＝ボックスナンバー(`extchar03`)と判明・PDF は 208 頁で 2 頁目に認証キー/顧客名・§4.1.2 追加）**<br>2026-09-01b（遺伝子=実アカウントで疎通確認。許諾取得済・partner選択不要・`kit_status='600'`で72件・PDF実体21MBを確認。§4.1.1／§4.2／§4.4 を更新）<br>2026-09-01（遺伝子=Genoplan の受取方式を実測で判定。**RPA も PowerShell も不要でサーバ側完結**・§4 を全面改訂／§0.1 追随）<br>2026-08-31（血液=受取方式を RPA/PAD から **PowerShell 方式**へ変更・§1/§0.1/§7 を更新）<br>2026-08-26（Draft・LAiF 実データ疎通の結果／ID 連携仕様／問診データの渡し方マトリクスを追記） |
+| 上位文書 | **本書は「受取方式（各社別）」に特化した詳細。EC購入→キット→問診→受取→Elith→表示の E2E 全体像は `docs/lab/lab_data_pipeline_master_spec.md`（総合仕様書）が正本。** **【v2.1 / 2026-10-09】さらに「検査IDの紐づけ／問診受渡／結果受領」の 4検査横断は同書 §4-5 が正本**になった。本書は**同書 §4-5 と矛盾しない範囲で有効**（矛盾箇所＝同書 §4-5.11）。 |
 | 関連 | **`docs/lab/demecal_unattended_spec.md`（血液=無人定期取得の正本・PowerShell方式）** / `docs/lab/demecal_powershell_probe_guide.md`（方式決定の実測）/ `docs/lab/demecal_auto_download_overview_spec.md`（概要）、`docs/elith/elith_assembly_wrapping_spec.md`（LAiF/ウェルネス年齢のラップ）、`docs/lab/lab_integration_workflow.md`（割当・PII）、`docs/lab/kit_progress_management.md`（進捗）、`docs/lab/wellfort_admin_lab_upload_spec.md`（admin取込） |
 
 ---
@@ -102,7 +102,18 @@
 ## 2. がんリスク検査（尿・プリベント社）
 
 - **検査会社**: プリベント社（様式=ALA-PDS）。
-- **受取方式（提案中・プレゼン段階）**: **LAiF と同じ「専用ポータル＋AWS S3＋パスキー認証」方式を先方へ提案中**（確定ではない）。
+> **⚠️ 【一部失効・2026-10-09 / v2.1】** 本章の「**提案中・プレゼン段階**」は失効。
+> **専用ポータル＋AWS S3＋パスキー方式は「採用方式」として扱う**（ポータル・パスキー・
+> 結果PDF の Presigned PUT・受領一覧が実装済であることを踏まえた判断）。
+> ただし **本番問診CSV の生成／配布** と **受取時のバーコードNo. 取得** と
+> **結果PDF の ID bind** は**いずれも未実装**。
+> また本章の「現状フロー（手動・8ステップ）」の 5. が言う「プリベント社が『ID』で検体を特定」の **ID の実体は
+> 先方の バーコードNo.（例 `704000xxx`）** で、**これをユーザーが受取時に撮影して `lab_tests.id` へ
+> 紐づける**のが現行方針（**P0**）。
+> 現行正本＝`docs/lab/lab_data_pipeline_master_spec.md` §4-5.3 ／
+> 撮影・登録の詳細＝`docs/lab/kit_receipt_external_id_capture_spec.md`。
+
+- **受取方式（採用方式・v2.1）**: **LAiF と同じ「専用ポータル＋AWS S3＋パスキー認証」方式**。
   上り（弊社→プリベント）で **問診CSV** をポータル経由で受渡し、下り（プリベント→弊社）で **報告書PDF** を専用S3で受領する双方向運用へ移行する狙い。往復メール／アクセス権未設定リンクを解消する。
   - **提案資料**: `がんリスク検査_プリベント_データ受け渡し方式ご提案_v0.1_20260806.pdf`（冒頭フロー図＋3ページ）。
   - **デモ画面（パスキー設定前にお試し）**: `https://wellfort.co.jp/partner-portal-preview?partner=prevent`（LAiF ポータルを流用・ダミーデータ・noindex）。
@@ -380,7 +391,18 @@ API 実測（`list_total_cnt=255` / `kit_status='600'` → 72）と**完全に�
   少なくとも現時点でこのアカウントに IP 制限は掛かっていない。
   **将来掛けられる可能性は残る**ので、失敗時に黙って止まらないようにする（§4.4）。
 - **(e) 【方式は既定・運用工程だけ未確定】顧客との突合**。
-  **新しい論点ではない。** 突合方式は `lab_integration_workflow.md §2 Workflow 2`（**Phase 1 の主軸**）で既定＝
+  **新しい論点ではない。**
+  > **【v2.1 / 2026-10-09 追記】Genoplan の運用工程は確定した**＝
+  > **タカセ出荷時に「ヤマト運輸送り状番号 ＋ ボックスナンバー」を既存の出荷指示CSV の同一行へ追記し、
+  > 返送CSV を Wellfort が取り込む**（正本＝`docs/lab/lab_data_pipeline_master_spec.md` §4-5.6）。
+  > **Genoplan をユーザー撮影方式へ置き換えない。**
+  > ユーザー撮影（スマホ）は**プリベントの P0 主経路**としてだけ採用する
+  > （`docs/lab/kit_receipt_external_id_capture_spec.md`）。
+  >
+  > **ただし `customer.lab_tests` に行を作るコードが両リポジトリに 0 件**（実測 grep・
+  > SELECT は `src/lib/chat-context.ts:79-80` の 1 か所のみ）なので、
+  > **受け皿カラムが実在していても書き込む先の行が無い**。これが最上位の先行条件
+  > （上位 §4-5.12 の 3）。 突合方式は `lab_integration_workflow.md §2 Workflow 2`（**Phase 1 の主軸**）で既定＝
   「**発注時に `external_test_id ↔ diagnostic_user_id` を DB に保持 → 結果から検査 ID を読取って逆引き**」、
   **二重照合＝検査ID一致＋検査日一致＋検査機関名一致の 3 つすべて**。
   受け皿カラムも実在（`customer.lab_tests.external_test_id` / `external_barcode`・
@@ -642,7 +664,7 @@ LAiF の条件は「**英字を 1 文字以上含む／大小不問／文字は�
 | # | 状態 | 根拠 |
 |---|---|---|
 | 1 | **整理番号（②）の採番機構が未実装**。`src/` `scripts/` に「整理番号」のヒット **0 件** | 実測 grep |
-| 2 | そのため LAiF 上りビルダーは、入力 JSON の `client_id`（①）を**そのまま名前欄 G1 と No.0 に書いている** | `scripts/build-laif-input.py:103-104`（`671bd91`） |
+| 2 | そのため LAiF 上りビルダーは、入力 JSON の `client_id`（①）を**そのまま名前欄 G1 に書いている**。**【訂正 2026-10-09】「No.0 にも書いている」は古い** — No.0 は LAiF 指摘（2026-08-27・黒枠＝自動計算）により**記入しないことに変更済** | `scripts/build-laif-input.py:262-266` |
 | 3 | ③の受領時格納（`external_test_id`）が未実装 | 実測 |
 | 4 | `lab_companies.external_id_label` / `external_id_pattern` に各社様式が未登録 | 実測 |
 

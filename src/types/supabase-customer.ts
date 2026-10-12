@@ -247,6 +247,64 @@ export type Database = {
         Update: Partial<Database['customer']['Tables']['lab_tests']['Insert']>;
         Relationships: [];
       };
+      /**
+       * 受取時に撮影した外部検査ID の台帳
+       * (`supabase/migrations/20261011000010_lab_test_id_captures.sql`)。
+       * 正本 `docs/lab/kit_receipt_external_id_capture_spec.md`。
+       */
+      lab_test_id_captures: {
+        Row: {
+          id: string;
+          diagnostic_user_id: string;
+          /** dev=`kit_shipments.id` / 本番=`orders.id`。**FK は張っていない**(migration 冒頭の理由)。 */
+          shipment_ref: string;
+          provider: string;
+          test_type: string;
+          id_kind: string;
+          normalized_value: string;
+          capture_method: string;
+          decode_method: string;
+          review_reasons: string[];
+          evidence_key: string | null;
+          status: string;
+          lab_test_id: string | null;
+          lab_test_link_status: string;
+          lab_test_link_detail: string | null;
+          captured_at: string;
+          confirmed_at: string | null;
+          previous_value: string | null;
+          corrected_at: string | null;
+          corrected_by: string | null;
+          correction_reason: string | null;
+          created_at: string;
+        };
+        Insert: {
+          id?: string;
+          diagnostic_user_id: string;
+          shipment_ref: string;
+          provider: string;
+          test_type: string;
+          id_kind: string;
+          normalized_value: string;
+          capture_method: string;
+          decode_method: string;
+          review_reasons?: string[];
+          evidence_key?: string | null;
+          status?: string;
+          lab_test_id?: string | null;
+          lab_test_link_status?: string;
+          lab_test_link_detail?: string | null;
+          captured_at?: string;
+          confirmed_at?: string | null;
+          previous_value?: string | null;
+          corrected_at?: string | null;
+          corrected_by?: string | null;
+          correction_reason?: string | null;
+          created_at?: string;
+        };
+        Update: Partial<Database['customer']['Tables']['lab_test_id_captures']['Insert']>;
+        Relationships: [];
+      };
     };
     Views: Record<string, never>;
     Functions: Record<string, never>;

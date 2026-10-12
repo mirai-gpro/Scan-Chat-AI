@@ -12,7 +12,10 @@ import {
   SHIPMENT_STAGES,
 } from '../lib/dashboard-queries';
 import { countUnreadImportant } from '../lib/notice-queries';
-import { refreshConfig, cfg } from '../lib/app-config';
+import { refreshConfig, cfg, cfgBool } from '../lib/app-config';
+import ExternalIdCapture from '../components/dashboard/ExternalIdCapture.astro';
+import { providerForTestType, maskExternalId, type ExternalIdProvider } from '../lib/external-test-id';
+import { getServerSupabase } from '../lib/supabase';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
 import { noStore } from '../lib/http-cache';
 
@@ -68,6 +71,49 @@ const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId) :
 // 画面文言 (app_config)。未設定なら空文字が返り、UI 側で非表示になる。
 const supportContact = cfg('ui.support_contact');
 const shipments = data?.shipments ?? [];
+
+/*
+ * ── 受取時・外部検査ID の撮影 (正本 docs/lab/kit_receipt_external_id_capture_spec.md) ──
+ *
+ * **既定は両方 off** なので、実物の書面とバーコード規格を確認するまで誰にも出ない。
+ * **UI を出さないだけでなく API 側も 403 で閉じている** (`api/kit/[id]/external-id.ts`)
+ * ので、片方だけ開いた状態にならない。
+ *
+ * **共有閲覧では出さない** — 自己申告と同じ理由 (本人の状態を外部に変えさせない)。
+ */
+const captureOn: Record<ExternalIdProvider, boolean> = {
+  prevent: cfgBool('labid.prevent_capture'),
+  demecal: cfgBool('labid.demecal_capture'),
+};
+
+/** `shipment_ref` → 登録済みの (マスク, 確認待ちか)。**全文は画面に出さない**。 */
+const captured = new Map<string, { mask: string; needsReview: boolean }>();
+if (data && canSelfReport && (captureOn.prevent || captureOn.demecal)) {
+  const sb = getServerSupabase();
+  if (sb) {
+    const r = await sb
+      .schema('customer')
+      .from('lab_test_id_captures')
+      .select('shipment_ref, normalized_value, status')
+      .eq('diagnostic_user_id', data.diagnosticUserId)
+      .neq('status', 'superseded');
+    for (const row of r.data ?? []) {
+      captured.set(String(row.shipment_ref), {
+        mask: maskExternalId(String(row.normalized_value ?? '')),
+        needsReview: row.status !== 'confirmed',
+      });
+    }
+  }
+}
+
+/** この出荷で撮影ブロックを出すか。出すなら provider を返す。 */
+function captureProviderFor(s: { test_type: string; shipped_at: string | null }): ExternalIdProvider | null {
+  if (!canSelfReport) return null;
+  // **発送前には出さない** (届いていない物の番号は撮れない)。
+  if (!s.shipped_at) return null;
+  const p = providerForTestType(s.test_type);
+  return p && captureOn[p] ? p : null;
+}
 
 // 進行中を先に、完了済みを後に。同じ区分では発送日の新しい順。
 const byRecent = (a: { shipped_at: string | null }, b: { shipped_at: string | null }) =>
@@ -241,6 +287,19 @@ function selfReportFor(
                                     </p>
                                   </div>
                                 )}
+                                {/*
+                                  受取の段 (step 3) にだけ外部IDの撮影を出す。
+                                  **受取確認ボタンの有無に関係なく出す** — 先に「受け取りました」を
+                                  押した人にも番号の登録が要るため (押すと selfReport が消える)。
+                                */}
+                                {st.step === 3 && captureProviderFor(s) && (
+                                  <ExternalIdCapture
+                                    shipmentId={s.id}
+                                    provider={captureProviderFor(s)!}
+                                    registeredMask={captured.get(s.id)?.mask ?? null}
+                                    needsReview={captured.get(s.id)?.needsReview ?? false}
+                                  />
+                                )}
                               </div>
                             </li>
                           );
@@ -305,4 +364,8 @@ function selfReportFor(
   /* 処理の実体はダッシュボードのサマリと共有 (src/scripts/kit-self-report.ts)。 */
   import { initKitSelfReport } from '../scripts/kit-self-report';
   initKitSelfReport();
+
+  /* 受取時・外部検査ID の撮影／登録 (src/scripts/external-id-capture.ts)。 */
+  import { initExternalIdCapture } from '../scripts/external-id-capture';
+  initExternalIdCapture();
 </script>

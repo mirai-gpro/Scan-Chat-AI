@@ -4,13 +4,40 @@
 |---|---|
 | 目的 | パイプライン全体で使う **ID を層別に整理**し、①採番主体 ②相関（どのIDが何を結ぶか）③PII境界 ④**現時点=全ID Wellfort側で採番・管理** ⑤**将来=各検査会社の独自ID／検査キットの物理ID(POS/バーコード)連携** の方針を1枚に集約する。 |
 | 位置づけ | ID の**正本**。個々のテーブル定義は各スキーマ型（`src/types/supabase-*.ts`）／各 spec が正。本書は横断の相関と採番方針を規定。 |
-| 版 | 2026-08-12（Draft・初版） |
+| 版 | 2026-08-12（Draft・初版）／**§0 に一部失効の注記を追加 2026-10-09（v2.1）**。外部ID運用の現行正本＝`docs/lab/lab_data_pipeline_master_spec.md` §4-5 |
 | 出典（実在確認済） | `src/types/supabase-customer.ts`（customer/PII）・`src/types/supabase-diagnosis.ts`（diagnosis/非PII）・`src/types/supabase-bridge.ts`（橋渡し）・`docs/elith/elith_s3_data_handoff_spec.md`（client_id）・`docs/architecture/data_integration_requirements.md`（連携キー）・`docs/subscription/kit_lifecycle_and_handoff_management_spec.md`（プラン/キット）・`docs/lab/questionnaire_to_lab_csv_spec.md`（各社ID） |
 | 関連 | `docs/lab/lab_data_pipeline_master_spec.md`（E2E総合仕様・上位） |
 
 ---
 
 ## 0. 大原則
+
+> ### ⚠️ 【一部失効・2026-10-09 / v2.1】
+>
+> **下の原則 1「全ID は Wellfort 側で採番・管理」は、プリベント／デメカル／Genoplan の
+> 外部ID運用については失効した。** 現行正本＝**`docs/lab/lab_data_pipeline_master_spec.md` §4-5**
+> （4検査横断・v2.1 / 基準日 2026-10-09）。
+>
+> 現行の原則はこう:
+> - **内部主キーは Wellfort（`lab_tests.id`）を維持する**（ここは不変）。
+> - **外部検査会社が発行する番号も実運用に入る**（プリベントのバーコードNo. / Genoplan の
+>   ボックスナンバー・認証キー / デメカルの番号）。これらは**内部主キーを置き換えず、
+>   `external_test_id` / `external_barcode` の相関キーとして併置する**。
+> - 原則 3 の「**将来**：各検査会社の独自ID／キット物理IDとの双方向連携」は、**もう将来ではない**。
+>   プリベントの受取時 ID 取得は **P0**（正本＝`docs/lab/kit_receipt_external_id_capture_spec.md`）。
+>
+> **§7-3（採番タイミング・スキャン工程）は依然 未実装**で、しかも
+> **`customer.lab_tests` に行を作るコードが両リポジトリに 1 つも無い**
+> （SELECT は `src/lib/chat-context.ts:79-80` の 1 か所だけ・INSERT/UPDATE/UPSERT は 0 件・実測 grep）。**これが外部ID紐づけ全体の先行条件**＝
+> 上位 §4-5.12 の 3。
+>
+> なお **§1.1 の見出し「customer スキーマ = HP/wellfort-site Supabase」は正確でない。**
+> `customer` スキーマは **Scan-Chat-AI 自身の Supabase プロジェクト**に在り
+> （`supabase/migrations/20260601000010_schemas_and_tables.sql`）、service_role で**書き込みもできる**
+> （`src/lib/supabase.ts:31-38`／`src/pages/api/kit/[id]/self-report.ts:117-123`）。
+> wellfort-site 側に在るのは `public`（`customer_profiles` 等）と `app_bridge` で、
+> `HP_BRIDGE_READONLY_KEY` は**後者専用**（`src/lib/supabase.ts:41-46`）。
+> 本番のキット／注文の正本は wellfort-site の `orders` 側。
 
 1. **現時点＝全ID は Wellfort（本システム）側で採番・管理**する。外部検査会社・Elith へ渡す識別子も**こちらの採番値**を用いる。
 2. **外部（各社 / S3 / Elith）へ持ち出す識別子は仮名 `diagnostic_user_id`（および派生）のみ**。氏名・住所・生年月日等の PII は識別子に使わない（PII例外＝LAiF/プリベント上りCSVの**生年月日**のみ・発注者決定・ポータル保護）。

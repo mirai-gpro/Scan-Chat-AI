@@ -1,0 +1,972 @@
+#!/usr/bin/env node
+/**
+ * `npm run verify:external-id-capture` — **受取時・外部検査ID 撮影／登録**の回帰チェック。
+ *
+ * 正本: `docs/lab/kit_receipt_external_id_capture_spec.md`
+ *       ＋ `docs/lab/lab_data_pipeline_master_spec.md` §4-5 (v2.1)。
+ *
+ * ══════════════════════════════════════════════════════════════════════
+ * 【ここは静かに壊れる】目視では守れないので機械で見る。
+ * ══════════════════════════════════════════════════════════════════════
+ *   - 撮れたつもりで**読めていない**（画面はエラーを出さない）
+ *   - **QR の値**を相関キーにしてしまう（番号の形は似ている）
+ *   - **他人の検査**へ紐付く（画面は正常に見える）
+ *   - 期待パターンの既定が実物と違うだけで**全件が止まる**
+ *   - 台帳が **anon キーで読める**（証跡画像の S3 キーと外部IDが漏れる）
+ *
+ * 検査は「そう書いてあるか」で済ませず、**実物を transpile して動かす**。
+ */
+
+import { readFileSync, mkdirSync } from 'node:fs';
+import { resolve } from 'node:path';
+
+const ROOT = resolve(import.meta.dirname, '..');
+const read = (p) => readFileSync(resolve(ROOT, p), 'utf8');
+/** コメント行を落とす（経緯の説明に旧コードが書いてあるため、そこを拾わない）。 */
+const code = (p) => read(p).split('\n').filter((ln) => !/^\s*(\*|\/\/|\/\*)/.test(ln)).join('\n');
+
+const fails = [];
+let pass = 0;
+const ts = (await import('typescript')).default;
+mkdirSync(resolve(ROOT, 'node_modules/.cache'), { recursive: true });
+const js = (src) => ts.transpileModule(src, { compilerOptions: { target: 'ES2022', module: 'ESNext' } }).outputText;
+/**
+ * TS を transpile して **data: URL から import する**。
+ * data: URL では相対 import を解決できないので、`subs` で
+ * **import 文をリテラル宣言へ置き換える**（値はソースと同じものを使う）。
+ */
+const load = async (relPath, subs = []) => {
+  let src = read(relPath);
+  for (const [re, to] of subs) src = src.replace(re, to ?? '');
+  const b64 = Buffer.from(js(src), 'utf8').toString('base64');
+  return import(`data:text/javascript;base64,${b64}`);
+};
+
+const ok = (label, cond, why) => {
+  if (cond) pass++; else fails.push(`${label}${why ? ` — ${why}` : ''}`);
+  console.log(`  ${cond ? '✓' : '✗'} ${label}`);
+};
+const eq = (label, got, want) => ok(label, JSON.stringify(got) === JSON.stringify(want),
+  `got ${JSON.stringify(got)} / want ${JSON.stringify(want)}`);
+
+// ══════════════════════════════════════════════════════════════════════
+// ① 正規化 — 区切りだけ捨てる。数字以外を「親切に」直さない
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n① 正規化 (normalizeExternalId)\n');
+const core = await load('src/lib/external-test-id.ts');
+{
+  const n = core.normalizeExternalId;
+  eq('半角そのまま', n('704000123'), '704000123');
+  eq('全角数字 → 半角', n('７０４０００１２３'), '704000123');
+  eq('空白・全角空白を捨てる', n(' 704 000　123 '), '704000123');
+  eq('ハイフン類を捨てる (- ‐ – — ー −)', n('704-000‐123–'), '704000123');
+  eq('ドットを捨てる', n('704.000.123'), '704000123');
+  // **ここが要点**: `O`→`0` のような補正をしない。別の番号に化けるため。
+  eq('英字が混ざったら null (O→0 に直さない)', n('7O4000123'), null);
+  eq('記号が混ざったら null', n('704000#123'), null);
+  eq('空文字は null', n('   '), null);
+  eq('文字列以外は null', n(12345), null);
+  eq('undefined は null', n(undefined), null);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ② 構造ガード (ハード) と 期待パターン (ソフト) の二段
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n② 構造ガードと期待パターン\n');
+{
+  const g = core.passesStructuralGuard;
+  ok('4 桁は通る', g('1234'));
+  ok('3 桁は落ちる', !g('123'));
+  ok('20 桁は通る', g('1'.repeat(20)));
+  ok('21 桁は落ちる', !g('1'.repeat(21)));
+  ok('null は落ちる', !g(null));
+
+  const m = core.matchesExpectedPattern;
+  eq('既定パターンに合う', m('704000123', core.DEFAULT_EXPECTED_PATTERN.prevent), true);
+  eq('既定パターンに合わない', m('704000', core.DEFAULT_EXPECTED_PATTERN.prevent), false);
+  /*
+   * **壊れたパターンで落ちない**。判定不能 = null → 呼び出し側は review に倒す。
+   * try/catch を外した退行は**例外で検査ごと落ちる**ので、ここで捕まえて
+   * **名指しの FAIL にする**（crash は原因が読めない）。
+   */
+  {
+    let got;
+    try { got = m('704000123', '^704000[0-9'); } catch (e) { got = `threw: ${e instanceof Error ? e.name : 'unknown'}`; }
+    eq('壊れた正規表現は null (例外を投げない)', got, null);
+  }
+  eq('空パターンは null (未設定)', m('704000123', ''), null);
+  eq('デメカル既定は 15 桁', m('123456789012345', core.DEFAULT_EXPECTED_PATTERN.demecal), true);
+  eq('デメカル既定は 16 桁を弾く', m('1234567890123456', core.DEFAULT_EXPECTED_PATTERN.demecal), false);
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ③ 採否判定 — **一致しないものを自動確定しない**（仕様 §1-3 / §5.1）
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n③ 採否判定 (evaluateExternalId)\n');
+{
+  const ev = (o) => core.evaluateExternalId({ provider: 'prevent', expectedPattern: core.DEFAULT_EXPECTED_PATTERN.prevent, ...o });
+
+  const both = ev({ barcode: '704000123', ocr: '704000123' });
+  eq('両方一致 → confirmed', [both.ok, both.status, both.value, both.decodeMethod],
+    [true, 'confirmed', '704000123', 'barcode+ocr']);
+  eq('両方一致 → 理由なし', both.reasons, []);
+
+  const mis = ev({ barcode: '704000123', ocr: '704000999' });
+  eq('不一致 → review_required', mis.status, 'review_required');
+  eq('不一致 → **バーコードを採る**', mis.value, '704000123');
+  ok('不一致 → 理由コードが付く', mis.reasons.includes('barcode_ocr_mismatch'));
+
+  const onlyB = ev({ barcode: '704000123', ocr: null });
+  eq('バーコードのみ → review_required', onlyB.status, 'review_required');
+  ok('バーコードのみ → single_source', onlyB.reasons.includes('single_source'));
+  eq('バーコードのみ → decode=barcode', onlyB.decodeMethod, 'barcode');
+
+  const onlyO = ev({ barcode: null, ocr: '704000123' });
+  eq('印字のみ → decode=ocr', onlyO.decodeMethod, 'ocr');
+  eq('印字のみ → review_required', onlyO.status, 'review_required');
+
+  const pat = ev({ barcode: '999999999', ocr: '999999999' });
+  eq('パターン外 → review_required (登録は通す)', [pat.ok, pat.status], [true, 'review_required']);
+  ok('パターン外 → pattern_mismatch', pat.reasons.includes('pattern_mismatch'));
+
+  const man = ev({ barcode: '704000123', ocr: '704000123', manual: '704000555' });
+  eq('手入力が最優先', man.value, '704000555');
+  eq('手入力 → review_required', man.status, 'review_required');
+  ok('手入力 → manual_entry', man.reasons.includes('manual_entry'));
+
+  const none = ev({ barcode: 'ABC', ocr: null });
+  eq('読める値ゼロ → ok:false', [none.ok, none.value, none.error], [false, null, 'no_readable_value']);
+
+  const short = ev({ barcode: '12', ocr: '12' });
+  eq('構造ガード未満は採らない', [short.ok, short.error], [false, 'no_readable_value']);
+
+  const unk = core.evaluateExternalId({ provider: 'prevent', barcode: '704000123', ocr: '704000123', expectedPattern: '' });
+  ok('パターン未設定 → pattern_unknown で review', unk.status === 'review_required' && unk.reasons.includes('pattern_unknown'));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ④ Genoplan を**この経路に通さない**（正本はタカセ返送CSV 方式・仕様 §2.3）
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n④ Genoplan は対象外\n');
+{
+  eq('provider は prevent / demecal の 2 つだけ', [...core.EXTERNAL_ID_PROVIDERS], ['prevent', 'demecal']);
+  ok('genoplan は provider でない', !core.isExternalIdProvider('genoplan'));
+  ok('genetics から provider は引けない', core.providerForTestType('genetics') === null);
+  eq('prevent ↔ cancer_urine', core.PROVIDER_TEST_TYPE.prevent, 'cancer_urine');
+  eq('demecal ↔ blood', core.PROVIDER_TEST_TYPE.demecal, 'blood');
+  ok('provider と test_type の不整合を弾く', !core.providerMatchesTestType('prevent', 'blood'));
+  // migration の CHECK でも閉じていること（DB 側の二重の守り）
+  const mig = read('supabase/migrations/20261011000010_lab_test_id_captures.sql');
+  ok('migration の CHECK も prevent/demecal だけ',
+    /provider in \('prevent', 'demecal'\)/.test(mig));
+  ok('migration に genoplan が出てこない', !/genoplan/i.test(mig));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑤ 列の取り違えを防ぐ — external_barcode と external_test_id は別物
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑤ 書き込む列\n');
+{
+  eq('prevent は external_barcode (物理キットID)', core.PROVIDER_ID_COLUMN.prevent, 'external_barcode');
+  eq('demecal は external_test_id (外部照会ID)', core.PROVIDER_ID_COLUMN.demecal, 'external_test_id');
+  const persist = code('src/lib/external-id-persist.ts');
+  // **計算キーに戻っていないこと**。戻ると列名を取り違えても型で気づけない。
+  ok('計算キー `[column]:` を使っていない', !/\[column\]\s*:/.test(persist));
+  ok('idPatch で列を明示している', /external_barcode:\s*v/.test(persist) && /external_test_id:\s*v/.test(persist));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑥ マスク — 外部IDの全文を画面・ログへ出さない（仕様 §6.1）
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑥ マスク\n');
+{
+  const m = core.maskExternalId;
+  eq('末尾 4 桁だけ残す', m('704000123'), '*****0123');
+  eq('桁数は保つ (長さが漏れるのは許容・値は漏らさない)', m('704000123').length, 9);
+  ok('先頭が残らない', !m('704000123').startsWith('7'));
+  eq('4 桁以下は全部隠す', m('1234'), '****');
+  eq('空は空', m(''), '');
+  eq('null は空', m(null), '');
+  // register 応答に全文が入らないこと
+  const api = code('src/pages/api/kit/[id]/external-id.ts');
+  ok('register 応答は masked を返す', /masked:\s*rec\.masked/.test(api));
+  ok('register 応答に value / candidate を入れていない',
+    !/mode:\s*'register'[\s\S]{0,400}candidate/.test(api));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑦ プリベント問診CSV の fail-closed ゲート（仕様 §7.1 ①）
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑦ AI問診 → 問診CSV のゲート\n');
+{
+  /** 台帳レコードの形で渡す（**値だけを渡す API に戻してはいけない**）。 */
+  const cap = (over = {}) => ({
+    normalizedValue: '704000123',
+    status: 'confirmed',
+    labTestLinkStatus: 'linked',
+    labTestId: 'lt-1',
+    ...over,
+  });
+  const g = (capture, p) => core.checkPreventQuestionnaireGate({ capture, expectedPattern: p });
+
+  eq('撮影レコードが無い → ブロック', [g(null).allowed, g(null).reason], [false, 'capture_missing']);
+  eq('undefined → ブロック', [g(undefined).allowed, g(undefined).reason], [false, 'capture_missing']);
+  eq('値が空 → ブロック',
+    [g(cap({ normalizedValue: '' })).allowed, g(cap({ normalizedValue: '' })).reason],
+    [false, 'barcode_no_missing']);
+  eq('数字にならない → ブロック',
+    [g(cap({ normalizedValue: 'ABC' })).allowed, g(cap({ normalizedValue: 'ABC' })).reason],
+    [false, 'barcode_no_missing']);
+  eq('短すぎる → ブロック',
+    [g(cap({ normalizedValue: '12' })).allowed, g(cap({ normalizedValue: '12' })).reason],
+    [false, 'barcode_no_malformed']);
+
+  // ── ここが本題（発注者指示 2026-10-11）: 3 つ揃ったときだけ通す ──────
+  eq('confirmed + linked + lab_test_id → 通す', [g(cap()).allowed, g(cap()).reason], [true, 'ok']);
+
+  for (const st of ['review_required', 'superseded', '', 'unknown']) {
+    const r = g(cap({ status: st }));
+    eq(`status=${st || '(空)'} → **ブロック**`, [r.allowed, r.reason], [false, 'capture_not_confirmed']);
+  }
+  for (const ls of ['deferred', 'conflict', '', 'unknown']) {
+    const r = g(cap({ labTestLinkStatus: ls }));
+    eq(`link=${ls || '(空)'} → **ブロック**`, [r.allowed, r.reason], [false, 'lab_test_not_linked']);
+  }
+  for (const id of [null, undefined, '', '   ']) {
+    const r = g(cap({ labTestId: id }));
+    eq(`lab_test_id=${JSON.stringify(id)} → **ブロック**`, [r.allowed, r.reason], [false, 'lab_test_not_linked']);
+  }
+
+  // **パターン外は台帳側で review_required になっている**ので、この段で止まる。
+  // ゲートがパターンを再判定して独自に通す／止めることはしない。
+  eq('パターン外でも台帳が confirmed なら通す (判定の二重化をしない)',
+    g(cap({ normalizedValue: '999999999' })).allowed, true);
+  eq('パターン外で review_required なら止まる',
+    g(cap({ normalizedValue: '999999999', status: 'review_required' })).allowed, false);
+
+  ok('ブロックの説明に外部IDの全文が入らない',
+    !g(cap({ normalizedValue: '123456789', status: 'review_required' })).detail.includes('123456789'));
+
+  // **値だけを受ける旧シグネチャが残っていないこと**（残っていると
+  // 呼び側が status / link を見ずに通せる = 元の穴がそのまま再発する）。
+  const gateSrc = read('src/lib/external-test-id.ts');
+  ok('旧 `capturedBarcodeNo` 引数を復活させていない', !/capturedBarcodeNo/.test(gateSrc));
+  ok('ゲートが status を見ている', /cap\.status !== 'confirmed'/.test(gateSrc));
+  ok('ゲートが lab_test_link_status を見ている', /labTestLinkStatus !== 'linked'/.test(gateSrc));
+
+  // **`interview-cycle.ts` に足していないこと**。あちらは fail-safe が
+  // 「催促しない」側なので、ゲートを置くと fail-open になる。
+  const cyc = code('src/lib/interview-cycle.ts');
+  ok('interview-cycle.ts にバーコードのゲートを足していない',
+    !/barcode|external_?(test_)?id|labid\./i.test(cyc));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑧ 証跡画像のキー検証 — ここが緩むとバケット内の他データを読み出せる
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑧ 証跡画像のキー検証 (isEvidenceKey)\n');
+{
+  // S3 SDK を読み込まずに純粋部分だけ動かす（import を落とす）。
+  const ev = await load('src/lib/external-id-evidence.ts', [
+    [/^import \{ PutObjectCommand[\s\S]*?from '@aws-sdk\/client-s3';$/m, ''],
+    [/^import \{ getSignedUrl \}[\s\S]*?from '@aws-sdk\/s3-request-presigner';$/m, ''],
+    [/^import \{ getS3Config[\s\S]*?from '\.\/s3';$/m, ''],
+  ]);
+  const cfg = { prefix: 'scan-accuracy-test/', bucket: 'b', region: 'r' };
+  const K = (k) => ev.isEvidenceKey(k, cfg);
+  const good = 'scan-accuracy-test/kit-id-captures/2026/10/11/11111111-2222-3333-4444-555555555555.jpg';
+  ok('サーバ採番の形は通る', K(good));
+  ok('png / webp / heic も通る', K(good.replace('.jpg', '.png')) && K(good.replace('.jpg', '.webp')) && K(good.replace('.jpg', '.heic')));
+  // ここから下は**全部通してはいけない**
+  ok('**Elith 納品 JSON を通さない**', !K('scan-accuracy-test/user/d0000001/date/2026_10_11/HealthCheckupData_x.json'));
+  ok('**.json を通さない**', !K(good.replace('.jpg', '.json')));
+  ok('**.pdf を通さない** (撮影は写真だけ)', !K(good.replace('.jpg', '.pdf')));
+  ok('スキャンの一時領域を通さない', !K('scan-accuracy-test/scan-uploads/2026/10/11/11111111-2222-3333-4444-555555555555.jpg'));
+  ok('prefix だけ合う部分一致を通さない', !K('scan-accuracy-test/kit-id-captures/anything.jpg'));
+  ok('相対パス (..) を通さない', !K('scan-accuracy-test/kit-id-captures/2026/10/../../../secret.jpg'));
+  ok('非 UUID を通さない', !K('scan-accuracy-test/kit-id-captures/2026/10/11/not-a-uuid.jpg'));
+  ok('二重拡張子を通さない', !K(good.replace('.jpg', '.jpg.json')));
+  ok('prefix 違いを通さない', !K('other-prefix/kit-id-captures/2026/10/11/11111111-2222-3333-4444-555555555555.jpg'));
+  ok('日付でないセグメントを通さない', !K('scan-accuracy-test/kit-id-captures/aaaa/bb/cc/11111111-2222-3333-4444-555555555555.jpg'));
+  ok('文字列以外を通さない', !K(null) && !K(undefined) && !K(123));
+
+  // 実体検査（Content-Type の自己申告だけを信じない）
+  const img = ev.looksLikeImage;
+  ok('JPEG のマジックバイトを認める', img(new Uint8Array([0xff, 0xd8, 0xff, 0, 0, 0, 0, 0, 0, 0, 0, 0])));
+  ok('PNG のマジックバイトを認める', img(new Uint8Array([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0])));
+  ok('**PDF を画像と認めない**', !img(new Uint8Array([...Buffer.from('%PDF-1.7'), 0, 0, 0, 0])));
+  ok('**JSON を画像と認めない**', !img(new Uint8Array([...Buffer.from('{"a":1}'), 0, 0, 0, 0, 0])));
+  ok('短すぎるバイト列を認めない', !img(new Uint8Array([0xff, 0xd8])));
+
+  // **10 年保管の原本ストレージへ入れていないこと**（撮り直しが消せなくなる）
+  const evSrc = code('src/lib/external-id-evidence.ts');
+  ok('putOriginal を使っていない', !/putOriginal/.test(evSrc));
+  ok('Content-Type と長さを署名に固定している', /ContentType:\s*contentType/.test(evSrc) && /ContentLength:\s*bytes/.test(evSrc));
+  ok('requestChecksumCalculation の罠を踏んでいない', /WHEN_REQUIRED/.test(evSrc));
+  ok('キーはサーバが採番している (randomUUID)', /crypto\.randomUUID\(\)/.test(evSrc));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑨ Gemini 読み取り — **QR を候補にしない**
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑨ 読み取り (Gemini)\n');
+{
+  const rd = await load('src/lib/external-id-read.ts', [
+    [/^import \{ callGemini[\s\S]*?from '\.\/gemini';$/m, 'const callGemini = async () => { throw new Error("stub"); }; const MODELS = { scan: "stub" };'],
+    [/^import \{ refreshConfig \}[\s\S]*?from '\.\/app-config';$/m, 'const refreshConfig = async () => undefined;'],
+    // **値はソースから読み出して注入する**（ここで別の配列を書くと検査が実物から離れる）
+    [/^import \{\n?\s*EXTERNAL_ID_PROVIDERS[\s\S]*?from '\.\/external-test-id';$/m,
+      `const EXTERNAL_ID_PROVIDERS = ${JSON.stringify([...core.EXTERNAL_ID_PROVIDERS])};`],
+  ]);
+  const p = rd.parseReadJson;
+  eq('素の JSON を読む', p('{"barcode_value":"704000123","printed_id_value":"704000123"}'),
+    { barcode: '704000123', printed: '704000123', note: null });
+  eq('```json フェンスを外す', p('```json\n{"barcode_value":"1","printed_id_value":null}\n```'),
+    { barcode: '1', printed: null, note: null });
+  eq('数値で返ってきても文字列化する', p('{"barcode_value":704000123,"printed_id_value":null}').barcode, '704000123');
+  eq('"null" 文字列は null 扱い', p('{"barcode_value":"null","printed_id_value":null}').barcode, null);
+  eq('壊れた JSON は null (投げない)', p('{oops'), null);
+  eq('空文字は null', p(''), null);
+  eq('配列は null', p('[1,2]'), null);
+
+  const src = read('src/lib/external-id-read.ts');
+  // **スキーマに QR のフィールドを作らない**
+  ok('スキーマに qr のフィールドが無い', !/qr[_a-z]*\s*:/i.test(src.split('export const SYSTEM_BY_PROVIDER')[0]));
+
+  /*
+   * **プロンプトは provider ごとに個別に見る。**
+   * 以前はソース全体に「QR …読まない」が 1 つあれば通る書き方にしていたため、
+   * **片方の provider から QR 除外を外した退行が素通りした**（実測）。
+   * 片方だけ壊れると、その検査だけ QR の値が候補に混ざる = 静かに壊れる。
+   */
+  for (const prov of core.EXTERNAL_ID_PROVIDERS) {
+    const sys = rd.SYSTEM_BY_PROVIDER[prov];
+    const usr = rd.USER_BY_PROVIDER[prov];
+    ok(`${prov}: system プロンプトが QR を除外している`,
+      /QR\s*コード[^。]*(読まない|読み取らない|無視)/.test(sys), JSON.stringify(sys?.slice(0, 120)));
+    ok(`${prov}: user プロンプトでも QR を無視させている`,
+      /QR\s*コード[^。]*(無視|読まない|読み取らない)/.test(usr), JSON.stringify(usr));
+    ok(`${prov}: 推測で数字を作らせない`, /推測で数字を作らない/.test(sys));
+    ok(`${prov}: 読めないものは null と指示している`, /null/.test(sys));
+  }
+  ok('バーコードと印字を別々に報告させている', /barcode_value/.test(src) && /printed_id_value/.test(src));
+  ok('prevent は 1次元バーコードと印字IDの 2 つを別々に取る',
+    /barcode_value/.test(rd.SYSTEM_BY_PROVIDER.prevent) && /printed_id_value/.test(rd.SYSTEM_BY_PROVIDER.prevent));
+  // **読み取り側で正規化しない**（規則が 2 か所に分かれると食い違う）
+  ok('read 側で normalizeExternalId を呼んでいない', !/normalizeExternalId/.test(code('src/lib/external-id-read.ts')));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑩ 登録の挙動 — 実物の persist を**スタブ DB で動かす**
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑩ 登録 (persistExternalIdCapture を実際に動かす)\n');
+/** ⑭ でも同じ実物・同じスタブを使うため外へ出す（別に書き写すと検査が実装から離れる）。 */
+let PERSIST; let MAKE_STUB; let BASE;
+{
+  const persist = await load('src/lib/external-id-persist.ts', [
+    [/^import type \{ SupabaseClient \}[\s\S]*?;$/m, ''],
+    [/^import type \{ Database \}[\s\S]*?;$/m, ''],
+    // **実物の値を注入する**（別に書き写すと検査が実装から離れる）
+    [/^import \{[\s\S]*?from '\.\/external-test-id';$/m,
+      `const PROVIDER_ID_COLUMN = ${JSON.stringify(core.PROVIDER_ID_COLUMN)};`
+      + ` const PROVIDER_ID_KIND = ${JSON.stringify(core.PROVIDER_ID_KIND)};`
+      + ` const PROVIDER_TEST_TYPE = ${JSON.stringify(core.PROVIDER_TEST_TYPE)};`
+      + ` const maskExternalId = ${core.maskExternalId.toString()};`],
+  ]);
+
+  /** 呼ばれたクエリを記録する最小のスタブ。テーブルごとに応答を差し込める。 */
+  function makeStub(tables) {
+    const calls = [];
+    const builder = (table) => {
+      const st = { table, op: 'select', filters: {}, values: null };
+      const res = (v) => { calls.push(st); return Promise.resolve(v); };
+      const api = {
+        select() { st.op = st.op === 'select' ? 'select' : st.op; return api; },
+        insert(v) { st.op = 'insert'; st.values = v; return api; },
+        update(v) { st.op = 'update'; st.values = v; return api; },
+        eq(c, v) { st.filters[c] = v; return api; },
+        neq(c, v) { st.filters[`!${c}`] = v; return api; },
+        contains(c, v) { st.filters[c] = v; return api; },
+        order() { return api; },
+        limit() { return api.then ? api : api; },
+        maybeSingle() { return res(resolveFor(st, tables, 'single')); },
+        then(onOk, onErr) { return res(resolveFor(st, tables, 'many')).then(onOk, onErr); },
+      };
+      return api;
+    };
+    return {
+      calls,
+      schema: () => ({ from: (t) => builder(t) }),
+    };
+  }
+  function resolveFor(st, tables, shape) {
+    const h = tables[st.table];
+    const out = typeof h === 'function' ? h(st) : h;
+    const v = out ?? { data: shape === 'single' ? null : [], error: null };
+    if (shape === 'single' && Array.isArray(v.data)) return { data: v.data[0] ?? null, error: v.error ?? null };
+    return v;
+  }
+  const base = {
+    diagnosticUserId: 'aaaaaaaa-0000-0000-0000-000000000001',
+    shipmentRef: 'ord_prod_id',
+    provider: 'prevent',
+    testType: 'cancer_urine',
+    value: '704000123',
+    status: 'confirmed',
+    captureMethod: 'camera',
+    decodeMethod: 'barcode+ocr',
+    reviewReasons: [],
+    evidenceKey: 'scan-accuracy-test/kit-id-captures/2026/10/11/11111111-2222-3333-4444-555555555555.jpg',
+  };
+
+  // (a) 新規・材料そろい → lab_tests を作って linked
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => st.op === 'insert' ? { data: [{ id: 'cap1' }], error: null } : { data: [], error: null },
+      lab_tests: (st) => st.op === 'insert' ? { data: [{ id: 'lt1' }], error: null } : { data: [], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    ok('(a) 新規登録が成功する', r.ok === true, JSON.stringify(r));
+    eq('(a) linked になる', r.ok && r.record.labTestLinkStatus, 'linked');
+    eq('(a) status は confirmed のまま', r.ok && r.record.status, 'confirmed');
+    eq('(a) 応答はマスクだけ', r.ok && r.record.masked, '*****0123');
+    const ins = stub.calls.find((c) => c.table === 'lab_tests' && c.op === 'insert');
+    ok('(a) lab_tests へ insert した', !!ins);
+    eq('(a) **external_barcode** へ入れている', ins?.values?.external_barcode, '704000123');
+    ok('(a) external_test_id は触らない', ins?.values?.external_test_id === undefined);
+    // **本番の受取 ID は customer.kit_shipments に無いので shipment_id は NULL**
+    eq('(a) shipment_id は NULL (FK 違反を避ける)', ins?.values?.shipment_id, null);
+    eq('(a) assigned_by は auto_id', ins?.values?.assigned_by, 'auto_id');
+  }
+
+  // (b) 重複 — 同じ値が**別の人**に在る → lab_tests を 1 バイトも触らない
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => {
+        if (st.op === 'insert') return { data: [{ id: 'cap2' }], error: null };
+        if (st.filters.normalized_value) {
+          return { data: [{ id: 'other', diagnostic_user_id: 'bbbbbbbb-0000-0000-0000-000000000002', shipment_ref: 'ord_other' }], error: null };
+        }
+        return { data: [], error: null };
+      },
+      lab_tests: { data: [], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    ok('(b) 重複でも台帳には記録する (撮影を失わない)', r.ok === true);
+    eq('(b) conflict になる', r.ok && r.record.labTestLinkStatus, 'conflict');
+    eq('(b) status は review_required へ落ちる', r.ok && r.record.status, 'review_required');
+    const touched = stub.calls.filter((c) => c.table === 'lab_tests' && c.op !== 'select');
+    eq('(b) **lab_tests への書き込みは 0 件**', touched.length, 0);
+  }
+
+  // (c) 二重 submit — 同じ値を 2 回 → 行を増やさない (update のみ)
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => {
+        if (st.op === 'insert') return { data: [{ id: 'cap_new' }], error: null };
+        if (st.filters.normalized_value) return { data: [], error: null };
+        return { data: [{ id: 'cap_prev', normalized_value: '704000123' }], error: null };
+      },
+      lab_tests: (st) => st.op === 'insert' ? { data: [{ id: 'lt1' }], error: null } : { data: [], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    ok('(c) 二重 submit も成功で返す', r.ok === true);
+    const inserts = stub.calls.filter((c) => c.table === 'lab_test_id_captures' && c.op === 'insert');
+    eq('(c) **台帳へ insert しない (行が増えない)**', inserts.length, 0);
+    const ups = stub.calls.filter((c) => c.table === 'lab_test_id_captures' && c.op === 'update');
+    ok('(c) 既存行を update する', ups.length >= 1);
+    ok('(c) superseded にしない', !ups.some((u) => u.values?.status === 'superseded'));
+  }
+
+  // (d) 撮り直し (値が変わる) → 旧行を superseded にして入れ直す
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => {
+        if (st.op === 'insert') return { data: [{ id: 'cap_new' }], error: null };
+        if (st.filters.normalized_value) return { data: [], error: null };
+        return { data: [{ id: 'cap_prev', normalized_value: '704000999' }], error: null };
+      },
+      lab_tests: (st) => st.op === 'insert' ? { data: [{ id: 'lt1' }], error: null } : { data: [], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    ok('(d) 撮り直しが成功する', r.ok === true);
+    const sup = stub.calls.find((c) => c.table === 'lab_test_id_captures' && c.op === 'update' && c.values?.status === 'superseded');
+    ok('(d) 旧行を superseded にする (消さない)', !!sup);
+    const ins = stub.calls.find((c) => c.table === 'lab_test_id_captures' && c.op === 'insert');
+    ok('(d) 新行を insert する', !!ins);
+    eq('(d) previous_value に旧値を残す (監査)', ins?.values?.previous_value, '704000999');
+  }
+
+  // (e) customer_profiles が無い本番の形 → lab_tests を作らず deferred。**撮影は残る**
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => st.op === 'insert' ? { data: [{ id: 'cap3' }], error: null } : { data: [], error: null },
+      lab_tests: { data: [], error: null },
+      customer_profiles: { data: [], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    ok('(e) 紐付けできなくても登録は成功する', r.ok === true, JSON.stringify(r));
+    eq('(e) deferred になる', r.ok && r.record.labTestLinkStatus, 'deferred');
+    eq('(e) status は review_required', r.ok && r.record.status, 'review_required');
+    ok('(e) 理由が残る', r.ok && /customer_profiles/.test(r.record.labTestLinkDetail ?? ''));
+    const ins = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'insert');
+    eq('(e) **lab_tests へ insert しない (FK 違反を起こさない)**', ins.length, 0);
+    const cap = stub.calls.find((c) => c.table === 'lab_test_id_captures' && c.op === 'insert');
+    ok('(e) 台帳には書いている (サイレント脱落ゼロ)', !!cap);
+  }
+
+  // (f) **過去の lab_tests が在っても使い回さない**（前年上書きの直接の回帰）
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => st.op === 'insert' ? { data: [{ id: 'cap4' }], error: null } : { data: [], error: null },
+      // 前年ぶんが 2 件ある状態。どちらにも触ってはいけない。
+      lab_tests: (st) => st.op === 'insert'
+        ? { data: [{ id: 'lt-new' }], error: null }
+        : { data: [{ id: 'lt-2024' }, { id: 'lt-2025' }], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    eq('(f) 今回用の行を作って linked', r.ok && r.record.labTestLinkStatus, 'linked');
+    eq('(f) **既存行ではなく新しい行**', r.ok && r.record.labTestId, 'lt-new');
+    const upd = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'update');
+    eq('(f) **既存の lab_tests を update しない**', upd.length, 0);
+    // **`test_type` で既存行を探す問い合わせ自体を出していないこと。**
+    const byType = stub.calls.filter((c) => c.table === 'lab_tests' && c.filters.test_type !== undefined);
+    eq('(f) test_type で lab_tests を引いていない', byType.length, 0);
+  }
+
+  // (g) lab_companies が 1 件でない → 決めない
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => st.op === 'insert' ? { data: [{ id: 'cap5' }], error: null } : { data: [], error: null },
+      lab_tests: { data: [], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    eq('(g) 検査会社が引けなければ deferred', r.ok && r.record.labTestLinkStatus, 'deferred');
+    ok('(g) 理由に lab_companies が入る', /lab_companies/.test((r.ok && r.record.labTestLinkDetail) ?? ''));
+  }
+
+  // (h) **既存が「1 件だけ」でも使い回さない** — 前年のプリベント検査がちょうど 1 件、
+  //     という最も起こりやすい形。ここを update してしまうのが今回直した穴。
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => st.op === 'insert' ? { data: [{ id: 'cap6' }], error: null } : { data: [], error: null },
+      lab_tests: (st) => st.op === 'insert'
+        ? { data: [{ id: 'lt-new' }], error: null }
+        : { data: [{ id: 'lt-existing' }], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    eq('(h) linked になる', r.ok && r.record.labTestLinkStatus, 'linked');
+    eq('(h) **既存 1 件を流用しない**', r.ok && r.record.labTestId, 'lt-new');
+    const upd = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'update');
+    eq('(h) **既存行を update しない (前年の外部IDを消さない)**', upd.length, 0);
+    const ins = stub.calls.find((c) => c.table === 'lab_tests' && c.op === 'insert');
+    ok('(h) 今回用に insert する', !!ins);
+    eq('(h) 今回の値を入れる', ins?.values?.external_barcode, '704000123');
+  }
+
+  // (h2) **同じ回の撮り直しだけは既存行を使う** — 台帳の lab_test_id が根拠
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => {
+        if (st.op === 'insert') return { data: [{ id: 'cap_new' }], error: null };
+        if (st.filters.normalized_value) return { data: [], error: null };
+        // 同じ (uid, shipment_ref, provider) の有効行が lab_test_id を持っている
+        return { data: [{ id: 'cap_prev', normalized_value: '704000999', lab_test_id: 'lt-same' }], error: null };
+      },
+      lab_tests: (st) => st.op === 'insert' ? { data: [{ id: 'lt-should-not' }], error: null } : { data: [{ id: 'lt-same' }], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    eq('(h2) 同じ回なので既存行を使う', r.ok && r.record.labTestId, 'lt-same');
+    const ins = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'insert');
+    eq('(h2) **新しい lab_tests を作らない**', ins.length, 0);
+    const upd = stub.calls.find((c) => c.table === 'lab_tests' && c.op === 'update');
+    eq('(h2) その行を今回の値で更新する', upd?.values?.external_barcode, '704000123');
+    eq('(h2) 更新先は台帳が指していた行', upd?.filters?.id, 'lt-same');
+  }
+
+  // (h3) 台帳が指す行が**消えている** → 黙って linked を装わず作り直す
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => {
+        if (st.op === 'insert') return { data: [{ id: 'cap_new' }], error: null };
+        if (st.filters.normalized_value) return { data: [], error: null };
+        return { data: [{ id: 'cap_prev', normalized_value: '704000999', lab_test_id: 'lt-gone' }], error: null };
+      },
+      lab_tests: (st) => st.op === 'insert' ? { data: [{ id: 'lt-remade' }], error: null } : { data: [], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    eq('(h3) 作り直して linked', [r.ok && r.record.labTestLinkStatus, r.ok && r.record.labTestId], ['linked', 'lt-remade']);
+    const upd = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'update');
+    eq('(h3) 消えた行を update しない', upd.length, 0);
+  }
+
+  // (i) demecal は external_test_id 側へ入る
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => st.op === 'insert' ? { data: [{ id: 'cap7' }], error: null } : { data: [], error: null },
+      lab_tests: (st) => st.op === 'insert' ? { data: [{ id: 'lt-b' }], error: null } : { data: [], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-b' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({
+      sb: stub, ...base, provider: 'demecal', testType: 'blood', value: '123456789012345',
+    });
+    ok('(i) demecal も登録できる', r.ok === true, JSON.stringify(r));
+    const ins = stub.calls.find((c) => c.table === 'lab_tests' && c.op === 'insert');
+    eq('(i) **external_test_id** へ入れる', ins?.values?.external_test_id, '123456789012345');
+    ok('(i) external_barcode は触らない', ins?.values?.external_barcode === undefined);
+  }
+
+  // (j) kit_shipments に実在すれば shipment_id を入れる (dev の形)
+  {
+    const stub = makeStub({
+      lab_test_id_captures: (st) => st.op === 'insert' ? { data: [{ id: 'cap8' }], error: null } : { data: [], error: null },
+      lab_tests: (st) => st.op === 'insert' ? { data: [{ id: 'lt-new' }], error: null } : { data: [], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [{ id: 'ord_prod_id' }], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    ok('(j) 登録できる', r.ok === true);
+    const ins = stub.calls.find((c) => c.table === 'lab_tests' && c.op === 'insert');
+    eq('(j) 実在するときだけ shipment_id を入れる', ins?.values?.shipment_id, 'ord_prod_id');
+  }
+
+  // (k) 台帳が引けない (migration 未適用) → **黙って成功しない**
+  {
+    const stub = makeStub({
+      lab_test_id_captures: { data: null, error: { message: 'relation "customer.lab_test_id_captures" does not exist' } },
+      lab_tests: { data: [], error: null },
+      customer_profiles: { data: [{ user_id: 'cust-1' }], error: null },
+      lab_companies: { data: [{ id: 'co-1' }], error: null },
+      kit_shipments: { data: [], error: null },
+    });
+    const r = await persist.persistExternalIdCapture({ sb: stub, ...base });
+    ok('(k) migration 未適用なら失敗を返す', r.ok === false, JSON.stringify(r));
+    eq('(k) 503 で返す', !r.ok && r.status, 503);
+    const w = stub.calls.filter((c) => c.table === 'lab_tests' && c.op !== 'select');
+    eq('(k) lab_tests を触らない', w.length, 0);
+  }
+
+  PERSIST = persist; MAKE_STUB = makeStub; BASE = base;
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑪ API の認可 — 新しい認可を発明せず、既存の 3 段ガードを通す
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑪ API の認可とゲート\n');
+{
+  const api = code('src/pages/api/kit/[id]/external-id.ts');
+  ok('denyReadOnlyWrite を通す (代理表示で書かせない)', /denyReadOnlyWrite\(viewer\)/.test(api));
+  ok('denyForShare を通す (共有閲覧から叩かせない)', /denyForShare\(viewer\)/.test(api));
+  ok('denyAnonymous を通す (未認証を止める)', /denyAnonymous\(viewer\)/.test(api));
+  ok('対象は viewer.writeTargetUid で決める', /viewer\.writeTargetUid/.test(api));
+  // **body の uid を認可根拠にしない**
+  ok('body から uid / diagnosticUserId を読んでいない',
+    !/body\.(diagnosticUserId|uid|diagnostic_user_id)/.test(api));
+
+  // ガードが**モードの分岐より前**にあること（read でも Gemini を回すので同じ扱い）
+  const iGuard = api.indexOf('denyAnonymous');
+  const iMode = api.indexOf("mode === 'ticket'");
+  ok('3 段ガードはモード分岐より前にある', iGuard > 0 && iMode > iGuard);
+
+  // 既定 off のゲートが**API 側にも**在ること（UI だけ隠して API を開けない）
+  ok('capture_disabled のゲートが API に在る', /capture_disabled/.test(api));
+  const iCap = api.indexOf('captureEnabled(provider)');
+  ok('撮影ゲートもモード分岐より前', iCap > 0 && iMode > iCap);
+  ok('provider と test_type の整合を検証する', /providerMatchesTestType/.test(api));
+  ok('処理の前に refreshConfig を呼ぶ', api.indexOf('refreshConfig') < iMode);
+
+  // app_config の既定が off であること
+  const cfgSrc = read('src/lib/app-config.ts');
+  for (const k of ['labid.prevent_capture', 'labid.demecal_capture']) {
+    const m = new RegExp(`key: '${k.replace('.', '\\.')}'[\\s\\S]{0,400}?default: '([^']*)'`).exec(cfgSrc);
+    eq(`${k} の既定は off`, m?.[1], 'off');
+  }
+  for (const k of ['labid.prevent_pattern', 'labid.demecal_pattern']) {
+    ok(`${k} が app_config に在る (env でもコード定数でもない)`, new RegExp(`key: '${k.replace('.', '\\.')}'`).test(cfgSrc));
+  }
+  // **dev seed の誤ったパターンを使っていないこと**（`^K[0-9]{4}$` は 704000123 を弾く）
+  const persistSrc = code('src/lib/external-id-persist.ts');
+  ok('lab_companies.external_id_pattern を検証に使っていない',
+    !/external_id_pattern/.test(persistSrc) && !/external_id_pattern/.test(api));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑫ migration の不変条件 — 台帳が anon で読めたら事故
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑫ migration の不変条件\n');
+{
+  const mig = read('supabase/migrations/20261011000010_lab_test_id_captures.sql');
+  ok('RLS を有効にする', /enable row level security/.test(mig));
+  ok('force row level security も付ける', /force row level security/.test(mig));
+  ok('**anon / authenticated から revoke する**', /revoke all on customer\.lab_test_id_captures from anon, authenticated;/.test(mig));
+  ok('service_role にだけ grant する', /grant\s+all on customer\.lab_test_id_captures to service_role;/.test(mig));
+  ok('**ポリシーを 1 つも作らない** (dev_read_all を真似しない)', !/create policy/i.test(mig));
+  // 本番の形（orders.id）を受けるため shipment_ref に FK を張っていないこと
+  ok('shipment_ref に FK を張っていない', !/shipment_ref[^,]*references/i.test(mig));
+  ok('shipment_ref は text', /shipment_ref\s+text not null/.test(mig));
+  ok('lab_test_id には FK を張る', /lab_test_id\s+uuid references customer\.lab_tests\(id\)/.test(mig));
+  ok('二重 submit を止める部分 unique がある',
+    /unique index[\s\S]*?ux_lab_test_id_captures_active[\s\S]*?\(diagnostic_user_id, shipment_ref, provider\)[\s\S]*?where status <> 'superseded'/.test(mig));
+  // 重複値は**一意制約で弾かない**（conflict として残す）
+  ok('normalized_value に unique を張っていない', !/unique[\s\S]{0,80}normalized_value/.test(mig));
+  ok('既存テーブルを alter していない (additive のみ)',
+    !/alter table customer\.lab_tests/i.test(mig) && !/drop /i.test(mig.replace(/drop index if exists/gi, '')));
+  // 証跡は S3 のキーだけ（画像本体を DB に入れない）
+  ok('画像本体の列 (bytea) を作っていない', !/bytea/i.test(mig));
+  ok('evidence_key は text', /evidence_key\s+text/.test(mig));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑬ UI — QR を撮影対象として見せない / PC にカメラを出さない
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑬ UI の契約\n');
+{
+  const comp = read('src/components/dashboard/ExternalIdCapture.astro');
+  ok('QR は読み取らないと書いてある', /QRコード.*読み取りません/.test(comp));
+  ok('**QR を撮影対象として案内していない**', !/QR.{0,12}(を撮影|に合わせ|を枠)/.test(comp));
+  ok('書面全体を撮るよう案内している', /全体/.test(comp));
+  ok('プリベントはユーザーIDと 1次元バーコードを指している',
+    /ユーザーID/.test(comp) && /バーコード/.test(comp));
+  ok('デメカルは問合せ番号を指している', /問合せ番号/.test(comp));
+  // getUserMedia を使わない（PC で必ずエラーになる経路を作らない）
+  // **呼び出し**が無いことを見る。説明コメントには出てくるので `(` まで含めて照合する。
+  ok('getUserMedia を呼んでいない', !/getUserMedia\s*\(/.test(comp)
+    && !/getUserMedia\s*\(/.test(code('src/scripts/external-id-capture.ts')));
+  ok('カメラは capture="environment" の file input', /capture="environment"/.test(comp));
+  ok('カメラボタンは touch-only (PC に出さない)', /touch-only[\s\S]{0,200}capture="environment"/.test(comp));
+  ok('写真を選ぶ経路は touch-only でない (PC でも使える)',
+    /<label class="btn-pair btn-graph min-h-touch cursor-pointer">/.test(comp));
+  ok('撮り直し・手入力の逃げ道がある',
+    /data-extid-retake/.test(comp) && /data-extid-manual/.test(comp));
+  ok('確認してから登録する (即確定しない)', /data-extid-register/.test(comp) && /この番号で登録する/.test(comp));
+
+  const script = code('src/scripts/external-id-capture.ts');
+  ok('uid を属性で渡していない', !/diagnosticUserId|data-diagnostic-user-id/.test(script));
+  ok('二重 submit よけがある', /busy/.test(script));
+  ok('S3 が落ちたら手入力へ落ちる', /captureMethod = 'manual'/.test(script));
+  ok('登録後は再読込で状態を取り直す', /window\.location\.reload\(\)/.test(script));
+
+  const kit = code('src/pages/kit.astro');
+  ok('/kit が撮影ブロックを出す', /ExternalIdCapture/.test(kit));
+  ok('共有閲覧では出さない', /if \(!canSelfReport\) return null;/.test(kit));
+  ok('発送前には出さない', /if \(!s\.shipped_at\) return null;/.test(kit));
+  ok('provider は test_type から引く (名前で推測しない)', /providerForTestType\(s\.test_type\)/.test(kit));
+  ok('全文ではなくマスクを渡す', /maskExternalId/.test(kit) && !/normalized_value\s*\}\s*\)/.test(kit));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑭ 年跨ぎの回帰（発注者指示 2026-10-11）— 「前年を上書きしない」を固定する
+//
+// プリベントは年 1 回。**ここが壊れると画面も台帳も `linked` と表示したまま
+// 前年の `external_barcode` が消える**（＝前年の結果PDF を辿るキーが無くなる）。
+// 目視では絶対に気づけないので、5 本とも名指しで落ちるようにしておく。
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑭ 年跨ぎ / ゲートの回帰 (①〜⑤)\n');
+{
+  const persist = PERSIST;
+  const makeStub = MAKE_STUB;
+  const base = BASE;
+
+  /** 台帳と lab_tests を**状態として持つ**スタブ（2 年ぶんを順に流すため）。 */
+  function makeStatefulStub(seed = {}) {
+    const db = {
+      lab_test_id_captures: [...(seed.captures ?? [])],
+      lab_tests: [...(seed.labTests ?? [])],
+      customer_profiles: [{ user_id: 'cust-1', diagnostic_user_id: base.diagnosticUserId }],
+      lab_companies: [{ id: 'co-1', test_types: ['cancer_urine', 'blood'] }],
+      kit_shipments: [],
+    };
+    let seq = 0;
+    const match = (row, filters) => Object.entries(filters).every(([k, v]) => {
+      if (k.startsWith('!')) return row[k.slice(1)] !== v;
+      if (Array.isArray(v)) return Array.isArray(row[k]) && v.every((x) => row[k].includes(x));
+      return row[k] === v;
+    });
+    const handler = (st) => {
+      const rows = db[st.table] ?? [];
+      if (st.op === 'insert') {
+        const id = `${st.table}-${++seq}`;
+        const row = { id, ...st.values };
+        rows.push(row);
+        return { data: [{ id }], error: null };
+      }
+      if (st.op === 'update') {
+        const hit = rows.filter((r) => match(r, st.filters));
+        for (const r of hit) Object.assign(r, st.values);
+        return { data: hit.map((r) => ({ id: r.id })), error: null };
+      }
+      return { data: rows.filter((r) => match(r, st.filters)), error: null };
+    };
+    const stub = makeStub({
+      lab_test_id_captures: handler, lab_tests: handler,
+      customer_profiles: handler, lab_companies: handler, kit_shipments: handler,
+    });
+    return { stub, db };
+  }
+
+  // ── ① 同一人物が 2 年連続プリベント → lab_tests が 2 行・前年を上書きしない ──
+  {
+    const { stub, db } = makeStatefulStub();
+    const y1 = await persist.persistExternalIdCapture({
+      sb: stub, ...base, shipmentRef: 'ord_2025', value: '704000111',
+    });
+    const y2 = await persist.persistExternalIdCapture({
+      sb: stub, ...base, shipmentRef: 'ord_2026', value: '704000222',
+    });
+    ok('① 1 年目が成功する', y1.ok === true, JSON.stringify(y1));
+    ok('① 2 年目が成功する', y2.ok === true, JSON.stringify(y2));
+    eq('① **lab_tests が 2 行になる**', db.lab_tests.length, 2);
+    eq('① 1 年目と 2 年目で lab_test_id が違う',
+      y1.ok && y2.ok && y1.record.labTestId !== y2.record.labTestId, true);
+    const bars = db.lab_tests.map((r) => r.external_barcode).sort();
+    eq('① **前年の external_barcode が残っている**', bars, ['704000111', '704000222']);
+    const upd = stub.calls.filter((c) => c.table === 'lab_tests' && c.op === 'update');
+    eq('① 既存行への update は 0 件', upd.length, 0);
+    eq('① 台帳も 2 行 (前年を superseded にしない)', db.lab_test_id_captures.length, 2);
+    eq('① 前年の台帳行は有効なまま',
+      db.lab_test_id_captures.filter((r) => r.status !== 'superseded').length, 2);
+  }
+
+  // ── ② 前年 confirmed・今年未撮影 → **前年IDを使わずブロック** ──────────
+  {
+    const { stub } = makeStatefulStub({
+      captures: [{
+        id: 'cap-2025', diagnostic_user_id: base.diagnosticUserId, shipment_ref: 'ord_2025',
+        provider: 'prevent', normalized_value: '704000111', status: 'confirmed',
+        lab_test_id: 'lt-2025', lab_test_link_status: 'linked',
+      }],
+      labTests: [{ id: 'lt-2025', external_barcode: '704000111' }],
+    });
+    // 今年の回（`ord_2026`）で引く = 前年のレコードは**出てこない**
+    const cur = await persist.loadCapturedExternalId({
+      sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent', shipmentRef: 'ord_2026',
+    });
+    eq('② 今年の回では null (前年を拾わない)', cur, null);
+    const gate = core.checkPreventQuestionnaireGate({ capture: cur });
+    eq('② **ゲートがブロックする**', [gate.allowed, gate.reason], [false, 'capture_missing']);
+    // 前年の回を指せば当然引ける（＝引けないのではなく「今年ではない」を表せている）
+    const prev = await persist.loadCapturedExternalId({
+      sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent', shipmentRef: 'ord_2025',
+    });
+    eq('② 前年の回を指せば引ける', prev?.normalizedValue, '704000111');
+    // **「人だけ」で引く呼び出しは通らない**（旧シグネチャの封じ込め）
+    const loose = await persist.loadCapturedExternalId({
+      sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent',
+    });
+    eq('② shipmentRef も labTestId も無ければ引かない', loose, null);
+    const persistSrc = read('src/lib/external-id-persist.ts');
+    ok('② `captured_at desc limit 1` で最新を拾う実装に戻していない',
+      !/order\('captured_at'/.test(persistSrc));
+  }
+
+  // ── ③ 今年 review_required → ブロック ────────────────────────────────
+  {
+    const { stub } = makeStatefulStub({
+      captures: [{
+        id: 'cap-2026', diagnostic_user_id: base.diagnosticUserId, shipment_ref: 'ord_2026',
+        provider: 'prevent', normalized_value: '704000222', status: 'review_required',
+        lab_test_id: 'lt-2026', lab_test_link_status: 'linked',
+      }],
+    });
+    const cur = await persist.loadCapturedExternalId({
+      sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent', shipmentRef: 'ord_2026',
+    });
+    eq('③ レコードは引ける', cur?.status, 'review_required');
+    const gate = core.checkPreventQuestionnaireGate({ capture: cur });
+    eq('③ **review_required はブロック**', [gate.allowed, gate.reason], [false, 'capture_not_confirmed']);
+  }
+
+  // ── ④ 今年 deferred / conflict → ブロック ────────────────────────────
+  for (const link of ['deferred', 'conflict']) {
+    const { stub } = makeStatefulStub({
+      captures: [{
+        id: 'cap-2026', diagnostic_user_id: base.diagnosticUserId, shipment_ref: 'ord_2026',
+        provider: 'prevent', normalized_value: '704000222',
+        // **status だけ confirmed に見える回**でも link で止まることを見る
+        status: 'confirmed', lab_test_id: null, lab_test_link_status: link,
+      }],
+    });
+    const cur = await persist.loadCapturedExternalId({
+      sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent', shipmentRef: 'ord_2026',
+    });
+    eq(`④ ${link} でもレコードは引ける`, cur?.labTestLinkStatus, link);
+    eq(`④ lab_test_id は null`, cur?.labTestId, null);
+    const gate = core.checkPreventQuestionnaireGate({ capture: cur });
+    eq(`④ **${link} はブロック**`, [gate.allowed, gate.reason], [false, 'lab_test_not_linked']);
+
+    // **`lab_test_id` が残っていても通さない。** conflict の回は台帳の
+    // `lab_test_id` を消さない（admin の手がかり）ので、ここが `lab_test_id` の
+    // 有無だけを見ていると**競合したまま CSV が出る**。
+    const withId = core.checkPreventQuestionnaireGate({
+      capture: { normalizedValue: '704000222', status: 'confirmed', labTestLinkStatus: link, labTestId: 'lt-2026' },
+    });
+    eq(`④ ${link} + lab_test_id あり でも **ブロック**`,
+      [withId.allowed, withId.reason], [false, 'lab_test_not_linked']);
+  }
+
+  // ── ⑤ 同じ shipment の二重 submit → 同じ lab_test_id を維持 ───────────
+  {
+    const { stub, db } = makeStatefulStub();
+    const a = await persist.persistExternalIdCapture({
+      sb: stub, ...base, shipmentRef: 'ord_2026', value: '704000222',
+    });
+    const b = await persist.persistExternalIdCapture({
+      sb: stub, ...base, shipmentRef: 'ord_2026', value: '704000222',
+    });
+    ok('⑤ 2 回とも成功する', a.ok === true && b.ok === true, JSON.stringify([a, b]));
+    eq('⑤ **同じ lab_test_id を維持する**', a.ok && b.ok && a.record.labTestId === b.record.labTestId, true);
+    eq('⑤ lab_tests は 1 行のまま', db.lab_tests.length, 1);
+    eq('⑤ 台帳も 1 行のまま', db.lab_test_id_captures.length, 1);
+    eq('⑤ ゲートを通る', core.checkPreventQuestionnaireGate({
+      capture: await persist.loadCapturedExternalId({
+        sb: stub, diagnosticUserId: base.diagnosticUserId, provider: 'prevent', shipmentRef: 'ord_2026',
+      }),
+    }).allowed, true);
+
+    // 撮り直し（値が変わる）でも**同じ行**を使い続ける
+    const c = await persist.persistExternalIdCapture({
+      sb: stub, ...base, shipmentRef: 'ord_2026', value: '704000333',
+    });
+    ok('⑤ 撮り直しも成功する', c.ok === true, JSON.stringify(c));
+    eq('⑤ 撮り直しでも lab_test_id は同じ', c.ok && c.record.labTestId === (a.ok && a.record.labTestId), true);
+    eq('⑤ 撮り直し後も lab_tests は 1 行', db.lab_tests.length, 1);
+    eq('⑤ lab_tests の値が今回のものに更新される', db.lab_tests[0].external_barcode, '704000333');
+    eq('⑤ 旧台帳行は superseded', db.lab_test_id_captures.filter((r) => r.status === 'superseded').length, 1);
+    eq('⑤ 有効な台帳行は 1 件', db.lab_test_id_captures.filter((r) => r.status !== 'superseded').length, 1);
+  }
+}
+
+console.log(`\n${fails.length === 0 ? `✓ ${pass} / ${pass} passed` : `✗ ${fails.length} 件 FAIL (${pass} passed)`}`);
+if (fails.length) { console.error('\n落ちた検査:\n  - ' + fails.join('\n  - ')); process.exit(1); }
