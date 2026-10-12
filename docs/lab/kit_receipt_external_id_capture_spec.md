@@ -76,7 +76,17 @@
 | → 確定が要るもの | **総桁数 / prefix の固定範囲 / チェックディジットの有無 / 1次元バーコードの規格（CODE39・CODE128・ITF 等）** | — |
 | デメカル 15桁 と DSS `指図番号` の同一性 | **未確認。同一と断定しない**（上位 §4-5.4） | `src/lib/elith-blood-csv.ts:539`（`指図番号` は「15 桁前後」）／本番様式 fixture の実値は **16桁・17桁**（`scripts/blood-csv-fixtures/prod_ok_2rows.sjis.csv`・ただし当社が作った架空値） |
 
-→ **帰結**: 桁数・prefix は **`lab_companies.external_id_pattern`（regex・実在・未登録）か共通 validator に置き、コードへ直書きしない。**
+→ **帰結（実装はこう分けた）**: 期待パターンと構造ガードは**別物**で、置き場所も違う。**どちらもコードへ直書きしない。**
+
+| | 置き場所 | 実装 | 外れたときの挙動 |
+|---|---|---|---|
+| **期待パターン（ソフト・可変）** | **app_config `labid.prevent_pattern` / `labid.demecal_pattern`** | `matchesExpectedPattern()`（`src/lib/external-test-id.ts`） | **登録は通し `review_required`**（止めると実物の形式が違う回に何も記録できない）。壊れた正規表現は「判定不能」= `review_required` |
+| **ハードな構造ガード（不変）** | **共通 validator** | `passesStructuralGuard()`（同ファイル・数字のみ 4〜20 桁 = `ID_MIN_DIGITS`/`ID_MAX_DIGITS`） | **自動確定しない** |
+
+**`lab_companies.external_id_pattern` は正としない。** 列は実在するが現行の dev seed が `^K[0-9]{4}$` で、
+`704000123` を**弾いてしまう**（プリベントの形式例と矛盾する）。実物を確定したら admin から
+app_config を即日直せることが要点なので、期待パターンは app_config に置く。
+
 実物 1 枚で確定するまでは「**形式検証を通らない値は自動確定しない**」という振る舞いだけを実装する。
 
 ---
@@ -257,8 +267,10 @@ v1.0 の初版は「既存 1 件ならその行へ入れる / 2 件以上なら�
 | 片方だけ取得 | 信頼度・形式チェックの後、**ユーザー確認を必須**にする |
 | **QR だけ読めた／対象バーコードが読めない** | 「対象の番号を読み取れませんでした」として**再撮影**（QR の値は**使わない・保存しない**） |
 
-**`704000xxx` は現時点の業務上の形式例。** 桁数／prefix をコードへ固定する前に、既存実データ・先方資料・現行仕様で
-**許容範囲を確認**し、**設定（`lab_companies.external_id_pattern`）または共通 validator** に置く（§2.3）。
+**`704000xxx` は現時点の業務上の形式例。** 桁数／prefix はコードへ固定しない。
+**期待パターン = app_config `labid.prevent_pattern`**（admin から即日変更可・外れても登録は通り `review_required`）、
+**ハードな構造ガード = 共通 validator `passesStructuralGuard()`**（数字のみ 4〜20 桁）に分けてある（§2.3）。
+実物の書面 1 枚で許容範囲を確定したら、app_config の値を直す（コード変更・再デプロイは不要）。
 
 ### 5.2 デメカル
 
