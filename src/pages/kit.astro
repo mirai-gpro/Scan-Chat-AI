@@ -16,6 +16,8 @@ import { refreshConfig, cfg, cfgBool } from '../lib/app-config';
 import ExternalIdCapture from '../components/dashboard/ExternalIdCapture.astro';
 import { providerForTestType, maskExternalId, type ExternalIdProvider } from '../lib/external-test-id';
 import { getServerSupabase } from '../lib/supabase';
+import { qrSvgPath } from '../lib/qr';
+import { publicOrigin } from '../lib/public-url';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
 import { noStore } from '../lib/http-cache';
 
@@ -85,6 +87,23 @@ const captureOn: Record<ExternalIdProvider, boolean> = {
   prevent: cfgBool('labid.prevent_capture'),
   demecal: cfgBool('labid.demecal_capture'),
 };
+
+/*
+ * PC 向けの導線。**カメラは `touch-only` なので PC には撮影ボタンが無い** (要件 F-A5)。
+ * `/scan` と同じ流儀で、同じ画面を開くための QR を出す (`scan.astro:140-168`)。
+ *
+ * **固定パス `/kit` の公開 URL を符号化する。**
+ *   - 公開 URL を使うのは `Astro.request.url` がプロキシの内側になり得るため
+ *     (実測 2026-09-04・`public-url.ts`: 内側 URL の QR は読んでも開けなかった)。
+ *   - `publicUrl`（現在の URL）ではなく**固定パス**にしたのは、クエリや
+ *     代理表示のパスを QR へ持ち込まないため。`/kit` に出荷ごとの URL は無いので
+ *     deep link にする余地もない。**uid も入らない** (`?u=` は 2026-09-29 に撤去)。
+ *   - QR の SVG は**ページで 1 つだけ定義**して各ブロックから `<use>` で参照する
+ *     (パスは実測 3.2KB・出荷は最大 10 件なので展開すると無駄に重い)。
+ */
+const extIdQrSymbolId = 'extid-handoff-qr';
+const extIdShareUrl = `${publicOrigin(Astro.request)}/kit`;
+const extIdQr = (captureOn.prevent || captureOn.demecal) ? qrSvgPath(extIdShareUrl, { cell: 4, margin: 4, ec: 'M' }) : null;
 
 /** `shipment_ref` → 登録済みの (マスク, 確認待ちか)。**全文は画面に出さない**。 */
 const captured = new Map<string, { mask: string; needsReview: boolean }>();
@@ -187,6 +206,19 @@ function selfReportFor(
       </header>
 
       <main class="flex flex-1 flex-col gap-6 px-5 pb-12 pt-5">
+        {/*
+          PC 導線の QR。**定義だけ**をここに 1 つ置き、各撮影ブロックは `<use>` で参照する。
+          `hidden` な `<svg>` の中の `<symbol>` は描画されないが `<use>` からは参照できる
+          (いわゆる SVG スプライト)。
+        */}
+        {extIdQr && (
+          <svg class="hidden" aria-hidden="true">
+            <symbol id={extIdQrSymbolId} viewBox={`0 0 ${extIdQr.size} ${extIdQr.size}`}>
+              <rect width={extIdQr.size} height={extIdQr.size} fill="#FFFFFF" />
+              <path d={extIdQr.path} fill="#102B3A" />
+            </symbol>
+          </svg>
+        )}
         {shipments.length === 0 && (
           <section class="card text-center">
             <AppIcon name="kit" size={32} class="mx-auto text-slate-400" />
@@ -298,6 +330,9 @@ function selfReportFor(
                                     provider={captureProviderFor(s)!}
                                     registeredMask={captured.get(s.id)?.mask ?? null}
                                     needsReview={captured.get(s.id)?.needsReview ?? false}
+                                    shareUrl={extIdShareUrl}
+                                    qrSymbolId={extIdQrSymbolId}
+                                    qrSize={extIdQr?.size ?? null}
                                   />
                                 )}
                               </div>

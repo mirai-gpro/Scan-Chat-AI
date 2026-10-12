@@ -778,8 +778,50 @@ console.log('\n⑬ UI の契約\n');
   ok('S3 が落ちたら手入力へ落ちる', /captureMethod = 'manual'/.test(script));
   ok('登録後は再読込で状態を取り直す', /window\.location\.reload\(\)/.test(script));
 
+  /*
+   * PC 導線 (QR)。**ここは静かに壊れる** — QR の URL に文脈が混ざっても、
+   * `.pointer-only` が外れてスマホに出ても、画面は「それなり」に見える。
+   */
+  // **アンカーは markup の class 属性にする。** 冒頭の説明コメントにも
+  // `.pointer-only` が出てくるので、ただの出現では「説明が在る」しか見ていない。
+  ok('PC 導線は .pointer-only (スマホには出さない)', /class="pointer-only mt-3/.test(comp));
+  ok('QR は use で 1 つの symbol を参照する (出荷ごとに展開しない)',
+    /<use href=\{`#\$\{qrSymbolId\}`\}/.test(comp));
+  ok('QR の 3 点が揃わなければ導線ごと出さない',
+    /canHandOff = !!shareUrl && !!qrSymbolId && !!qrSize/.test(comp) && /\{canHandOff && \(/.test(comp));
+  ok('URL はサーバ側で value に入れる (JS 無しでも読める)', /readonly[\s\S]{0,80}value=\{shareUrl\}/.test(comp));
+  /*
+   * **`location.href` で URL を上書きしない。** 上書きすると
+   *   ① QR の URL と文字の URL が食い違う
+   *   ② 代理表示のパス (`/admin-view/...`) をコピー欄に持ち込む
+   * `comp` 側は説明コメントに語が出るので**コメントを落としてから**見る
+   * (⑨ で踏んだ「説明文があれば通る」を繰り返さない)。
+   */
+  const compCode = comp.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  ok('**location.href で URL を上書きしない** (代理表示のパスを持ち込まない)',
+    !/location\.href/.test(compCode) && !/location\.href/.test(code('src/scripts/external-id-capture.ts')));
+  /*
+   * コピーは撮影の状態機械に触らない。**click ハンドラの中で**比べる —
+   * ファイル選択の `change` ハンドラにも `ctx(root)` があるので、
+   * ファイル全体の最初の出現と比べると**常に false になり検査が無意味**になる (実測)。
+   */
+  {
+    const scr = code('src/scripts/external-id-capture.ts');
+    const click = scr.slice(scr.indexOf("document.addEventListener('click'"));
+    const iCopy = click.indexOf('data-extid-share-copy');
+    const iCtx = click.indexOf('const c = ctx(root);');
+    ok('コピーは撮影の状態機械に触らない (ctx より前で返す)', iCopy >= 0 && iCtx > iCopy, `copy=${iCopy} ctx=${iCtx}`);
+  }
+
   const kit = code('src/pages/kit.astro');
   ok('/kit が撮影ブロックを出す', /ExternalIdCapture/.test(kit));
+  ok('QR は公開 origin で作る (プロキシの内側 URL を符号化しない)', /publicOrigin\(Astro\.request\)/.test(kit));
+  ok('**QR は固定パス `/kit`** (クエリや代理表示のパスを入れない)',
+    /publicOrigin\(Astro\.request\)\}\/kit`/.test(kit) && !/publicUrl\(/.test(kit));
+  ok('QR に uid を入れていない', !/extIdShareUrl[\s\S]{0,120}(uid|\?u=)/.test(kit));
+  ok('撮影が両方 off の回は QR を作らない (無駄な計算をしない)',
+    /\(captureOn\.prevent \|\| captureOn\.demecal\) \? qrSvgPath/.test(kit));
+  ok('symbol はページに 1 つだけ', (kit.match(/<symbol id=\{extIdQrSymbolId\}/g) ?? []).length === 1);
   ok('共有閲覧では出さない', /if \(!canSelfReport\) return null;/.test(kit));
   ok('発送前には出さない', /if \(!s\.shipped_at\) return null;/.test(kit));
   ok('provider は test_type から引く (名前で推測しない)', /providerForTestType\(s\.test_type\)/.test(kit));

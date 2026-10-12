@@ -195,6 +195,28 @@ export function initExternalIdCapture(): void {
     const t = e.target as Element | null;
     const root = t?.closest?.('[data-extid-capture]') as HTMLElement | null;
     if (!root) return;
+
+    /*
+     * PC 導線: URL のコピー。**撮影の状態機械とは無関係**なので `ctx()` より前で返す
+     * (コピーしただけで読み取りの状態を作らない)。失敗しても行き止まりにしない
+     * = 選択状態にして手でコピーしてもらう (`scan.astro:1339-1348` と同じ)。
+     */
+    if (t?.closest?.('[data-extid-share-copy]')) {
+      const urlEl = root.querySelector('[data-extid-share-url]') as HTMLInputElement | null;
+      const msgEl = root.querySelector('[data-extid-share-msg]') as HTMLElement | null;
+      if (!urlEl) return;
+      void (async () => {
+        try {
+          await navigator.clipboard.writeText(urlEl.value);
+          if (msgEl) msgEl.textContent = 'コピーしました。スマートフォンのブラウザで開いてください。';
+        } catch {
+          urlEl.select();
+          if (msgEl) msgEl.textContent = 'コピーできませんでした。選択状態にしたので手動でコピーしてください。';
+        }
+      })();
+      return;
+    }
+
     const c = ctx(root);
 
     if (t?.closest?.('[data-extid-register]')) {
