@@ -102,6 +102,35 @@ console.log('\n② 埋まらない枠を並べない\n');
   ok('単品購入では検査キットの行を出さない',
     /\{course && \(\s*<li[\s\S]{0,400}?<KitProgressRows/.test(sec),
     '単品購入にキットは 1 つも無い');
+  /*
+   * **ダッシュボードに申告ボタンを出さない。**
+   * この画面は `kit-self-report.ts` を読み込んでいないので、ボタンを描いても
+   * **押して何も起きない**（実測 2026-10-13・エラーも出ないので気づけない）。
+   * 申告は `/kit` で行うので、同じ場所から詳細ページへ送る（発注者指示）。
+   */
+  ok('進捗セクションは申告ボタンでなくリンクを出す（押して無反応にしない）',
+    /<KitProgressRows[\s\S]{0,200}actionHref=\{detailHref\}/.test(sec));
+  {
+    const rows = read('src/components/dashboard/KitProgressRows.astro');
+    ok('`actionHref` があればリンク、無ければ従来どおりボタン',
+      /actionHref \? \(/.test(rows) && /data-self-report/.test(rows));
+    ok('リンクとボタンで見た目を変えない（class を 1 か所で持つ）',
+      /const ACTION_CLASS =/.test(rows)
+      && (rows.match(/class=\{ACTION_CLASS\}/g) ?? []).length === 4);
+    ok('押すと移動することが分かる（リンクにだけ next を付ける）',
+      /受け取りました<AppIcon name="next"/.test(rows) && /返送しました<AppIcon name="next"/.test(rows));
+    /*
+     * **申告ボタンを描く画面は、必ずスクリプトを読み込んでいること。**
+     * ここが崩れると「押しても無反応」が静かに戻る。
+     */
+    const kit = read('src/pages/kit.astro');
+    ok('`/kit` は申告ボタンとスクリプトを両方持つ',
+      /data-self-report/.test(kit) && /initKitSelfReport\(\)/.test(kit));
+    const dash = read('src/pages/dashboard.astro');
+    ok('ダッシュボードはスクリプトを読み込まない（＝ボタンも出さない）',
+      !/initKitSelfReport/.test(dash));
+  }
+
   ok('キットの行は KitProgressRows に一本化されている',
     !/data-self-report/.test(sec),
     '自己申告ボタンは kit-self-report.ts と組。写して増やすと片方だけ腐る');
