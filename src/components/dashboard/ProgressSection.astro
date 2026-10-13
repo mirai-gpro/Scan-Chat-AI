@@ -178,7 +178,17 @@ const steps = [
     {course && (
       <li class="flex flex-col gap-2.5 rounded-xl border border-slate-200 bg-white p-3">
         <span class="text-base font-bold text-navy-800">3. 検査キット</span>
-        <KitProgressRows shipments={shipments} nextTestAt={nextTestAt} canSelfReport={canSelfReport} />
+        {/*
+          **ダッシュボードでは申告ボタンを出さない。** この画面は `kit-self-report.ts` を
+          読み込んでいないので、ボタンを描いても押して何も起きない（実測 2026-10-13）。
+          申告は `/kit` で行うので、同じ場所から**詳細ページへ送る**（発注者指示）。
+        */}
+        <KitProgressRows
+          shipments={shipments}
+          nextTestAt={nextTestAt}
+          canSelfReport={canSelfReport}
+          actionHref={detailHref}
+        />
       </li>
     )}
 

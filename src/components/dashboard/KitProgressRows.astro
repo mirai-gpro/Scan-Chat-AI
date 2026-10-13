@@ -26,8 +26,22 @@ interface Props {
    * （UI だけ消して API を開けたままにしない）。
    */
   canSelfReport?: boolean;
+  /**
+   * **ここを渡すと、申告ボタンの代わりに「その場所へ行くリンク」を出す**
+   * （発注者指示 2026-10-13）。
+   *
+   * ダッシュボードは**サマリ**なので `kit-self-report.ts` を読み込んでいない。
+   * それなのに `data-self-report` のボタンを描いていたため、
+   * **押しても何も起きなかった**（実測。エラーも出ないので気づけない）。
+   * 申告は `/kit` で行うので、ダッシュボードからはそこへ送る。
+   *
+   * 未指定なら従来どおり申告ボタン（スクリプトを読み込んでいる画面用）。
+   */
+  actionHref?: string | null;
 }
-const { shipments, nextTestAt, canSelfReport = true } = Astro.props as Props;
+const { shipments, nextTestAt, canSelfReport = true, actionHref = null } = Astro.props as Props;
+/** ボタンとリンクで見た目を変えない（同じ場所・同じ大きさ）。 */
+const ACTION_CLASS = 'order-5 flex min-h-touch shrink-0 items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-3.5 text-base font-semibold text-slate-800 transition hover:bg-brand-50 disabled:cursor-wait disabled:opacity-60 xl:order-6';
 const active = shipments.filter((s) => !s.lab_completed_at).slice(0, 2);
 
 /* 横 1 行に畳むので、日付から曜日を落とす (formatJpDate は「2026年8月25日 (火)」を返す)。 */
@@ -87,28 +101,45 @@ const shortJpDate = (iso: string | null | undefined) => formatJpDate(iso).replac
               </span>
             </span>
 
-            {/* 自己申告ボタン */}
+            {/*
+              自己申告。**`actionHref` があればリンク**（押すと詳細ページへ）、
+              無ければ従来どおりボタン（その場で申告）。
+              リンクのときに末尾へ `next` を付けるのは、**押すと移動する**ことを
+              押す前に見せるため（同じ見た目で挙動だけ違う、を避ける）。
+            */}
             {canSelfReport && !s.user_received_at && s.shipped_at && (
-              <button
-                type="button"
-                data-self-report
-                data-shipment-id={s.id}
-                data-action="received"
-                class="order-5 flex min-h-touch shrink-0 items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-3.5 text-base font-semibold text-slate-800 transition hover:bg-brand-50 disabled:cursor-wait disabled:opacity-60 xl:order-6"
-              >
-                <AppIcon name="kit" size={18} />受け取りました
-              </button>
+              actionHref ? (
+                <a href={actionHref} class={ACTION_CLASS}>
+                  <AppIcon name="kit" size={18} />受け取りました<AppIcon name="next" size={16} />
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  data-self-report
+                  data-shipment-id={s.id}
+                  data-action="received"
+                  class={ACTION_CLASS}
+                >
+                  <AppIcon name="kit" size={18} />受け取りました
+                </button>
+              )
             )}
             {canSelfReport && s.user_received_at && !s.user_returned_at && (
-              <button
-                type="button"
-                data-self-report
-                data-shipment-id={s.id}
-                data-action="returned"
-                class="order-5 flex min-h-touch shrink-0 items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-3.5 text-base font-semibold text-slate-800 transition hover:bg-brand-50 disabled:cursor-wait disabled:opacity-60 xl:order-6"
-              >
-                <AppIcon name="send" size={18} />返送しました
-              </button>
+              actionHref ? (
+                <a href={actionHref} class={ACTION_CLASS}>
+                  <AppIcon name="send" size={18} />返送しました<AppIcon name="next" size={16} />
+                </a>
+              ) : (
+                <button
+                  type="button"
+                  data-self-report
+                  data-shipment-id={s.id}
+                  data-action="returned"
+                  class={ACTION_CLASS}
+                >
+                  <AppIcon name="send" size={18} />返送しました
+                </button>
+              )
             )}
           </article>
         );
