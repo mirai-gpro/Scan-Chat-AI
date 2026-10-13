@@ -905,6 +905,33 @@ console.log('\n⑬ UI の契約\n');
       `says=${JSON.stringify(saysFigure)} hasFigure=${JSON.stringify(hasFigure)}`);
   }
 
+  /*
+   * **デモの出荷 ID が API の形式検査を通ること。**
+   * `self-report.ts:43` / `external-id.ts:50` はどちらも `/^[0-9a-f-]{36}$/i` で見るので、
+   * `demo-kit-0002` のような文字列だと **押した瞬間に 400** で止まる（実測 2026-10-13）。
+   * 画面は正常に見えるので、ここが戻ると**デモで何も試せない状態に静かに戻る**。
+   */
+  {
+    const demo = read('src/lib/demo-data.ts');
+    /*
+     * **形式は API のソースから取り出す。** ここに正規表現を書き写すと、
+     * API 側だけ変わったときに**検査は緑のままデモが 400 で止まる**。
+     */
+    const pick = (f) => /!\/(\^\[[^/]+)\/i\.test\(/.exec(read(f))?.[1] ?? null;
+    const reSelf = pick('src/pages/api/kit/[id]/self-report.ts');
+    const reExt = pick('src/pages/api/kit/[id]/external-id.ts');
+    ok('受取 ID の形式検査を 2 つの API から取り出せた', !!reSelf && !!reExt, `${reSelf} / ${reExt}`);
+    ok('2 つの API が同じ形式を見ている', reSelf === reExt, `${reSelf} / ${reExt}`);
+    const idRe = new RegExp(reSelf ?? '^$', 'i');
+    const block = demo.slice(demo.indexOf('shipped: number | null'), demo.indexOf('const at = (d: number | null)'));
+    const ids = [...block.matchAll(/\bid: '([^']+)'/g)].map((m) => m[1]);
+    ok('デモの出荷が 1 件以上ある', ids.length > 0, JSON.stringify(ids));
+    ok('デモの出荷 ID が API の形式検査を通る（通らないと押した瞬間に 400）',
+      ids.length > 0 && ids.every((v) => idRe.test(v)),
+      JSON.stringify(ids.filter((v) => !idRe.test(v))));
+    ok('ID が重複していない', new Set(ids).size === ids.length);
+  }
+
   const kit = code('src/pages/kit.astro');
   ok('/kit が撮影ブロックを出す', /ExternalIdCapture/.test(kit));
   ok('QR は公開 origin で作る (プロキシの内側 URL を符号化しない)', /publicOrigin\(Astro\.request\)/.test(kit));

@@ -327,27 +327,39 @@ export function demoShipments(uid: string): (KitShipment & { lab_name: string | 
     requested_at: null, requested_lock_at: null, notes: null,
   };
   const rows: {
+    /*
+     * **id は UUID の形にする。`demo-kit-0002` のような読みやすい文字列に戻さない。**
+     *
+     * `/kit` のボタンが叩く API は、受取 ID を
+     * `/^[0-9a-f-]{36}$/i` で検査する（`api/kit/[id]/self-report.ts:43` /
+     * `api/kit/[id]/external-id.ts:50`）。形が違うと **400 invalid shipment id** で
+     * 止まるので、デモでは**自己申告も外部ID撮影も押した瞬間に落ちていた**（実測 2026-10-13）。
+     *
+     * **API 側を緩めない** — あれは `shipment_ref` の形を保つための検査で、
+     * 緩めると本番の台帳に変な値が入る。直すのはデモ側。
+     * `verify:external-id-capture` ⑬ が形を見張っている。
+     */
     id: string; test_type: string; lab_name: string; tracking_no: string | null;
     shipped: number | null; received: number | null; returned: number | null;
     labRecv: number | null; done: number | null;
   }[] = [
     // step 1 出荷準備 (発送前)
-    { id: 'demo-kit-0001', test_type: 'blood',        lab_name: 'リージャー',  tracking_no: null,
+    { id: 'd0000000-0000-4000-8000-000000000001', test_type: 'blood',        lab_name: 'リージャー',  tracking_no: null,
       shipped: null, received: null, returned: null, labRecv: null, done: null },
     // step 2 発送済
-    { id: 'demo-kit-0002', test_type: 'cancer_urine', lab_name: 'プリベント',  tracking_no: '2345-6789-0123',
+    { id: 'd0000000-0000-4000-8000-000000000002', test_type: 'cancer_urine', lab_name: 'プリベント',  tracking_no: '2345-6789-0123',
       shipped: 2,  received: null, returned: null, labRecv: null, done: null },
     // step 3 受取済
-    { id: 'demo-kit-0003', test_type: 'blood',        lab_name: 'リージャー',  tracking_no: '1234-5678-9012',
+    { id: 'd0000000-0000-4000-8000-000000000003', test_type: 'blood',        lab_name: 'リージャー',  tracking_no: '1234-5678-9012',
       shipped: 5,  received: 3,    returned: null, labRecv: null, done: null },
     // step 4 返送済
-    { id: 'demo-kit-0004', test_type: 'genetics',     lab_name: 'Genoplan',   tracking_no: '3456-7890-1234',
+    { id: 'd0000000-0000-4000-8000-000000000004', test_type: 'genetics',     lab_name: 'Genoplan',   tracking_no: '3456-7890-1234',
       shipped: 14, received: 12,   returned: 9,    labRecv: null, done: null },
     // step 5 検査会社受領
-    { id: 'demo-kit-0005', test_type: 'blood',        lab_name: 'リージャー',  tracking_no: '4567-8901-2345',
+    { id: 'd0000000-0000-4000-8000-000000000005', test_type: 'blood',        lab_name: 'リージャー',  tracking_no: '4567-8901-2345',
       shipped: 24, received: 22,   returned: 19,   labRecv: 16,   done: null },
     // step 6 検査完了
-    { id: 'demo-kit-0006', test_type: 'cancer_urine', lab_name: 'プリベント',  tracking_no: '5678-9012-3456',
+    { id: 'd0000000-0000-4000-8000-000000000006', test_type: 'cancer_urine', lab_name: 'プリベント',  tracking_no: '5678-9012-3456',
       shipped: 60, received: 58,   returned: 55,   labRecv: 52,   done: 46 },
   ];
   const at = (d: number | null) => (d == null ? null : daysAgo(d));
