@@ -177,15 +177,13 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     description: '偶然一致し得るため明示on時のみ(anomalies 監査へ)。' },
 
   // ── 受取時・外部検査ID 撮影／登録 (正本 docs/lab/kit_receipt_external_id_capture_spec.md) ──
-  // **env でもコード定数でもなく app_config に置く**。
-  // プリベントの総桁数・prefix は実物 1 枚で確定したが (2026-10-13・仕様 §2.1.1)、
-  // **ロット差・チェックディジット・バーコード規格は未確認**なのでここに置いたままにする。
+  // **実物の形式が未確認なので env でもコード定数でもなく app_config に置く**。
   // 外れても登録は止めず `review_required` にするだけなので、admin が即日直せることが要点。
   // パターンを壊しても落ちない (コンパイル不能な正規表現は「判定不能」= review_required)。
   { key: 'labid.prevent_pattern', type: 'string', group: '外部検査ID',
     label: 'プリベント バーコードNo. の期待パターン',
     default: '^704000[0-9]{3}$',
-    description: '正規表現。既定の `^704000[0-9]{3}$` は**実物のシール台紙 (2026-10-13) と一致**。'
+    description: '正規表現。既定は仕様書の表示例 `704000xxx` をそのまま写したもの (**実物は未確認**)。'
       + ' 外れた値も登録は通し `review_required` にする (止めると実物の形式が違う回に何も記録できない)。'
       + ' 空にすると「判定不能」= 常に review_required。' },
   { key: 'labid.demecal_pattern', type: 'string', group: '外部検査ID',
@@ -198,16 +196,6 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     default: 'off',
     description: '受取確認の画面に撮影導線を出すか。**既定 off = 従来どおりの受取確認のまま**。'
       + ' 実物の書面とバーコード規格を確認してから on にする。' },
-  // **CSV 配布は撮影とは別の口で閉じる（独立した enable）。**
-  // `labid.prevent_capture` が off でも、**台帳に過去/デモの confirmed 行が残っていれば**
-  // 一覧に出得る（撮影 UI の on/off と台帳の中身は別物）。しかも先方様式が未確定の間は
-  // **出してはいけない**ので、配布だけを止める鍵をここに置く。
-  { key: 'labid.prevent_csv_release', type: 'bool', group: '外部検査ID',
-    label: 'プリベント問診CSV の配布を有効化',
-    default: 'off',
-    description: 'off のあいだ Partner Portal には一覧も CSV も出さない (fail-closed)。'
-      + ' **先方提供 Excel に様式を合わせるまで on にしない** (`PREVENT_CSV_FORMAT_STATUS`)。'
-      + ' 撮影の有効化 (`labid.prevent_capture`) とは独立。' },
   { key: 'labid.demecal_capture', type: 'bool', group: '外部検査ID',
     label: 'デメカル 受取時 問合せ番号撮影を出す (Secondary)',
     default: 'off',
