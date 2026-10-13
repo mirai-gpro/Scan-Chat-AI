@@ -3,6 +3,7 @@ import { resolveViewer } from '../../../../lib/viewer';
 import { denyReadOnlyWrite, denyForShare, denyAnonymous } from '../../../../lib/write-guard';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { isHpEdgeConfigured, submitKitSelfReport } from '../../../../lib/hp-edge';
+import { demoFallbackEnabled, isDemoShipmentId } from '../../../../lib/demo-data';
 
 export const prerender = false;
 
@@ -58,6 +59,26 @@ export const POST: APIRoute = async (ctx) => {
   }
   if (!diagnosticUserId || !/^[0-9a-f-]{36}$/i.test(diagnosticUserId)) {
     return json({ error: 'missing or invalid diagnosticUserId' }, 400);
+  }
+
+  /*
+   * ── デモ用アカウントの出荷は、どこにも書かずに「記録されない」と返す ──────────
+   *
+   * デモの出荷は `demo-data.ts` の**作り物**で、本番の `orders` に行が無い。
+   * そのまま下の Edge Function へ渡すと **`Order not found` (404)** が返り、
+   * 画面には「申告に失敗しました: Order not found」と出る（実測 2026-10-13）。
+   * デモは記者やパートナーにも見せる枠なので、**押すとエラーになるボタン**を残さない。
+   *
+   * **条件は 2 つとも見る。** 片方だけだと
+   *   - uid だけ → デモ用アカウントが**本物の出荷**を申告できなくなる
+   *   - ID だけ → 本物の利用者がデモの ID を送れば**偽の成功**を受け取れる
+   *
+   * **Edge と DB の呼び出しより前**に置く（後ろだと 404 のあとに届いて意味がない）。
+   * 成功とは言わず `demo: true` を返し、**画面側が「記録されません」と出す**
+   * （黙って成功を装わない）。
+   */
+  if (demoFallbackEnabled(diagnosticUserId) && isDemoShipmentId(id)) {
+    return json({ ok: true, action, demo: true });
   }
 
   // 本番: HP の kit-self-report Edge Function に委譲 (正本 = orders)。

@@ -61,7 +61,23 @@ const ITEMS: { href: string; label: string; icon: AppIconName; note?: string }[]
   { href: `${p}/scan${q}`,      label: 'AI スキャン',  icon: 'scan',      note: '検診結果を読み取る' },
   { href: `${p}/chat${q}`,      label: 'AI 問診',      icon: 'interview', note: '生活習慣を記録する' },
   { href: `${p}/kit${q}`,       label: '検査キット',   icon: 'kit',       note: '発送と返送の進捗' },
-  { href: `${p}/coach${q}`,     label: 'AI コーチ',    icon: 'coach',     note: '結果について相談' },
+  /*
+   * **AI コーチはメニューに出さない**（発注者指示 2026-10-13）。
+   * 機能をペンディングにしたのに**入口だけが残っていた**ため、
+   * 押せるのに中身が止まっている状態になっていた。
+   *
+   * **ページとコードは消していない**（`src/pages/coach.astro` /
+   * `src/lib/coach-context.ts` / `api/coach/ask.ts`）。戻す判断のために残す、という
+   * 既存の扱い（`CLAUDE.md` の「未参照のまま残置。戻す判断のため削除しない」）にそろえる。
+   * **再開するときはこの 1 行を戻すだけ**:
+   *   { href: `${p}/coach${q}`, label: 'AI コーチ', icon: 'coach', note: '結果について相談' },
+   *
+   * ※ ここに未参照コンポーネントの**名前を書かない**。
+   *   `verify:admin-handoff` の L-17 は `grep -rl` で素の名前を探すので、
+   *   コメントに書くだけで「import されている」と判定される（実測 2026-10-13）。
+   *
+   * **URL を直接開けば `/coach` にはまだ到達できる。** 塞ぐかは別の判断。
+   */
   { href: `${p}/notices${q}`,   label: 'お知らせ',     icon: 'notice' },
 ];
 ---

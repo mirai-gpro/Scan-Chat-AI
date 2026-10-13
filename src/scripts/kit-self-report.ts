@@ -50,8 +50,19 @@ export function initKitSelfReport(): void {
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ action }),
       });
-      const payload = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string };
+      const payload = (await res.json().catch(() => ({}))) as { ok?: boolean; error?: string; demo?: boolean };
       if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+      /*
+       * デモ用アカウントの出荷は**どこにも記録されない**（サーバが `demo: true` を返す）。
+       * ここで `reload()` すると**状態が変わらないまま戻ってくる**ので、
+       * 「押したのに何も起きない」に見える。**何が起きたかを言ってボタンを戻す。**
+       */
+      if (payload.demo) {
+        alert(`デモ用アカウントのため、${verb}の申告は記録されません。本番では記録されます。`);
+        btn.disabled = false;
+        btn.innerHTML = originalHtml;
+        return;
+      }
       // 成功 → 再読込で段階を進める (状態を JS 側で組み立て直さない)。
       window.location.reload();
     } catch (err) {

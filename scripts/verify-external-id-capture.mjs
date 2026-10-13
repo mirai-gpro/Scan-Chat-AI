@@ -923,13 +923,44 @@ console.log('\n⑬ UI の契約\n');
     ok('受取 ID の形式検査を 2 つの API から取り出せた', !!reSelf && !!reExt, `${reSelf} / ${reExt}`);
     ok('2 つの API が同じ形式を見ている', reSelf === reExt, `${reSelf} / ${reExt}`);
     const idRe = new RegExp(reSelf ?? '^$', 'i');
-    const block = demo.slice(demo.indexOf('shipped: number | null'), demo.indexOf('const at = (d: number | null)'));
-    const ids = [...block.matchAll(/\bid: '([^']+)'/g)].map((m) => m[1]);
+    /*
+     * **ID は `DEMO_SHIPMENT_IDS` から取る。** fixture 側は定数を参照しているので、
+     * そちらを正規表現で拾うと空振りする（一度そうなった）。
+     */
+    const arr = /export const DEMO_SHIPMENT_IDS: readonly string\[\] = \[([\s\S]*?)\];/.exec(demo)?.[1] ?? '';
+    const ids = [...arr.matchAll(/'([^']+)'/g)].map((m) => m[1]);
     ok('デモの出荷が 1 件以上ある', ids.length > 0, JSON.stringify(ids));
     ok('デモの出荷 ID が API の形式検査を通る（通らないと押した瞬間に 400）',
       ids.length > 0 && ids.every((v) => idRe.test(v)),
       JSON.stringify(ids.filter((v) => !idRe.test(v))));
     ok('ID が重複していない', new Set(ids).size === ids.length);
+    ok('出荷 ID の定義は 1 か所', /export const DEMO_SHIPMENT_IDS/.test(demo)
+      && /id: DEMO_SHIPMENT_IDS\[\d\]/.test(demo));
+
+    /*
+     * **デモの出荷は本番の `orders` に無い。**
+     * そのまま HP の Edge Function へ渡すと `Order not found` (404) になり、
+     * 画面には「申告に失敗しました」と出る（実測 2026-10-13）。
+     * デモは記者やパートナーにも見せるので、押すとエラーになるボタンを残さない。
+     */
+    const sr = code('src/pages/api/kit/[id]/self-report.ts');
+    ok('デモの出荷は自己申告で外部へ出さない',
+      /demoFallbackEnabled\(diagnosticUserId\) && isDemoShipmentId\(id\)/.test(sr));
+    ok('**条件は 2 つとも見る**（uid だけ・ID だけにしない）',
+      /demoFallbackEnabled\([^)]*\) && isDemoShipmentId\(/.test(sr));
+    {
+      const iDemo = sr.indexOf('isDemoShipmentId(id)');
+      const iEdge = sr.indexOf('isHpEdgeConfigured()');
+      const iSb = sr.indexOf('getServerSupabase()');
+      ok('デモの分岐は Edge と DB より前', iDemo >= 0 && iDemo < iEdge && iDemo < iSb,
+        `demo=${iDemo} edge=${iEdge} sb=${iSb}`);
+    }
+    ok('**黙って成功を装わない**（demo を返す）', /ok: true, action, demo: true/.test(sr));
+    const srScript = code('src/scripts/kit-self-report.ts');
+    ok('デモでは再読込しない（変わらない画面に戻さない）',
+      /payload\.demo/.test(srScript)
+      && srScript.indexOf('payload.demo') < srScript.indexOf('window.location.reload()'));
+    ok('デモでは記録されないと伝える', /記録されません/.test(srScript));
   }
 
   const kit = code('src/pages/kit.astro');
