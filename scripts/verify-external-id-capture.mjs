@@ -64,6 +64,18 @@ const core = await load('src/lib/external-test-id.ts');
   // **ここが要点**: `O`→`0` のような補正をしない。別の番号に化けるため。
   eq('英字が混ざったら null (O→0 に直さない)', n('7O4000123'), null);
   eq('記号が混ざったら null', n('704000#123'), null);
+  /*
+   * **バーコードの start/stop を 1 文字だけ剥がす** (実物のプリベントの台紙は `A…A`)。
+   * 剥がさないと **バーコード側が常に捨てられ、毎回 `single_source` = `review_required`** になる。
+   */
+  eq('Codabar の start/stop を剥がす (A…A)', n('A704000123A'), '704000123');
+  eq('小文字でも剥がす', n('a704000123a'), '704000123');
+  eq('A〜D なら種類が違ってもよい', n('B704000123C'), '704000123');
+  eq('片側だけでも剥がす', n('A704000123'), '704000123');
+  eq('**2 文字は剥がさない** (想定外はそのまま落とす)', n('AA704000123A'), null);
+  eq('**`*` は剥がさない** (Code39 は実物で見ていない)', n('*704000123*'), null);
+  eq('英字だけなら null', n('A'), null);
+  eq('E〜Z は剥がさない', n('E704000123E'), null);
   eq('空文字は null', n('   '), null);
   eq('文字列以外は null', n(12345), null);
   eq('undefined は null', n(undefined), null);
@@ -344,6 +356,17 @@ console.log('\n⑨ 読み取り (Gemini)\n');
     const usr = rd.USER_BY_PROVIDER[prov];
     ok(`${prov}: system プロンプトが QR を除外している`,
       /QR\s*コード[^。]*(読まない|読み取らない|無視)/.test(sys), JSON.stringify(sys?.slice(0, 120)));
+    if (prov === 'prevent') {
+      /*
+       * **台紙にはログイン用のパスワードが印字されている**（実物で確認・2026-10-13）。
+       * 値として返させない。証跡画像は S3 に残るので、ここが緩むと**資格情報が
+       * 応答と台帳に流れる**。
+       */
+      ok('prevent: パスワードと URL を読ませない',
+        /パスワード[^。]*読まない|読まない[^。]*パスワード/.test(sys) && /URL/.test(sys));
+      ok('prevent: 英字で挟まれた印字をそのまま返させる (A…A)',
+        /英字で挟まれている/.test(sys));
+    }
     ok(`${prov}: user プロンプトでも QR を無視させている`,
       /QR\s*コード[^。]*(無視|読まない|読み取らない)/.test(usr), JSON.stringify(usr));
     ok(`${prov}: 推測で数字を作らせない`, /推測で数字を作らない/.test(sys));
@@ -778,8 +801,146 @@ console.log('\n⑬ UI の契約\n');
   ok('S3 が落ちたら手入力へ落ちる', /captureMethod = 'manual'/.test(script));
   ok('登録後は再読込で状態を取り直す', /window\.location\.reload\(\)/.test(script));
 
+  /*
+   * PC 導線 (QR)。**ここは静かに壊れる** — QR の URL に文脈が混ざっても、
+   * `.pointer-only` が外れてスマホに出ても、画面は「それなり」に見える。
+   */
+  // **アンカーは markup の class 属性にする。** 冒頭の説明コメントにも
+  // `.pointer-only` が出てくるので、ただの出現では「説明が在る」しか見ていない。
+  ok('PC 導線は .pointer-only (スマホには出さない)', /class="pointer-only mt-3/.test(comp));
+  ok('QR は use で 1 つの symbol を参照する (出荷ごとに展開しない)',
+    /<use href=\{`#\$\{qrSymbolId\}`\}/.test(comp));
+  ok('QR の 3 点が揃わなければ導線ごと出さない',
+    /canHandOff = !!shareUrl && !!qrSymbolId && !!qrSize/.test(comp) && /\{canHandOff && \(/.test(comp));
+  ok('URL はサーバ側で value に入れる (JS 無しでも読める)', /readonly[\s\S]{0,80}value=\{shareUrl\}/.test(comp));
+  /*
+   * **`location.href` で URL を上書きしない。** 上書きすると
+   *   ① QR の URL と文字の URL が食い違う
+   *   ② 代理表示のパス (`/admin-view/...`) をコピー欄に持ち込む
+   * `comp` 側は説明コメントに語が出るので**コメントを落としてから**見る
+   * (⑨ で踏んだ「説明文があれば通る」を繰り返さない)。
+   */
+  const compCode = comp.replace(/\/\*[\s\S]*?\*\//g, '').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  ok('**location.href で URL を上書きしない** (代理表示のパスを持ち込まない)',
+    !/location\.href/.test(compCode) && !/location\.href/.test(code('src/scripts/external-id-capture.ts')));
+  /*
+   * コピーは撮影の状態機械に触らない。**click ハンドラの中で**比べる —
+   * ファイル選択の `change` ハンドラにも `ctx(root)` があるので、
+   * ファイル全体の最初の出現と比べると**常に false になり検査が無意味**になる (実測)。
+   */
+  {
+    const scr = code('src/scripts/external-id-capture.ts');
+    const click = scr.slice(scr.indexOf("document.addEventListener('click'"));
+    const iCopy = click.indexOf('data-extid-share-copy');
+    const iCtx = click.indexOf('const c = ctx(root);');
+    ok('コピーは撮影の状態機械に触らない (ctx より前で返す)', iCopy >= 0 && iCtx > iCopy, `copy=${iCopy} ctx=${iCtx}`);
+  }
+
+  /*
+   * 用紙の図 (§4.6)。**実物を見ていない provider の図を描かない**のが要点。
+   * 描いてしまうと、利用者は「この図のとおりの紙」を探す。
+   */
+  const fig = read('src/components/dashboard/ExternalIdSheetGuide.astro');
+  ok('図を出すのは実物を確認した provider だけ',
+    /hasDiagram = provider === 'demecal' \|\| provider === 'prevent'/.test(fig));
+  ok('図は provider ごとに分かれている',
+    /\{provider === 'demecal' && \(/.test(fig) && /\{provider === 'prevent' && \(/.test(fig));
+  ok('プリベントの図は「シール台紙」を描く', /シール台紙/.test(fig));
+  ok('プリベントの図は `A…A` の印字をそのまま見せる', /A704000\*\*\*A/.test(fig));
+  ok('**パスワードと QR は読まないと図にも書く**',
+    /ここは読み取りません/.test(fig) && /パスワード/.test(fig) && /QR/.test(fig));
+  ok('シールを貼る前に撮るよう言っている', /シールを貼る前に撮影/.test(fig));
+  ok('図は `hasDiagram` のときだけ描く', /\{hasDiagram && \(/.test(fig));
+  ok('**本物の番号を図に入れない** (0 の並び)', /000000000000000/.test(fig)
+    && !/[0-9]{15}/.test(fig.replace(/0{15}/g, '')));
+  ok('桁数が分かる', /15桁/.test(fig));
+  ok('取り違えやすい数字を名指ししている (電話番号・検査ID欄)',
+    /0120/.test(fig) && /検査ID/.test(fig));
+  ok('図は撮影ブロックから呼ばれる', /<ExternalIdSheetGuide provider=\{provider\} \/>/.test(comp));
+
+  /*
+   * 誤読・読めなかったときの案内。**候補を消さない** (形が違っても登録はできる)。
+   */
+  ok('誤読の案内の受け皿がある', /data-extid-wrong\b/.test(comp)
+    && /data-extid-wrong-title/.test(comp) && /data-extid-wrong-body/.test(comp));
+  ok('赤にしない (status-watch = 注意)', /data-extid-wrong[\s\S]{0,120}status-watch|status-watch[\s\S]{0,120}data-extid-wrong/.test(comp));
+  {
+    const scr = code('src/scripts/external-id-capture.ts');
+    ok('形が違うときに案内を出す', /pattern_mismatch'\) \|\| reasons\.includes\('pattern_unknown'\)[\s\S]{0,200}showWrong/.test(scr));
+    /*
+     * **候補は消さない。** 形が違っても登録はできる (台帳に `review_required` で残る)。
+     * ここで止めると撮影そのものを失わせる。
+     *
+     * **「後ろに `show(confirmEl, true)` がある」では検査にならない** — 分岐の中で
+     * 候補を消して `return` しても、その先の行に `true` が残っていて素通りした (実測)。
+     * → **分岐の中だけ**を切り出して、消す/抜ける操作が無いことを見る。
+     */
+    {
+      const i = scr.indexOf("if (reasons.includes('pattern_mismatch')");
+      const j = scr.indexOf('show(c.confirmEl, true);', i);
+      const branch = i >= 0 && j > i ? scr.slice(i, j) : '';
+      ok('**候補は消さない** (そのまま登録できる)',
+        branch.includes('showWrong')
+        && !/show\(c\.confirmEl, false\)/.test(branch)
+        && !/\breturn\b/.test(branch),
+        branch.slice(0, 160));
+    }
+    ok('読めなかったときも案内を出す (手入力は開く)',
+      /show\(c\.manualEl, true\);[\s\S]{0,400}showWrong/.test(scr));
+    ok('撮り直し・再読取で前回の案内を消す',
+      /clearWrong\(c\);/.test(scr) && (scr.match(/clearWrong\(c\)/g) ?? []).length >= 2);
+    /*
+     * **「上の図」と言ってよいのは図を持つ provider だけ。**
+     * ずれると「上の図」と書いてあるのに図が無い状態になる (文章と UI の食い違いは目視で抜ける)。
+     */
+    const saysFigure = [...scr.matchAll(/^\s{2}(\w+): '上の図/gm)].map((m) => m[1]).sort();
+    /*
+     * **両側から取り出して突き合わせる。** 片方を定数で書くと、図を足したときに
+     * ここを直し忘れて「検査は緑なのに文面と UI が食い違う」状態になる。
+     */
+    const hasFigureLine = /const hasDiagram = ([^;]+);/.exec(fig)?.[1] ?? '';
+    const hasFigure = [...hasFigureLine.matchAll(/'(\w+)'/g)].map((m) => m[1]).sort();
+    ok('「上の図」と言う provider は図を持つ provider と一致する',
+      hasFigure.length > 0 && JSON.stringify(saysFigure) === JSON.stringify(hasFigure),
+      `says=${JSON.stringify(saysFigure)} hasFigure=${JSON.stringify(hasFigure)}`);
+  }
+
+  /*
+   * **デモの出荷 ID が API の形式検査を通ること。**
+   * `self-report.ts:43` / `external-id.ts:50` はどちらも `/^[0-9a-f-]{36}$/i` で見るので、
+   * `demo-kit-0002` のような文字列だと **押した瞬間に 400** で止まる（実測 2026-10-13）。
+   * 画面は正常に見えるので、ここが戻ると**デモで何も試せない状態に静かに戻る**。
+   */
+  {
+    const demo = read('src/lib/demo-data.ts');
+    /*
+     * **形式は API のソースから取り出す。** ここに正規表現を書き写すと、
+     * API 側だけ変わったときに**検査は緑のままデモが 400 で止まる**。
+     */
+    const pick = (f) => /!\/(\^\[[^/]+)\/i\.test\(/.exec(read(f))?.[1] ?? null;
+    const reSelf = pick('src/pages/api/kit/[id]/self-report.ts');
+    const reExt = pick('src/pages/api/kit/[id]/external-id.ts');
+    ok('受取 ID の形式検査を 2 つの API から取り出せた', !!reSelf && !!reExt, `${reSelf} / ${reExt}`);
+    ok('2 つの API が同じ形式を見ている', reSelf === reExt, `${reSelf} / ${reExt}`);
+    const idRe = new RegExp(reSelf ?? '^$', 'i');
+    const block = demo.slice(demo.indexOf('shipped: number | null'), demo.indexOf('const at = (d: number | null)'));
+    const ids = [...block.matchAll(/\bid: '([^']+)'/g)].map((m) => m[1]);
+    ok('デモの出荷が 1 件以上ある', ids.length > 0, JSON.stringify(ids));
+    ok('デモの出荷 ID が API の形式検査を通る（通らないと押した瞬間に 400）',
+      ids.length > 0 && ids.every((v) => idRe.test(v)),
+      JSON.stringify(ids.filter((v) => !idRe.test(v))));
+    ok('ID が重複していない', new Set(ids).size === ids.length);
+  }
+
   const kit = code('src/pages/kit.astro');
   ok('/kit が撮影ブロックを出す', /ExternalIdCapture/.test(kit));
+  ok('QR は公開 origin で作る (プロキシの内側 URL を符号化しない)', /publicOrigin\(Astro\.request\)/.test(kit));
+  ok('**QR は固定パス `/kit`** (クエリや代理表示のパスを入れない)',
+    /publicOrigin\(Astro\.request\)\}\/kit`/.test(kit) && !/publicUrl\(/.test(kit));
+  ok('QR に uid を入れていない', !/extIdShareUrl[\s\S]{0,120}(uid|\?u=)/.test(kit));
+  ok('撮影が両方 off の回は QR を作らない (無駄な計算をしない)',
+    /\(captureOn\.prevent \|\| captureOn\.demecal\) \? qrSvgPath/.test(kit));
+  ok('symbol はページに 1 つだけ', (kit.match(/<symbol id=\{extIdQrSymbolId\}/g) ?? []).length === 1);
   ok('共有閲覧では出さない', /if \(!canSelfReport\) return null;/.test(kit));
   ok('発送前には出さない', /if \(!s\.shipped_at\) return null;/.test(kit));
   ok('provider は test_type から引く (名前で推測しない)', /providerForTestType\(s\.test_type\)/.test(kit));
@@ -966,6 +1127,32 @@ console.log('\n⑭ 年跨ぎ / ゲートの回帰 (①〜⑤)\n');
     eq('⑤ 旧台帳行は superseded', db.lab_test_id_captures.filter((r) => r.status === 'superseded').length, 1);
     eq('⑤ 有効な台帳行は 1 件', db.lab_test_id_captures.filter((r) => r.status !== 'superseded').length, 1);
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑮ 手順書がコードと同期しているか
+//
+// `docs/operations/外部検査ID_読み取り精度テスト手順書.md` は**生成物**。
+// プロンプトやスキーマを直したのに書き出し直さないと、**古い手順書で精度を測る**ことになる
+// （しかも見た目は正しいので誰も気づかない）。`verify:sheet-contract` と同じ流儀で、
+// **組み立てる関数そのものを呼んで**突き合わせる（書き出しの規則を 2 つに割らない）。
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑮ 手順書の同期\n');
+{
+  const { buildDoc, DOC_PATH } = await import('./lib/external-id-prompt-doc.mjs');
+  let cur = null;
+  try { cur = read(DOC_PATH); } catch { cur = null; }
+  const next = await buildDoc();
+  ok('手順書が存在する', cur !== null, DOC_PATH);
+  ok('手順書がコードと一致する（古かったら npm run dump:external-id-prompt）',
+    cur === next,
+    cur === null ? '未生成' : `差分 ${Math.abs(cur.length - next.length)} 文字`);
+  // **プロンプトの本文が実際に載っていること**（器だけ生成されても意味がない）
+  const rdSrc = read('src/lib/external-id-read.ts');
+  const firstLine = /prevent: \[\n\s*'([^']+)'/.exec(rdSrc)?.[1] ?? '';
+  ok('プリベントの system プロンプトが手順書に載っている',
+    firstLine.length > 0 && (cur ?? '').includes(firstLine), firstLine.slice(0, 40));
+  ok('**実物の写真を入れないと書いてある**', (cur ?? '').includes('リポジトリに入れない'));
 }
 
 console.log(`\n${fails.length === 0 ? `✓ ${pass} / ${pass} passed` : `✗ ${fails.length} 件 FAIL (${pass} passed)`}`);

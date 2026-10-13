@@ -31,6 +31,8 @@ interface Ctx {
   candidateEl: HTMLElement | null;
   noteEl: HTMLElement | null;
   manualEl: HTMLElement | null;
+  /** 「別の用紙／別の数字かもしれません」の案内。 */
+  wrongEl: HTMLElement | null;
   inputEl: HTMLInputElement | null;
   /** 直近の読み取り結果（登録時にサーバへ戻す）。 */
   read: { barcode: string | null; printed: string | null } | null;
@@ -55,6 +57,7 @@ function ctx(root: HTMLElement): Ctx {
     candidateEl: q('[data-extid-candidate]'),
     noteEl: q('[data-extid-note]'),
     manualEl: q('[data-extid-manual]'),
+    wrongEl: q('[data-extid-wrong]'),
     inputEl: q<HTMLInputElement>('[data-extid-input]'),
     read: null,
     evidenceKey: null,
@@ -88,7 +91,47 @@ async function post(c: Ctx, payload: Record<string, unknown>): Promise<Record<st
 }
 
 /** 撮影 → S3 → 読取。**失敗は throw せず false を返し、手入力へ譲る。** */
+/**
+ * 「別の用紙／別の数字かもしれません」の案内を出す。
+ *
+ * **候補は消さない。** 形が違っても登録はできる（台帳に `review_required` で残り、
+ * 事務局が直す）ので、ここで止めると**撮影そのものを失わせる**ことになる。
+ * 出すのは注意と、**上の図をもう一度見てもらう**ための一文だけ。
+ */
+function showWrong(c: Ctx, title: string, body: string): void {
+  if (c.wrongEl) {
+    const t = c.wrongEl.querySelector('[data-extid-wrong-title]');
+    const b = c.wrongEl.querySelector('[data-extid-wrong-body]');
+    if (t) t.textContent = title;
+    if (b) b.textContent = body;
+  }
+  show(c.wrongEl, true);
+}
+
+/** 撮り直し・次の読み取りのたびに消す（前回の注意を残さない）。 */
+function clearWrong(c: Ctx): void {
+  show(c.wrongEl, false);
+}
+
+/**
+ * この用紙のどこを読むかの言い直し。
+ *
+ * **図を持つ provider は図を指す**（同じ説明を 2 回読ませない）。図は
+ * `ExternalIdSheetGuide.astro` が **`demecal` のときだけ**出すので、
+ * 「上の図」と言ってよいのも `demecal` だけ。**この対応がずれると
+ * 「上の図」と書いてあるのに図が無い**ことになるので、検査で固定している
+ * （`verify:external-id-capture` ⑬）。
+ */
+const WHERE: Record<string, string> = {
+  demecal: '上の図の囲み＝「問合せ番号」の行（数字 15 桁と、その右の横線のバーコード）です。用紙全体が入るように撮ってください。',
+  prevent: '上の図の囲み＝「ユーザーID」の印字と、その下のバーコードです。シールを貼る前に、台紙全体が入るように撮ってください。',
+};
+function whereText(c: Ctx): string {
+  return WHERE[c.provider] ?? '用紙全体が入るように撮り直してください。';
+}
+
 async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
+  clearWrong(c);
   say(c, '写真を送っています…');
   let key: string;
   try {
@@ -123,6 +166,16 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
     if (c.candidateEl) c.candidateEl.textContent = candidate;
     const reasons = Array.isArray(r.review_reasons) ? (r.review_reasons as string[]) : [];
     if (c.noteEl) c.noteEl.textContent = reasonText(reasons, typeof r.note === 'string' ? r.note : null);
+    /*
+     * **形が想定と違う = 別の数字を読んだ可能性が高い。**
+     * 用紙には電話番号や管理用の記号も印字されているので、ここで図へ戻す。
+     * ただし**候補は出したままにする** — 実物の形式が既定と違うだけのこともあり、
+     * その回を登録できなくすると撮影そのものが無駄になる。
+     */
+    if (reasons.includes('pattern_mismatch') || reasons.includes('pattern_unknown')) {
+      showWrong(c, `別の数字を読んだかもしれません`,
+        `読み取れた数字が${c.idLabel}の形と違います。${whereText(c)} この番号で間違いなければ、そのまま登録できます。`);
+    }
     show(c.confirmEl, true);
     show(c.manualEl, false);
     say(c, '');
@@ -132,6 +185,12 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
     say(c, `${msg}`);
     show(c.confirmEl, false);
     show(c.manualEl, true);
+    /*
+     * 読めなかったとき。**原因はこちらから見えない**（別の用紙 / 手ブレ / 影 / 画像が粗い）
+     * ので、**断定せずに「どこを撮るか」をもう一度出す**。手入力も開いてあるので
+     * 行き止まりにはならない。
+     */
+    showWrong(c, '番号を読み取れませんでした', `${whereText(c)} うまくいかないときは、下の欄に手で入力してください。`);
     return false;
   }
 }
@@ -195,6 +254,28 @@ export function initExternalIdCapture(): void {
     const t = e.target as Element | null;
     const root = t?.closest?.('[data-extid-capture]') as HTMLElement | null;
     if (!root) return;
+
+    /*
+     * PC 導線: URL のコピー。**撮影の状態機械とは無関係**なので `ctx()` より前で返す
+     * (コピーしただけで読み取りの状態を作らない)。失敗しても行き止まりにしない
+     * = 選択状態にして手でコピーしてもらう (`scan.astro:1339-1348` と同じ)。
+     */
+    if (t?.closest?.('[data-extid-share-copy]')) {
+      const urlEl = root.querySelector('[data-extid-share-url]') as HTMLInputElement | null;
+      const msgEl = root.querySelector('[data-extid-share-msg]') as HTMLElement | null;
+      if (!urlEl) return;
+      void (async () => {
+        try {
+          await navigator.clipboard.writeText(urlEl.value);
+          if (msgEl) msgEl.textContent = 'コピーしました。スマートフォンのブラウザで開いてください。';
+        } catch {
+          urlEl.select();
+          if (msgEl) msgEl.textContent = 'コピーできませんでした。選択状態にしたので手動でコピーしてください。';
+        }
+      })();
+      return;
+    }
+
     const c = ctx(root);
 
     if (t?.closest?.('[data-extid-register]')) {
@@ -205,6 +286,7 @@ export function initExternalIdCapture(): void {
     }
     if (t?.closest?.('[data-extid-retake]')) {
       c.read = null; c.evidenceKey = null;
+      clearWrong(c);
       show(c.confirmEl, false); show(c.manualEl, false);
       say(c, 'もう一度撮影してください。');
       return;

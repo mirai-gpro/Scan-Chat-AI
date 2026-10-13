@@ -1,5 +1,6 @@
 ---
 import AppIcon from '../AppIcon.astro';
+import ExternalIdSheetGuide from './ExternalIdSheetGuide.astro';
 import {
   PROVIDER_ID_KIND, type ExternalIdProvider,
 } from '../../lib/external-test-id';
@@ -17,6 +18,18 @@ import {
  *   - PC には**カメラのボタンを出さない** (`touch-only` = CSS の `(pointer: coarse)`)。
  *     `CLAUDE.md`「画面に出ていないカメラが JS から起動する」事故を構造的に避ける。
  *
+ * 【PC ではスマートフォンへの導線を出す (`/scan` と同じ流儀)】
+ * カメラが `touch-only` なので、PC では撮影ボタンそのものが無い。そのまま何も出さないと
+ * 「用紙は手元にあるのに撮れない」で行き止まりになるので、**同じ画面を開くための QR** を
+ * `.pointer-only` で出す (`scan.astro:140-168` と同じ形・QR の生成は `src/lib/qr.ts`)。
+ *   - **QR は固定パス `/kit` の公開 URL** を符号化する。`scan.astro` は現在の URL を
+ *     そのまま入れているが、こちらは**クエリやパスの文脈を QR に持ち込まない**ため固定にした
+ *     (`?u=` は 2026-09-29 に撤去済み・代理表示では撮影ブロックごと出ないが、
+ *      URL を機械が読み取れる形にする以上、載せないものを明示的に決めておく)。
+ *   - **uid は入れない。** スマホ側では改めてサインインしてもらう。
+ *   - QR の SVG は**ページで 1 つだけ定義して `<use>` で参照する** (`kit.astro`)。
+ *     出荷ごとにパスを展開すると 1 個 3.2KB × 最大 10 件になる (実測)。
+ *
  * 【撮影ガイドは書面全体を示す。QR を対象にしない】
  * プリベントの同梱書面には QR も印字されているが、要るのは
  * **「ユーザーID」の印字と 1次元バーコード**。ここで QR を見せると
@@ -29,8 +42,19 @@ interface Props {
   registeredMask?: string | null;
   /** 登録済みだが確認待ちか。 */
   needsReview?: boolean;
+  /** PC 導線で見せる URL (スマホで開いてもらう先)。無ければ導線を出さない。 */
+  shareUrl?: string | null;
+  /** 同じページに 1 つだけ置いた QR の `<symbol>` の id。 */
+  qrSymbolId?: string | null;
+  /** その QR の viewBox の一辺。 */
+  qrSize?: number | null;
 }
-const { shipmentId, provider, registeredMask = null, needsReview = false } = Astro.props as Props;
+const {
+  shipmentId, provider, registeredMask = null, needsReview = false,
+  shareUrl = null, qrSymbolId = null, qrSize = null,
+} = Astro.props as Props;
+/** 3 つ揃ってはじめて QR を出せる (欠けたら導線ごと出さない = 読めない QR を出さない)。 */
+const canHandOff = !!shareUrl && !!qrSymbolId && !!qrSize;
 
 /** 先方の呼び方をそのまま使う (当社で言い換えない)。 */
 const ID_LABEL: Record<ExternalIdProvider, string> = {
@@ -40,9 +64,9 @@ const ID_LABEL: Record<ExternalIdProvider, string> = {
 /** 撮影対象の案内。**どこを枠に入れるか**を具体的に書く。 */
 const GUIDE: Record<ExternalIdProvider, string[]> = {
   prevent: [
-    '同梱の IDシート**全体**が入るように撮影してください。',
-    '枠に入れるのは「**ユーザーID**」の印字と、その近くの**横線のバーコード**です。',
-    '**QRコード（四角い模様）は読み取りません。** 写っていてもかまいません。',
+    '**シールを貼る前に**、同梱の「**シール台紙**」全体が入るように撮影してください。',
+    '枠に入れるのは「**ユーザーID**」の印字と、その下の**横線のバーコード**です。',
+    '**QRコードとパスワードは読み取りません。** 写っていてもかまいません。',
   ],
   demecal: [
     '「検査申し込み用紙（返送用）」の**全体**が入るように撮影してください。',
@@ -82,6 +106,9 @@ const idKind = PROVIDER_ID_KIND[provider];
         ))}
       </ul>
 
+      {/* どの用紙のどこを読むかの図。**実物を見ていない provider では何も出ない**。 */}
+      <ExternalIdSheetGuide provider={provider} />
+
       <div class="mt-3 flex flex-wrap gap-2">
         {/* スマホだけに出す。PC には出さない (CSS `.touch-only` = (pointer: coarse))。 */}
         <label class="touch-only btn-pair btn-data min-h-touch cursor-pointer">
@@ -96,6 +123,19 @@ const idKind = PROVIDER_ID_KIND[provider];
 
       {/* 進行・結果・手入力。**JS が無いと何も起きないので、その旨を出す。** */}
       <p class="mt-2 text-sm text-slate-600" data-extid-status aria-live="polite"></p>
+
+      {/*
+        読めなかった / 別の数字を読んだときの案内。
+        **行き止まりにしない** — 候補が出ているときは消さず、横に注意として添える
+        （`status-watch` = 注意。赤にしない）。**上の図をもう一度見てもらう**のが目的なので、
+        図は 1 つだけにして「上の図」と指す（同じ図を 2 回描かない）。
+      */}
+      <div class="mt-2 hidden rounded-xl border p-3 status-watch" data-extid-wrong role="status">
+        <p class="flex items-start gap-2 text-base font-semibold">
+          <AppIcon name="watch" size={18} class="mt-1 shrink-0" /><span data-extid-wrong-title></span>
+        </p>
+        <p class="mt-1 text-sm" data-extid-wrong-body></p>
+      </div>
 
       <div class="mt-3 hidden" data-extid-confirm>
         <p class="text-base text-slate-800">
@@ -132,6 +172,63 @@ const idKind = PROVIDER_ID_KIND[provider];
           <AppIcon name="ok" size={18} />この番号で登録する
         </button>
       </div>
+
+      {/*
+        PC 向け: カメラが無いのでスマートフォンへ移ってもらう導線。
+        `.pointer-only` = `(pointer: coarse)` で消える (カメラボタンの `touch-only` と対)。
+        **「写真を選ぶ」は PC でも使える**ので、ここは「用紙が手元にある」人向けの案内に留める。
+      */}
+      {canHandOff && (
+        <div class="pointer-only mt-3 rounded-xl border border-slate-200 bg-white p-3.5 text-left">
+          <p class="flex items-center gap-2 text-base font-semibold text-navy-800">
+            <AppIcon name="camera" size={20} class="text-slate-600" />
+            撮影はスマートフォンから
+          </p>
+          <p class="mt-1.5 text-sm text-slate-700">
+            PC ではカメラを使えません。用紙が手元にある場合は、下の QR コードをスマートフォンで
+            読み取って同じ画面を開いてください。写真のファイルが PC にあるなら「写真を選ぶ」でも登録できます。
+          </p>
+
+          <div class="mt-3 flex flex-wrap items-center gap-5">
+            {/* QR はサーバ側で生成した静的 SVG (外部サービスへ URL を送らない)。 */}
+            <svg
+              viewBox={`0 0 ${qrSize} ${qrSize}`}
+              width="160"
+              height="160"
+              class="shrink-0 rounded-lg border border-slate-200 bg-white p-1"
+              role="img"
+              aria-label="検査キットの番号を登録する画面を開くための QR コード"
+            >
+              <use href={`#${qrSymbolId}`} />
+            </svg>
+            <p class="min-w-0 flex-1 text-sm text-slate-700">
+              スマートフォンのカメラを向けると、この画面が開きます。<br />
+              サインインを求められたら、PC と同じアカウントでサインインしてください。<br />
+              読み取れない場合は下の URL をお使いください。
+            </p>
+          </div>
+
+          <div class="mt-3 flex flex-wrap items-center gap-2">
+            {/*
+              **値はサーバ側で入れる** (JS が無くても読める)。
+              `location.href` で上書きしない — QR と文字の URL が食い違うし、
+              代理表示のパスを持ち込むことになる。
+            */}
+            <input
+              type="text"
+              readonly
+              value={shareUrl}
+              class="min-h-touch flex-1 rounded-xl border border-slate-300 bg-slate-50 px-3 text-sm text-slate-800"
+              aria-label="この画面の URL"
+              data-extid-share-url
+            />
+            <button type="button" class="btn-secondary !py-2 !text-sm" data-extid-share-copy>
+              <AppIcon name="attachment" size={16} class="mr-1.5" />URL をコピー
+            </button>
+          </div>
+          <p class="mt-1.5 text-sm text-slate-600" data-extid-share-msg aria-live="polite"></p>
+        </div>
+      )}
     </>
   )}
 </section>
