@@ -158,7 +158,7 @@
 | # | 検査 | 検査会社 | 受渡・受取方式 | Elith format_id | ステータス |
 |---|---|---|---|---|---|
 | 1 | 血液 | リージャー（デメカルDSS） | **PowerShell**（専用PC・mTLS・無人定期実行）で CSV DL → 決定論パース。**RPA/PAD 不要**（2026-08-31 確定・正本 `demecal_unattended_spec.md`） | `BloodTestData` | サーバ側実装済／**PC側は未実装**。bat は **2 本立て**＝①偵察・初回テスト `scripts/demecal-recon.ps1`（実装済・ログイン後のDL画面 form をその場で自己発見）→ ②本番の自動実行（①の結果を見てから作る）。**`LAB_INTAKE_API_KEY` が未実装**（無人化の前提） |
-| 2 | がんリスク（尿） | プリベント（ALA-PDS） | **専用ポータル＋AWS S3＋パスキー方式（採用方式・v2.1）**。上り＝問診CSV を先方が DL／下り＝結果PDF を同ポータルから UP | `CancerRiskAssessmentData` | **一部実装**。パスキー Portal・結果PDF の Presigned PUT・受領一覧は**実装済**／**受取時バーコード撮影**は**実装済（既定 off・ON 前の残作業あり）**／**本番問診CSV の生成・配布**と**結果の ID bind** は**未実装**（→ §4-5.3） |
+| 2 | がんリスク（尿） | プリベント（ALA-PDS） | **専用ポータル＋AWS S3＋パスキー方式（採用方式・v2.1）**。上り＝問診CSV を先方が DL／下り＝結果PDF を同ポータルから UP | `CancerRiskAssessmentData` | **一部実装**。パスキー Portal・結果PDF の Presigned PUT・受領一覧は**実装済**／**本番問診CSV の生成・配布**も**実装済（2026-10-13・往復キー＝バーコードNo.）**／**受取時バーコード撮影**は**実装済（既定 off・ON 前の残作業あり）**／残る未実装は**結果PDF の ID bind**（→ §4-5.3） |
 | 3 | AI疾病発症予測 | LAiF | **AWS S3 専用バケット**（ポータル・パスキー・**上り＝所定XLSX**／下りPDF）。※**CSV ではない** | `Other`(ai_prediction) | 受取方式確定・スキャン実装済。**上り XLSX ビルダーも実装済だが CLI 単体**で、入るのは人単位の仮名ID 1 か所のみ。**本番配布結線と結果の検査ID bind は未実装**（→ §4-5.5） |
 | 4 | 遺伝子 | Genoplan | **サーバ側（Vercel）から API 取得**（ID/PW のみ・**クライアント証明書も Cookie セッションも無い**＝**RPA も PowerShell も専用PC も不要**・2026-09-01 実証。正本 `lab_data_reception_overview.md §4`） | `GeneticTestResultData` | **取得＝実装済**（`src/lib/genoplan.ts` ＋ `POST /api/admin/genoplan-fetch`）。**実証で 72 件全件取得成功・失敗 0**。差分は**ボックスナンバーの差集合**で判定（日付では絞れない）。**顧客への割当は未実装**（③-1 の個体ID捕捉待ち） |
 - **正本**: **検査IDの紐づけ／問診受渡／結果受領の横断は本書 §4-5（v2.1）**。会社別の詳細は (a) 各章（§1血液／§2がん／§3 LAiF／§4遺伝子）。
@@ -187,7 +187,8 @@
 | `external_test_id` | 検査会社が発行する**外部検査ID／認証キー** | `customer.lab_tests.external_test_id`（`unique (lab_company_id, external_test_id)`） | 同 `:150,161` |
 | `external_barcode` | **検査キットの物理ID**（バーコードNo. / ボックスナンバー等） | `customer.lab_tests.external_barcode` | 同 `:151` |
 | `kit_shipments.tracking_no` | **配送追跡番号**（ヤマト等） | `customer.kit_shipments.tracking_no` | 同 `:112,123` |
-| ②上りID（整理番号） | 各社へ**渡す**仮名ID | **列が存在しない**（`upstream_ref` の新設案＝`lab_data_reception_overview.md §5.2/§5.5`） | 実測 |
+| ②上りID（整理番号） | 各社へ**渡す**仮名ID。**LAiF 専用**（確定 2026-08・Wellfort 採番） | **列が存在しない**（`upstream_ref` の新設案＝`lab_data_reception_overview.md §5.2/§5.5`） | 実測 |
+| ↑ **プリベントは対象外（確定 2026-10）** | プリベントとの往復キーは **先方発行のバーコードNo.**。**Wellfort 独自の整理番号は使わない**（先方要望） | `customer.lab_tests.external_barcode`（実在列） | §4-5.3 |
 
 **原則（厳守）**
 
@@ -200,12 +201,32 @@
 
 | 検査 | 取得方式 | 上り（問診等） | 下り（結果） | ID紐づけ | 現状 |
 |---|---|---|---|---|---|
-| **① がんリスク（プリベント / ALA-PDS）** | 専用ポータル＋AWS S3＋**パスキー** | 問診CSV を先方が DL | 結果PDF を同ポータルから UP | 先方**バーコードNo.**（例 `704000xxx`）を**受取時にユーザーがスマホ撮影**し、対象 `lab_tests.id` へ紐づけ | 一部実装（§4-5.3） |
+| **① がんリスク（プリベント / ALA-PDS）** | 専用ポータル＋AWS S3＋**パスキー** | 問診CSV を先方が DL（**実装済**） | 結果PDF を同ポータルから UP | 先方**バーコードNo.**（現物確認済み `704000`＋3桁）を**受取時にユーザーがスマホ撮影**し、対象 `lab_tests.id` へ紐づけ。**往復キーはこれ 1 本**（当社の整理番号は使わない） | 一部実装（§4-5.3） |
 | **② 血液（リージャー / デメカル）** | 専用PC＋**PowerShell**＋mTLS＋ID/PW＋**無人定期実行**（2026-08-31 確定） | 紙問診を検体と同梱返送（**弊社からの電子受渡なし**） | DSS から結果CSV を自動取得 | **Primary（暫定）= 氏名＋生年月日** ／ **Secondary = 受取時に 15桁「問合せ番号」を撮影（実装済・`labid.demecal_capture` 既定 off）** | 取得系は実装進行／本人紐づけ未実装（§4-5.4） |
 | **③ AI疾病予測（LAiF）** | 専用ポータル＋AWS S3＋**パスキー** | **所定XLSX**（CSV ではない）を先方が DL | 結果PDF を同ポータルから UP | Wellfort 側の検査IDを往復キーにする（**目標**。現状は人単位の仮名ID） | 一部実装（§4-5.5） |
 | **④ 遺伝子（Genoplan）** | **Vercel サーバから API 取得**（ID/PW のみ・証明書／専用PC 不要・2026-09-01 実測） | **弊社からの受渡なし**（Genoplan 側 Web で本人が回答） | API から結果PDF を自動取得 | **タカセ出荷時に「ヤマト送り状番号＋ボックスナンバー」を既存出荷指示CSVの同一行へ追記 → 返送CSVを取込** | 取得は実装済／割当は未実装（§4-5.6） |
 
 ### 4-5.3 ① がんリスク検査（プリベント / ALA-PDS）
+
+**外部キーの正本（確定 2026-10・先方要望）**
+
+| | 内容 |
+|---|---|
+| **列** | **`customer.lab_tests.external_barcode`**（実在列・`20260601000010_schemas_and_tables.sql:151`） |
+| **値** | **プリベント検査セットの「バーコードNo.」＝「ユーザーID」**（先方の呼称をそのまま使う） |
+| **現物確認済みの形式** | **`704000` ＋ 3 桁の計 9 桁**（2026-10-13・実物のシール台紙 1 枚。`kit_receipt_external_id_capture_spec.md §2.1.1`）。バーコードの印字は **`A` ＋ 数字 ＋ `A`** で、Wellfort 側は**正規化後の 9 桁**（`704000123`）を使う |
+| **使わないもの** | **Wellfort 独自の「整理番号」をプリベントとの往復キーにしない。** ②上りID（§4-5.1）は **LAiF 専用**。`WF-CANCER-…` のような当社採番の ID も作らない |
+
+**先方からの明示要望（2026-10）**
+
+1. Wellfort 独自の整理番号は使わない。
+2. プリベント検査セットの**バーコードNo.** を使う。
+3. **ポータルの一覧に表示する番号もバーコードNo.**
+4. **CSV の対象を識別する番号も同じバーコードNo.**
+5. **現在「整理番号」とされているファイル名もバーコードNo. にする。**
+
+→ 実装は **`704000123.csv`**（prefix / suffix を付けない。付ける根拠がコードにも合意資料にも無い。
+LAiF の `input_wellfort_laif_{id}.xlsx` は**先方提供フォームの名前**なのでプリベントには当てはまらない）。
 
 **確定仕様（E2E）**
 
@@ -218,7 +239,27 @@
 
 **完成条件（E2E 一貫性）**
 
-`lab_tests.id` → 受取時の `704000xxx` → 問診CSV → 物理検体 → 結果PDF → **同じ `lab_tests.id`**
+```
+lab_tests.id
+  → 受取時に取得した external_barcode = 704000xxx
+     → プリベント向け問診CSV（会員ID/ユーザーID 欄 ＋ ファイル名 704000xxx.csv）
+        → プリベント専用ポータルの一覧（表示も 704000xxx）
+           → 物理検体のバーコードNo.
+              → 結果PDF
+                 → 同一 lab_tests.id
+```
+
+**この 3 つが必ず同じ値であること**（別々に文字列を作らない。実装は
+`src/lib/prevent-questionnaire-csv.ts` の 1 つの引数から派生させる）:
+
+| | 値 |
+|---|---|
+| Portal 一覧の表示 | `704000123` |
+| CSV の「会員ID/ユーザーID」 | `704000123` |
+| CSV のファイル名 | `704000123.csv` |
+
+**Portal にはバーコードNo. 以外の識別子を出さない。** `lab_tests.id` /
+`diagnostic_user_id` / `orders.id` / `shipment_ref` は**プリベント担当者へ表示しない**（§4-5.10）。
 
 **実装状況（実コードで確認・2026-10-11）**
 
@@ -227,7 +268,10 @@
 | パスキー必須 Partner Portal | **実装済** | wellfort-site `src/lib/partner-auth.ts:43`（`PARTNERS = ['laif','prevent']`）／`src/pages/partner-portal-preview.astro:3-5`（「パスキー認証が必須の本番画面」「常時必須」）／`supabase/migrations/20260909000010_partner_portal_auth.sql:30-115`（6 表） |
 | 結果PDF → S3 Presigned PUT | **実装済** | wellfort-site `src/pages/api/partner/upload.ts:78-89` → Scan-Chat-AI `src/pages/api/partner/laif-upload.ts:52-68` → `src/lib/laif-portal.ts:149-183` |
 | 受領一覧（`mode:'list'`） | **実装済（本番結線）** | `src/pages/partner-portal-preview.astro:518`／`src/lib/laif-portal.ts:268-272` |
-| **顧客ごとの本番問診CSV 配布** | **未実装**（画面は記入例サンプルを返す） | `src/pages/partner-portal-preview.astro:10,200,216`（「入力ファイルの取得だけは、まだ配布用のサンプルを返す」） |
+| **顧客ごとの本番問診CSV 配布** | **実装済（2026-10-13）** | 生成＝`src/lib/prevent-questionnaire-csv.ts`（純関数・列定義・ファイル名）／`src/lib/prevent-questionnaire.ts`（台帳＋S3 の I/O）／API＝`src/pages/api/partner/prevent-questionnaire.ts`（`mode:'list'｜'download'`・Bearer `ADMIN_API_KEY`）／中継＝wellfort-site `src/pages/api/partner/questionnaire.ts`（パスキー session・**プリベント専用**）／画面＝同 `src/pages/partner-portal-preview.astro`。**ゲートは `checkPreventQuestionnaireGate()` だけ**（一覧も DL も同じ関数を通る＝API 直叩きでも迂回できない）。**LAiF 側は 1 行も変えていない** |
+| ↑ **CSV の列順・列名・選択肢コード** | **未確定（先方様式の確定待ち）** | `questionnaire_to_lab_csv_spec.md §6`「要確認」／§7-2（共通設問No↔設問文の正本）／§7-3（選択肢変換マスタ）。§4.2 の 行13-23 は **11 行に対して概念名が 8 個**しか書かれておらず 1:1 の列名が起こせない。→ **当社で列名を発明せず**、基本情報は §4.2 の表記・問診由来は**設問文の逐語**を使う。定義は `PREVENT_CSV_COLUMNS` の **1 か所**に閉じてある |
+| ↑ **★検体・検査固有項目**（ALA摂取日時／採尿日時／排尿回数／採尿前日の薬・飲酒／冷凍保存） | **埋められない（空欄で出す）** | production の AI問診に**設問が無い**（`src/scripts/chat/interview-script.ts`）。Wellfort の Forms 側にはあるが production では採っていない（wellfort-site `src/scripts/transcos/interview-map.ts:203-224` が 8 問すべて `kind:'skip'`）。`questionnaire_to_lab_csv_spec.md §5-5`「捏造しない」に従い**列は出して値は空**。供給経路は §4-5.12 の未決 |
+| ↑ **DL 後の自動非表示／削除** | **未決（別運用仕様）** | DL 済み管理・one-time 処理は**存在しない**（`src/lib/laif-portal.ts` に `downloaded`／`one_time`／`consumed` のヒット 0 件・実測 grep）。**本番CSV の生成・一覧・DL までが今回の実装範囲**で、削除仕様はここでは決めない |
 | **受取時バーコード撮影／ID登録** | **実装済（v1.1・既定 off）** | §4-5.7。`src/lib/external-test-id.ts` / `external-id-evidence.ts` / `external-id-read.ts` / `external-id-persist.ts` / `api/kit/[id]/external-id.ts` / `components/dashboard/ExternalIdCapture.astro` / `supabase/migrations/20261011000010_lab_test_id_captures.sql`。**`labid.prevent_capture` が既定 off なので画面にも API にも出ない**＝**ON 前の残作業は §4-5.7 の「ON の条件」を参照**（実物書面の確定 ＋ **`review_required` の admin 訂正／承認**） |
 | **結果PDF upload 時の `704000xxx` 構造的 bind** | **未実装** | §4-5.5 の調査結果と同じ（キーに検査IDが入らない） |
 | プリベント向け問診CSV 生成コード | **未実装** | 生成処理が **0 件**（実測 grep）。写像表だけが `questionnaire_to_lab_csv_spec.md §4.2`（33項目）に在る |
@@ -496,7 +540,7 @@ v2.1 原案の記述を実コードで再確認し、**4 件を訂正**した。
 | 旧記述 | 上書き後 |
 |---|---|
 | `id_management_and_correlation_spec.md` の「**現時点＝全ID Wellfort 側で採番・管理**」 | プリベント・デメカル・Genoplan の**外部ID運用については失効**。内部主キーは Wellfort（`lab_tests.id`）、**外部IDは別名／相関キーとして持つ**（§4-5.1） |
-| `lab_data_reception_overview.md §2` プリベント「**提案中（プレゼン段階）**」 | ポータル／パスキー／PDF upload の実装が在ることを踏まえ **採用方式**として扱う。ただし残りは 2 種類に分かれる（§4-5.3）: **(a) 本番問診CSV の生成・配布 と 結果PDF の ID bind = 未実装** / **(b) 受取時の ID capture = 実装済み（既定 off・ON の条件が未完了）**。**(b) を「未完成」と一括りにしない** — コードは在るので、要るのは実物書面の確定と `review_required` の admin 訂正経路（§4-5.7「ON の条件」） |
+| `lab_data_reception_overview.md §2` プリベント「**提案中（プレゼン段階）**」 | ポータル／パスキー／PDF upload の実装が在ることを踏まえ **採用方式**として扱う。ただし残りは 2 種類に分かれる（§4-5.3）: **(a) 本番問診CSV の生成・配布 = 実装済（2026-10-13）／結果PDF の ID bind = 未実装** / **(b) 受取時の ID capture = 実装済み（既定 off・ON の条件が未完了）**。**(b) を「未完成」と一括りにしない** — コードは在るので、要るのは実物書面の確定と `review_required` の admin 訂正経路（§4-5.7「ON の条件」） |
 | `lab_data_reception_overview.md §4` 遺伝子「取得部**未実装**」 | **失効**。API 取得コードは実在し実証済。**未実装は顧客割当だけ**（§4-5.6） |
 | `lab_data_reception_overview.md §5.4` 項目 2「G1 **と No.0** に書いている」 | **No.0 への書き込みは撤回済**（`build-laif-input.py:262-266`） |
 | 本書 §3 ③-1 の「補助経路＝受取確認時にスマホ撮影（**案**）。主経路が欠けた回の保険。**任意操作**」 | **プリベントについては P0 の主経路**へ格上げ（§4-5.7）。**Genoplan は従来どおりタカセ返送CSV が主経路**で、撮影は採らない |

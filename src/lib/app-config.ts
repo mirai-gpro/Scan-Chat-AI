@@ -177,13 +177,15 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     description: '偶然一致し得るため明示on時のみ(anomalies 監査へ)。' },
 
   // ── 受取時・外部検査ID 撮影／登録 (正本 docs/lab/kit_receipt_external_id_capture_spec.md) ──
-  // **実物の形式が未確認なので env でもコード定数でもなく app_config に置く**。
+  // **env でもコード定数でもなく app_config に置く**。
+  // プリベントの総桁数・prefix は実物 1 枚で確定したが (2026-10-13・仕様 §2.1.1)、
+  // **ロット差・チェックディジット・バーコード規格は未確認**なのでここに置いたままにする。
   // 外れても登録は止めず `review_required` にするだけなので、admin が即日直せることが要点。
   // パターンを壊しても落ちない (コンパイル不能な正規表現は「判定不能」= review_required)。
   { key: 'labid.prevent_pattern', type: 'string', group: '外部検査ID',
     label: 'プリベント バーコードNo. の期待パターン',
     default: '^704000[0-9]{3}$',
-    description: '正規表現。既定は仕様書の表示例 `704000xxx` をそのまま写したもの (**実物は未確認**)。'
+    description: '正規表現。既定の `^704000[0-9]{3}$` は**実物のシール台紙 (2026-10-13) と一致**。'
       + ' 外れた値も登録は通し `review_required` にする (止めると実物の形式が違う回に何も記録できない)。'
       + ' 空にすると「判定不能」= 常に review_required。' },
   { key: 'labid.demecal_pattern', type: 'string', group: '外部検査ID',
