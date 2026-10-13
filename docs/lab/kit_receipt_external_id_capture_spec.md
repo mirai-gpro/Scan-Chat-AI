@@ -20,7 +20,8 @@
 > | `src/pages/api/kit/[id]/external-id.ts` | `mode: ticket / read / register`（認可は `self-report.ts` の 3 段ガードを流用） |
 > | `src/components/dashboard/ExternalIdCapture.astro` ／ `src/scripts/external-id-capture.ts` | 画面と処理 |
 > | `supabase/migrations/20261011000010_lab_test_id_captures.sql` | 撮影台帳（**service_role だけ**・ポリシー 0 件） |
-> | `scripts/verify-external-id-capture.mjs` | `npm run verify:external-id-capture`（**298 件**・CI の A 層。⑭ が年跨ぎの回帰①〜⑤）・**退行注入 41 種** |
+> | `docs/operations/外部検査ID_読み取り精度テスト手順書.md` | **生成物**。ON 条件 ③ を実物の写真 1 枚で測る手順（AI Studio 用のプロンプト・スキーマ・合否表）。**手で編集しない** — `npm run dump:external-id-prompt` で`external-id-read.ts` から書き出し、⑮ が同期を見張る |
+> | `scripts/verify-external-id-capture.mjs` | `npm run verify:external-id-capture`（**302 件**・CI の A 層。⑭ が年跨ぎの回帰①〜⑤）・**退行注入 44 種** |
 >
 > **§3.2 のブロッカーは「案A ＋ 紐付け失敗を deferred で残す」で解いた**（§3.2 の末尾）。
 > **実装の前提と残っている未確認は §9 と §12。**

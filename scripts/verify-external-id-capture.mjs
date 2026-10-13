@@ -1102,5 +1102,31 @@ console.log('\n⑭ 年跨ぎ / ゲートの回帰 (①〜⑤)\n');
   }
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// ⑮ 手順書がコードと同期しているか
+//
+// `docs/operations/外部検査ID_読み取り精度テスト手順書.md` は**生成物**。
+// プロンプトやスキーマを直したのに書き出し直さないと、**古い手順書で精度を測る**ことになる
+// （しかも見た目は正しいので誰も気づかない）。`verify:sheet-contract` と同じ流儀で、
+// **組み立てる関数そのものを呼んで**突き合わせる（書き出しの規則を 2 つに割らない）。
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑮ 手順書の同期\n');
+{
+  const { buildDoc, DOC_PATH } = await import('./lib/external-id-prompt-doc.mjs');
+  let cur = null;
+  try { cur = read(DOC_PATH); } catch { cur = null; }
+  const next = await buildDoc();
+  ok('手順書が存在する', cur !== null, DOC_PATH);
+  ok('手順書がコードと一致する（古かったら npm run dump:external-id-prompt）',
+    cur === next,
+    cur === null ? '未生成' : `差分 ${Math.abs(cur.length - next.length)} 文字`);
+  // **プロンプトの本文が実際に載っていること**（器だけ生成されても意味がない）
+  const rdSrc = read('src/lib/external-id-read.ts');
+  const firstLine = /prevent: \[\n\s*'([^']+)'/.exec(rdSrc)?.[1] ?? '';
+  ok('プリベントの system プロンプトが手順書に載っている',
+    firstLine.length > 0 && (cur ?? '').includes(firstLine), firstLine.slice(0, 40));
+  ok('**実物の写真を入れないと書いてある**', (cur ?? '').includes('リポジトリに入れない'));
+}
+
 console.log(`\n${fails.length === 0 ? `✓ ${pass} / ${pass} passed` : `✗ ${fails.length} 件 FAIL (${pass} passed)`}`);
 if (fails.length) { console.error('\n落ちた検査:\n  - ' + fails.join('\n  - ')); process.exit(1); }
