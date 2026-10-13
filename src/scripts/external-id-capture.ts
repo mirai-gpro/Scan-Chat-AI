@@ -19,6 +19,8 @@
  * （`kit-self-report.ts:16-18` と同じ・他人の uid を書かせない）。
  */
 
+import { initCameraScan, type CameraScanController } from './camera-scan';
+
 let bound = false;
 
 interface Ctx {
@@ -33,6 +35,13 @@ interface Ctx {
   manualEl: HTMLElement | null;
   /** 「別の用紙／別の数字かもしれません」の案内。 */
   wrongEl: HTMLElement | null;
+  /** アプリ内カメラの面と、その中の要素。 */
+  cameraEl: HTMLElement | null;
+  videoEl: HTMLVideoElement | null;
+  canvasEl: HTMLCanvasElement | null;
+  cameraStatusEl: HTMLElement | null;
+  /** `/scan` と同じコントローラ。**押されるまで作らない**（作っただけでは起動しない）。 */
+  camera: CameraScanController | null;
   inputEl: HTMLInputElement | null;
   /** 直近の読み取り結果（登録時にサーバへ戻す）。 */
   read: { barcode: string | null; printed: string | null } | null;
@@ -58,6 +67,11 @@ function ctx(root: HTMLElement): Ctx {
     noteEl: q('[data-extid-note]'),
     manualEl: q('[data-extid-manual]'),
     wrongEl: q('[data-extid-wrong]'),
+    cameraEl: q('[data-extid-camera]'),
+    videoEl: q<HTMLVideoElement>('[data-extid-video]'),
+    canvasEl: q<HTMLCanvasElement>('[data-extid-canvas]'),
+    cameraStatusEl: q('[data-extid-camera-status]'),
+    camera: null,
     inputEl: q<HTMLInputElement>('[data-extid-input]'),
     read: null,
     evidenceKey: null,
@@ -128,6 +142,81 @@ const WHERE: Record<string, string> = {
 };
 function whereText(c: Ctx): string {
   return WHERE[c.provider] ?? '用紙全体が入るように撮り直してください。';
+}
+
+/**
+ * カメラを使える端末か。**判定は CSS の `.touch-only` と同じ `(pointer: coarse)`**
+ * （`scan.astro` の `cameraAvailable()` と同じ）。
+ * ここがずれると「画面に出ていないカメラが JS から起動する」ことになる。
+ */
+function cameraAvailable(): boolean {
+  return window.matchMedia?.('(pointer: coarse)').matches ?? false;
+}
+
+/** 撮った 1 枚を File にする（`captureAndRead` がそのまま受け取れる形）。 */
+async function dataUrlToFile(dataUrl: string): Promise<File | null> {
+  try {
+    const blob = await (await fetch(dataUrl)).blob();
+    const type = blob.type || 'image/jpeg';
+    return new File([blob], 'capture.jpg', { type });
+  } catch {
+    return null;
+  }
+}
+
+/** カメラを止めて面を閉じる。**二重に止めても安全**。 */
+function closeCamera(c: Ctx): void {
+  try {
+    c.camera?.stop();
+  } catch {
+    /* 止められなくても画面は閉じる */
+  }
+  show(c.cameraEl, false);
+}
+
+/**
+ * アプリ内カメラを開く。**このボタンを押したときだけ**呼ぶ。
+ *
+ * OS のカメラアプリは開かない — Android Chrome では端末のカメラが
+ * バーコードを検出して別画面へ持っていき、**写真が返ってこなかった**（実測 2026-10-13）。
+ */
+async function openCamera(c: Ctx): Promise<void> {
+  if (!c.videoEl || !c.canvasEl || !c.cameraEl) return;
+  if (!cameraAvailable()) {
+    say(c, 'この端末ではカメラを使えません。「写真を選ぶ」から画像を選んでください。');
+    return;
+  }
+  clearWrong(c);
+  if (!c.camera) {
+    c.camera = initCameraScan({
+      video: c.videoEl,
+      canvas: c.canvasEl,
+      status: c.cameraStatusEl ?? c.videoEl,
+      /*
+       * **`onShot` を渡すと「撮るだけ」になる**（解析は走らない）。
+       * ここで受け取った 1 枚を、ファイル選択と**同じ経路**へ流す。
+       */
+      onShot: (dataUrl: string) => {
+        void (async () => {
+          const file = await dataUrlToFile(dataUrl);
+          closeCamera(c);
+          if (!file) {
+            say(c, '写真を取り出せませんでした。もう一度お試しください。');
+            return;
+          }
+          c.captureMethod = 'camera';
+          await captureAndRead(c, file);
+        })();
+      },
+      onError: (message: string) => {
+        closeCamera(c);
+        // **行き止まりにしない** — 権限拒否・カメラ無しはここに来る。
+        say(c, `${message} 「写真を選ぶ」から画像を選んでください。`);
+      },
+    });
+  }
+  show(c.cameraEl, true);
+  await c.camera.start();
 }
 
 async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
@@ -235,6 +324,14 @@ export function initExternalIdCapture(): void {
   if (bound) return;
   bound = true;
 
+  // ページを離れるときにカメラを止める（`scan.astro` と同じ扱い）。
+  window.addEventListener('pagehide', () => {
+    for (const root of document.querySelectorAll<HTMLElement>('[data-extid-capture]')) {
+      const c = ctxOf.get(root);
+      if (c) closeCamera(c);
+    }
+  });
+
   // ファイル選択（カメラ / 写真）
   document.addEventListener('change', (e) => {
     const input = (e.target as Element | null)?.closest?.('input[data-extid-file]') as HTMLInputElement | null;
@@ -277,6 +374,19 @@ export function initExternalIdCapture(): void {
     }
 
     const c = ctx(root);
+
+    if (t?.closest?.('[data-extid-camera-open]')) {
+      void openCamera(c);
+      return;
+    }
+    if (t?.closest?.('[data-extid-camera-close]')) {
+      closeCamera(c);
+      return;
+    }
+    if (t?.closest?.('[data-extid-shot]')) {
+      void c.camera?.capture();
+      return;
+    }
 
     if (t?.closest?.('[data-extid-register]')) {
       const v = c.candidateEl?.textContent?.trim() ?? '';

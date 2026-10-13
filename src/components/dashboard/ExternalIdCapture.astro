@@ -10,13 +10,23 @@ import {
  *
  * 正本: `docs/lab/kit_receipt_external_id_capture_spec.md` §4。
  *
- * 【カメラは `getUserMedia` を使わない】
- * `<input type="file" capture="environment">` にしてある。理由:
- *   - スマホではカメラが直接開き、**権限拒否時はそのままファイル選択に落ちる**
- *     (仕様 §4.4 の「カメラ権限拒否時は画像ファイル選択へフォールバック」が
- *      ブラウザ側の挙動として自動的に満たされる)。
+ * 【カメラは**アプリ内**で開く (`getUserMedia`)。`<input capture>` は使わない】
+ *
+ * **2026-10-13 に方針を変えた。** それまでは `<input type="file" capture="environment">`
+ * で OS のカメラアプリに任せていたが、**Android Chrome の実機で破綻した**:
+ * 端末のカメラがバーコードを自動検出し、「この番号を調べる」側へ遷移してしまう。
+ * **写真が返ってこないのでアプリ側では何も起きない** (エラーも出ない)。
+ * **バーコードを撮る機能が、OS のバーコード検出に割り込まれる**という噛み合わせの悪さで、
+ * 注意書きでは直らない (文言も挙動も端末ごとに違う)。
+ *
+ * → **`/scan` と同じアプリ内カメラ** (`initCameraScan` の `onShot`) に変えた。
+ *   OS のカメラアプリを開かないので、検出に割り込まれる余地が無い。
+ *
+ *   - **権限拒否・カメラ無しのときは「写真を選ぶ」へ誘導する** (仕様 §4.4 の
+ *     「カメラ権限拒否時は画像ファイル選択へフォールバック」は、こちらで明示的に満たす)。
  *   - PC には**カメラのボタンを出さない** (`touch-only` = CSS の `(pointer: coarse)`)。
- *     `CLAUDE.md`「画面に出ていないカメラが JS から起動する」事故を構造的に避ける。
+ *     JS 側も同じ条件で判定する (`CLAUDE.md`「画面に出ていないカメラが JS から起動する」)。
+ *   - **「写真を選ぶ」は `capture` を付けない**ので、OS のカメラは開かない。
  *
  * 【PC ではスマートフォンへの導線を出す (`/scan` と同じ流儀)】
  * カメラが `touch-only` なので、PC では撮影ボタンそのものが無い。そのまま何も出さないと
@@ -111,14 +121,44 @@ const idKind = PROVIDER_ID_KIND[provider];
 
       <div class="mt-3 flex flex-wrap gap-2">
         {/* スマホだけに出す。PC には出さない (CSS `.touch-only` = (pointer: coarse))。 */}
-        <label class="touch-only btn-pair btn-data min-h-touch cursor-pointer">
+        <button type="button" class="touch-only btn-pair btn-data min-h-touch" data-extid-camera-open>
           <AppIcon name="camera" size={18} />カメラで撮影
-          <input type="file" accept="image/*" capture="environment" class="hidden" data-extid-file="camera" />
-        </label>
+        </button>
+        {/*
+          **`capture` を付けない。** 付けると OS のカメラアプリが開き、
+          そのカメラのバーコード検出に割り込まれる (上のヘッダ参照)。
+          ここは「すでに撮ってある写真を選ぶ」ための口で、カメラが使えないときの逃げ道でもある。
+        */}
         <label class="btn-pair btn-graph min-h-touch cursor-pointer">
           <AppIcon name="upload" size={18} />写真を選ぶ
           <input type="file" accept="image/*" class="hidden" data-extid-file="file" />
         </label>
+      </div>
+
+      {/*
+        アプリ内カメラ。**開くのは上のボタンを押したときだけ** — ここが自動で開くと
+        PC や、撮る気のない人の端末でカメラが起動する。
+      */}
+      <div class="mt-3 hidden" data-extid-camera>
+        <div class="overflow-hidden rounded-xl border border-navy-400 bg-black">
+          <video
+            class="block h-auto w-full"
+            playsinline
+            muted
+            autoplay
+            data-extid-video
+          ></video>
+        </div>
+        <canvas class="hidden" data-extid-canvas></canvas>
+        <p class="mt-2 text-sm text-slate-600" data-extid-camera-status aria-live="polite"></p>
+        <div class="mt-2 flex flex-wrap gap-2">
+          <button type="button" class="btn-pair btn-data min-h-touch" data-extid-shot>
+            <AppIcon name="camera" size={18} />この位置で撮る
+          </button>
+          <button type="button" class="btn-pair btn-graph min-h-touch" data-extid-camera-close>
+            <AppIcon name="close" size={18} />閉じる
+          </button>
+        </div>
       </div>
 
       {/* 進行・結果・手入力。**JS が無いと何も起きないので、その旨を出す。** */}

@@ -783,12 +783,47 @@ console.log('\n⑬ UI の契約\n');
   ok('プリベントはユーザーIDと 1次元バーコードを指している',
     /ユーザーID/.test(comp) && /バーコード/.test(comp));
   ok('デメカルは問合せ番号を指している', /問合せ番号/.test(comp));
-  // getUserMedia を使わない（PC で必ずエラーになる経路を作らない）
-  // **呼び出し**が無いことを見る。説明コメントには出てくるので `(` まで含めて照合する。
-  ok('getUserMedia を呼んでいない', !/getUserMedia\s*\(/.test(comp)
-    && !/getUserMedia\s*\(/.test(code('src/scripts/external-id-capture.ts')));
-  ok('カメラは capture="environment" の file input', /capture="environment"/.test(comp));
-  ok('カメラボタンは touch-only (PC に出さない)', /touch-only[\s\S]{0,200}capture="environment"/.test(comp));
+  /*
+   * **カメラはアプリ内で開く（2026-10-13 に方針転換）。**
+   * `<input capture>` で OS のカメラアプリを開くと、Android Chrome では端末のカメラが
+   * **バーコードを検出して別画面へ持っていき、写真が返ってこなかった**（実機で実測）。
+   * バーコードを撮る機能なので、ここは注意書きでは直らない。
+   */
+  /*
+   * **コメントを落としてから見る。** ヘッダに「以前は `capture="environment"` だった」と
+   * 経緯を書いてあるので、生のソースで探すと**説明文に当たって落ちる**（実測）。
+   * ⑨ と L-17 で踏んだのと同じ型。
+   */
+  ok('**`capture` 属性を使わない**（OS のカメラを開かない）',
+    !/capture="environment"/.test(code('src/components/dashboard/ExternalIdCapture.astro')));
+  ok('カメラボタンは touch-only (PC に出さない)',
+    /touch-only[\s\S]{0,200}data-extid-camera-open/.test(comp));
+  ok('アプリ内カメラの面がある', /data-extid-camera\b/.test(comp)
+    && /data-extid-video/.test(comp) && /data-extid-canvas/.test(comp) && /data-extid-shot/.test(comp));
+  ok('カメラ面は既定で閉じている', /class="mt-3 hidden" data-extid-camera/.test(comp));
+  ok('「写真を選ぶ」に capture を付けない（ここからも OS のカメラを開かない）',
+    /accept="image\/\*" class="hidden" data-extid-file="file"/.test(comp));
+  {
+    const scr = code('src/scripts/external-id-capture.ts');
+    ok('カメラは `/scan` と同じ実装を流用する（写して増やさない）',
+      /from '\.\/camera-scan'/.test(scr) && /initCameraScan\(/.test(scr));
+    ok('**撮るだけ**の口を使う（ここで解析しない）', /onShot:/.test(scr));
+    ok('PC では起動しない（CSS と同じ `(pointer: coarse)` で判定）',
+      /matchMedia\?\.\('\(pointer: coarse\)'\)/.test(scr));
+    /*
+     * **起動の呼び出し元はボタンだけ。** `openCamera` が他から呼ばれると
+     * 「画面に出ていないカメラが JS から起動する」ことになる（CLAUDE.md）。
+     */
+    const callers = [...scr.matchAll(/openCamera\(/g)].length;
+    ok('`openCamera` の呼び出しは定義 1 + ボタン 1 だけ', callers === 2, `出現 ${callers} 回`);
+    ok('カメラを開く前に端末を判定する',
+      /async function openCamera[\s\S]{0,400}cameraAvailable\(\)/.test(scr));
+    ok('ページを離れるときに止める', /pagehide[\s\S]{0,300}closeCamera/.test(scr));
+    ok('撮ったらカメラを閉じてから読み取りへ回す',
+      /closeCamera\(c\);[\s\S]{0,200}captureAndRead\(c, file\)/.test(scr));
+    ok('権限拒否・カメラ無しは「写真を選ぶ」へ逃がす',
+      /onError[\s\S]{0,300}写真を選ぶ/.test(scr));
+  }
   ok('写真を選ぶ経路は touch-only でない (PC でも使える)',
     /<label class="btn-pair btn-graph min-h-touch cursor-pointer">/.test(comp));
   ok('撮り直し・手入力の逃げ道がある',
