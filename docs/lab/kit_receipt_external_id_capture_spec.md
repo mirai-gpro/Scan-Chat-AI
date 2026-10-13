@@ -620,6 +620,44 @@ v1.0 の初版は「既存 1 件ならその行へ入れる / 2 件以上なら�
 **②の案内はまだ画面に出していない。** 出すのは `labid.prevent_capture` を on にする段
 （それまで撮影導線そのものが出ないので、案内だけ先に出すと行き先が無い）。
 
+#### 7.1.2 【P0・2026-10-13】問診を「その人の最新」で採ってはいけない
+
+**初版の誤り**: `(diagnostic_user_id)` だけで S3 の最新 `LifestyleQuestionnaireData` を
+採っていた。これは**前年の検査に今年の問診を載せられる**（逆もできる）。
+「問診日を Portal に出すから分かる」は**誤配布の防止にならない** —
+先方は番号で検体と突き合わせるので、中身が別の回でも気づけない。
+
+**今日の DB に相関キーは無い（実コードで確認）**
+
+| 調べたもの | 結果 |
+|---|---|
+| `diagnosis.interview_completions` | `diagnostic_id`（S3 の書き出し識別子）と `completed_at` は持つが、**`lab_test_id` / `shipment_ref` への参照は無い**（`20260915000010_interview_completions.sql`） |
+| `customer.lab_tests` | 問診への参照 **0 件**（`20260601000010_schemas_and_tables.sql:143-162`） |
+| `customer.lab_test_id_captures` | 問診への参照 **0 件**（`20261011000010_lab_test_id_captures.sql`） |
+| 回（サイクル）の窓 | `src/lib/bridge-queries.ts:59,78,79` が `current_cycle_seq` / `subscription_year` / `subscription_seq` を**全部 null** で返す → 窓で切ることもできない |
+| S3 のキー | `user/{uid}/date/{YYYY_MM_DD}/LifestyleQuestionnaireData_...json` ＝ **人と日付だけ** |
+
+→ **時間の窓で当てる（受取日の前後 N 日の問診を採る等）は推定なので採らない。**
+
+**実装 = fail-closed**（`src/lib/prevent-interview-link.ts`）
+
+- `findInterviewLink()` … **明示的な相関レコードを探すだけ**。無ければ `not_correlated`。
+  **現在は常に `not_correlated`**（上の表のとおり供給元が無い）。
+- `pickInterviewByLink()` … 相関が指す `diagnostic_id` の**完全一致でしか選ばない**
+  （日付が近いもの・最新へ落とさない。2 件あれば選ばない）。
+- 呼び出し側（`prevent-questionnaire.ts`）は相関が取れない回を
+  **一覧に出さず CSV も作らない**（理由 `interview_not_correlated`）。
+
+**相関の供給元は未決（設計案・発注者の裁定が要る）**
+
+| 案 | 内容 | コスト |
+|---|---|---|
+| **(a) ③-1 の `test_instance_ref` に乗せる** | 「1 回・1 検査」の cross-system key を出荷時に作り、問診の書き出し時にも記録する。上位 §4-5.12 の 3 の裁定に沿う | ③-1 の実装が前提。**本タスクでは拡張しない** |
+| **(b) 問診完了時に対象検査を併記する** | `interview_completions` に `lab_test_id`（または対象検査の配列）を足す／中間表を作る。③-1 を待たずに入れられる | migration 1 本 ＋ 「その回の対象検査」をどう決めるかの裁定（受取済み・未返送の検査か、など） |
+
+**どちらも migration を伴うので、ここでは作らない。**
+差し替えるのは `findInterviewLink()` の中だけで済むようにしてある。
+
 ### 7.2 デメカル
 
 受取撮影は **Secondary** のため、**v2.1 時点では一律ハードブロックの要件にしない**（§2.2）。

@@ -12,6 +12,16 @@
  * mode:
  *   'list'     … 取得できる問診CSV の一覧（**バーコードNo. だけ**を外へ出す）
  *   'download' … 1 件ぶんの CSV 本体（base64）
+ *   'preview'  … **当社内部の様式確認専用**。配布の有効化ゲートを飛ばす代わりに、
+ *                **中継（wellfort-site）の mode allow-list が `list`/`download` だけ**なので
+ *                Partner Portal からは到達できない。応答に `format_status` を必ず載せる。
+ *
+ * 【配布は既定で閉じている】`list` / `download` は app_config
+ * `labid.prevent_csv_release`（既定 off）＋ `PREVENT_CSV_FORMAT_STATUS`
+ * （先方提供 Excel に合わせるまで `'unconfirmed'`）の**両方**が揃うまで何も返さない。
+ * **`labid.prevent_capture` とは独立**にしてある — 撮影 UI が off でも台帳に過去／デモの
+ * `confirmed` 行が残っていれば一覧に出得るので、「撮影が off だから CSV は 0 件」と
+ * 仮定してはいけない。
  *
  * 【partner を body から信用しない…のは中継側の仕事】
  * ここへ来る `partner` は **wellfort-site がパスキー session から取り出した値**
@@ -27,12 +37,16 @@
 import type { APIRoute } from 'astro';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 import {
-  listPreventQuestionnaires, buildPreventQuestionnaireFile,
+  listPreventQuestionnaires, buildPreventQuestionnaireFile, isPreventCsvReleased,
 } from '../../../lib/prevent-questionnaire';
+import {
+  PREVENT_CSV_FORMAT_STATUS, PREVENT_CSV_PENDING_COLUMNS,
+} from '../../../lib/prevent-questionnaire-csv';
 
 export const prerender = false;
 
-const ALLOWED_MODES = new Set(['list', 'download']);
+/** `preview` は**当社内部用**。中継は allow-list でこれを通さない。 */
+const ALLOWED_MODES = new Set(['list', 'download', 'preview']);
 
 function json(data: unknown, status = 200): Response {
   return new Response(JSON.stringify(data), {
@@ -64,6 +78,10 @@ export const POST: APIRoute = async ({ request }) => {
     const r = await listPreventQuestionnaires();
     return json({
       ok: true, mode, partner,
+      // **配布が無効なら必ず空**。画面は `released` を見て案内を出す。
+      released: r.released,
+      hold_reason: r.holdReason ?? null,
+      format_status: PREVENT_CSV_FORMAT_STATUS,
       entries: r.entries,
       // **プリベントへは返さない情報**。中継が落とす（件数だけ admin の切り分けに使う）。
       skipped_count: r.skipped.length,
@@ -71,10 +89,33 @@ export const POST: APIRoute = async ({ request }) => {
     });
   }
 
+  if (mode === 'preview') {
+    /*
+     * **当社内部の様式確認専用。** 配布ゲートを飛ばすのはここだけで、
+     * Partner Portal からは中継の allow-list に阻まれて到達しない。
+     * 「これは未確定様式である」ことを応答に必ず載せる（取り違えて外へ出さないため）。
+     */
+    const r = await buildPreventQuestionnaireFile(body.barcodeNo, { skipReleaseGate: true });
+    if (!r.ok) return json({ ok: false, mode, error: r.error, detail: r.detail }, r.status);
+    return json({
+      ok: true, mode, partner,
+      format_status: r.formatStatus,
+      released: await isPreventCsvReleased(),
+      pending_columns: PREVENT_CSV_PENDING_COLUMNS,
+      barcode_no: r.barcodeNo,
+      filename: r.filename,
+      content_type: 'text/csv; charset=utf-8',
+      csv_base64: Buffer.from(r.csv, 'utf8').toString('base64'),
+      column_count: r.columnCount,
+      filled_count: r.filledCount,
+    });
+  }
+
   const r = await buildPreventQuestionnaireFile(body.barcodeNo);
   if (!r.ok) return json({ ok: false, error: r.error, detail: r.detail }, r.status);
   return json({
     ok: true, mode, partner,
+    format_status: r.formatStatus,
     barcode_no: r.barcodeNo,
     filename: r.filename,
     content_type: 'text/csv; charset=utf-8',

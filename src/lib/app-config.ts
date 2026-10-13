@@ -198,6 +198,16 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     default: 'off',
     description: '受取確認の画面に撮影導線を出すか。**既定 off = 従来どおりの受取確認のまま**。'
       + ' 実物の書面とバーコード規格を確認してから on にする。' },
+  // **CSV 配布は撮影とは別の口で閉じる（独立した enable）。**
+  // `labid.prevent_capture` が off でも、**台帳に過去/デモの confirmed 行が残っていれば**
+  // 一覧に出得る（撮影 UI の on/off と台帳の中身は別物）。しかも先方様式が未確定の間は
+  // **出してはいけない**ので、配布だけを止める鍵をここに置く。
+  { key: 'labid.prevent_csv_release', type: 'bool', group: '外部検査ID',
+    label: 'プリベント問診CSV の配布を有効化',
+    default: 'off',
+    description: 'off のあいだ Partner Portal には一覧も CSV も出さない (fail-closed)。'
+      + ' **先方提供 Excel に様式を合わせるまで on にしない** (`PREVENT_CSV_FORMAT_STATUS`)。'
+      + ' 撮影の有効化 (`labid.prevent_capture`) とは独立。' },
   { key: 'labid.demecal_capture', type: 'bool', group: '外部検査ID',
     label: 'デメカル 受取時 問合せ番号撮影を出す (Secondary)',
     default: 'off',

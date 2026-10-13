@@ -213,11 +213,53 @@
 | 中継 ＋ 画面 | wellfort-site `src/pages/api/partner/questionnaire.ts` / `src/pages/partner-portal-preview.astro` |
 | ゲート | `checkPreventQuestionnaireGate()`（`kit_receipt_external_id_capture_spec.md §7.1.1`） |
 
-**列名を当社で発明していない。** §6 の列順・列名・選択肢コードが未確定（§7-2 / §7-3）で、
-しかも §4.2 の 行13-23 は **11 行に対して概念名が 8 個**しか書かれていないため 1:1 の列名が起こせない。
-→ **基本情報（行3-7）は §4.2 の表記、問診由来の列は production の設問文を逐語**で使う。
-`[選択]` の**選択肢コードへは変換しない**（変換マスタが未確定・§7-3）ので、
-回答は問診の表示ラベル（`answer_label`）を**そのまま**入れる。
-**先方様式が確定したら `PREVENT_CSV_COLUMNS` だけを直す。**
+#### 8.1.1 【P0・2026-10-13】この様式は先方確定ではない。本番配布しない
+
+先方（プリベント）から**項目をまとめた Excel**
+「**ウェルフォート様_問診・アンケートデータ_例_問診1回.xlsx**」が提供されているが、
+**両リポジトリに入っていない**（実測: `*.xlsx` の全検索でヒットせず、
+ファイル名・「アンケートデータ」の文字列ヒットも 0 件）。
+→ **その Excel の構造を忠実に再現できない。**
+
+| 項目 | 状態 |
+|---|---|
+| 会員ID/ユーザーID に**バーコードNo.** を入れる | **確定**（先方要望） |
+| **整理番号は削除** | **確定**（先方要望） |
+| 共有形式は **CSV** | **確定**（先方要望。項目の正は先方 Excel） |
+| **ヘッダ行数**（Excel は 3 行・CSV は 3 行か 1 行か） | **未確定** |
+| **列順・列名** | **未確定**（先方 Excel が正。§4.2 の 行13-23 は 11 行に概念名 8 個しか無く 1:1 を起こせない） |
+| **選択肢コード／値の表記** | **未確定**（変換マスタ＝§7-3） |
+| **文字コード・改行** | **未確定**（現在は UTF-8 BOM ＋ CRLF） |
+
+**帰結（発注者裁定 2026-10-13 の選択肢 B を採用）**
+
+- 現在の実装（1 行ヘッダ × 27 列）は **`PREVENT_CSV_FORMAT_STATUS = 'unconfirmed'`** と
+  明示し、**当社内部の様式確認（テスト用 preview）専用**に降格した。
+- **プリベント本番ポータルからは DL できない。** 配布は app_config
+  **`labid.prevent_csv_release`（既定 off）**＋ 様式の確定フラグの**両方**が
+  揃うまで閉じる（一覧も出さず「準備中」と出す）。
+- preview の口は Scan-Chat-AI の `mode:'preview'` だけで、
+  **中継（wellfort-site）の allow-list が `list`/`download` しか通さない**ので
+  Portal からは到達しない。
+- `scripts/prevent-csv-fixtures/expected_704000111.csv` を置き、
+  **様式が動いたら PR の差分に出る**ようにした（1 バイト単位で比較）。
+
+**Excel を受領したら** `PREVENT_CSV_COLUMNS` を合わせ → `PREVENT_CSV_FORMAT_STATUS` を
+`'confirmed'` に → fixture を書き出し直し → `labid.prevent_csv_release` を on。
+
+#### 8.1.2 ★ 項目の供給元（「AI問診に設問が無い」は誤り）
+
+★ は **AI問診から意図的に外されたもの**で、`src/scripts/chat/interview-script.ts:538-541`
+に削除の記録がある（旧 `EX-URINE-DT` / `EX-URINE-ALC` / `EX-URINE-MED` /
+`EX-URINE-MED-NAME` / `EX-ALA-DT` / `EX-URINATE` / `EX-URINATE-CNT` / `EX-FROZEN`）。
+
+| 項目 | 供給元 | 実装 |
+|---|---|---|
+| **ALAカプセル摂取日時** / **採尿日時** | **検査キットの進捗管理で取得**（2026-09-03 業務合意） | **未実装**。`api/kit/[id]/self-report.ts:135-136` は `user_received_at` / `user_returned_at` しか書かず、`kit_progress_management.md` にも入力欄が無い。`src/` と `supabase/migrations/` に該当列 **0 件** |
+| **排尿回数** / **採尿検体の冷凍保存** / **採尿前日の薬** / **採尿前日の飲酒** | **未確定**（AI問診から削除済み・進捗管理にも入力欄なし・先方取得かどうかも未確認） | — |
+
+**値は作らない**（§5-5）。列は出して空にし、コードの `source` に
+**どこから来るはずか**（`kit_progress` / `undecided`）を持たせた
+（「設問が無い」で止めると、別ソースが在るのに空のまま放置される）。
 
 **LAiF は今回変更していない**（所定 XLSX で別物・`laif_s3_secure_handoff_spec.md`）。
