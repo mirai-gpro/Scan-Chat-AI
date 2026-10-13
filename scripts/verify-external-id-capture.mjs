@@ -64,6 +64,18 @@ const core = await load('src/lib/external-test-id.ts');
   // **ここが要点**: `O`→`0` のような補正をしない。別の番号に化けるため。
   eq('英字が混ざったら null (O→0 に直さない)', n('7O4000123'), null);
   eq('記号が混ざったら null', n('704000#123'), null);
+  /*
+   * **バーコードの start/stop を 1 文字だけ剥がす** (実物のプリベントの台紙は `A…A`)。
+   * 剥がさないと **バーコード側が常に捨てられ、毎回 `single_source` = `review_required`** になる。
+   */
+  eq('Codabar の start/stop を剥がす (A…A)', n('A704000123A'), '704000123');
+  eq('小文字でも剥がす', n('a704000123a'), '704000123');
+  eq('A〜D なら種類が違ってもよい', n('B704000123C'), '704000123');
+  eq('片側だけでも剥がす', n('A704000123'), '704000123');
+  eq('**2 文字は剥がさない** (想定外はそのまま落とす)', n('AA704000123A'), null);
+  eq('**`*` は剥がさない** (Code39 は実物で見ていない)', n('*704000123*'), null);
+  eq('英字だけなら null', n('A'), null);
+  eq('E〜Z は剥がさない', n('E704000123E'), null);
   eq('空文字は null', n('   '), null);
   eq('文字列以外は null', n(12345), null);
   eq('undefined は null', n(undefined), null);
@@ -344,6 +356,17 @@ console.log('\n⑨ 読み取り (Gemini)\n');
     const usr = rd.USER_BY_PROVIDER[prov];
     ok(`${prov}: system プロンプトが QR を除外している`,
       /QR\s*コード[^。]*(読まない|読み取らない|無視)/.test(sys), JSON.stringify(sys?.slice(0, 120)));
+    if (prov === 'prevent') {
+      /*
+       * **台紙にはログイン用のパスワードが印字されている**（実物で確認・2026-10-13）。
+       * 値として返させない。証跡画像は S3 に残るので、ここが緩むと**資格情報が
+       * 応答と台帳に流れる**。
+       */
+      ok('prevent: パスワードと URL を読ませない',
+        /パスワード[^。]*読まない|読まない[^。]*パスワード/.test(sys) && /URL/.test(sys));
+      ok('prevent: 英字で挟まれた印字をそのまま返させる (A…A)',
+        /英字で挟まれている/.test(sys));
+    }
     ok(`${prov}: user プロンプトでも QR を無視させている`,
       /QR\s*コード[^。]*(無視|読まない|読み取らない)/.test(usr), JSON.stringify(usr));
     ok(`${prov}: 推測で数字を作らせない`, /推測で数字を作らない/.test(sys));
@@ -818,7 +841,15 @@ console.log('\n⑬ UI の契約\n');
    * 描いてしまうと、利用者は「この図のとおりの紙」を探す。
    */
   const fig = read('src/components/dashboard/ExternalIdSheetGuide.astro');
-  ok('図を出すのは実物を確認した provider だけ', /hasDiagram = provider === 'demecal'/.test(fig));
+  ok('図を出すのは実物を確認した provider だけ',
+    /hasDiagram = provider === 'demecal' \|\| provider === 'prevent'/.test(fig));
+  ok('図は provider ごとに分かれている',
+    /\{provider === 'demecal' && \(/.test(fig) && /\{provider === 'prevent' && \(/.test(fig));
+  ok('プリベントの図は「シール台紙」を描く', /シール台紙/.test(fig));
+  ok('プリベントの図は `A…A` の印字をそのまま見せる', /A704000\*\*\*A/.test(fig));
+  ok('**パスワードと QR は読まないと図にも書く**',
+    /ここは読み取りません/.test(fig) && /パスワード/.test(fig) && /QR/.test(fig));
+  ok('シールを貼る前に撮るよう言っている', /シールを貼る前に撮影/.test(fig));
   ok('図は `hasDiagram` のときだけ描く', /\{hasDiagram && \(/.test(fig));
   ok('**本物の番号を図に入れない** (0 の並び)', /000000000000000/.test(fig)
     && !/[0-9]{15}/.test(fig.replace(/0{15}/g, '')));
@@ -862,9 +893,16 @@ console.log('\n⑬ UI の契約\n');
      * **「上の図」と言ってよいのは図を持つ provider だけ。**
      * ずれると「上の図」と書いてあるのに図が無い状態になる (文章と UI の食い違いは目視で抜ける)。
      */
-    const saysFigure = [...scr.matchAll(/^\s{2}(\w+): '上の図/gm)].map((m) => m[1]);
+    const saysFigure = [...scr.matchAll(/^\s{2}(\w+): '上の図/gm)].map((m) => m[1]).sort();
+    /*
+     * **両側から取り出して突き合わせる。** 片方を定数で書くと、図を足したときに
+     * ここを直し忘れて「検査は緑なのに文面と UI が食い違う」状態になる。
+     */
+    const hasFigureLine = /const hasDiagram = ([^;]+);/.exec(fig)?.[1] ?? '';
+    const hasFigure = [...hasFigureLine.matchAll(/'(\w+)'/g)].map((m) => m[1]).sort();
     ok('「上の図」と言う provider は図を持つ provider と一致する',
-      saysFigure.length === 1 && saysFigure[0] === 'demecal', JSON.stringify(saysFigure));
+      hasFigure.length > 0 && JSON.stringify(saysFigure) === JSON.stringify(hasFigure),
+      `says=${JSON.stringify(saysFigure)} hasFigure=${JSON.stringify(hasFigure)}`);
   }
 
   const kit = code('src/pages/kit.astro');

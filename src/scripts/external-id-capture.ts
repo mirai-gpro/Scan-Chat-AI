@@ -124,7 +124,7 @@ function clearWrong(c: Ctx): void {
  */
 const WHERE: Record<string, string> = {
   demecal: '上の図の囲み＝「問合せ番号」の行（数字 15 桁と、その右の横線のバーコード）です。用紙全体が入るように撮ってください。',
-  prevent: '同梱の IDシートにある「ユーザーID」の印字と、その近くの横線のバーコードを、書面全体が入るように撮ってください。QRコードは読み取りません。',
+  prevent: '上の図の囲み＝「ユーザーID」の印字と、その下のバーコードです。シールを貼る前に、台紙全体が入るように撮ってください。',
 };
 function whereText(c: Ctx): string {
   return WHERE[c.provider] ?? '用紙全体が入るように撮り直してください。';
