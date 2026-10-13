@@ -813,6 +813,60 @@ console.log('\n⑬ UI の契約\n');
     ok('コピーは撮影の状態機械に触らない (ctx より前で返す)', iCopy >= 0 && iCtx > iCopy, `copy=${iCopy} ctx=${iCtx}`);
   }
 
+  /*
+   * 用紙の図 (§4.6)。**実物を見ていない provider の図を描かない**のが要点。
+   * 描いてしまうと、利用者は「この図のとおりの紙」を探す。
+   */
+  const fig = read('src/components/dashboard/ExternalIdSheetGuide.astro');
+  ok('図を出すのは実物を確認した provider だけ', /hasDiagram = provider === 'demecal'/.test(fig));
+  ok('図は `hasDiagram` のときだけ描く', /\{hasDiagram && \(/.test(fig));
+  ok('**本物の番号を図に入れない** (0 の並び)', /000000000000000/.test(fig)
+    && !/[0-9]{15}/.test(fig.replace(/0{15}/g, '')));
+  ok('桁数が分かる', /15桁/.test(fig));
+  ok('取り違えやすい数字を名指ししている (電話番号・検査ID欄)',
+    /0120/.test(fig) && /検査ID/.test(fig));
+  ok('図は撮影ブロックから呼ばれる', /<ExternalIdSheetGuide provider=\{provider\} \/>/.test(comp));
+
+  /*
+   * 誤読・読めなかったときの案内。**候補を消さない** (形が違っても登録はできる)。
+   */
+  ok('誤読の案内の受け皿がある', /data-extid-wrong\b/.test(comp)
+    && /data-extid-wrong-title/.test(comp) && /data-extid-wrong-body/.test(comp));
+  ok('赤にしない (status-watch = 注意)', /data-extid-wrong[\s\S]{0,120}status-watch|status-watch[\s\S]{0,120}data-extid-wrong/.test(comp));
+  {
+    const scr = code('src/scripts/external-id-capture.ts');
+    ok('形が違うときに案内を出す', /pattern_mismatch'\) \|\| reasons\.includes\('pattern_unknown'\)[\s\S]{0,200}showWrong/.test(scr));
+    /*
+     * **候補は消さない。** 形が違っても登録はできる (台帳に `review_required` で残る)。
+     * ここで止めると撮影そのものを失わせる。
+     *
+     * **「後ろに `show(confirmEl, true)` がある」では検査にならない** — 分岐の中で
+     * 候補を消して `return` しても、その先の行に `true` が残っていて素通りした (実測)。
+     * → **分岐の中だけ**を切り出して、消す/抜ける操作が無いことを見る。
+     */
+    {
+      const i = scr.indexOf("if (reasons.includes('pattern_mismatch')");
+      const j = scr.indexOf('show(c.confirmEl, true);', i);
+      const branch = i >= 0 && j > i ? scr.slice(i, j) : '';
+      ok('**候補は消さない** (そのまま登録できる)',
+        branch.includes('showWrong')
+        && !/show\(c\.confirmEl, false\)/.test(branch)
+        && !/\breturn\b/.test(branch),
+        branch.slice(0, 160));
+    }
+    ok('読めなかったときも案内を出す (手入力は開く)',
+      /show\(c\.manualEl, true\);[\s\S]{0,400}showWrong/.test(scr));
+    ok('撮り直し・再読取で前回の案内を消す',
+      /clearWrong\(c\);/.test(scr) && (scr.match(/clearWrong\(c\)/g) ?? []).length >= 2);
+    /*
+     * **「上の図」と言ってよいのは図を持つ provider だけ。**
+     * ずれると「上の図」と書いてあるのに図が無い状態になる (文章と UI の食い違いは目視で抜ける)。
+     */
+    const saysFigure = [...scr.matchAll(/^\s{2}(\w+): '上の図/gm)].map((m) => m[1]);
+    ok('「上の図」と言う provider は図を持つ provider と一致する',
+      saysFigure.length === 1 && saysFigure[0] === 'demecal', JSON.stringify(saysFigure));
+  }
+
   const kit = code('src/pages/kit.astro');
   ok('/kit が撮影ブロックを出す', /ExternalIdCapture/.test(kit));
   ok('QR は公開 origin で作る (プロキシの内側 URL を符号化しない)', /publicOrigin\(Astro\.request\)/.test(kit));

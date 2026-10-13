@@ -1,5 +1,6 @@
 ---
 import AppIcon from '../AppIcon.astro';
+import ExternalIdSheetGuide from './ExternalIdSheetGuide.astro';
 import {
   PROVIDER_ID_KIND, type ExternalIdProvider,
 } from '../../lib/external-test-id';
@@ -105,6 +106,9 @@ const idKind = PROVIDER_ID_KIND[provider];
         ))}
       </ul>
 
+      {/* どの用紙のどこを読むかの図。**実物を見ていない provider では何も出ない**。 */}
+      <ExternalIdSheetGuide provider={provider} />
+
       <div class="mt-3 flex flex-wrap gap-2">
         {/* スマホだけに出す。PC には出さない (CSS `.touch-only` = (pointer: coarse))。 */}
         <label class="touch-only btn-pair btn-data min-h-touch cursor-pointer">
@@ -119,6 +123,19 @@ const idKind = PROVIDER_ID_KIND[provider];
 
       {/* 進行・結果・手入力。**JS が無いと何も起きないので、その旨を出す。** */}
       <p class="mt-2 text-sm text-slate-600" data-extid-status aria-live="polite"></p>
+
+      {/*
+        読めなかった / 別の数字を読んだときの案内。
+        **行き止まりにしない** — 候補が出ているときは消さず、横に注意として添える
+        （`status-watch` = 注意。赤にしない）。**上の図をもう一度見てもらう**のが目的なので、
+        図は 1 つだけにして「上の図」と指す（同じ図を 2 回描かない）。
+      */}
+      <div class="mt-2 hidden rounded-xl border p-3 status-watch" data-extid-wrong role="status">
+        <p class="flex items-start gap-2 text-base font-semibold">
+          <AppIcon name="watch" size={18} class="mt-1 shrink-0" /><span data-extid-wrong-title></span>
+        </p>
+        <p class="mt-1 text-sm" data-extid-wrong-body></p>
+      </div>
 
       <div class="mt-3 hidden" data-extid-confirm>
         <p class="text-base text-slate-800">
