@@ -73,7 +73,6 @@
     "verify:email-auth": "node scripts/verify-email-auth.mjs",
     "verify:transcosmos-test-data": "node scripts/verify-transcosmos-test-data.mjs",
     "verify:external-id-capture": "node scripts/verify-external-id-capture.mjs",
-    "verify:prevent-questionnaire": "node scripts/verify-prevent-questionnaire.mjs",
     "dump:external-id-prompt": "node scripts/dump-external-id-prompt.mjs"
   },
   "dependencies": {

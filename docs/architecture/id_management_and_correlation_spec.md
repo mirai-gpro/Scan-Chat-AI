@@ -88,7 +88,7 @@
 | 検査会社 | 渡すID | 採番 | 状態 |
 |---|---|---|---|
 | LAiF（AI疾病予測） | **整理番号（識別番号 No.0）** | **Wellfort採番の仮名ID（確定 2026-08）** | 確定。LAiF自社連番は使わない |
-| プリベント（がん・尿） | **会員ID/ユーザーID ＝ 検査セットの バーコードNo.**（`704000`＋3桁・`lab_tests.external_barcode`） | **プリベント（検査会社）** | **確定 2026-10**（先方要望）。**当社は採番しない**。現物確認済み（`kit_receipt_external_id_capture_spec.md §2.1.1`）。正本 = `lab_data_pipeline_master_spec.md §4-5.3` |
+| プリベント（がん・尿） | **会員ID/ユーザーID**（検体紐付けも「ID」） | Wellfort（採番元は要確認） | **要確認**（(b)§7-4） |
 | リージャー（血液） | デメカルDSS上の検体ID等 | 検査会社/キット由来 | キット同梱情報から供給（実装時確定） |
 | Genoplan（遺伝子） | 整理番号系（国籍等と共に） | 要確認 | (b)§7-4 |
 
@@ -117,13 +117,10 @@
     │                                                                    │
     ▼                                                                    │
  lab_tests.id ─(shipment_id)─(lab_company_id)─(diagnostic_user_id)───────┘
-    │   ├─ external_test_id     ◀── 各検査会社の独自ID
-    │   └─ external_barcode     ◀── 検査キット物理ID(バーコード/POS)
-    │          └─ プリベント：バーコードNo.(=ユーザーID・704000+3桁)
-    │             **受取時にユーザーが撮影して紐づけ（実装済・既定 off）**
+    │   ├─ external_test_id     ◀── 【将来】各検査会社の独自ID
+    │   └─ external_barcode     ◀── 【将来】検査キット物理ID(バーコード/POS)
     ▼
- 各社上りID：LAiF整理番号（= Wellfort採番の仮名値）
-    ※ プリベントは②を使わない。往復キーは上の external_barcode（先方発行・確定 2026-10）
+ 各社上りID：LAiF整理番号 / プリベント会員ID …（= Wellfort採番の仮名値）
     ▼
  Elith S3：client_id(=diagnostic_user_id) + format_id + date
     ▼
@@ -149,10 +146,7 @@
 
 - **顧客ID / 診断ユーザーID / 注文ID / 契約ID / 出荷ID / 検査ID / 各社上りID（整理番号等）** は**すべて Wellfort が採番・管理**。
 - `diagnostic_user_id` は **App 側 Edge Function（`verify-eligibility`）で uuid 発行**し、HP `customer_profiles` に同期（`data_integration_requirements §EF`）。
-- 各社へ渡す識別子は会社ごとに別体系。**LAiF の整理番号は Wellfort 採番の仮名値**（各社自社連番に依存しない）。
-  **プリベントは例外（確定 2026-10・先方要望）** — 往復キーは**先方発行のバーコードNo.**
-  （= ユーザーID・`704000`＋3桁・`lab_tests.external_barcode`）で、**当社は整理番号／会員IDを採番しない**。
-  正本 = `docs/lab/lab_data_pipeline_master_spec.md §4-5.3`。
+- 各社へ渡す識別子（LAiF整理番号・プリベント会員ID）も **Wellfort採番の仮名値**で統一（各社自社連番に依存しない）。
 
 ## 5. 【将来】外部ID・キット物理IDとの連携（受け皿は実装済＝いま設計変更不要）
 
@@ -174,9 +168,7 @@
 
 ## 7. 確認事項
 1. **プラン表現の整合**: `subscription_plans.id`（契約プランマスタ）と EC `test_products.id`（(c)§1.1）の対応（同一か／FK 化するか）。
-2. ~~**プリベント**の上りID採番元~~ → **解決（確定 2026-10）**: 採番しない。**先方発行のバーコードNo.**
-   （`704000`＋3桁・現物確認済み）を往復キーにする（`lab_data_pipeline_master_spec.md §4-5.3`）。
-   **Genoplan の上りID採番元は引き続き要確認**（(b)§7-4）。
+2. **プリベント/Genoplan の上りID採番元**: 会員ID/整理番号の採番主体・桁・様式（(b)§7-4）。
 3. **将来の外部ID運用**: `external_test_id`/`external_barcode` の**採番タイミング・スキャン工程・突合ルール**（キット個体IDの印字/貼付方式＝POS仕様）。
 4. **⑥ Elith 下りPDF のひも付け**: `diagnostic_user_id`＋検査日で確定（受取仕様未確定＝`lab_data_pipeline_master_spec §9`）。
 </content>

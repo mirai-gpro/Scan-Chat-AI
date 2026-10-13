@@ -617,8 +617,7 @@ dry-run の `storage_backend` が **`supabase`** だった。
 | 層 | 実体 | 採番 | 用途 |
 |---|---|---|---|
 | **① 内部の軸** | `diagnostic_user_id`（uuid・非PII） | Wellfort | PII と診断系を結ぶ**唯一の連携キー**。**Elith の `client_id` はこれ**（`elith_s3_data_handoff_spec §2`） |
-| **② 各社への上りID** | **LAiF＝整理番号（識別番号 No.0）のみ**／Genoplan＝整理番号系 | **Wellfort 採番の仮名ID** | 検査会社へ渡す ID。**会社ごとに別体系**。LAiF は「**自社連番は使わない・Wellfort 整理番号で突合**」で確定（2026-08） |
-| ↑ **プリベントは②に含めない（確定 2026-10）** | **先方発行のバーコードNo.（= ユーザーID・`704000`＋3桁）** | **プリベント（検査会社）** | **Wellfort 独自の整理番号・会員IDを採番しない**（先方要望）。実体は③の `lab_tests.external_barcode` で、受取時にユーザーが撮影して①と対応づける。問診CSV の会員ID欄・Portal 一覧・CSV ファイル名はすべてこの値。正本 = `lab_data_pipeline_master_spec.md §4-5.3` |
+| **② 各社への上りID** | LAiF＝**整理番号（識別番号 No.0）**／プリベント＝会員ID／Genoplan＝整理番号系 | **Wellfort 採番の仮名ID** | 検査会社へ渡す ID。**会社ごとに別体系**。LAiF は「**自社連番は使わない・Wellfort 整理番号で突合**」で確定（2026-08） |
 | **③ 検査会社の独自ID** | `lab_tests.external_test_id`／`external_barcode` | **検査会社** | 検査会社が結果に付す固有ID・キット物理ID。**受領時に格納して①と対応づける**（照合・突合用） |
 
 **原則**: **内部 `diagnostic_user_id` を軸に、②③は補助照合キーとして持つ**。②③を軸にしない。
@@ -665,7 +664,6 @@ LAiF の条件は「**英字を 1 文字以上含む／大小不問／文字は�
 | # | 状態 | 根拠 |
 |---|---|---|
 | 1 | **整理番号（②）の採番機構が未実装**。`src/` `scripts/` に「整理番号」のヒット **0 件** | 実測 grep |
-| 1' | **ただしプリベントには要らない（確定 2026-10）** — 往復キーは先方発行のバーコードNo. なので、採番機構は **LAiF（と Genoplan）だけの先行条件** | `lab_data_pipeline_master_spec.md §4-5.3` |
 | 2 | そのため LAiF 上りビルダーは、入力 JSON の `client_id`（①）を**そのまま名前欄 G1 に書いている**。**【訂正 2026-10-09】「No.0 にも書いている」は古い** — No.0 は LAiF 指摘（2026-08-27・黒枠＝自動計算）により**記入しないことに変更済** | `scripts/build-laif-input.py:262-266` |
 | 3 | ③の受領時格納（`external_test_id`）が未実装 | 実測 |
 | 4 | `lab_companies.external_id_label` / `external_id_pattern` に各社様式が未登録 | 実測 |
