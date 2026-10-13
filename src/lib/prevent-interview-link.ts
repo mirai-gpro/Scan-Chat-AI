@@ -64,13 +64,21 @@ export type InterviewLinkLookup =
  * `lab_tests` ↔ 問診を結ぶ列・表が**どこにも無い**ため。
  * ここで「その人の最新」へ落としてはいけない（それが直した不具合そのもの）。
  *
- * 【相関の供給元が決まったときに差し替える場所】
- * 候補は 2 つあり、**どちらも発注者の裁定が要る**（§7.1.2 の設計案）:
- *   (a) ③-1 の `test_instance_ref`（1 回・1 検査の cross-system key）を
- *       問診の書き出し時にも記録する
- *   (b) 問診完了時に「その回の対象検査」を `interview_completions` へ併記する
- *       （新しい列 or 中間表）
- * **どちらも migration を伴う**ので、このモジュールでは勝手に作らない。
+ * 【相関の供給元は裁定済み（2026-10-13・発注者）— 実装は別タスク（③-1）】
+ * **(a) と (b) は二者択一ではない。**
+ * (a) = 何を正本キーにするか ／ (b) = そのキーをいつ問診へ結び付けるか。**両方を採る。**
+ *
+ *   1. **③-1 で `test_instance_ref` を cross-system の正本キーにする**
+ *      （`test_instance_ref → lab_tests.id → 出荷 → 受取撮影 → 問診 → 結果`）。
+ *   2. **問診完了時に、その問診の `diagnostic_id` と対象 `test_instance_ref` の
+ *      明示リンクを保存する。** `interview_completions` へ `lab_test_id` を直接足すのでなく
+ *      **link table 型**（`diagnosis.interview_test_links`:
+ *      `diagnostic_id` / `test_instance_ref` / `linked_at` / `link_source`）にする —
+ *      将来**同じ AI問診を複数の検査が利用する**ことがあり得るため。
+ *   3. **日時推定は禁止。**
+ *
+ * **③-1 が入ったら、この関数の中だけを `interview_test_links` の照会へ差し替える。**
+ * migration を伴うので、このモジュールでは作らない。正本 = 仕様 §7.1.2。
  */
 export async function findInterviewLink(args: {
   sb: SupabaseClient<Database>;

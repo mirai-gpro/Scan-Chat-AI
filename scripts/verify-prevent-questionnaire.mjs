@@ -545,13 +545,35 @@ console.log('\n⑤ 仕様書\n');
   ok('capture spec が相関キーの不在を file 付きで示している',
     /20260915000010_interview_completions\.sql/.test(capture)
     && /bridge-queries\.ts:59,78,79/.test(capture));
-  ok('capture spec が相関の供給元を「未決・設計案」として書いている',
-    /相関の供給元は未決（設計案・発注者の裁定が要る）/.test(capture));
+  // **裁定後は「未決」ではない。** `test_instance_ref` ＋ link table ＋ 日時推定禁止が正本。
+  ok('capture spec が相関の供給元の裁定（2026-10-13）を書いている',
+    /相関の供給元【裁定済み・2026-10-13・発注者】/.test(capture));
+  ok('capture spec が test_instance_ref を正本キーと明記',
+    /`test_instance_ref` を cross-system の正本キーとして採用する/.test(capture));
+  ok('capture spec が link table 型（1 問診 → 複数検査）を明記',
+    /diagnosis\.interview_test_links/.test(capture)
+    && /同じ AI問診を複数の検査が利用する/.test(capture));
+  ok('capture spec が日時推定の禁止を明記',
+    /\*\*日時推定は禁止。\*\*/.test(capture));
+  ok('capture spec が実装を別タスク（③-1）だと明記',
+    /\*\*実装は別タスク（③-1）。\*\*/.test(capture));
   ok('questionnaire spec §8.1.1（様式は先方確定でない）がある',
     /#### 8\.1\.1 【P0・2026-10-13】この様式は先方確定ではない。本番配布しない/.test(qcsv));
-  ok('questionnaire spec が先方 Excel の名前と未入手を明記',
+  ok('questionnaire spec が先方 Excel の名前と「リポジトリ未取り込み」を明記',
     /ウェルフォート様_問診・アンケートデータ_例_問診1回\.xlsx/.test(qcsv)
-    && /両リポジトリに入っていない/.test(qcsv));
+    && /両リポジトリで/.test(qcsv));
+  // **「Excel が存在しない」と書かない。** メール添付として実在し、再受領は不要。
+  ok('questionnaire spec が「Excel は実在・再受領は不要」と書いている',
+    /Excel は実在する。再受領は不要/.test(qcsv));
+  ok('questionnaire spec が先方メールの確定事項（09-01 / 09-07）を表にしている',
+    /2026-09-01（先方）/.test(qcsv) && /2026-09-07（先方回答）/.test(qcsv));
+  ok('questionnaire spec が unconfirmed を維持する理由 5 点を書いている',
+    /3 段ヘッダをどう表現するか/.test(qcsv) && /選択肢の値/.test(qcsv));
+  ok('questionnaire spec が次タスク 2 本と「2 本とも完成まで off」を書いている',
+    /次タスク（2 本に分ける・発注者裁定 2026-10-13）/.test(qcsv)
+    && /2 本とも完成するまで `labid\.prevent_csv_release` は off のまま/.test(qcsv));
+  ok('questionnaire spec が ALA/採尿日時を工程データとして扱うと書いている',
+    /「CSV の空欄問題」として扱わない/.test(qcsv));
   ok('questionnaire spec §8.1.2（★ の供給元）がある',
     /#### 8\.1\.2 ★ 項目の供給元/.test(qcsv)
     && /2026-09-03 業務合意/.test(qcsv));

@@ -648,15 +648,50 @@ v1.0 の初版は「既存 1 件ならその行へ入れる / 2 件以上なら�
 - 呼び出し側（`prevent-questionnaire.ts`）は相関が取れない回を
   **一覧に出さず CSV も作らない**（理由 `interview_not_correlated`）。
 
-**相関の供給元は未決（設計案・発注者の裁定が要る）**
+**相関の供給元【裁定済み・2026-10-13・発注者】**
 
-| 案 | 内容 | コスト |
-|---|---|---|
-| **(a) ③-1 の `test_instance_ref` に乗せる** | 「1 回・1 検査」の cross-system key を出荷時に作り、問診の書き出し時にも記録する。上位 §4-5.12 の 3 の裁定に沿う | ③-1 の実装が前提。**本タスクでは拡張しない** |
-| **(b) 問診完了時に対象検査を併記する** | `interview_completions` に `lab_test_id`（または対象検査の配列）を足す／中間表を作る。③-1 を待たずに入れられる | migration 1 本 ＋ 「その回の対象検査」をどう決めるかの裁定（受取済み・未返送の検査か、など） |
+> **(a) と (b) は二者択一ではない。**
+> **(a) = 何を正本キーにするか** ／ **(b) = そのキーをいつ問診へ結び付けるか**
+> という関係なので、**両方を採る**。
 
-**どちらも migration を伴うので、ここでは作らない。**
-差し替えるのは `findInterviewLink()` の中だけで済むようにしてある。
+1. **③-1 で `test_instance_ref` を cross-system の正本キーとして採用する。**
+   以前確定した設計原則
+   `test_instance_ref → lab_tests.id → 出荷 → 受取撮影 → 問診 → 結果`
+   をそのまま貫く。
+
+   ```
+   test_instance_ref
+           │
+           ├─ customer.lab_tests
+           ├─ shipment / kit progress
+           ├─ lab_test_id_captures
+           ├─ interview linkage
+           └─ result
+   ```
+
+2. **問診完了時に、その問診の `diagnostic_id` と対象 `test_instance_ref` の
+   明示リンクを保存する。**
+   `interview_completions` へ `lab_test_id` を直接足すのではなく **link table 型**にする
+   — 将来「**同じ AI問診を複数の検査が利用する**」ことがあり得るため
+   （1 問診 → 複数検査を表現できる）。概念的には:
+
+   ```
+   diagnosis.interview_test_links
+     diagnostic_id
+     test_instance_ref
+     linked_at
+     link_source
+   ```
+
+3. **日時推定は禁止。** `diagnostic_user_id + 日付` / 最新問診 / 近い日時 の
+   どれへも戻さない。
+
+**実装は別タスク（③-1）。** 本タスクでは migration を作らず、
+`findInterviewLink()` が `not_correlated` を返す fail-closed のままにしてある
+（③-1 が入ったら**この関数の中だけ**を `interview_test_links` の照会へ差し替える）。
+
+**この骨格はプリベント専用ではない。** 血液（デメカル）・LAiF・Genoplan の
+「今回の検査」も同じキーで扱えるようにするのが狙い（上位 §4-5.12 の 3）。
 
 ### 7.2 デメカル
 
