@@ -8,9 +8,21 @@
 | 大原則 | **プリベント専用の Portal 基盤を作らない。** LAiF Partner Portal を流用し、**差分だけ**を足す |
 | 凡例 | **[LAiF流用]** / **[Prevent差分]** / **[既存実装あり]** / **[新規実装必要]** / **[未確定]** |
 
+### 正本の優先順位
+
+**プリベント Partner Portal については `docs/lab/prevent_partner_portal_spec.md` を今回の正本とする。**
+既存 4 仕様書（`docs/architecture/id_management_and_correlation_spec.md` /
+`docs/lab/lab_data_reception_overview.md` / `docs/lab/lab_data_pipeline_master_spec.md` /
+`docs/lab/kit_receipt_external_id_capture_spec.md`）の **Prevent 節に矛盾が残っている間は、
+本仕様書を優先する**（例: 「プリベント＝会員ID／Wellfort 採番の仮名ID」は**古い**。
+正は**先方発行のバーコードNo.**）。
+→ 既存 4 仕様書側の記述（仕様書 §17.1 の **R-1〜R-4**）は、
+**別の小さな docs 整合タスク**で修正する。**本手順書の Step では直さない。**
+
 > **着手条件**: 仕様書 `prevent_partner_portal_spec.md` が**発注者確認を通ってから**。
-> **Step 4 / 5 / 7 / 9 / 12 は仕様書 §17 の未確定事項が解けるまで着手できない**
-> （各 Step の「完了条件」に明記した）。**推測で埋めて進めない。**
+> **Step 4 / 5 / 7 / 9 / 12 は仕様書 §17 の未確定事項が解けるまで着手できない。
+> Step 6 は「API / UI の骨格、または準備中表示」までで止める**（実データの配布を開かない）。
+> 各 Step の「完了条件」に明記した。**推測で埋めて進めない。**
 
 ---
 
@@ -27,12 +39,20 @@
 | **API 変更** | なし |
 | **UI 変更** | なし |
 | **テスト方法** | `git rev-parse --is-shallow-repository` が `false` であること（`true` なら `--unshallow`。shallow のまま差分を測ると ahead/behind が狂う）／`git fetch origin && git log --oneline -1 origin/claude/awesome-carson-UeyUZ`（Scan-Chat-AI）と `origin/main`（wellfort-site）／`git diff --name-status <base>...HEAD` が空 |
-| **完了条件** | 両リポジトリで **本番ブランチの先頭 SHA をメモに残した**。作業ブランチを**その先頭から新規に切った**（過去の `claude/*` を掘り起こさない） |
+| **完了条件** | 両リポジトリで **基準ブランチの先頭 SHA をメモに残した**。作業ブランチを**その先頭から新規に切った**（過去の `claude/*` / `feature/*` / `fix/*` を掘り起こさない） |
 | **rollback 方法** | 不要（読み取りのみ） |
 
-**本番ブランチ（2026-10-13 時点）**: Scan-Chat-AI = `claude/awesome-carson-UeyUZ` ／
-wellfort-site = `claude/wellfort-ui-design-draft-7y8dup`（GitHub 既定 = 同じ。**`main` は使わない**）。
-→ **`origin/main` から切ると本番の差分を欠いたブランチになる**（ルート `CLAUDE.md` の実例あり）。
+**基準ブランチ（2026-10-13 時点）**
+
+| repo | 基準 | 根拠 |
+|---|---|---|
+| Scan-Chat-AI | `claude/awesome-carson-UeyUZ` | 既定ブランチ（`main` は存在しない） |
+| wellfort-site | **`main`** | **`wellfort-site/CLAUDE.md`「Git 運用（必須）」1**：新規タスクは**必ず最新 `origin/main` から開始**する |
+
+```bash
+# wellfort-site
+git fetch origin && git switch main && git pull --ff-only origin main && git switch -c <type>/<task>
+```
 
 ---
 
@@ -98,9 +118,15 @@ wellfort-site = `claude/wellfort-ui-design-draft-7y8dup`（GitHub 既定 = 同�
 | **rollback 方法** | 不要 |
 
 > **ここが「新しい基盤を作らない」の要**。
-> 台帳行 1 件が**その回・その検査の撮影結果**なので、一覧も DL も**台帳を正**にすれば足りる。
-> **`test_instance_ref` / `interview_test_links` / `customer.test_instances` は要らない**
-> （仕様書 §19）。必要に見えても**この Step で作らない**。
+> **バーコードNo. → 対象ユーザー／検査の特定、および Portal 一覧の「候補」の取得には、
+> 既存 `customer.lab_test_id_captures` で足りる**（台帳行 1 件がその回・その検査の撮影結果で、
+> `shipment_ref` と `lab_test_id` を自分で持っているため）。
+>
+> **ただし「問診と検査の相関」は現在未解決**（Step 4 / 仕様書 §17 の #1）。
+> **その解決方式は本仕様では決めない。**
+> そして **`test_instance_ref` 等を今回の Portal 実装の前提条件にはしない**
+> （解決方式が決まる前でも Step 0〜3・6 骨格・8・10・11 は進められる、という意味）。
+> → この Step で新しいテーブル・新しい cross-system ID を**作らない**（仕様書 §19）。
 
 ---
 
@@ -149,20 +175,39 @@ wellfort-site = `claude/wellfort-ui-design-draft-7y8dup`（GitHub 既定 = 同�
 
 ---
 
-## Step 6. Portal の一覧表示 — **[Prevent差分][新規実装必要]**
+## Step 6. Portal の一覧表示 — **[Prevent差分][新規実装必要・骨格まで]**
+
+> **現時点では「DL 可能な実一覧」を公開できない。**
+> Step 4 で「**その検査の**問診」を**一意に特定**できるようになるまで、この Step は
+> **API / UI の骨格、または「準備中」表示まで**とする。
+> **台帳に `confirmed` / `linked` の行があるだけで「取得可能」として表示しない。**
+
+**公開一覧の成立条件（5 つすべて）**
+
+| # | 条件 | 現状 |
+|---|---|---|
+| 1 | barcode が `confirmed` | **判定可**（台帳 `status`） |
+| 2 | `lab_test` が `linked` | **判定可**（台帳 `lab_test_link_status`） |
+| 3 | `lab_test_id` あり | **判定可**（台帳 `lab_test_id`） |
+| 4 | **対応する問診が一意に特定済み** | **不可**（Step 4 / 仕様書 §17 #1 が未解決） |
+| 5 | **CSV 様式が確定済み** | **不可**（Step 5 / 仕様書 §13 が未確認） |
+
+→ **1〜3 だけ満たした行は「公開一覧に出せる行」ではない。**
+既存 `checkPreventQuestionnaireGate()` が見るのは 1〜3 なので、
+**ゲートを通ったこと＝配布可、ではない**（4・5 を別に満たす必要がある）。
 
 | | |
 |---|---|
-| **目的** | 画面の**ダミー一覧**を、**サーバが返す実データの一覧**に置き換える |
+| **目的** | 画面の**ダミー一覧**を撤去し、**サーバが返す一覧に置き換えられる骨格**を作る。**実データの配布は開かない**（4・5 が未達のため「準備中」を表示する） |
 | **既存流用コード** | 中継の型＝wellfort-site `src/pages/api/partner/upload.ts`（**`SCAN_CHAT_AI_API_KEY` をサーバ側だけで使い、`requirePartner` で partner を session から取り、body の `partner` を信用しない**：`:53-60`）／画面側の `show()` / `scr-csv` 画面（`partner-portal-preview.astro:150`） |
 | **変更対象ファイル** | wellfort-site `src/pages/partner-portal-preview.astro:401-423`（**ダミー一覧 `var ids = [C.idPrefix + '000123', …]` と、クライアント側 Blob 生成を撤去**。`laif` は `sampleFile` 経路のまま＝**分岐で守る**） |
 | **新規ファイル** | wellfort-site `src/pages/api/partner/questionnaire.ts`（中継）／Scan-Chat-AI `src/pages/api/partner/prevent-questionnaire.ts`（一覧 + DL） |
 | **DB 変更有無** | **なし**（読むのは既存 `customer.lab_test_id_captures`） |
 | **migration 有無** | **なし** |
 | **API 変更** | **新規 2 本**（`mode: 'list'`）。**既存 `api/partner/upload.ts` の `ALLOWED_MODES` は広げない** |
-| **UI 変更** | **あり**（`?partner=prevent` の一覧だけ。`?partner=laif` の画面は不変） |
-| **テスト方法** | Step 11 の verify で ①中継が `Authorization` を**サーバ側で**付けていること ②`requirePartner` を通っていること ③body の `partner` を使っていないこと ④**ゲート（`checkPreventQuestionnaireGate`）が wellfort-site 側にコピーされていないこと**（grep で 0 件） |
-| **完了条件** | `?partner=prevent` の一覧が**台帳由来の実データ**で出る。**台帳が 0 件なら 0 行**（ダミーを出さない）。`?partner=laif` の一覧が**従来どおり**（ダミー 3 件 + 静的 xlsx） |
+| **UI 変更** | **あり**（`?partner=prevent` のみ。**一覧は「準備中」表示**。`?partner=laif` の画面は不変） |
+| **テスト方法** | Step 11 の verify で ①中継が `Authorization` を**サーバ側で**付けていること ②`requirePartner` を通っていること ③body の `partner` を使っていないこと ④**ゲート（`checkPreventQuestionnaireGate`）が wellfort-site 側にコピーされていないこと**（grep で 0 件）⑤**`list` が 4・5 を満たさない行を返さないこと**（台帳に `confirmed`/`linked` 行を置いた fixture で **0 行**になる） |
+| **完了条件** | `?partner=prevent` の一覧が **「準備中」** で、**DL できる行が 1 件も出ない**。ダミー ID（`WF-CANCER-000123` 等）も出ない。`?partner=laif` の一覧が**従来どおり**（ダミー 3 件 + 静的 xlsx）。**「実データの一覧を公開する」のは Step 4・5 の判断が出てから**（この Step の完了条件ではない） |
 | **rollback 方法** | 新規 2 ファイルを削除し、`partner-portal-preview.astro` の該当 commit を `git revert`。**DB も S3 も触っていないので戻すだけで完全に元へ戻る** |
 
 **採用する構成（Step 6・7 共通・実装前に発注者へ報告する）**:
@@ -241,9 +286,13 @@ wellfort-site = `claude/wellfort-ui-design-draft-7y8dup`（GitHub 既定 = 同�
 
 ## Step 10. 監査ログ — **[LAiF流用][既存実装あり]**
 
+> **CSV の DL 自体を監査ログへ残すかは未確定**（仕様書 §17 の #6。LAiF は静的 DL でログが無く
+> 前例が無い）。→ **発注者判断が出るまで、DL のログは実装しない。**
+> この Step で入れるのは **認証・認可の既存イベント（`gate_deny` 等）を新しい口でも同じ書式で残すこと**だけ。
+
 | | |
 |---|---|
-| **目的** | 「誰が・いつ・何を取得したか」を残す |
+| **目的** | 新しい口でも**認証・認可の既存イベント**が従来と同じ書式で残るようにする |
 | **既存流用コード** | wellfort-site `src/lib/partner-auth.ts:100` `logEvent({ partner, partnerUserId, credentialId, event, detail, request })` → `partner_auth_events` へ insert（**ip は `x-forwarded-for` の先頭**・`user_agent` は 300 字で切る・**失敗しても認証を落とさない**：`:122-124`） |
 | **変更対象ファイル** | wellfort-site `src/pages/api/partner/questionnaire.ts`（Step 6 の新規ファイル内で `logEvent` を呼ぶだけ） |
 | **新規ファイル** | なし |
@@ -251,12 +300,12 @@ wellfort-site = `claude/wellfort-ui-design-draft-7y8dup`（GitHub 既定 = 同�
 | **migration 有無** | **なし** |
 | **API 変更** | なし（既存 API の中で呼ぶ） |
 | **UI 変更** | なし |
-| **テスト方法** | verify で ①`gate_deny` が**既存と同じ書式**で残ること ②`detail` に**バーコードNo. の全文を入れていない**こと（`maskExternalId` 相当か、件数だけ）③PII（氏名・メール）を入れていないこと |
-| **完了条件** | 既存のイベント名の体系に**並ぶ名前**で記録されている。**新しいログ基盤を作っていない** |
+| **テスト方法** | verify で ①`gate_deny` が**既存と同じ書式**で残ること ②`detail` に**バーコードNo. の全文を入れていない**こと（`maskExternalId` 相当か、件数だけ）③PII（氏名・メール）を入れていないこと ④**DL のイベントを記録していないこと**（§17 #6 の判断待ちなので、先に入れない） |
+| **完了条件** | 既存のイベント名の体系に**並ぶ名前**で、**認証・認可のイベントだけ**が記録されている。**新しいログ基盤を作っていない**。**DL ログは未実装**（判断待ち） |
 | **rollback 方法** | commit を `git revert`（ログ行が増えなくなるだけで、既存ログは残る） |
 
-**未確定**: **CSV の DL 自体をログに残すか**は仕様書 §17 の #6（LAiF は静的 DL でログが無く前例が無い）。
-→ **残す方に倒して実装する**が、イベント名は発注者確認で変わり得る。
+**未確定（この Step では実装しない）**: **CSV の DL 自体をログに残すか** = 仕様書 §17 の #6。
+残すと決まったら、イベント名と `detail` の粒度（**全文を入れない**）を合わせて別 commit で足す。
 
 ---
 
@@ -337,13 +386,15 @@ wellfort-site = `claude/wellfort-ui-design-draft-7y8dup`（GitHub 既定 = 同�
 ## 付録 B. 着手順と依存
 
 ```
-Step 0 → 1 → 2 → 3 ─┬→ 6 → 7 →(§13 確定後に実データ配布)→ 12
-                     ├→ 10
-                     └→ 11（2・3・6・7・10 の都度追加）
+Step 0 → 1 → 2 → 3 ─┬→ 6（骨格／準備中まで）─→ 7 ─→ 12
+                     ├→ 10（認証・認可ログのみ。DL ログは判断待ち）
+                     └→ 11（2・3・6・10 の都度追加）
 Step 4 / 5 / 9 … 発注者判断待ち（着手不可）
+Step 6 の「実一覧の公開」/ Step 7 / Step 12 … Step 4（問診の一意特定）と Step 5（CSV 様式）の
+                                              両方が解けてから
 Step 8 … 変更なし（確認だけ）
 ```
 
-**実装可能な範囲は Step 0〜3・6・8・10・11 まで**で、
-**実際にプリベントへ CSV が渡るのは Step 4・5・12 の判断が出てから**。
-→ **「Portal は先に通せるが、中身（CSV）は未確定のまま配れない」**のが現状の正しい姿。
+**いま着手できるのは Step 0〜3・6 の骨格・8・10（認証ログのみ）・11 まで。**
+**実際にプリベントへ CSV が渡るのは Step 4・5 が解け、Step 12 の判断が出てから。**
+→ **「Portal の口は先に通せるが、一覧は準備中のままで、中身（CSV）は配れない」**のが現状の正しい姿。
