@@ -424,13 +424,24 @@ console.log('\n⑨ メール登録でその場で uid を発行する (API を�
 const API = await (async () => {
   writeFileSync(resolve(CACHE, 'sa-api-auth.mjs'), 'export const isAdminAuthorized = () => true;\n');
   writeFileSync(resolve(CACHE, 'sa-progress.mjs'), 'export const getAccountProgress = async () => ({});\n');
+  /*
+   * `replace_email` (2026-10-15 追加) が `getServerSupabase` を使う。
+   * **この節で検査するのは add_email / remove_email なので、ここは null で足りる。**
+   * null だと replace 経路は 503 で止まる = 黙って通らない。
+   * 差し替えそのものの検査は `npm run verify:special-email-replace` が持つ。
+   */
+  writeFileSync(resolve(CACHE, 'sa-supabase.mjs'), 'export const getServerSupabase = () => null;\n');
+  // 純ロジック (型 import だけ) なので**実物を transpile して渡す**。
+  writeFileSync(resolve(CACHE, 'sa-email-replace.mjs'), js(read('src/lib/special-email-replace.ts')));
   let src = read('src/pages/api/admin/special-accounts.ts')
     .replace(/^import type .*?;$/gm, '')
     .replace(/from '\.\.\/\.\.\/\.\.\/lib\/app-config'/g, "from './sa-app-config.mjs'")
     .replace(/from '\.\.\/\.\.\/\.\.\/lib\/demo-accounts'/g, "from './sa-demo-accounts.mjs'")
     .replace(/from '\.\.\/\.\.\/\.\.\/lib\/special-accounts'/g, "from './sa-special-accounts.mjs'")
     .replace(/from '\.\.\/\.\.\/\.\.\/lib\/api-auth'/g, "from './sa-api-auth.mjs'")
-    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/account-progress'/g, "from './sa-progress.mjs'");
+    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/account-progress'/g, "from './sa-progress.mjs'")
+    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/supabase'/g, "from './sa-supabase.mjs'")
+    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/special-email-replace'/g, "from './sa-email-replace.mjs'");
   // 差し替え漏れを**黙って通さない** (import の形が変わったら気づけるように)。
   if (/\.\.\/\.\.\/\.\.\/lib\//.test(src)) fails.push('verify: API の import 差し替えに失敗');
   const out = resolve(CACHE, 'sa-api.mjs');

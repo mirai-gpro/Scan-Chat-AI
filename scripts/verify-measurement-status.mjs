@@ -124,6 +124,12 @@ const ARTIFACT_ALLOW = [
     must: 'q.testDate',
     why: '差し替え前の片付け (replaceSameDateArtifacts)。status に関わらず同日の行を全部拾う必要がある。',
   },
+  {
+    file: 'pages/api/admin/special-accounts.ts',
+    must: "count: 'exact'",
+    why: 'replace_email の非退行チェック用の件数カウント。メール差し替えの前後で総数が変わっていないことを'
+      + ' 比べるのが目的なので、status 別に分けず全部数える (画面には出ない・値も読まない)。',
+  },
 ];
 console.log('\n③ test_artifacts を人単位で select しているチェーン');
 let artFound = 0;
