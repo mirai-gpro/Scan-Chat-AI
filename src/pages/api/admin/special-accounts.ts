@@ -36,7 +36,12 @@
 import type { APIRoute } from 'astro';
 import { isAdminAuthorized } from '../../../lib/api-auth';
 import { refreshConfig, setConfig } from '../../../lib/app-config';
-import { hashEmail, isUuid, maskEmail, parseEmailEntries, parseEntries, serializeEmailEntries } from '../../../lib/demo-accounts';
+import { getServerSupabase } from '../../../lib/supabase';
+import { planEmailReplace, type ReplaceEmailItem } from '../../../lib/special-email-replace';
+import {
+  demoEmailEntries, hashEmail, isUuid, maskEmail,
+  parseEmailEntries, parseEntries, serializeEmailEntries,
+} from '../../../lib/demo-accounts';
 import {
   listSpecialAccounts, serializeUidEntries, mintSpecialUid,
   parseDobEntries, serializeDobEntries, normSexToken,
@@ -137,6 +142,8 @@ export const POST: APIRoute = async ({ request }) => {
   let body: {
     add?: unknown; remove?: unknown;
     add_email?: unknown; remove_email?: unknown;
+    /** 登録メールの差し替え (uid を変えない)。2026-10-15 追加。 */
+    replace_email?: unknown; dry_run?: unknown;
     deny?: unknown; undeny?: unknown;
     updated_by?: unknown;
   } = {};
@@ -151,11 +158,22 @@ export const POST: APIRoute = async ({ request }) => {
   const remove = Array.isArray(body.remove) ? lower(body.remove) : [];
   const addEmail = Array.isArray(body.add_email) ? body.add_email : [];
   const removeEmail = Array.isArray(body.remove_email) ? lower(body.remove_email) : [];
+  const replaceEmail = Array.isArray(body.replace_email) ? body.replace_email : [];
   const deny = Array.isArray(body.deny) ? lower(body.deny) : [];
   const undeny = Array.isArray(body.undeny) ? lower(body.undeny) : [];
   if (add.length === 0 && remove.length === 0 && addEmail.length === 0
-      && removeEmail.length === 0 && deny.length === 0 && undeny.length === 0) {
+      && removeEmail.length === 0 && deny.length === 0 && undeny.length === 0
+      && replaceEmail.length === 0) {
     return json({ ok: false, error: 'nothing_to_do' }, 400);
+  }
+  /*
+   * **`replace_email` は他の操作と混ぜない。**
+   * 混ぜると「どの操作が uid を動かしたか」が後から追えなくなる。
+   * この口の売りは *uid を動かさないこと* なので、単独操作に限る。
+   */
+  if (replaceEmail.length > 0
+      && (add.length || remove.length || addEmail.length || removeEmail.length || deny.length || undeny.length)) {
+    return json({ ok: false, error: 'mixed_operations', detail: 'replace_email は単独で呼ぶこと。' }, 400);
   }
 
   const cur = await snapshot();
@@ -165,6 +183,163 @@ export const POST: APIRoute = async ({ request }) => {
   // 生年月日・性別は専用キー (PII 隔離)。email のハッシュで引く。
   const dobEntries = parseDobEntries(cur.dobRaw);
   const rejected: { uid: string; reason: string }[] = [];
+
+  /*
+   * ── 登録メールの差し替え (uid を変えない) ──────────────────────
+   * 2026-10-15 追加。正本 `docs/operations/スペシャルアカウント_仕様書.md`。
+   *
+   * 【なぜ専用操作が要るか】`remove_email` → `add_email` の 2 段では
+   * **`diagnostic_user_id` が変わる** (remove が uid を資格一覧からも外し、
+   * add が新規と判定して `mintSpecialUid()` で採番し直す)。uid が変わると
+   * `test_artifacts` / `diagnosis_results` / 報告書 PDF の紐付けが全部外れる。
+   * → **`hash` と `masked` だけ**差し替える。`uid` / `label` は維持する。
+   *
+   * 【この経路がしないこと】
+   *   - `special.account_uids` を**書かない** (下の `updates` で KEY を外す)
+   *   - 実データ (`test_artifacts` 等) を 1 行も触らない
+   *   - Supabase Auth / Google identity を代理作成しない
+   *   - 生のアドレスを応答・ログ・app_config に残さない (ハッシュとマスクだけ)
+   *
+   * 【fail-closed】1 件でも条件を満たさなければ**何も保存しない**。
+   * 本人が既に Auth と紐付いている回も止める (identity の整理が先)。
+   */
+  if (replaceEmail.length > 0) {
+    const items: ReplaceEmailItem[] = [];
+    for (const raw of replaceEmail) {
+      const o = raw as { old_email?: unknown; new_email?: unknown; expected_uid?: unknown };
+      const oldAddr = String(o?.old_email ?? '').trim();
+      const newAddr = String(o?.new_email ?? '').trim();
+      const expectedUid = String(o?.expected_uid ?? '').trim().toLowerCase();
+      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(oldAddr) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newAddr)) {
+        return json({ ok: false, error: 'invalid_email', detail: 'old_email / new_email の形式が違う。' }, 400);
+      }
+      items.push({
+        // **正規化とハッシュは既存の `hashEmail()` のまま** (独自実装を増やさない)。
+        oldHash: await hashEmail(oldAddr),
+        newHash: await hashEmail(newAddr),
+        expectedUid,
+        newMasked: maskEmail(newAddr),
+      });
+    }
+
+    const plan = planEmailReplace({
+      emails,
+      dob: dobEntries,
+      items,
+      // デモ枠と混ざっていたら止める (枠の目的が逆なので、取り違えは実データ側に出る)。
+      demoEmailHashes: new Set(demoEmailEntries().map((e) => e.hash)),
+      specialUids: new Set(cur.rows.map((r) => r.uid)),
+    });
+    if (plan.errors.length > 0) {
+      const worst = plan.errors.reduce((a, b) => (b.status >= a.status ? b : a), plan.errors[0]);
+      return json({ ok: false, error: 'replace_rejected', errors: plan.errors }, worst.status);
+    }
+
+    /*
+     * **本人が既にログイン済みなら止める。** メールだけ替えると、
+     * 既存の Auth 紐付けと照合キーが食い違った状態になる (identity 競合)。
+     * 判断の根拠は `diagnosis.app_users` の実値 1 本。
+     */
+    const sb = getServerSupabase();
+    if (!sb) return json({ ok: false, error: 'supabase_not_configured' }, 503);
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const dg = (sb as any).schema('diagnosis');
+    const uids = plan.rows.map((r) => r.uid);
+    const { data: au, error: auErr } = await dg
+      .from('app_users')
+      .select('diagnostic_user_id, auth_user_id, google_sub')
+      .in('diagnostic_user_id', uids);
+    if (auErr) return json({ ok: false, error: 'db_error', detail: auErr.message }, 500);
+    const authRows = (au ?? []) as { diagnostic_user_id: string; auth_user_id: string | null; google_sub: string | null }[];
+    const bound = authRows.filter((r) => r.auth_user_id !== null || r.google_sub !== null);
+    if (bound.length > 0) {
+      return json({
+        ok: false, error: 'auth_already_linked',
+        detail: '対象 uid が既に Supabase Auth / Google と紐付いている。identity 競合の整理が先なので、ここでは何も変更しない。',
+        uids: bound.map((r) => ({
+          uid: r.diagnostic_user_id,
+          auth_user_id_present: r.auth_user_id !== null,
+          google_sub_present: r.google_sub !== null,
+        })),
+      }, 409);
+    }
+
+    /**
+     * 非退行チェック用の件数。**この操作は実データを 1 行も変えない**ので、
+     * 変更の前後で同数であることを応答で示す (status 別には分けず総数で見る)。
+     */
+    const countsOf = async () => {
+      const out: Record<string, { test_artifacts: number | null; diagnosis_results: number | null }> = {};
+      for (const uid of uids) {
+        const a = await dg.from('test_artifacts').select('id', { count: 'exact', head: true }).eq('diagnostic_user_id', uid);
+        const d = await dg.from('diagnosis_results').select('id', { count: 'exact', head: true }).eq('diagnostic_user_id', uid);
+        out[uid] = { test_artifacts: a?.count ?? null, diagnosis_results: d?.count ?? null };
+      }
+      return out;
+    };
+    const countsBefore = await countsOf();
+
+    const emailValueNext = serializeEmailEntries(plan.emails);
+    const dobValueNext = serializeDobEntries(plan.dob);
+    const willWrite: Record<string, string> = {};
+    if (emailValueNext !== cur.emailsRaw) willWrite[EMAIL_KEY] = emailValueNext;
+    if (dobValueNext !== cur.dobRaw) willWrite[DOB_KEY] = dobValueNext;
+
+    // **dry-run が既定ではない** — `dry_run: true` を明示したときだけ保存せずに返す。
+    if (body.dry_run === true) {
+      return json({
+        ok: true, mode: 'dry_run', replaced: plan.rows,
+        keys_to_write: Object.keys(willWrite),
+        uid_key_untouched: true,
+        auth_unlinked: true,
+        app_users: authRows.map((r) => ({
+          uid: r.diagnostic_user_id,
+          auth_user_id_present: r.auth_user_id !== null,
+          google_sub_present: r.google_sub !== null,
+        })),
+        counts: countsBefore,
+      });
+    }
+
+    /*
+     * **1 回の `setConfig` で原子的に書く。**
+     * 「旧を消す → 保存 → 新を足す」の 2 段は禁止 (途中状態で照合キーが消える)。
+     * **`special.account_uids` (KEY) は渡さない** = 資格一覧は 1 バイトも動かない。
+     */
+    if (Object.keys(willWrite).length > 0) {
+      const updatedBy = typeof body.updated_by === 'string' ? body.updated_by : undefined;
+      const w = await setConfig(willWrite, updatedBy);
+      if (!w.ok) return json({ ok: false, error: 'save_failed', detail: w }, 400);
+    }
+
+    // 読み戻し (TTL を無視して引き直す)。
+    const after = await snapshot();
+    const afterEmails = parseEmailEntries(after.emailsRaw);
+    const afterUids = new Set(parseEntries(after.configRaw).map((e) => e.uid));
+    const countsAfter = await countsOf();
+    return json({
+      ok: true, mode: 'applied',
+      // `present()` も `rows` (アカウント一覧) を返すので、差し替え結果は別名にする。
+      replaced: plan.rows.map((r) => {
+        const row = afterEmails.find((e) => e.uid === r.uid);
+        return {
+          ...r,
+          /** 読み戻した結果。**uid が維持されていること**をここで示す。 */
+          readback_masked: row?.masked ?? null,
+          readback_uid: row?.uid ?? null,
+          readback_label: row?.label ?? null,
+          uid_still_entitled: afterUids.has(r.uid) || after.rows.some((x) => x.uid === r.uid),
+        };
+      }),
+      /** 旧メールのハッシュがもう無いこと。 */
+      old_hash_remaining: items.filter((it) => afterEmails.some((e) => e.hash === it.oldHash)).length,
+      new_hash_present: items.filter((it) => afterEmails.some((e) => e.hash === it.newHash)).length,
+      uid_key_changed: after.configRaw !== cur.configRaw,
+      counts_before: countsBefore,
+      counts_after: countsAfter,
+      ...present(after),
+    });
+  }
 
   for (const raw of add) {
     const uid = String((raw as { uid?: unknown })?.uid ?? raw ?? '').trim().toLowerCase();

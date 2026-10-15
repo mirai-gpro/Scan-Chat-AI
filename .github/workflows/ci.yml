@@ -78,6 +78,8 @@ jobs:
       - run: npm run verify:report-approval
       - run: npm run verify:demo-gate
       - run: npm run verify:special-accounts
+      # 登録メールの差し替え。**uid が変わる退行が一番まずい** (検査データの紐付けが全部外れる)。
+      - run: npm run verify:special-email-replace
       - run: npm run verify:transcosmos-reports
       - run: npm run verify:transcosmos-test-data
       - run: npm run verify:single-purchase
