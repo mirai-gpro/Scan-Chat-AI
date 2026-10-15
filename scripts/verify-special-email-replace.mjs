@@ -197,6 +197,8 @@ console.log('\n⑤ API 側の構造 (ここが静かに壊れる)');
   const iDry = block.indexOf('body.dry_run === true');
   ok('S-11 dry_run の分岐が setConfig より前', iDry > 0 && iDry < iSave);
   ok('S-12 他の操作と混ぜられない', /mixed_operations/.test(api));
+  ok('S-13b 旧メールは hash でも指定できる (画面は現物を持っていない)',
+    /old_hash/.test(block) && /oldAddr \? await hashEmail\(oldAddr\) : oldHashIn/.test(block));
   ok('S-13 応答に生アドレスを載せない (new_email / old_email を返していない)',
     !/(old_email|new_email)\s*:/.test(block));
   ok('S-14 読み戻して uid を示す', /readback_uid/.test(block) && /uid_still_entitled/.test(block));

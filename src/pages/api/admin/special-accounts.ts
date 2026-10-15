@@ -206,16 +206,31 @@ export const POST: APIRoute = async ({ request }) => {
   if (replaceEmail.length > 0) {
     const items: ReplaceEmailItem[] = [];
     for (const raw of replaceEmail) {
-      const o = raw as { old_email?: unknown; new_email?: unknown; expected_uid?: unknown };
+      const o = raw as {
+        old_email?: unknown; old_hash?: unknown; new_email?: unknown; expected_uid?: unknown;
+      };
       const oldAddr = String(o?.old_email ?? '').trim();
+      /*
+       * **旧メールは hash でも指定できる。**
+       * admin 画面は一覧に hash しか持っていない (`remove_email` と同じ流儀で、
+       * 現物のアドレスを往復させない)。`old_email` を渡した回は `hashEmail()` に通す。
+       */
+      const oldHashIn = String(o?.old_hash ?? '').trim().toLowerCase();
       const newAddr = String(o?.new_email ?? '').trim();
       const expectedUid = String(o?.expected_uid ?? '').trim().toLowerCase();
-      if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(oldAddr) || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(newAddr)) {
-        return json({ ok: false, error: 'invalid_email', detail: 'old_email / new_email の形式が違う。' }, 400);
+      const mailRe = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+      if (!mailRe.test(newAddr)) {
+        return json({ ok: false, error: 'invalid_email', detail: 'new_email の形式が違う。' }, 400);
+      }
+      if (!oldAddr && !/^[0-9a-f]{64}$/.test(oldHashIn)) {
+        return json({ ok: false, error: 'invalid_email', detail: 'old_email か old_hash のどちらかが要る。' }, 400);
+      }
+      if (oldAddr && !mailRe.test(oldAddr)) {
+        return json({ ok: false, error: 'invalid_email', detail: 'old_email の形式が違う。' }, 400);
       }
       items.push({
         // **正規化とハッシュは既存の `hashEmail()` のまま** (独自実装を増やさない)。
-        oldHash: await hashEmail(oldAddr),
+        oldHash: oldAddr ? await hashEmail(oldAddr) : oldHashIn,
         newHash: await hashEmail(newAddr),
         expectedUid,
         newMasked: maskEmail(newAddr),
