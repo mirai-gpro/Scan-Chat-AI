@@ -28,7 +28,6 @@ import {
   extractUrgentAlert,
   extractDailyQuests,
   extractSituationalCards,
-  findSection,
 } from '../lib/elith-parser';
 import { noStore } from '../lib/http-cache';
 
@@ -228,8 +227,6 @@ const sections    = data?.elithSections ?? [];
 const urgentAlert = data ? extractUrgentAlert(sections) : null;
 const quests      = data ? extractDailyQuests(sections) : [];
 const situations  = data ? extractSituationalCards(sections) : [];
-const abstract    = findSection(sections, 'アブストラクト');
-const totalChars  = sections.reduce((sum, s) => sum + (s.char_count || 0), 0);
 
 // あいさつ帯に出す「最新の検査」の種別名。
 const latestTypeName = latest ? testTypeLabel(latest.testType).name : '';
@@ -453,103 +450,10 @@ const reportHref = manualPdfReport
         {/* ⑩ ホーム画面への追加 (追加済み / 閉じたあとは出ない。判定はクライアント側) */}
         <AddToHomeCard />
 
-        {/* ⑪ 商品一覧 (発注者指示 2026-09-16)。**利用者に見える最後の枠**
-             — この下はテストフェーズの確認用フッタで、総合テストで遮蔽する。 */}
+        {/* ⑪ 商品一覧 (発注者指示 2026-09-16)。**利用者に見える最後の枠**。
+             この下に在った「デバッグ (テストフェーズ確認用)」は撤去した
+             (発注者指示 2026-10-20)。admin にも出さない。 */}
         <ProductsLinkCard />
-
-        {/*
-          テストフェーズの確認用フッタ。**admin だけに出す** (2026-09-29)。
-
-          【なぜサーバ側で出し分けるか】この欄には
-            - 本人の `diagnostic_user_id` の本文表示
-            - 固定のデモ uid を載せた `/dashboard?u=…` の切替リンク 6 件
-          が入っている。CSS で隠しても **HTML には載る**ので、
-          一般ユーザーの画面から識別子を消すには**そもそも描かない**しかない。
-          admin では中身を 1 つも削っていない (デモ切替リンクもそのまま)。
-        */}
-        {viewer.isAdmin && (
-        <details class="rounded-2xl border border-dashed border-slate-300 p-4">
-          <summary class="min-h-touch cursor-pointer text-sm font-medium text-slate-600">
-            デバッグ (テストフェーズ確認用)
-          </summary>
-          <dl class="mt-3 space-y-1 text-sm text-slate-600">
-            <div class="flex justify-between gap-3"><dt>diagnostic_user_id:</dt><dd class="font-mono break-all">{data?.diagnosticUserId}</dd></div>
-            {/*
-              **AI問診を観測ログ付きで開く導線** (2026-09-23)。
-              `?trace=1` を付けて開いた回だけ、問診画面の右下に
-              「観測ログをコピー」が出る (`live-trace.ts` の `mountTraceButton`)。
-
-              【なぜ要るか】実機は iPhone で JS コンソールを開けないうえ、
-              **ホーム画面から起動していると URL 欄が無く `?trace=1` を付けられない**。
-              読み上げが飛ぶ不具合の原因を、採取できないまま推測で 2 回外している。
-              ここに置けば**1 タップ**で採れる。デバッグ欄なので通常の利用者には出ない。
-            */}
-            <div class="flex justify-between gap-3">
-              <dt>AI問診の観測ログ:</dt>
-              <dd>
-                <a href={`${linkPrefix}/chat${q ? `${q}&` : '?'}trace=1`} class="font-semibold text-brand-700 underline">
-                  観測ログ付きで開く
-                </a>
-                <span class="ml-1 text-slate-500">（画面右下の「観測ログをコピー」で採取）</span>
-              </dd>
-            </div>
-            {/*
-              **admin 判定とその根拠**。判定は静かに外れるので、根拠を画面に出せないと
-              「なぜダミーが出ないのか」が誰にも分からない (実測 2026-08-30: 本番で
-              報告書が空になり、原因の特定に何往復もした)。**推測でなくここを見る。**
-            */}
-            <div class="flex justify-between gap-3">
-              <dt>admin 判定:</dt>
-              <dd>
-                {viewer.isAdmin ? '✓ admin' : '✗ admin ではない'}
-                {viewer.adminBy === 'cookie' && <span class="ml-1">（根拠: サインイン時に管理者リストで確認）</span>}
-                {!viewer.isAdmin && (
-                  <span class="ml-1">（サインインした email が admin の管理者リストに無いか、リストを引けていない）</span>
-                )}
-              </dd>
-            </div>
-            {/*
-              **デモ表示は uid だけで決まる** (admin 権限とは無関係)。
-              「出さない」なら、その uid をデモ用アカウントに登録すれば出る
-              (wellfort-site admin → 設定「デモ」→「デモ用アカウントの uid」に上の
-              diagnostic_user_id を足す。再デプロイ不要・反映は最大 45 秒)。
-            */}
-            <div class="flex justify-between gap-3">
-              <dt>デモ表示:</dt>
-              <dd>
-                {demoShown ? '出す（デモ用アカウント）' : '出さない（このアカウントは実データのみ）'}
-              </dd>
-            </div>
-            <div class="flex justify-between gap-3"><dt>検査アーティファクト:</dt><dd class="tnum">{data?.artifacts.length} 件</dd></div>
-            <div class="flex justify-between gap-3"><dt>検査値 (最新回):</dt><dd class="tnum">{latest?.items.length ?? 0} 件</dd></div>
-            <div class="flex justify-between gap-3"><dt>キット出荷:</dt><dd class="tnum">{data?.shipments.length} 件</dd></div>
-            <div class="flex justify-between gap-3"><dt>Elith sections:</dt><dd class="tnum">{sections.length} 件 / {totalChars.toLocaleString()} 字</dd></div>
-            <div class="flex justify-between gap-3"><dt>abstract:</dt><dd>{abstract ? `${abstract.char_count}字` : 'なし'}</dd></div>
-            {/*
-              **本番表示**。受領 JSON を**本番のアダプタ・本番のレンダラ**に通した紙面を
-              タイプ別に見る (発注者指示 2026-09-01)。既定はタイプ1。
-              **モックへのリンクは置かない** — モックは紙面の正だが**本番の画面で見せるものではなく**
-              (発注者指示 2026-09-01)、リポジトリの `docs/elith/mock/*.html` に在り、
-              実装との突き合わせは `npm run verify:sheet-contract` が機械で行う。
-              デバッグ欄を遮蔽するときに `?preview=` も一緒に閉じる。
-            */}
-            <p class="pt-3">紙面 (受領 JSON から生成):</p>
-            <div class="flex flex-wrap gap-2 pt-1">
-              <a href="/report?preview=1" class="chip">タイプ1 コースプラン</a>
-              <a href="/report?preview=2" class="chip">タイプ2 単品購入相当</a>
-            </div>
-            <p class="pt-3">他ユーザーで試す:</p>
-            <div class="flex flex-wrap gap-2 pt-1">
-              <a href="/dashboard?u=d0000001-0000-0000-0000-000000000000" class="chip">真鍋 (横ばい)</a>
-              <a href="/dashboard?u=d0000002-0000-0000-0000-000000000000" class="chip">田中 (改善)</a>
-              <a href="/dashboard?u=d0000003-0000-0000-0000-000000000000" class="chip">山田 (悪化)</a>
-              <a href="/dashboard?u=d0000004-0000-0000-0000-000000000000" class="chip">鈴木 (検査なし)</a>
-              <a href="/dashboard?u=d0000009-0000-0000-0000-000000000000" class="chip">中村 (検査中)</a>
-              <a href="/dashboard?u=da000001-0000-0000-0000-000000000000" class="chip">山田太郎 (OEMデモ)</a>
-            </div>
-          </dl>
-        </details>
-        )}
       </main>
     </>
   )}
