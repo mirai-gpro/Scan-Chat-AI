@@ -883,8 +883,6 @@ console.log('\n⑬ 画面のリンクが代理表示の prefix を落として�
     { file: 'src/components/GoogleOneTap.astro', needle: "url.pathname === '/'", why: '同上（Google サインイン後の遷移先の既定）' },
     { file: 'src/components/ImpersonationBanner.astro', needle: 'window.location.replace', why: '「代理表示をやめる」。**抜けるのが目的**なので prefix を付けない' },
     { file: 'src/components/ShareBanner.astro', needle: 'window.location.replace', why: '共有セッションを抜ける導線。同上' },
-    // 管理者だけに出るデバッグ欄。素の `?u=` で検体を切り替えるための切り分け導線。
-    { file: 'src/pages/dashboard.astro', needle: 'class="chip"', why: 'admin 専用デバッグ欄の検体切替。意図して素のパス' },
     // dashboard.astro が必ず上書きする Props の既定値（下の L-15 が裏打ち）。
     { file: 'src/components/dashboard/ProgressSection.astro', needle: 'detailHref =', why: 'Props の既定値。dashboard.astro が prefix 付きで必ず渡す（L-15）' },
     { file: 'src/components/dashboard/KitProgressCard.astro', needle: 'detailHref =', why: 'Props の既定値。同上（L-15）' },

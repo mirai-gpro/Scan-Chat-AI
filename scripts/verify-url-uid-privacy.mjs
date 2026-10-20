@@ -250,7 +250,11 @@ console.log('\n⑥ クエリ連結 (T-09)');
     // `${p}` は代理表示の path prefix (一般利用者は '')。**連結の形は変わっていない**。
     ['src/components/dashboard/HealthAgeCard.astro', /`\$\{p\}\/trend\$\{q \? `\$\{q\}&` : '\?'\}type=wellness`/],
     ['src/components/dashboard/TestResultsSection.astro', /\$\{q \? `\$\{q\}&` : '\?'\}type=/],
-    ['src/pages/dashboard.astro', /\$\{q \? `\$\{q\}&` : '\?'\}trace=1/],
+    /*
+     * `dashboard.astro` の `…?trace=1` は**デバッグ欄の中にしか無かった**。
+     * 欄を撤去した (発注者指示 2026-10-20) ので対象から外す。
+     * 連結の形の保証は上の 2 本が引き続き持つ。
+     */
   ];
   for (const [f, re] of joins) ok('T-09', `${f.split('/').pop()} が ? 二重化しない連結`, re.test(read(f)));
 
@@ -421,31 +425,42 @@ const derivedBloodEpisodeIndex = (x) => {
   ok('T-18c', 'demo-art-* は DB を引かない (所有者検証より前)', calls.length === 0, `${calls.length} 回`);
 }
 
-// ── ⑧-2 デバッグ欄は admin だけ (T-21〜T-24) ────────────────────
-console.log('\n⑧-2 デバッグ欄の出し分け (T-21〜T-24)');
+// ── ⑧-2 デバッグ欄は撤去済み (T-21〜T-24) ───────────────────────
+/*
+ * **2026-10-20 に向きが変わった。** 以前は「デバッグ欄を admin だけに出す」ことを
+ * 確かめていたが、発注者指示で**欄そのものを撤去**した (admin にも出さない)。
+ *
+ * そこで検査も反転させる — **在ることの確認から、無いことの確認へ。**
+ * privacy の保証としてはこちらが強い。`{viewer.isAdmin && …}` で包む形は
+ * 「admin の画面には識別子が出る」ことを許していたが、いまは誰の画面にも出ない。
+ *
+ * **うっかり戻すのを止めるのがこの節の役目。** 欄には
+ *   - 本人の `diagnostic_user_id` の本文表示
+ *   - 固定デモ uid を載せた `/dashboard?u=…` の切替リンク
+ *   - `/report?preview=…`（紙面の確認モード）への入口
+ * が入っていた。CSS で隠しても HTML には載るので、**描かないことが唯一の担保**。
+ */
+console.log('\n⑧-2 デバッグ欄が撤去されたままか (T-21〜T-24)');
 {
-  const raw = read('src/pages/dashboard.astro');
   /*
-   * **CSS で隠すのでは足りない。** HTML には載ってしまうので、
-   * サーバ側で描かない (`{viewer.isAdmin && (…)}`) ことを構文で確かめる。
+   * **JSX コメントを落としてから見る。** 「何を撤去したか」の由来は
+   * `dashboard.astro` のコメントに残してあるので、生のままだと由来の説明文を
+   * 欄の復活と読み違える。見るのは**描かれるもの**だけ。
    */
-  const open = raw.indexOf('{viewer.isAdmin && (\n        <details');
-  const close = raw.indexOf('</details>\n        )}');
-  ok('T-21a', 'デバッグ欄が {viewer.isAdmin && ( … )} で包まれている', open >= 0 && close > open);
-  const block = open >= 0 && close > open ? raw.slice(open, close) : '';
-  ok('T-21b', '本人の diagnostic_user_id 表示がその中にある',
-    /diagnostic_user_id:/.test(block));
-  ok('T-22', '固定デモ uid の切替リンク 6 件がその中にある',
-    (block.match(/\/dashboard\?u=(?:d0|da)[0-9a-f]{6}-/g) ?? []).length === 6,
-    `${(block.match(/\/dashboard\?u=(?:d0|da)[0-9a-f]{6}-/g) ?? []).length} 件`);
-  // 欄の外に漏れていないこと
-  const outside = raw.slice(0, open) + raw.slice(close);
-  ok('T-21c', 'diagnostic_user_id 表示が欄の外に無い', !/diagnostic_user_id:/.test(outside));
-  ok('T-22b', 'デモ切替リンクが欄の外に無い', !/\/dashboard\?u=(?:d0|da)[0-9a-f]{6}-/.test(outside));
-  // T-23: admin では中身を削っていない (既存のデバッグ項目が残っている)
-  for (const key of ['admin 判定:', '他ユーザーで試す:', '紙面 (受領 JSON から生成):', 'AI問診の観測ログ:']) {
-    ok('T-23', `admin 向けデバッグ項目「${key}」を残している`, block.includes(key));
-  }
+  const raw = read('src/pages/dashboard.astro').replace(/\{\/\*[\s\S]*?\*\/\}/g, '');
+  ok('T-21a', 'デバッグ欄 (テストフェーズ確認用) が無い', !raw.includes('テストフェーズ確認用'));
+  ok('T-21b', '本人の diagnostic_user_id の本文表示が無い', !/diagnostic_user_id:/.test(raw));
+  ok('T-22', '固定デモ uid の切替リンクが無い',
+    !/\/dashboard\?u=(?:d0|da)[0-9a-f]{6}-/.test(raw),
+    `${(raw.match(/\/dashboard\?u=(?:d0|da)[0-9a-f]{6}-/g) ?? []).length} 件`);
+  ok('T-23a', '紙面の確認モード (?preview=) への入口が無い', !/\?preview=/.test(raw));
+  ok('T-23b', '観測ログ (?trace=1) への入口が無い', !/trace=1/.test(raw));
+  /*
+   * **`<details>` 自体を禁止はしない** — 将来ふつうの開閉 UI を置くことはあり得る。
+   * 見るのは「識別子と切替リンクが戻っていないか」だけ。
+   */
+  ok('T-24', 'admin 専用の識別子ブロックが戻っていない',
+    !/\{viewer\.isAdmin && \(\n\s*<details/.test(raw));
 }
 
 // ── ⑨ スコープの約束 ────────────────────────────────────────────
