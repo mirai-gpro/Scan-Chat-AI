@@ -49,6 +49,18 @@ export const PROVIDER_ID_KIND: Record<ExternalIdProvider, string> = {
   demecal: 'inquiry_no',   // 先方名称「問合せ番号」
 };
 
+/**
+ * 画面に出す呼び名。**先方の呼び方をそのまま使う**（当社で言い換えない）。
+ *
+ * 撮影ブロック (`ExternalIdCapture.astro`) と 7 日ワーニング
+ * (`ExternalIdReminder.astro`) が**同じ文字列を使う**ために、ここ 1 か所に置く。
+ * 画面ごとに別名が出ると、利用者が「どの番号の話か」を取り違える。
+ */
+export const PROVIDER_ID_LABEL: Record<ExternalIdProvider, string> = {
+  prevent: 'バーコードNo.',
+  demecal: '問合せ番号',
+};
+
 /** どの列へ入れるか。物理キットの番号は `external_barcode`、外部照会系の番号は `external_test_id`。 */
 export const PROVIDER_ID_COLUMN: Record<ExternalIdProvider, 'external_barcode' | 'external_test_id'> = {
   // バーコードNo. は**検体に貼付される物理バーコード**なので物理キットID の列（仕様 §6.2）。

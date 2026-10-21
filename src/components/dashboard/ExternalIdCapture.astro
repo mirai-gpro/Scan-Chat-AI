@@ -2,7 +2,7 @@
 import AppIcon from '../AppIcon.astro';
 import ExternalIdSheetGuide from './ExternalIdSheetGuide.astro';
 import {
-  PROVIDER_ID_KIND, type ExternalIdProvider,
+  PROVIDER_ID_KIND, PROVIDER_ID_LABEL, type ExternalIdProvider,
 } from '../../lib/external-test-id';
 
 /**
@@ -61,6 +61,11 @@ import {
  * プリベントの同梱書面には QR も印字されているが、要るのは
  * **「ユーザーID」の印字と 1次元バーコード**。ここで QR を見せると
  * **ユーザーが QR を撮って「撮れた」と思い、読めない画像が集まり続ける** (仕様 §2.1)。
+ *
+ * 【`id="extid-<出荷ID>"` を持つ理由】
+ * 7 日ワーニング (`ExternalIdReminder.astro`・仕様 §7.1) の「撮影して登録する」が
+ * **このブロックへ直接飛ぶ**ため。出荷は最大 10 件並ぶので、ページ先頭へ送るだけでは
+ * どれを撮ればよいか分からない。
  */
 interface Props {
   shipmentId: string;
@@ -83,11 +88,6 @@ const {
 /** 3 つ揃ってはじめて QR を出せる (欠けたら導線ごと出さない = 読めない QR を出さない)。 */
 const canHandOff = !!shareUrl && !!qrSymbolId && !!qrSize;
 
-/** 先方の呼び方をそのまま使う (当社で言い換えない)。 */
-const ID_LABEL: Record<ExternalIdProvider, string> = {
-  prevent: 'バーコードNo.',
-  demecal: '問合せ番号',
-};
 /** 撮影対象の案内。**どこを枠に入れるか**を具体的に書く。 */
 const GUIDE: Record<ExternalIdProvider, string[]> = {
   prevent: [
@@ -101,11 +101,12 @@ const GUIDE: Record<ExternalIdProvider, string[]> = {
     '**QRコードは読み取りません。**',
   ],
 };
-const idLabel = ID_LABEL[provider];
+const idLabel = PROVIDER_ID_LABEL[provider];
 const idKind = PROVIDER_ID_KIND[provider];
 ---
 
 <section
+  id={`extid-${shipmentId}`}
   class="mt-3 rounded-xl border border-navy-400 bg-brand-50 p-4"
   data-extid-capture
   data-shipment-id={shipmentId}

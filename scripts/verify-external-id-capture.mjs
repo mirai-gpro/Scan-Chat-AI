@@ -1336,7 +1336,12 @@ console.log('\n⑬ UI の契約\n');
   ok('共有閲覧では出さない', /if \(!canSelfReport\) return null;/.test(kit));
   ok('発送前には出さない', /if \(!s\.shipped_at\) return null;/.test(kit));
   ok('provider は test_type から引く (名前で推測しない)', /providerForTestType\(s\.test_type\)/.test(kit));
-  ok('全文ではなくマスクを渡す', /maskExternalId/.test(kit) && !/normalized_value\s*\}\s*\)/.test(kit));
+  // **全文ではなくマスクを渡す。** 引くのは共通の `loadRegisteredCaptures()` なので、
+  // ページ側は `normalized_value` を 1 文字も触らない（触れたら全文が画面へ出る口になる）。
+  ok('全文ではなくマスクを渡す (ページは normalized_value を触らない)',
+    /loadRegisteredCaptures\(/.test(kit) && !/normalized_value/.test(kit));
+  ok('台帳の読み出しは共通関数が持つ (ページで SQL を書かない)',
+    !/lab_test_id_captures/.test(kit));
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1545,6 +1550,97 @@ console.log('\n⑮ 手順書の同期\n');
   ok('プリベントの system プロンプトが手順書に載っている',
     firstLine.length > 0 && (cur ?? '').includes(firstLine), firstLine.slice(0, 40));
   ok('**実物の写真を入れないと書いてある**', (cur ?? '').includes('リポジトリに入れない'));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑯ 7 日ワーニング — 撮り忘れの催促 (仕様 §7.1・発注者指示 2026-10-21)
+//
+// 【ここは静かに壊れる】催促は**出なくてもエラーにならない**。
+// 出ないまま検体だけが検査会社に届き、問診データを渡せないので検査が始まらない
+// （しかも画面は正常に見える）。逆に**撮った人を催促し続ける**のも静かな壊れ方。
+//
+// 判定は純関数なので**実物を動かして**測る。画面側は「同じ関数を使っているか」と
+// 「押す先があるか」を見る。
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
+{
+  const rem = await load('src/lib/external-id-reminder.ts', [
+    [/import \{ PROVIDER_TEST_TYPE \} from '\.\/external-test-id';/, "const PROVIDER_TEST_TYPE = { prevent: 'cancer_urine', demecal: 'blood' };"],
+  ]);
+  const { barcodeReminders, daysBetweenJst, BARCODE_REMINDER_DAYS, REMINDER_TEST_TYPE } = rem;
+  const NOW = new Date('2026-10-21T01:00:00Z');   // JST 2026-10-21 10:00
+  const ship = (over) => ({ id: 'ord_1', test_type: 'cancer_urine', shipped_at: '2026-10-10', ...over });
+  const run = (over = {}) => barcodeReminders({
+    shipments: [ship(over.ship ?? {})], registered: new Set(over.registered ?? []),
+    captureEnabled: over.captureEnabled ?? true, now: over.now ?? NOW,
+  });
+
+  eq('閾値は 7 日', BARCODE_REMINDER_DAYS, 7);
+  eq('対象はがんリスク (プリベント) だけ', REMINDER_TEST_TYPE, 'cancer_urine');
+
+  // 暦日で数える（時刻の端数で 1 日ずれない）
+  eq('暦日の差', daysBetweenJst('2026-10-10', '2026-10-17T14:59:00Z'), 7);   // JST 10-17 23:59
+  eq('JST で日を切る (UTC 15:00 = JST 翌日 0:00)', daysBetweenJst('2026-10-10', '2026-10-16T15:00:00Z'), 7);
+  eq('読めない日付は null', daysBetweenJst('なんだこれ', NOW), null);
+
+  eq('11 日たっていれば催促する', run().length, 1);
+  eq('経過日数は実測値 (丸めない)', run()[0]?.days, 11);
+  eq('ちょうど 7 日で催促する', run({ now: new Date('2026-10-17T03:00:00Z') }).length, 1);
+  eq('6 日では催促しない', run({ now: new Date('2026-10-16T03:00:00Z') }).length, 0);
+  eq('**撮影が off のときは 1 件も返さない** (行き先が無い)', run({ captureEnabled: false }).length, 0);
+  eq('発送前 (shipped_at なし) は催促しない', run({ ship: { shipped_at: null } }).length, 0);
+  eq('**登録済みの人を急かさない**', run({ registered: ['ord_1'] }).length, 0);
+  eq('別の検査 (血液) は対象外', run({ ship: { test_type: 'blood' } }).length, 0);
+  eq('読めない発送日は催促しない (当てずっぽうで日数を作らない)',
+    run({ ship: { shipped_at: 'いつか' } }).length, 0);
+  eq('複数の出荷でもそれぞれ返す', barcodeReminders({
+    shipments: [ship({ id: 'a' }), ship({ id: 'b' }), ship({ id: 'c', shipped_at: '2026-10-20' })],
+    registered: new Set(['b']), captureEnabled: true, now: NOW,
+  }).map((r) => r.shipmentId), ['a']);
+
+  // ── 「登録済み」の判定を問診CSV のゲートと混ぜない ──
+  // ここは `status <> 'superseded'` で見る（撮った人を急かさないため）。
+  // ゲート (`checkPreventQuestionnaireGate`) は `confirmed` ∧ `linked` を要求する fail-closed。
+  // 片方をもう片方の代わりに使うと「確定していない番号で先方へ出す」か
+  // 「撮った人を催促し続ける」のどちらかになる。
+  const persistSrc = code('src/lib/external-id-persist.ts');
+  const loader = /export async function loadRegisteredCaptures[\s\S]*?\n\}/.exec(persistSrc)?.[0] ?? '';
+  ok('`loadRegisteredCaptures` が在る', loader.length > 0);
+  ok('superseded でない行を引く', /\.neq\('status', 'superseded'\)/.test(loader));
+  ok('**confirmed を条件にしない** (撮った人を急かさない)', !/'confirmed'\s*\)/.test(loader.replace(/!==\s*'confirmed'/g, '')));
+  ok('マスクだけを返す (全文を返さない)',
+    /maskExternalId\(/.test(loader) && !/normalized_value:/.test(loader));
+  ok('その人の行だけを引く', /\.eq\('diagnostic_user_id', diagnosticUserId\)/.test(loader));
+
+  // ── 画面側 ──
+  const remUi = code('src/components/dashboard/ExternalIdReminder.astro');
+  ok('器は判定を持たない (日数・閾値・登録済みを自分で判断しない)',
+    !/shipped_at|registered|captureEnabled|BARCODE_REMINDER_DAYS/.test(remUi));
+  ok('**行き先が無いものは描かない** (押しても何も起きない帯を出さない)',
+    /hrefFor\(r\.shipmentId\)/.test(remUi) && /\.filter\(/.test(remUi));
+  ok('赤にしない (status-watch)', /status-watch/.test(remUi) && !/status-(?:alert|danger|error)/.test(remUi));
+  ok('呼び名は共通の定義から受け取る (画面で焼かない)',
+    /idLabel/.test(remUi) && !/バーコードNo\./.test(remUi));
+  ok('撮影へ促す文言が在る', /撮影/.test(remUi));
+
+  const cap = code('src/components/dashboard/ExternalIdCapture.astro');
+  ok('撮影ブロックに飛び先の id が在る', /id=\{`extid-\$\{shipmentId\}`\}/.test(cap));
+  ok('呼び名の定義は 1 か所 (external-test-id.ts)',
+    /PROVIDER_ID_LABEL\[provider\]/.test(cap) && /PROVIDER_ID_LABEL: Record/.test(code('src/lib/external-test-id.ts')));
+
+  for (const [page, label] of [['src/pages/kit.astro', '/kit'], ['src/pages/dashboard.astro', 'ダッシュボード']]) {
+    const src = code(page);
+    ok(`${label} が同じ判定関数を使う`, /barcodeReminders\(/.test(src));
+    ok(`${label} が条件を書き直していない`, !/BARCODE_REMINDER_DAYS|>=\s*7|7\s*\*\s*86400/.test(src));
+    ok(`${label} は共有閲覧で催促しない`, /canSelfReport|viewer\.kind !== 'share'/.test(src));
+    ok(`${label} の飛び先は該当の撮影ブロック (ページ先頭へ送らない)`, /#extid-\$\{id\}/.test(src));
+  }
+  // ダッシュボードは撮影が on のときだけ台帳を引く（off の回に無駄な問い合わせを出さない）
+  const dash = code('src/pages/dashboard.astro');
+  ok('ダッシュボードは撮影が off なら台帳を引かない',
+    /cfgBool\('labid\.prevent_capture'\)/.test(dash)
+    && /barcodeCaptureOn[\s\S]{0,200}loadRegisteredCaptures\(/.test(dash));
+  ok('ダッシュボードでも全文を触らない', !/normalized_value/.test(dash));
 }
 
 console.log(`\n${fails.length === 0 ? `✓ ${pass} / ${pass} passed` : `✗ ${fails.length} 件 FAIL (${pass} passed)`}`);

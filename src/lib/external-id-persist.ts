@@ -466,3 +466,41 @@ export async function loadCapturedExternalId(
 export function expectedTestType(provider: ExternalIdProvider): string {
   return PROVIDER_TEST_TYPE[provider];
 }
+
+/**
+ * **その人の「登録済み」の受取 ID を全部引く**（画面の表示だけに使う）。
+ *
+ * 用途は 2 つで、どちらも**出す / 出さないを決めるためだけ**:
+ *   - 受取確認の撮影ブロックを「登録済み」の表示にするか（`/kit`）
+ *   - **7 日ワーニングを出すか**（`barcodeReminders` の `registered`・仕様 §7.1）
+ *
+ * **`checkPreventQuestionnaireGate` の代わりにしない。** あちらは
+ * 「この番号がこの検査のものだと確定したか」を見る fail-closed のゲートで、
+ * **`status='confirmed'` ∧ `linked` を要求する**。ここは `superseded` でない行が
+ * 在るかどうかだけを見る（**撮影が済んでいる人を急かさない**ため）。
+ * 混ぜると「確定していない番号で先方へ出す」か「撮った人を催促し続ける」の
+ * どちらかになる。
+ */
+export async function loadRegisteredCaptures(
+  sb: SupabaseClient<Database>,
+  diagnosticUserId: string,
+): Promise<Map<string, { mask: string; needsReview: boolean }>> {
+  const out = new Map<string, { mask: string; needsReview: boolean }>();
+  const r = await sb
+    .schema('customer')
+    .from(TABLE)
+    .select('shipment_ref, normalized_value, status')
+    .eq('diagnostic_user_id', diagnosticUserId)
+    .neq('status', 'superseded');
+  if (r.error) return out;              // 引けなければ「未登録」と同じ扱い（催促が出るだけ）
+  for (const row of r.data ?? []) {
+    const ref = String((row as Row).shipment_ref ?? '');
+    if (!ref) continue;
+    out.set(ref, {
+      // **全文は画面に出さない**（末尾 4 桁のマスクだけ）。
+      mask: maskExternalId(String((row as Row).normalized_value ?? '')),
+      needsReview: (row as Row).status !== 'confirmed',
+    });
+  }
+  return out;
+}
