@@ -931,11 +931,39 @@ console.log('\n⑬ UI の契約\n');
     !/#DCECEF/.test(preventFig) && !/#CBD5E1/.test(preventFig)
     && !/#F8FAFC/.test(preventFig) && !/#102B3A/.test(preventFig));
   ok('インクは黒で描く', (preventFig.match(/#111827/g) ?? []).length >= 10);
-  ok('黒丸に白抜きの番号を 4 つ描く',
-    (preventFig.match(/<circle[^>]*fill="#111827"/g) ?? []).length === 4
-    && (preventFig.match(/fill="#FFFFFF" text-anchor="middle"/g) ?? []).length === 4);
-  ok('**brand 色は当社の注記だけ**（囲みと「↑ ここ」の 2 か所）',
-    (preventFig.match(/#287F86/g) ?? []).length === 2);
+  /*
+   * ①〜④ は**黒い角丸の吹き出し（白抜きの文字 ＋ 三角のしっぽ）**。
+   * 丸囲みの番号ではない（最初そう描いて、実物と配置ごと違うと指摘された）。
+   */
+  ok('黒い吹き出しが 4 つある（①〜④）',
+    (preventFig.match(/rx="9" fill="#111827"/g) ?? []).length === 4);
+  ok('吹き出しのしっぽ（三角）が 4 つある',
+    (preventFig.match(/<polygon points="[^"]*" fill="#111827" \/>/g) ?? []).length === 4);
+  /*
+   * **実物に印字されている文言をそのまま写す。** ここが欠けると
+   * 「この図のとおりの紙」を探す人が迷う（図の役目は紙の見分け）。
+   */
+  ok('実物の 4 つの指示文を写している',
+    ['① 採尿管に貼り付けてください', '② 採尿管ケースに貼り付けてください',
+      '③ 遮光袋に貼り', '④ 返信用封筒の開口部に'].every((w) => preventFig.includes(w)));
+  ok('実物の 4 つの枠を写している',
+    ['密封シール', '口止めシール', 'ログインして登録してください', 'バーコード']
+      .every((w) => preventFig.includes(w)));
+  ok('採尿管シールは 3 枚で、2 本目だけ空',
+    /\{ y: 70, label: '1本', filled: true \}/.test(preventFig)
+    && /\{ y: 107, label: '2本', filled: false \}/.test(preventFig)
+    && /\{ y: 136, label: '予備', filled: true \}/.test(preventFig));
+  /*
+   * **紙の上に当社の文字を置かない。** 書き込みは囲み 2 本と、紙の外の凡例だけ。
+   * 置くと「実物に印字されている」と読まれる。色の出現数で固定する
+   * （囲み 1 ＋ 凡例の見本 1 ＋ 凡例の文字 1 ＝ 3）。
+   */
+  ok('**brand 色は当社の書き込みだけ**（囲み・凡例の見本・凡例の文字）',
+    (preventFig.match(/#287F86/g) ?? []).length === 3);
+  ok('**読み取らない枠の印も当社の書き込みだけ**',
+    (preventFig.match(/#A98558/g) ?? []).length === 3);
+  ok('QR の模様は**決まった式で置いた飾り**（実物を写していない＝読み取れない）',
+    /x \* 7 \+ y \* 13 \+ x \* y/.test(fig));
   /*
    * **パスワードは同じ台紙に印字されている**（§2.1.1）。
    * 「これは読み取りません」と言うために語は出すが、**値は書かない**。
