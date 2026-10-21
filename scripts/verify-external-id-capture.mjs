@@ -866,10 +866,17 @@ console.log('\n⑪ API の認可とゲート\n');
     ok('デメカルには接頭辞を渡さない (この概念を確認していない)',
       /provider === 'prevent' \? cfg\('labid\.prevent_org_prefix'\) : ''/.test(api));
     const scr2 = code('src/scripts/external-id-capture.ts');
-    ok('画面は**サーバが返した接頭辞**を使う (焼き込まない)',
-      /org_prefix/.test(scr2) && !/'704'/.test(scr2));
     ok('接頭辞が違う回は専用の案内を出す',
       /org_prefix_mismatch'\)\) \{[\s\S]{0,400}showWrong/.test(scr2));
+    /*
+     * **画面に `704` を焼かない。** 焼くと app_config を変えたときに
+     * 「704 で始まります」と言いながら別の接頭辞で判定する。
+     * **`'704'` という**リテラルだけを見ても捕まらない**（`'704 で始まります'` を
+     * 書かれると素通りする＝実測）。**数字の並びそのもの**を禁じ、
+     * かつ**案内の中で `c.orgPrefix` を使っている**ことまで見る。
+     */
+    ok('画面は**サーバが返した接頭辞**を使う (焼き込まない)',
+      /org_prefix/.test(scr2) && !/704/.test(scr2));
     /*
      * **候補は消さない。** 接頭辞が違っても登録はできる（実物の形式が既定と違うことも
      * あり得る）。ここで止めると撮影そのものを失わせる。分岐の中だけを見る。
@@ -879,6 +886,8 @@ console.log('\n⑪ API の認可とゲート\n');
       const j = scr2.indexOf('show(c.confirmEl, true);', i);
       return i >= 0 && j > i ? scr2.slice(i, j) : '';
     })();
+    ok('案内の文はサーバが返した接頭辞から組み立てる',
+      /c\.orgPrefix/.test(branch));
     ok('接頭辞が違っても候補は消さない',
       branch.includes('showWrong') && !/show\(c\.confirmEl, false\)/.test(branch) && !/\breturn\b/.test(branch),
       branch.slice(0, 120));
