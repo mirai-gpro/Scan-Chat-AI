@@ -801,8 +801,25 @@ console.log('\n⑬ UI の契約\n');
   ok('アプリ内カメラの面がある', /data-extid-camera\b/.test(comp)
     && /data-extid-video/.test(comp) && /data-extid-canvas/.test(comp) && /data-extid-shot/.test(comp));
   ok('カメラ面は既定で閉じている', /class="mt-3 hidden" data-extid-camera/.test(comp));
-  ok('「写真を選ぶ」に capture を付けない（ここからも OS のカメラを開かない）',
-    /accept="image\/\*" class="hidden" data-extid-file="file"/.test(comp));
+  /*
+   * **「写真を選ぶ」は撤去した（発注者指示 2026-10-21）。**
+   * ここで見るのは**口が無いこと**＝ markup。**語の有無で見ない** —
+   * 撤去した経緯を説明するコメントに「写真を選ぶ」が残るので、
+   * 語で見ると戻してしまっても通る（⑨ と L-17 で踏んだのと同じ型）。
+   */
+  ok('**ファイル選択の口が無い**（画面から入るのはカメラと手入力だけ）',
+    !/data-extid-file/.test(code('src/components/dashboard/ExternalIdCapture.astro'))
+    && !/type="file"/.test(code('src/components/dashboard/ExternalIdCapture.astro')));
+  ok('ファイル選択の `change` 経路も消えている',
+    !/data-extid-file/.test(code('src/scripts/external-id-capture.ts')));
+  ok('画面から送る captureMethod は camera と manual だけ',
+    /captureMethod: 'camera' \| 'manual';/.test(code('src/scripts/external-id-capture.ts')));
+  /*
+   * **サーバは `file` を受け続ける。** 既に台帳に入っている行と DB の check 制約
+   * (`20261011000010:50`) があるので、受け口を狭めると過去の行が読めなくなる。
+   */
+  ok('サーバは `file` も受け続ける（既存の台帳行と DB の check 制約）',
+    /v === 'camera' \|\| v === 'file' \|\| v === 'manual'/.test(read('src/pages/api/kit/[id]/external-id.ts')));
   {
     const scr = code('src/scripts/external-id-capture.ts');
     ok('カメラは `/scan` と同じ実装を流用する（写して増やさない）',
@@ -821,11 +838,26 @@ console.log('\n⑬ UI の契約\n');
     ok('ページを離れるときに止める', /pagehide[\s\S]{0,300}closeCamera/.test(scr));
     ok('撮ったらカメラを閉じてから読み取りへ回す',
       /closeCamera\(c\);[\s\S]{0,200}captureAndRead\(c, file\)/.test(scr));
-    ok('権限拒否・カメラ無しは「写真を選ぶ」へ逃がす',
-      /onError[\s\S]{0,300}写真を選ぶ/.test(scr));
+    ok('権限拒否・カメラ無しは手入力へ逃がす（行き止まりにしない）',
+      /onError[\s\S]{0,400}手で入力/.test(scr)
+      && /onError[\s\S]{0,400}show\(c\.manualEl, true\)/.test(scr));
+    ok('カメラの無い端末でも手入力の欄を開く',
+      /cameraAvailable\(\)\) \{[\s\S]{0,300}show\(c\.manualEl, true\)/.test(scr));
   }
-  ok('写真を選ぶ経路は touch-only でない (PC でも使える)',
-    /<label class="btn-pair btn-graph min-h-touch cursor-pointer">/.test(comp));
+  /*
+   * **手入力への逃げ道。** 「写真を選ぶ」を撤去した 2026-10-21 以降、
+   * カメラの無い PC と権限を拒否した端末はここしか残っていない（仕様 §5.1）。
+   * **`touch-only` を付けると PC から登録できなくなる**ので、そこを見る。
+   */
+  {
+    const m = comp.match(/<button[^>]*data-extid-manual-open>/);
+    ok('手入力を開く口がある', !!m);
+    ok('手入力の口は touch-only でない (PC でも開ける)', !!m && !/touch-only/.test(m[0]));
+    ok('手入力の口はタップ領域を確保している', !!m && /min-h-touch/.test(m[0]));
+    ok('手入力の口は欄を開くだけ（ここでは何も送らない）',
+      /data-extid-manual-open\]'\)\) \{[\s\S]{0,200}show\(c\.manualEl, true\)/.test(code('src/scripts/external-id-capture.ts'))
+      && !/data-extid-manual-open\]'\)\) \{[\s\S]{0,200}register\(/.test(code('src/scripts/external-id-capture.ts')));
+  }
   ok('撮り直し・手入力の逃げ道がある',
     /data-extid-retake/.test(comp) && /data-extid-manual/.test(comp));
   ok('確認してから登録する (即確定しない)', /data-extid-register/.test(comp) && /この番号で登録する/.test(comp));
@@ -881,13 +913,51 @@ console.log('\n⑬ UI の契約\n');
   ok('図は provider ごとに分かれている',
     /\{provider === 'demecal' && \(/.test(fig) && /\{provider === 'prevent' && \(/.test(fig));
   ok('プリベントの図は「シール台紙」を描く', /シール台紙/.test(fig));
-  ok('プリベントの図は `A…A` の印字をそのまま見せる', /A704000\*\*\*A/.test(fig));
+  /*
+   * プリベントの図は **2026-10-21 に白黒で描き直した**（発注者指示「用紙イメージが
+   * 実物と違うので、色味も含め実際の用紙に合わせて」）。実物は**白地に黒 1 色の印刷物**で、
+   * 淡色の装飾を紙に使うと**手元の紙と図が別物に見える**。
+   * brand 色を使ってよいのは**当社の注記（囲みと「↑ ここ」）だけ**＝台紙に無い線。
+   * **図は目視では守れない** — 色を戻しても画面は「それなり」に見える。
+   */
+  const preventFig = (() => {
+    const i = fig.indexOf("{provider === 'prevent' && (");
+    const j = fig.indexOf('</svg>', i);
+    return i >= 0 && j > i ? fig.slice(i, j) : '';
+  })();
+  ok('プリベントの図を取り出せた', preventFig.length > 500, `${preventFig.length} 文字`);
+  ok('プリベントの図は `A…A` の印字をそのまま見せる', /A704000123A/.test(preventFig));
+  ok('**紙は白黒**（淡色の装飾を紙に使わない）',
+    !/#DCECEF/.test(preventFig) && !/#CBD5E1/.test(preventFig)
+    && !/#F8FAFC/.test(preventFig) && !/#102B3A/.test(preventFig));
+  ok('インクは黒で描く', (preventFig.match(/#111827/g) ?? []).length >= 10);
+  ok('黒丸に白抜きの番号を 4 つ描く',
+    (preventFig.match(/<circle[^>]*fill="#111827"/g) ?? []).length === 4
+    && (preventFig.match(/fill="#FFFFFF" text-anchor="middle"/g) ?? []).length === 4);
+  ok('**brand 色は当社の注記だけ**（囲みと「↑ ここ」の 2 か所）',
+    (preventFig.match(/#287F86/g) ?? []).length === 2);
+  /*
+   * **パスワードは同じ台紙に印字されている**（§2.1.1）。
+   * 「これは読み取りません」と言うために語は出すが、**値は書かない**。
+   */
+  ok('**パスワードの値を図に書かない**',
+    !/パスワード[^<]{0,8}[A-Za-z0-9]{5,}/.test(preventFig));
   ok('**パスワードと QR は読まないと図にも書く**',
     /ここは読み取りません/.test(fig) && /パスワード/.test(fig) && /QR/.test(fig));
   ok('シールを貼る前に撮るよう言っている', /シールを貼る前に撮影/.test(fig));
   ok('図は `hasDiagram` のときだけ描く', /\{hasDiagram && \(/.test(fig));
-  ok('**本物の番号を図に入れない** (0 の並び)', /000000000000000/.test(fig)
+  ok('**デメカルの図は本物の番号を入れない** (0 の並び)', /000000000000000/.test(fig)
     && !/[0-9]{15}/.test(fig.replace(/0{15}/g, '')));
+  /*
+   * プリベントは **0 の並びにしない** — 実物が黒 1 色の印刷物なので、
+   * 番号だけ伏せ字だと紙に見えない。代わりに**リポジトリ共通のダミー**
+   * （ポータルのサンプル CSV・先方宛の依頼文と同じ `704000123`）を使う。
+   * **他の番号が混ざったら落とす**（実在の番号を写した疑いになる）。
+   */
+  ok('**プリベントの図はリポジトリ共通のダミーだけ**',
+    /704000123/.test(preventFig)
+    && (preventFig.match(/704000[0-9]{3}/g) ?? []).every((v) => v === '704000123'),
+    JSON.stringify([...new Set(preventFig.match(/704000[0-9]{3}/g) ?? [])]));
   ok('桁数が分かる', /15桁/.test(fig));
   ok('取り違えやすい数字を名指ししている (電話番号・検査ID欄)',
     /0120/.test(fig) && /検査ID/.test(fig));
@@ -938,6 +1008,67 @@ console.log('\n⑬ UI の契約\n');
     ok('「上の図」と言う provider は図を持つ provider と一致する',
       hasFigure.length > 0 && JSON.stringify(saysFigure) === JSON.stringify(hasFigure),
       `says=${JSON.stringify(saysFigure)} hasFigure=${JSON.stringify(hasFigure)}`);
+  }
+
+  /*
+   * ── 登録し直す（発注者指示 2026-10-21・仕様 §8.3「再撮影を第一選択」）──
+   *
+   * **以前は画面に戻る口が無かった。** 一度登録すると登録済みの表示だけになり、
+   * 撮り直すには台帳を手で直すしかなかった（API は前から撮り直しに対応している）。
+   * **ここは静かに壊れる** — 口が消えても画面は「登録済み」で正常に見えるし、
+   * 確認を飛ばしても押せてしまう（押した人は上書きされたことに気づかない）。
+   */
+  {
+    const scr = code('src/scripts/external-id-capture.ts');
+    ok('登録済みでも撮影の面を markup として出す（JS で組み立て直さない）',
+      /data-extid-done/.test(comp) && /data-extid-form/.test(comp)
+      && /class=\{registeredMask \? 'hidden' : ''\} data-extid-form/.test(comp));
+    ok('登録し直す口がある', /data-extid-redo-open/.test(comp));
+    ok('確認の面がある（はい／やめる）',
+      /data-extid-redo-confirm/.test(comp) && /data-extid-redo-yes/.test(comp)
+      && /data-extid-redo-no/.test(comp));
+    ok('確認は既定で閉じている',
+      /class="mt-2 hidden rounded-xl border p-3 status-watch" data-extid-redo-confirm/.test(comp));
+    ok('**赤にしない**（誤りではなくやり直せること）',
+      /status-watch" data-extid-redo-confirm/.test(comp));
+    ok('上書きになることと、前の番号が残ることを伝える',
+      /上書き/.test(comp) && /記録として残り/.test(comp));
+    /*
+     * **「押しただけで撮影の面が開く」に戻さない。** 1 段挟むのが要点なので、
+     * `redo-open` の分岐だけを切り出して、面を入れ替える操作が無いことを見る
+     * （後ろに `show(c.formEl, true)` があるので、ファイル全体で見ると素通りする）。
+     */
+    const open = (() => {
+      const i = scr.indexOf('data-extid-redo-open]');
+      const j = scr.indexOf('data-extid-redo-no]', i);
+      return i >= 0 && j > i ? scr.slice(i, j) : '';
+    })();
+    ok('登録し直すは**確認を出すだけ**（いきなり撮影の面にしない）',
+      open.includes('show(c.redoEl, true)')
+      && !/show\(c\.formEl, true\)/.test(open) && !/show\(c\.doneEl, false\)/.test(open),
+      open.slice(0, 120));
+    const yes = (() => {
+      const i = scr.indexOf('data-extid-redo-yes]');
+      const j = scr.indexOf('data-extid-manual-open]', i);
+      return i >= 0 && j > i ? scr.slice(i, j) : '';
+    })();
+    ok('承諾して初めて面が入れ替わる',
+      /show\(c\.doneEl, false\)/.test(yes) && /show\(c\.formEl, true\)/.test(yes));
+    ok('前回の候補・証跡を持ち越さない',
+      /c\.read = null; c\.evidenceKey = null/.test(yes));
+    ok('上書きになることを撮影中も出す', /上書きします/.test(yes));
+    /*
+     * **撮り直しは API を変えずに成立している。** 台帳は旧行を `superseded` に
+     * 落として入れ直す（`external-id-persist.ts`）。ここが「消して入れ直す」に
+     * 戻ると、**前の番号が辿れなくなる**（§8.3「修正前後を監査可能にする」）。
+     */
+    const persist = code('src/lib/external-id-persist.ts');
+    ok('旧行は消さずに superseded へ落とす',
+      /\.update\(\{ status: 'superseded' \}\)/.test(persist)
+      && !/\.delete\(\)/.test(persist));
+    ok('前の値を `previous_value` に残す', /previous_value: priorRow \?/.test(persist));
+    ok('同じ回の撮り直しは `lab_tests` の行を使い回す',
+      /existingLabTestId: priorLabTestId/.test(persist));
   }
 
   /*

@@ -17,6 +17,13 @@
  *
  * **uid は属性で渡さない。** 対象はサーバが Cookie から決める
  * （`kit-self-report.ts:16-18` と同じ・他人の uid を書かせない）。
+ *
+ * 【2026-10-21 の変更（発注者指示）】
+ *   - **「写真を選ぶ」を撤去**した。ファイル選択の `change` 経路も一緒に消えたので、
+ *     画面から入る口は**アプリ内カメラと手入力の 2 つだけ**。
+ *     サーバは `captureMethod: 'file'` を受け続ける（既存の台帳行と DB の check 制約）。
+ *   - **登録済みでも「登録し直す」から撮り直せる**ようにした（仕様 §8.3）。
+ *     API は以前から撮り直しに対応しているので、**ここで足したのは面の出し入れだけ**。
  */
 
 import { initCameraScan, type CameraScanController } from './camera-scan';
@@ -43,10 +50,15 @@ interface Ctx {
   /** `/scan` と同じコントローラ。**押されるまで作らない**（作っただけでは起動しない）。 */
   camera: CameraScanController | null;
   inputEl: HTMLInputElement | null;
+  /** 登録済みの面 / 撮影の面 / 登録し直すの確認。**登録済みでも両方 markup は在る**。 */
+  doneEl: HTMLElement | null;
+  formEl: HTMLElement | null;
+  redoEl: HTMLElement | null;
   /** 直近の読み取り結果（登録時にサーバへ戻す）。 */
   read: { barcode: string | null; printed: string | null } | null;
   evidenceKey: string | null;
-  captureMethod: 'camera' | 'file' | 'manual';
+  /** 画面から送るのは `camera` と `manual` の 2 つだけ（`file` の経路は撤去済み）。 */
+  captureMethod: 'camera' | 'manual';
   busy: boolean;
 }
 
@@ -73,6 +85,9 @@ function ctx(root: HTMLElement): Ctx {
     cameraStatusEl: q('[data-extid-camera-status]'),
     camera: null,
     inputEl: q<HTMLInputElement>('[data-extid-input]'),
+    doneEl: q('[data-extid-done]'),
+    formEl: q('[data-extid-form]'),
+    redoEl: q('[data-extid-redo-confirm]'),
     read: null,
     evidenceKey: null,
     captureMethod: 'camera',
@@ -183,7 +198,8 @@ function closeCamera(c: Ctx): void {
 async function openCamera(c: Ctx): Promise<void> {
   if (!c.videoEl || !c.canvasEl || !c.cameraEl) return;
   if (!cameraAvailable()) {
-    say(c, 'この端末ではカメラを使えません。「写真を選ぶ」から画像を選んでください。');
+    say(c, 'この端末ではカメラを使えません。「番号を手で入力する」からご登録ください。');
+    show(c.manualEl, true);
     return;
   }
   clearWrong(c);
@@ -211,7 +227,8 @@ async function openCamera(c: Ctx): Promise<void> {
       onError: (message: string) => {
         closeCamera(c);
         // **行き止まりにしない** — 権限拒否・カメラ無しはここに来る。
-        say(c, `${message} 「写真を選ぶ」から画像を選んでください。`);
+        say(c, `${message} 「番号を手で入力する」からご登録ください。`);
+        show(c.manualEl, true);
       },
     });
   }
@@ -300,7 +317,7 @@ export function reasonText(reasons: string[], note: string | null): string {
   return parts.join(' ');
 }
 
-async function register(c: Ctx, value: string, method: 'camera' | 'file' | 'manual'): Promise<void> {
+async function register(c: Ctx, value: string, method: 'camera' | 'manual'): Promise<void> {
   if (c.busy) return;              // 二重 submit よけ（サーバ側も冪等）
   c.busy = true;
   say(c, '登録しています…');
@@ -332,21 +349,6 @@ export function initExternalIdCapture(): void {
     }
   });
 
-  // ファイル選択（カメラ / 写真）
-  document.addEventListener('change', (e) => {
-    const input = (e.target as Element | null)?.closest?.('input[data-extid-file]') as HTMLInputElement | null;
-    if (!input) return;
-    const root = input.closest('[data-extid-capture]') as HTMLElement | null;
-    if (!root) return;
-    const c = ctx(root);
-    const file = input.files?.[0];
-    // **押した時点で捨てない**（ダイアログを閉じただけで状態を失わせない）。
-    if (!file) return;
-    c.captureMethod = input.dataset.extidFile === 'camera' ? 'camera' : 'file';
-    void captureAndRead(c, file);
-    input.value = '';              // 同じファイルを選び直せるように
-  });
-
   document.addEventListener('click', (e) => {
     const t = e.target as Element | null;
     const root = t?.closest?.('[data-extid-capture]') as HTMLElement | null;
@@ -374,6 +376,43 @@ export function initExternalIdCapture(): void {
     }
 
     const c = ctx(root);
+
+    /*
+     * **登録し直す**（仕様 §8.3「再撮影を第一選択」）。
+     * **押しただけでは撮影の面を開かない** — 上書きになることを先に伝えて、
+     * 「登録し直す」を押してもらってから面を入れ替える。
+     */
+    if (t?.closest?.('[data-extid-redo-open]')) {
+      show(c.redoEl, true);
+      return;
+    }
+    if (t?.closest?.('[data-extid-redo-no]')) {
+      show(c.redoEl, false);
+      return;
+    }
+    if (t?.closest?.('[data-extid-redo-yes]')) {
+      // 登録済みの面を畳んで撮影の面を出す。**値は消さない**（登録に失敗しても元の登録は残る）。
+      show(c.redoEl, false);
+      show(c.doneEl, false);
+      show(c.formEl, true);
+      clearWrong(c);
+      show(c.confirmEl, false);
+      show(c.manualEl, false);
+      c.read = null; c.evidenceKey = null; c.captureMethod = 'camera';
+      say(c, 'もう一度撮影してください。登録すると今の番号を上書きします。');
+      return;
+    }
+
+    /*
+     * 手入力の欄を開く。**撮影の代わりではなく逃げ道**なので、ここでは何も送らない
+     * （「写真を選ぶ」を撤去した 2026-10-21 以降、カメラの無い端末の唯一の口）。
+     */
+    if (t?.closest?.('[data-extid-manual-open]')) {
+      show(c.manualEl, true);
+      c.inputEl?.focus();
+      say(c, `${c.idLabel}を入力して登録してください。`);
+      return;
+    }
 
     if (t?.closest?.('[data-extid-camera-open]')) {
       void openCamera(c);
