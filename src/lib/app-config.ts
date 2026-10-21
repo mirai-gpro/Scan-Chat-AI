@@ -191,6 +191,15 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     default: '^[0-9]{15}$',
     description: '正規表現。既定は「15桁の問合せ番号」という記載どおり。'
       + ' **DSS の `指図番号` と同一だと断定していない** (実値は 15 桁前後で fixture は 16/17 桁)。' },
+  { key: 'labid.prevent_org_prefix', type: 'string', group: '外部検査ID',
+    label: 'プリベント ユーザーID の発行元 (法人) 接頭辞',
+    default: '704',
+    description: '**頭の `704` は Wellfort 法人を表す** (先方の説明・2026-10-21)。'
+      + ' 当社のキットの番号は必ずこれで始まるので、**読み取りが成功したかの検査に使う**'
+      + ' (外れたら review_required ＋ 画面で撮り直しを促す / バーコードと印字が食い違ったら'
+      + ' これで始まる側を採る / 問診CSV のゲートはブロックする)。'
+      + ' **空にすると判定しない。** 期待パターン (`labid.prevent_pattern`) と違い'
+      + ' **桁数の推測を含まない**ので、形式が違う実物が出てもここは緩めない。' },
   { key: 'labid.prevent_capture', type: 'bool', group: '外部検査ID',
     label: 'プリベント 受取時バーコード撮影を出す',
     default: 'off',

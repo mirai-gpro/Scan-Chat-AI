@@ -23,6 +23,8 @@ export const prerender = false;
  * mode:
  *   'ticket'   … 証跡画像の presigned PUT を発行（**ファイル本体は関数を通さない**）
  *   'read'     … S3 の画像を Gemini で読み、**候補だけ**返す（DB は 1 バイトも書かない）
+ *                 **読み取りが成功したかは発行元の接頭辞（`704`＝Wellfort）でも見る**
+ *                 （`labid.prevent_org_prefix`・外れたら `org_prefix_mismatch`）。
  *   'register' … ユーザーが確認した値を確定して登録（台帳 ＋ `lab_tests` 紐付け）
  *
  * 【認可は `self-report.ts:26-40` の 3 段ガードをそのまま使う。新しい認可を発明しない】
@@ -112,6 +114,7 @@ export const POST: APIRoute = async (ctx) => {
       barcode: read.barcode,
       ocr: read.printed,
       expectedPattern: patternFor(provider),
+      orgPrefix: orgPrefixFor(provider),
     });
     if (!ev.ok) {
       return json({
@@ -129,6 +132,13 @@ export const POST: APIRoute = async (ctx) => {
       status: ev.status,
       decode_method: ev.decodeMethod,
       review_reasons: ev.reasons,
+      /*
+       * **発行元の接頭辞を画面へ返す。** 利用者が手元の用紙で確かめられるように、
+       * 「704 で始まります」と具体的に言うため。**秘密ではない** — 同じ値が
+       * 本人の台紙に印字されているし、画面の図（ダミー `704000123`）にも出ている。
+       * 既定値をクライアントに焼かないので、**app_config を変えれば文言も追従する**。
+       */
+      org_prefix: orgPrefixFor(provider),
       note: read.note,
     });
   }
@@ -144,6 +154,7 @@ export const POST: APIRoute = async (ctx) => {
       ocr: body.printed,
       manual: body.manual,
       expectedPattern: patternFor(provider),
+      orgPrefix: orgPrefixFor(provider),
     });
     if (!ev.ok) {
       return json({ ok: false, error: 'no_readable_value', detail: '登録できる番号がありません' }, 400);
@@ -193,6 +204,14 @@ function captureEnabled(provider: ExternalIdProvider): boolean {
 
 function patternFor(provider: ExternalIdProvider): string {
   return provider === 'prevent' ? cfg('labid.prevent_pattern') : cfg('labid.demecal_pattern');
+}
+
+/**
+ * 発行元（法人）の接頭辞。**`704` は Wellfort 法人を表す**（先方の説明・2026-10-21）。
+ * デメカルはこの概念を確認していないので空＝判定しない。
+ */
+function orgPrefixFor(provider: ExternalIdProvider): string {
+  return provider === 'prevent' ? cfg('labid.prevent_org_prefix') : '';
 }
 
 function normalizeCaptureMethod(v: unknown): CaptureMethod | null {

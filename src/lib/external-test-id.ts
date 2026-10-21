@@ -75,6 +75,41 @@ export const DEFAULT_EXPECTED_PATTERN: Record<ExternalIdProvider, string> = {
   demecal: '^[0-9]{15}$',
 };
 
+/**
+ * **発行元（法人）を表す接頭辞**のコード既定（app_config `labid.prevent_org_prefix`）。
+ *
+ * **プリベントのユーザーID の頭 `704` は Wellfort 法人を指す**（先方の説明・2026-10-21）。
+ * つまり**当社の検査キットの番号は必ず `704` で始まる**ので、
+ * **読み取りが成功したかの判定に使える**:
+ *   - 読めた番号が `704` で始まらない ＝ **別の数字を読んだ疑いが濃い**
+ *     （用紙には URL・パスワード・管理用の記号も印字されている）。
+ *   - バーコードと印字で値が食い違ったとき、**`704` で始まる側を採る**。
+ *
+ * **期待パターン（`DEFAULT_EXPECTED_PATTERN`）とは別物。** あちらは総桁数まで含む
+ * 「形式例」で**実物は未確認**（仕様 §2.3）だが、**`704` は先方から説明を受けた事実**。
+ * 形式が違う実物が出てきたら `labid.prevent_pattern` の方を緩める。**接頭辞は緩めない。**
+ *
+ * デメカルは**この概念を確認していない**ので空＝判定しない（想像で足さない）。
+ */
+export const DEFAULT_ORG_PREFIX: Record<ExternalIdProvider, string> = {
+  prevent: '704',
+  demecal: '',
+};
+
+/**
+ * 発行元の接頭辞で始まるか。
+ *
+ * - `null` ＝ **判定しない**（未設定、または数字以外が入っている＝設定の誤り）。
+ *   値は構造ガードで数字のみに絞られているので、**数字でない接頭辞は必ず不一致になる** —
+ *   それを「全件アウト」にすると設定の打ち間違いで**運用が止まる**ので、判定しない側へ倒す。
+ * - `false` ＝ **当社の検査キットの番号ではない**（＝読み取りに失敗した疑い）。
+ */
+export function matchesOrgPrefix(normalized: string, prefix: string | null | undefined): boolean | null {
+  const p = (prefix ?? '').trim();
+  if (!p || !/^[0-9]+$/.test(p)) return null;
+  return normalized.startsWith(p);
+}
+
 export function isExternalIdProvider(v: unknown): v is ExternalIdProvider {
   return typeof v === 'string' && (EXTERNAL_ID_PROVIDERS as readonly string[]).includes(v);
 }
@@ -185,6 +220,7 @@ export type LabTestLinkStatus = 'linked' | 'deferred' | 'conflict';
 export type ReviewReason =
   | 'barcode_ocr_mismatch'   // バーコードと印字IDが食い違う
   | 'single_source'          // 片方しか読めていない
+  | 'org_prefix_mismatch'    // 発行元の接頭辞 (704=Wellfort) で始まらない＝当社のキットでない
   | 'pattern_mismatch'       // 期待パターンに合わない
   | 'pattern_unknown'        // 期待パターンが未設定／壊れている＝判定不能
   | 'manual_entry';          // 手入力で入れた値
@@ -199,6 +235,8 @@ export interface EvaluateInput {
   manual?: unknown;
   /** 期待パターン（app_config 由来）。 */
   expectedPattern?: string | null;
+  /** 発行元の接頭辞（app_config 由来。`704`＝Wellfort）。 */
+  orgPrefix?: string | null;
 }
 
 /** 正規化できた各経路の値（監査用。画面には出さない）。 */
@@ -249,6 +287,7 @@ export function evaluateExternalId(input: EvaluateInput): EvaluateResult {
   const manual = normalizeExternalId(input.manual);
   const sources = { barcode, ocr, manual };
 
+  const orgPrefix = input.orgPrefix ?? DEFAULT_ORG_PREFIX[input.provider];
   const reasons: ReviewReason[] = [];
   let value: string | null = null;
   let decodeMethod: DecodeMethod = 'manual';
@@ -261,11 +300,27 @@ export function evaluateExternalId(input: EvaluateInput): EvaluateResult {
     const bOk = barcode && passesStructuralGuard(barcode) ? barcode : null;
     const oOk = ocr && passesStructuralGuard(ocr) ? ocr : null;
     if (bOk && oOk) {
-      value = bOk;                       // バーコードを採る（印字より機械可読が確実）
       if (bOk === oOk) {
+        value = bOk;
         decodeMethod = 'barcode+ocr';
       } else {
-        decodeMethod = 'barcode';
+        /*
+         * 食い違ったときは **発行元の接頭辞で選ぶ**（`704`＝Wellfort）。
+         * 片方だけが `704…` なら、そちらが「読めた方」である可能性が高い。
+         * **どちらも／どちらとも言えないときは従来どおりバーコードを採る**
+         * （印字より機械可読が確実）。
+         * **どちらを採っても `barcode_ocr_mismatch` は残す** — 接頭辞が合ったことは
+         * 「正しい番号だ」という保証ではないので、**自動確定はさせない**。
+         */
+        const bPre = matchesOrgPrefix(bOk, orgPrefix);
+        const oPre = matchesOrgPrefix(oOk, orgPrefix);
+        if (bPre === false && oPre === true) {
+          value = oOk;
+          decodeMethod = 'ocr';
+        } else {
+          value = bOk;
+          decodeMethod = 'barcode';
+        }
         reasons.push('barcode_ocr_mismatch');
       }
     } else if (bOk) {
@@ -285,6 +340,14 @@ export function evaluateExternalId(input: EvaluateInput): EvaluateResult {
       decodeMethod: 'manual', reasons: [], sources, error: 'no_readable_value',
     };
   }
+
+  /*
+   * **発行元の接頭辞**（`704`＝Wellfort）。**読み取りが成功したかの検査**として使う。
+   * 外れても**登録は止めない**（撮影そのものを失わせない）が `review_required` になり、
+   * 画面は「別の数字を読んだかもしれません」と図へ戻す。
+   * **足りない接頭辞をこちらで補わない**（補うと別の番号に化ける＝捏造）。
+   */
+  if (matchesOrgPrefix(value, orgPrefix) === false) reasons.push('org_prefix_mismatch');
 
   const pattern = input.expectedPattern ?? DEFAULT_EXPECTED_PATTERN[input.provider];
   const m = matchesExpectedPattern(value, pattern);
@@ -345,6 +408,8 @@ export interface PreventGateInput {
   capture: PreventGateCapture | null | undefined;
   /** 期待パターン（app_config 由来）。 */
   expectedPattern?: string | null;
+  /** 発行元の接頭辞（app_config 由来。`704`＝Wellfort）。 */
+  orgPrefix?: string | null;
 }
 
 export type PreventGateReason =
@@ -352,6 +417,7 @@ export type PreventGateReason =
   | 'capture_missing'
   | 'barcode_no_missing'
   | 'barcode_no_malformed'
+  | 'org_prefix_mismatch'
   | 'capture_not_confirmed'
   | 'lab_test_not_linked';
 
@@ -385,6 +451,27 @@ export function checkPreventQuestionnaireGate(input: PreventGateInput): PreventG
       allowed: false,
       reason: 'barcode_no_malformed',
       detail: `登録済みのバーコードNo. が数字 ${ID_MIN_DIGITS}〜${ID_MAX_DIGITS} 桁の形になっていません (${maskExternalId(v)})。`,
+    };
+  }
+
+  /*
+   * **発行元の接頭辞**（`704`＝Wellfort）。ここは**ハードな不変条件なので再判定する**。
+   *
+   * 期待パターン（総桁数まで含む形式例）は**実物が未確認**なので再判定しない
+   * ＝ 台帳の `status` を正とする（下の段で止まる）。一方 `704` は**先方から説明を受けた
+   * 事実**で、構造ガードと同じ性質の不変条件。`confirmed` の行でも `704` で始まらない値は
+   * **当社の検査キットの番号ではない**ので、問診CSV に出してはいけない
+   * （admin の訂正で値が差し替わった回・接頭辞の設定が後から変わった回に効く）。
+   *
+   * **未設定・数字でない設定のときは判定しない**（`matchesOrgPrefix` が null）。
+   * 設定の打ち間違いで**全件が止まる**方が運用の被害が大きい。
+   */
+  if (matchesOrgPrefix(v, input.orgPrefix ?? DEFAULT_ORG_PREFIX.prevent) === false) {
+    return {
+      allowed: false,
+      reason: 'org_prefix_mismatch',
+      detail: `登録済みのバーコードNo. が発行元の接頭辞で始まっていません (${maskExternalId(v)})。`
+        + ' 当社の検査キットの番号ではない可能性があります。管理画面で確認してください。',
     };
   }
 

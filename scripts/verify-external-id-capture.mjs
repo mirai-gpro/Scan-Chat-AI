@@ -157,6 +157,86 @@ console.log('\n③ 採否判定 (evaluateExternalId)\n');
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// ③' 発行元（法人）の接頭辞 = **読み取りが成功したかの検査**
+//     （発注者指示 2026-10-21「ユーザーIDの頭の 704 は Wellfort 法人を表す」）
+// ══════════════════════════════════════════════════════════════════════
+console.log("\n③' 発行元の接頭辞 (704 = Wellfort)\n");
+{
+  const ev = (o) => core.evaluateExternalId({ provider: 'prevent', expectedPattern: core.DEFAULT_EXPECTED_PATTERN.prevent, ...o });
+
+  eq('コード既定は 704 (プリベント)', core.DEFAULT_ORG_PREFIX.prevent, '704');
+  /*
+   * **デメカルには足さない。** この概念を先方から確認していないので、
+   * 想像で接頭辞を置くと**全件が review_required になる**。
+   */
+  eq('デメカルは空 = 判定しない', core.DEFAULT_ORG_PREFIX.demecal, '');
+
+  const m = core.matchesOrgPrefix;
+  eq('704 で始まる → true', m('704000123', '704'), true);
+  eq('704 で始まらない → false', m('999000123', '704'), false);
+  eq('途中に 704 があっても false', m('170400012', '704'), false);
+  /*
+   * **設定の打ち間違いで全件を止めない。** 値は数字だけなので、数字でない接頭辞は
+   * 必ず不一致になる。そこで「アウト」にすると 1 文字のミスで運用が止まる。
+   */
+  eq('空は判定しない (null)', m('704000123', ''), null);
+  eq('数字でない設定は判定しない (null)', m('704000123', 'ABC'), null);
+  eq('undefined も判定しない', m('704000123', undefined), null);
+
+  // ── 読み取りが成功したかの検査 ──
+  const bad = ev({ barcode: '999000123', ocr: '999000123' });
+  eq('接頭辞が違う → review_required (**登録は止めない**)', [bad.ok, bad.status], [true, 'review_required']);
+  ok('接頭辞が違う → org_prefix_mismatch', bad.reasons.includes('org_prefix_mismatch'));
+  eq('**値を直さない** (704 を足して捏造しない)', bad.value, '999000123');
+
+  const good = ev({ barcode: '704000123', ocr: '704000123' });
+  ok('接頭辞が合えば理由は付かない', !good.reasons.includes('org_prefix_mismatch'));
+
+  /*
+   * **バーコードと印字が食い違ったら、704 で始まる側を採る**
+   * ＝「どちらの読み取りが成功したか」の判定に使う。
+   */
+  const pickOcr = ev({ barcode: '104000123', ocr: '704000123' });
+  eq('バーコードが 704 でなく印字が 704 → **印字を採る**', [pickOcr.value, pickOcr.decodeMethod], ['704000123', 'ocr']);
+  ok('それでも barcode_ocr_mismatch は残す (自動確定しない)',
+    pickOcr.reasons.includes('barcode_ocr_mismatch') && pickOcr.status === 'review_required');
+  ok('採った値は 704 なので org_prefix_mismatch は付かない', !pickOcr.reasons.includes('org_prefix_mismatch'));
+
+  const pickBarcode = ev({ barcode: '704000123', ocr: '104000123' });
+  eq('印字が 704 でなくバーコードが 704 → バーコードを採る',
+    [pickBarcode.value, pickBarcode.decodeMethod], ['704000123', 'barcode']);
+
+  const bothGood = ev({ barcode: '704000123', ocr: '704000999' });
+  eq('どちらも 704 → 従来どおりバーコードを採る',
+    [bothGood.value, bothGood.decodeMethod], ['704000123', 'barcode']);
+  const bothBad = ev({ barcode: '104000123', ocr: '204000123' });
+  eq('どちらも 704 でない → 従来どおりバーコードを採る',
+    [bothBad.value, bothBad.decodeMethod], ['104000123', 'barcode']);
+
+  // 手入力にも効く（手で打ち間違えた回も拾う）
+  const man = ev({ barcode: '704000123', ocr: '704000123', manual: '904000123' });
+  ok('手入力でも接頭辞を見る', man.reasons.includes('org_prefix_mismatch'));
+
+  // 接頭辞は app_config から差し替えられる
+  const other = core.evaluateExternalId({
+    provider: 'prevent', barcode: '704000123', ocr: '704000123',
+    expectedPattern: core.DEFAULT_EXPECTED_PATTERN.prevent, orgPrefix: '801',
+  });
+  ok('接頭辞を差し替えると判定も変わる', other.reasons.includes('org_prefix_mismatch'));
+  const off = core.evaluateExternalId({
+    provider: 'prevent', barcode: '999000123', ocr: '999000123',
+    expectedPattern: '', orgPrefix: '',
+  });
+  ok('接頭辞が空なら判定しない', !off.reasons.includes('org_prefix_mismatch'));
+
+  // デメカルは既定で判定しない
+  const dem = core.evaluateExternalId({
+    provider: 'demecal', barcode: '123456789012345', ocr: '123456789012345',
+  });
+  eq('デメカルは接頭辞で止めない', [dem.status, dem.reasons], ['confirmed', []]);
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // ④ Genoplan を**この経路に通さない**（正本はタカセ返送CSV 方式・仕様 §2.3）
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n④ Genoplan は対象外\n');
@@ -249,12 +329,41 @@ console.log('\n⑦ AI問診 → 問診CSV のゲート\n');
     eq(`lab_test_id=${JSON.stringify(id)} → **ブロック**`, [r.allowed, r.reason], [false, 'lab_test_not_linked']);
   }
 
-  // **パターン外は台帳側で review_required になっている**ので、この段で止まる。
-  // ゲートがパターンを再判定して独自に通す／止めることはしない。
+  /*
+   * **期待パターン（総桁数まで含む形式例）は再判定しない。** 実物が未確認なので、
+   * 台帳の `status` を正とする（外れた回は review_required で次の段が止める）。
+   * → **`704` で始まるがパターンには合わない値**で確かめる。
+   */
   eq('パターン外でも台帳が confirmed なら通す (判定の二重化をしない)',
-    g(cap({ normalizedValue: '999999999' })).allowed, true);
+    g(cap({ normalizedValue: '7041234567' })).allowed, true);
   eq('パターン外で review_required なら止まる',
-    g(cap({ normalizedValue: '999999999', status: 'review_required' })).allowed, false);
+    g(cap({ normalizedValue: '7041234567', status: 'review_required' })).allowed, false);
+
+  /*
+   * ── 発行元の接頭辞（`704`＝Wellfort・発注者指示 2026-10-21）──
+   * **ここはハードな不変条件なので再判定する。** `confirmed` の行でも `704` で
+   * 始まらない値は**当社の検査キットの番号ではない**ので、問診CSV に出してはいけない
+   * （admin の訂正で値が差し替わった回・接頭辞の設定が後から変わった回に効く）。
+   */
+  {
+    const r = g(cap({ normalizedValue: '999999999' }));
+    eq('**接頭辞が違えば confirmed でもブロック**', [r.allowed, r.reason], [false, 'org_prefix_mismatch']);
+    ok('ブロックの説明に外部IDの全文が入らない', !r.detail.includes('999999999'));
+  }
+  eq('接頭辞が合えば通る', g(cap({ normalizedValue: '704000999' })).allowed, true);
+  /*
+   * **設定の打ち間違いで全件を止めない。** 空・数字でない接頭辞は「判定しない」へ倒す
+   * （止める側に倒すと、1 文字の設定ミスで問診CSV が全部出せなくなる）。
+   */
+  eq('接頭辞が空なら判定しない',
+    core.checkPreventQuestionnaireGate({ capture: cap({ normalizedValue: '999999999' }), orgPrefix: '' }).allowed,
+    true);
+  eq('接頭辞が数字でなければ判定しない',
+    core.checkPreventQuestionnaireGate({ capture: cap({ normalizedValue: '999999999' }), orgPrefix: 'ABC' }).allowed,
+    true);
+  eq('接頭辞は app_config から差し替えられる',
+    core.checkPreventQuestionnaireGate({ capture: cap({ normalizedValue: '704000123' }), orgPrefix: '801' }).reason,
+    'org_prefix_mismatch');
 
   ok('ブロックの説明に外部IDの全文が入らない',
     !g(cap({ normalizedValue: '123456789', status: 'review_required' })).detail.includes('123456789'));
@@ -736,8 +845,54 @@ console.log('\n⑪ API の認可とゲート\n');
     const m = new RegExp(`key: '${k.replace('.', '\\.')}'[\\s\\S]{0,400}?default: '([^']*)'`).exec(cfgSrc);
     eq(`${k} の既定は off`, m?.[1], 'off');
   }
-  for (const k of ['labid.prevent_pattern', 'labid.demecal_pattern']) {
+  for (const k of ['labid.prevent_pattern', 'labid.demecal_pattern', 'labid.prevent_org_prefix']) {
     ok(`${k} が app_config に在る (env でもコード定数でもない)`, new RegExp(`key: '${k.replace('.', '\\.')}'`).test(cfgSrc));
+  }
+  /*
+   * ── 発行元の接頭辞の配線（発注者指示 2026-10-21）──
+   * **既定をクライアントに焼かない。** 焼くと app_config を変えても画面の文言が
+   * 追従せず、**「704 で始まります」と言いながら別の接頭辞で判定する**ことになる。
+   */
+  {
+    const prefixDefault = /key: 'labid\.prevent_org_prefix'[\s\S]{0,600}?default: '([^']*)'/.exec(cfgSrc)?.[1];
+    eq('app_config の既定は 704', prefixDefault, '704');
+    eq('コード既定と app_config の既定が一致する',
+      /prevent: '([0-9]*)',/.exec(/DEFAULT_ORG_PREFIX[\s\S]{0,300}?\};/.exec(read('src/lib/external-test-id.ts'))?.[0] ?? '')?.[1],
+      prefixDefault);
+    ok('API が read / register の両方で接頭辞を渡す',
+      (api.match(/orgPrefix: orgPrefixFor\(provider\)/g) ?? []).length === 2);
+    ok('接頭辞は app_config から引く (API に焼かない)',
+      /cfg\('labid\.prevent_org_prefix'\)/.test(api) && !/'704'/.test(api));
+    ok('デメカルには接頭辞を渡さない (この概念を確認していない)',
+      /provider === 'prevent' \? cfg\('labid\.prevent_org_prefix'\) : ''/.test(api));
+    const scr2 = code('src/scripts/external-id-capture.ts');
+    ok('接頭辞が違う回は専用の案内を出す',
+      /org_prefix_mismatch'\)\) \{[\s\S]{0,400}showWrong/.test(scr2));
+    /*
+     * **画面に `704` を焼かない。** 焼くと app_config を変えたときに
+     * 「704 で始まります」と言いながら別の接頭辞で判定する。
+     * **`'704'` という**リテラルだけを見ても捕まらない**（`'704 で始まります'` を
+     * 書かれると素通りする＝実測）。**数字の並びそのもの**を禁じ、
+     * かつ**案内の中で `c.orgPrefix` を使っている**ことまで見る。
+     */
+    ok('画面は**サーバが返した接頭辞**を使う (焼き込まない)',
+      /org_prefix/.test(scr2) && !/704/.test(scr2));
+    /*
+     * **候補は消さない。** 接頭辞が違っても登録はできる（実物の形式が既定と違うことも
+     * あり得る）。ここで止めると撮影そのものを失わせる。分岐の中だけを見る。
+     */
+    const branch = (() => {
+      const i = scr2.indexOf("reasons.includes('org_prefix_mismatch')");
+      const j = scr2.indexOf('show(c.confirmEl, true);', i);
+      return i >= 0 && j > i ? scr2.slice(i, j) : '';
+    })();
+    ok('案内の文はサーバが返した接頭辞から組み立てる',
+      /c\.orgPrefix/.test(branch));
+    ok('接頭辞が違っても候補は消さない',
+      branch.includes('showWrong') && !/show\(c\.confirmEl, false\)/.test(branch) && !/\breturn\b/.test(branch),
+      branch.slice(0, 120));
+    ok('read 応答に接頭辞を載せる (画面が具体的に言えるように)',
+      /org_prefix: orgPrefixFor\(provider\)/.test(api));
   }
   // **dev seed の誤ったパターンを使っていないこと**（`^K[0-9]{4}$` は 704000123 を弾く）
   const persistSrc = code('src/lib/external-id-persist.ts');
@@ -801,8 +956,25 @@ console.log('\n⑬ UI の契約\n');
   ok('アプリ内カメラの面がある', /data-extid-camera\b/.test(comp)
     && /data-extid-video/.test(comp) && /data-extid-canvas/.test(comp) && /data-extid-shot/.test(comp));
   ok('カメラ面は既定で閉じている', /class="mt-3 hidden" data-extid-camera/.test(comp));
-  ok('「写真を選ぶ」に capture を付けない（ここからも OS のカメラを開かない）',
-    /accept="image\/\*" class="hidden" data-extid-file="file"/.test(comp));
+  /*
+   * **「写真を選ぶ」は撤去した（発注者指示 2026-10-21）。**
+   * ここで見るのは**口が無いこと**＝ markup。**語の有無で見ない** —
+   * 撤去した経緯を説明するコメントに「写真を選ぶ」が残るので、
+   * 語で見ると戻してしまっても通る（⑨ と L-17 で踏んだのと同じ型）。
+   */
+  ok('**ファイル選択の口が無い**（画面から入るのはカメラと手入力だけ）',
+    !/data-extid-file/.test(code('src/components/dashboard/ExternalIdCapture.astro'))
+    && !/type="file"/.test(code('src/components/dashboard/ExternalIdCapture.astro')));
+  ok('ファイル選択の `change` 経路も消えている',
+    !/data-extid-file/.test(code('src/scripts/external-id-capture.ts')));
+  ok('画面から送る captureMethod は camera と manual だけ',
+    /captureMethod: 'camera' \| 'manual';/.test(code('src/scripts/external-id-capture.ts')));
+  /*
+   * **サーバは `file` を受け続ける。** 既に台帳に入っている行と DB の check 制約
+   * (`20261011000010:50`) があるので、受け口を狭めると過去の行が読めなくなる。
+   */
+  ok('サーバは `file` も受け続ける（既存の台帳行と DB の check 制約）',
+    /v === 'camera' \|\| v === 'file' \|\| v === 'manual'/.test(read('src/pages/api/kit/[id]/external-id.ts')));
   {
     const scr = code('src/scripts/external-id-capture.ts');
     ok('カメラは `/scan` と同じ実装を流用する（写して増やさない）',
@@ -821,11 +993,26 @@ console.log('\n⑬ UI の契約\n');
     ok('ページを離れるときに止める', /pagehide[\s\S]{0,300}closeCamera/.test(scr));
     ok('撮ったらカメラを閉じてから読み取りへ回す',
       /closeCamera\(c\);[\s\S]{0,200}captureAndRead\(c, file\)/.test(scr));
-    ok('権限拒否・カメラ無しは「写真を選ぶ」へ逃がす',
-      /onError[\s\S]{0,300}写真を選ぶ/.test(scr));
+    ok('権限拒否・カメラ無しは手入力へ逃がす（行き止まりにしない）',
+      /onError[\s\S]{0,400}手で入力/.test(scr)
+      && /onError[\s\S]{0,400}show\(c\.manualEl, true\)/.test(scr));
+    ok('カメラの無い端末でも手入力の欄を開く',
+      /cameraAvailable\(\)\) \{[\s\S]{0,300}show\(c\.manualEl, true\)/.test(scr));
   }
-  ok('写真を選ぶ経路は touch-only でない (PC でも使える)',
-    /<label class="btn-pair btn-graph min-h-touch cursor-pointer">/.test(comp));
+  /*
+   * **手入力への逃げ道。** 「写真を選ぶ」を撤去した 2026-10-21 以降、
+   * カメラの無い PC と権限を拒否した端末はここしか残っていない（仕様 §5.1）。
+   * **`touch-only` を付けると PC から登録できなくなる**ので、そこを見る。
+   */
+  {
+    const m = comp.match(/<button[^>]*data-extid-manual-open>/);
+    ok('手入力を開く口がある', !!m);
+    ok('手入力の口は touch-only でない (PC でも開ける)', !!m && !/touch-only/.test(m[0]));
+    ok('手入力の口はタップ領域を確保している', !!m && /min-h-touch/.test(m[0]));
+    ok('手入力の口は欄を開くだけ（ここでは何も送らない）',
+      /data-extid-manual-open\]'\)\) \{[\s\S]{0,200}show\(c\.manualEl, true\)/.test(code('src/scripts/external-id-capture.ts'))
+      && !/data-extid-manual-open\]'\)\) \{[\s\S]{0,200}register\(/.test(code('src/scripts/external-id-capture.ts')));
+  }
   ok('撮り直し・手入力の逃げ道がある',
     /data-extid-retake/.test(comp) && /data-extid-manual/.test(comp));
   ok('確認してから登録する (即確定しない)', /data-extid-register/.test(comp) && /この番号で登録する/.test(comp));
@@ -881,13 +1068,79 @@ console.log('\n⑬ UI の契約\n');
   ok('図は provider ごとに分かれている',
     /\{provider === 'demecal' && \(/.test(fig) && /\{provider === 'prevent' && \(/.test(fig));
   ok('プリベントの図は「シール台紙」を描く', /シール台紙/.test(fig));
-  ok('プリベントの図は `A…A` の印字をそのまま見せる', /A704000\*\*\*A/.test(fig));
+  /*
+   * プリベントの図は **2026-10-21 に白黒で描き直した**（発注者指示「用紙イメージが
+   * 実物と違うので、色味も含め実際の用紙に合わせて」）。実物は**白地に黒 1 色の印刷物**で、
+   * 淡色の装飾を紙に使うと**手元の紙と図が別物に見える**。
+   * brand 色を使ってよいのは**当社の注記（囲みと「↑ ここ」）だけ**＝台紙に無い線。
+   * **図は目視では守れない** — 色を戻しても画面は「それなり」に見える。
+   */
+  const preventFig = (() => {
+    const i = fig.indexOf("{provider === 'prevent' && (");
+    const j = fig.indexOf('</svg>', i);
+    return i >= 0 && j > i ? fig.slice(i, j) : '';
+  })();
+  ok('プリベントの図を取り出せた', preventFig.length > 500, `${preventFig.length} 文字`);
+  ok('プリベントの図は `A…A` の印字をそのまま見せる', /A704000123A/.test(preventFig));
+  ok('**紙は白黒**（淡色の装飾を紙に使わない）',
+    !/#DCECEF/.test(preventFig) && !/#CBD5E1/.test(preventFig)
+    && !/#F8FAFC/.test(preventFig) && !/#102B3A/.test(preventFig));
+  ok('インクは黒で描く', (preventFig.match(/#111827/g) ?? []).length >= 10);
+  /*
+   * ①〜④ は**黒い角丸の吹き出し（白抜きの文字 ＋ 三角のしっぽ）**。
+   * 丸囲みの番号ではない（最初そう描いて、実物と配置ごと違うと指摘された）。
+   */
+  ok('黒い吹き出しが 4 つある（①〜④）',
+    (preventFig.match(/rx="9" fill="#111827"/g) ?? []).length === 4);
+  ok('吹き出しのしっぽ（三角）が 4 つある',
+    (preventFig.match(/<polygon points="[^"]*" fill="#111827" \/>/g) ?? []).length === 4);
+  /*
+   * **実物に印字されている文言をそのまま写す。** ここが欠けると
+   * 「この図のとおりの紙」を探す人が迷う（図の役目は紙の見分け）。
+   */
+  ok('実物の 4 つの指示文を写している',
+    ['① 採尿管に貼り付けてください', '② 採尿管ケースに貼り付けてください',
+      '③ 遮光袋に貼り', '④ 返信用封筒の開口部に'].every((w) => preventFig.includes(w)));
+  ok('実物の 4 つの枠を写している',
+    ['密封シール', '口止めシール', 'ログインして登録してください', 'バーコード']
+      .every((w) => preventFig.includes(w)));
+  ok('採尿管シールは 3 枚で、2 本目だけ空',
+    /\{ y: 70, label: '1本', filled: true \}/.test(preventFig)
+    && /\{ y: 107, label: '2本', filled: false \}/.test(preventFig)
+    && /\{ y: 136, label: '予備', filled: true \}/.test(preventFig));
+  /*
+   * **紙の上に当社の文字を置かない。** 書き込みは囲み 2 本と、紙の外の凡例だけ。
+   * 置くと「実物に印字されている」と読まれる。色の出現数で固定する
+   * （囲み 1 ＋ 凡例の見本 1 ＋ 凡例の文字 1 ＝ 3）。
+   */
+  ok('**brand 色は当社の書き込みだけ**（囲み・凡例の見本・凡例の文字）',
+    (preventFig.match(/#287F86/g) ?? []).length === 3);
+  ok('**読み取らない枠の印も当社の書き込みだけ**',
+    (preventFig.match(/#A98558/g) ?? []).length === 3);
+  ok('QR の模様は**決まった式で置いた飾り**（実物を写していない＝読み取れない）',
+    /x \* 7 \+ y \* 13 \+ x \* y/.test(fig));
+  /*
+   * **パスワードは同じ台紙に印字されている**（§2.1.1）。
+   * 「これは読み取りません」と言うために語は出すが、**値は書かない**。
+   */
+  ok('**パスワードの値を図に書かない**',
+    !/パスワード[^<]{0,8}[A-Za-z0-9]{5,}/.test(preventFig));
   ok('**パスワードと QR は読まないと図にも書く**',
     /ここは読み取りません/.test(fig) && /パスワード/.test(fig) && /QR/.test(fig));
   ok('シールを貼る前に撮るよう言っている', /シールを貼る前に撮影/.test(fig));
   ok('図は `hasDiagram` のときだけ描く', /\{hasDiagram && \(/.test(fig));
-  ok('**本物の番号を図に入れない** (0 の並び)', /000000000000000/.test(fig)
+  ok('**デメカルの図は本物の番号を入れない** (0 の並び)', /000000000000000/.test(fig)
     && !/[0-9]{15}/.test(fig.replace(/0{15}/g, '')));
+  /*
+   * プリベントは **0 の並びにしない** — 実物が黒 1 色の印刷物なので、
+   * 番号だけ伏せ字だと紙に見えない。代わりに**リポジトリ共通のダミー**
+   * （ポータルのサンプル CSV・先方宛の依頼文と同じ `704000123`）を使う。
+   * **他の番号が混ざったら落とす**（実在の番号を写した疑いになる）。
+   */
+  ok('**プリベントの図はリポジトリ共通のダミーだけ**',
+    /704000123/.test(preventFig)
+    && (preventFig.match(/704000[0-9]{3}/g) ?? []).every((v) => v === '704000123'),
+    JSON.stringify([...new Set(preventFig.match(/704000[0-9]{3}/g) ?? [])]));
   ok('桁数が分かる', /15桁/.test(fig));
   ok('取り違えやすい数字を名指ししている (電話番号・検査ID欄)',
     /0120/.test(fig) && /検査ID/.test(fig));
@@ -938,6 +1191,67 @@ console.log('\n⑬ UI の契約\n');
     ok('「上の図」と言う provider は図を持つ provider と一致する',
       hasFigure.length > 0 && JSON.stringify(saysFigure) === JSON.stringify(hasFigure),
       `says=${JSON.stringify(saysFigure)} hasFigure=${JSON.stringify(hasFigure)}`);
+  }
+
+  /*
+   * ── 登録し直す（発注者指示 2026-10-21・仕様 §8.3「再撮影を第一選択」）──
+   *
+   * **以前は画面に戻る口が無かった。** 一度登録すると登録済みの表示だけになり、
+   * 撮り直すには台帳を手で直すしかなかった（API は前から撮り直しに対応している）。
+   * **ここは静かに壊れる** — 口が消えても画面は「登録済み」で正常に見えるし、
+   * 確認を飛ばしても押せてしまう（押した人は上書きされたことに気づかない）。
+   */
+  {
+    const scr = code('src/scripts/external-id-capture.ts');
+    ok('登録済みでも撮影の面を markup として出す（JS で組み立て直さない）',
+      /data-extid-done/.test(comp) && /data-extid-form/.test(comp)
+      && /class=\{registeredMask \? 'hidden' : ''\} data-extid-form/.test(comp));
+    ok('登録し直す口がある', /data-extid-redo-open/.test(comp));
+    ok('確認の面がある（はい／やめる）',
+      /data-extid-redo-confirm/.test(comp) && /data-extid-redo-yes/.test(comp)
+      && /data-extid-redo-no/.test(comp));
+    ok('確認は既定で閉じている',
+      /class="mt-2 hidden rounded-xl border p-3 status-watch" data-extid-redo-confirm/.test(comp));
+    ok('**赤にしない**（誤りではなくやり直せること）',
+      /status-watch" data-extid-redo-confirm/.test(comp));
+    ok('上書きになることと、前の番号が残ることを伝える',
+      /上書き/.test(comp) && /記録として残り/.test(comp));
+    /*
+     * **「押しただけで撮影の面が開く」に戻さない。** 1 段挟むのが要点なので、
+     * `redo-open` の分岐だけを切り出して、面を入れ替える操作が無いことを見る
+     * （後ろに `show(c.formEl, true)` があるので、ファイル全体で見ると素通りする）。
+     */
+    const open = (() => {
+      const i = scr.indexOf('data-extid-redo-open]');
+      const j = scr.indexOf('data-extid-redo-no]', i);
+      return i >= 0 && j > i ? scr.slice(i, j) : '';
+    })();
+    ok('登録し直すは**確認を出すだけ**（いきなり撮影の面にしない）',
+      open.includes('show(c.redoEl, true)')
+      && !/show\(c\.formEl, true\)/.test(open) && !/show\(c\.doneEl, false\)/.test(open),
+      open.slice(0, 120));
+    const yes = (() => {
+      const i = scr.indexOf('data-extid-redo-yes]');
+      const j = scr.indexOf('data-extid-manual-open]', i);
+      return i >= 0 && j > i ? scr.slice(i, j) : '';
+    })();
+    ok('承諾して初めて面が入れ替わる',
+      /show\(c\.doneEl, false\)/.test(yes) && /show\(c\.formEl, true\)/.test(yes));
+    ok('前回の候補・証跡を持ち越さない',
+      /c\.read = null; c\.evidenceKey = null/.test(yes));
+    ok('上書きになることを撮影中も出す', /上書きします/.test(yes));
+    /*
+     * **撮り直しは API を変えずに成立している。** 台帳は旧行を `superseded` に
+     * 落として入れ直す（`external-id-persist.ts`）。ここが「消して入れ直す」に
+     * 戻ると、**前の番号が辿れなくなる**（§8.3「修正前後を監査可能にする」）。
+     */
+    const persist = code('src/lib/external-id-persist.ts');
+    ok('旧行は消さずに superseded へ落とす',
+      /\.update\(\{ status: 'superseded' \}\)/.test(persist)
+      && !/\.delete\(\)/.test(persist));
+    ok('前の値を `previous_value` に残す', /previous_value: priorRow \?/.test(persist));
+    ok('同じ回の撮り直しは `lab_tests` の行を使い回す',
+      /existingLabTestId: priorLabTestId/.test(persist));
   }
 
   /*

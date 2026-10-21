@@ -17,9 +17,35 @@
  *
  * 【図に本物の番号を入れない】
  * 問合せ番号は外部検査IDそのもので、`maskExternalId` で末尾 4 桁しか画面に出さない値。
- * **図のサンプルは 0 の並び**にして、桁数だけが伝わるようにする。
+ * **デメカルの図のサンプルは 0 の並び**にして、桁数だけが伝わるようにする。
+ * **プリベントはリポジトリ共通のダミー `704000123`** を使う（ポータルのサンプル CSV・
+ * 先方宛の依頼文と同じ値）。`704000` は先方の固定の接頭辞で、残り 3 桁は作り物。
+ * **パスワードの値は図にも書かない**（台紙に印字されているが、ここで見せる必要が無い）。
  *
- * 【実物の写真を同梱しない】
+ * 【プリベントの図は実物のトレース。白黒】
+ * **2026-10-21 に実物の写真を見て写し直した**（発注者指示「用紙イメージが実物と違うので、
+ * 色味も含め実際の用紙に合わせて」→「配置が全く違う。正確にトレースして」）。
+ *
+ * 実物は**白地に黒 1 色の印刷物**で、配置は次のとおり（この順で描いている）:
+ *   - 最上部に**黒帯の「シール台紙」**（白抜き・中央寄り）
+ *   - 左上 **① 採尿管に貼り付けてください** → 下に**細長い六角形のシール 3 枚**
+ *     （`1本` / `2本` / `予備`。**`2本` は空**で、他の 2 枚にバーコードと `A…A` が入る）
+ *   - 右上 **ログイン用の枠**（QR ＋ URL ／ ユーザーID ／ パスワード）＝**読み取らない**
+ *   - 中央右 **③ 遮光袋に貼り付けてください** → **ユーザーID ＋ バーコードの枠**＝**読み取り対象**
+ *   - 左下 **② 採尿管ケースに貼り付けてください** → **密封シール**（横長の枠）
+ *   - 右下 **④ 返信用封筒の開口部に貼り付けてください** → **口止めシール ×2**（縦長・字は横倒し）
+ * ①〜④ は**黒い角丸の吹き出し**（白抜きの文字 ＋ 三角のしっぽ）で、丸囲みの番号ではない。
+ *
+ * 【紙の上に当社の文字を置かない】
+ * 当社の書き込みは **囲み 2 本（brand＝撮る／bronze 破線＝読み取らない）** と、
+ * **紙の外（区切り線の下）の凡例**だけ。紙の上に文字を足すと、**実物に印字されていると読まれる**。
+ * 淡色の装飾（`#DCECEF` 等）も紙に使わない — **手元の紙と図が別物に見える**。
+ *
+ * 【写真そのものはリポジトリに入れない】
+ * 提示された実物はサンプル用紙（実データではない）だが、**図は線画で足りる**ので
+ * 画像アセットを増やさない。**パスワードの値は図にも書かない**（行が在ることだけ伝える）。
+ *
+ * 【デメカルの図も同じ方針】
  * 写真には実際の番号が写る。**線画にすれば PII を持たずに位置だけ伝えられる**し、
  * 端末やテーマによらず同じ見え方になる（画像アセットも増えない）。
  */
@@ -49,6 +75,47 @@ const CONFUSABLE: Record<string, string[]> = {
   ],
 };
 const confusable = CONFUSABLE[provider] ?? [];
+
+/**
+ * バーコードの縞。**実物の規格（Codabar）を表すものではない** —
+ * 「ここに横線のバーコードがある」ことだけを伝えるための、固定の並び。
+ * 幅の合計は 54.4（`scale` を掛けた長さになる）。
+ */
+const BAR_W = [
+  1.4, 0.6, 0.6, 1.4, 0.6, 2.2, 0.6, 1.4, 1.4, 0.6, 0.6, 1.4, 2.2, 0.6, 1.4, 0.6,
+  0.6, 2.2, 1.4, 0.6, 1.4, 1.4, 0.6, 0.6, 2.2, 0.6, 1.4, 0.6, 1.4, 0.6, 2.2, 1.4,
+];
+function barRects(x0: number, y: number, h: number, scale: number) {
+  const out: Array<{ x: number; y: number; width: number; height: number }> = [];
+  let x = x0;
+  for (let i = 0; i < BAR_W.length; i += 1) {
+    const w = BAR_W[i] * scale;
+    if (i % 2 === 0) out.push({ x, y, width: w, height: h });
+    x += w + 0.55 * scale;
+  }
+  return out;
+}
+
+/**
+ * QR の模様。**決まった式で置いた飾り**で、実物を写したものではない
+ * （＝この図を読み取っても何処にも行けない）。位置を伝えるためだけに描く。
+ */
+const QR_N = 25;
+const QR_X = 174.5;
+const QR_Y = 47.5;
+const QR_M = 37 / QR_N;
+const QR_FINDERS = [
+  { x: QR_X, y: QR_Y },
+  { x: QR_X + QR_M * (QR_N - 7), y: QR_Y },
+  { x: QR_X, y: QR_Y + QR_M * (QR_N - 7) },
+];
+const QR_DOTS: Array<[number, number]> = [];
+for (let y = 0; y < QR_N; y += 1) {
+  for (let x = 0; x < QR_N; x += 1) {
+    const inFinder = (x < 8 && y < 8) || (x > QR_N - 9 && y < 8) || (x < 8 && y > QR_N - 9);
+    if (!inFinder && (x * 7 + y * 13 + x * y) % 5 < 2) QR_DOTS.push([x, y]);
+  }
+}
 ---
 
 {hasDiagram && (
@@ -122,58 +189,128 @@ const confusable = CONFUSABLE[provider] ?? [];
     )}
 
     {/*
-    プリベントの「シール台紙」の模式図。**実物の配置をなぞった線画**で、番号はダミー。
+    プリベントの「シール台紙」の模式図。**実物の配置をなぞった白黒の線画**で、番号はダミー。
     実物ではバーコードの下に **`A` で挟んだ形**が印字されている（Codabar の start/stop）。
     **図でもそのまま見せる** — 利用者が見る文字と図が食い違うと、かえって迷う。
+    黒丸の番号（1〜4）は台紙に印字されている目印。**こちらで意味づけはしない**
+    （何の手順かを書くと、見ていない説明文を当社が作ることになる）。
     */}
     {provider === 'prevent' && (
       <svg
-        viewBox="0 0 320 150"
-        class="mt-2 h-auto w-full max-w-[26rem]"
+        viewBox="0 0 400 294"
+        class="mt-2 h-auto w-full max-w-[28rem]"
         role="img"
         aria-labelledby={`sheet-fig-${provider}`}
       >
         <title id={`sheet-fig-${provider}`}>
-          プリベントのシール台紙。ユーザーIDの印字と、その下の横線のバーコードを囲んだ図。
+          プリベントのシール台紙を写した白黒の図。中央右の「ユーザーID」と「バーコード」の枠を
+          読み取り対象として囲み、右上のログイン用（QR・URL・パスワード）は読み取らない枠として示している。
         </title>
-  
-        {/* 台紙 */}
-        <rect x="2" y="2" width="316" height="146" rx="4" fill="#FFFFFF" stroke="#CBD5E1" />
-  
-        {/* 見出しの帯 */}
-        <rect x="10" y="9" width="300" height="14" rx="2" fill="#102B3A" />
-        <text x="16" y="19" font-size="8" fill="#FFFFFF">シール台紙</text>
-  
-        {/* 読み取り対象 — ユーザーID の印字とバーコード */}
-        <rect x="10" y="30" width="186" height="52" rx="4" fill="#FFFFFF" stroke="#CBD5E1" />
-        <text x="18" y="45" font-size="8" fill="#102B3A">ユーザーID</text>
-        <text x="66" y="45" font-size="10" fill="#94A3B8" font-family="ui-monospace, monospace">704000***</text>
-        <line x1="18" y1="51" x2="188" y2="51" stroke="#CBD5E1" />
-        <text x="18" y="62" font-size="8" fill="#102B3A">バーコード</text>
-        {[0, 4, 7, 12, 15, 19, 24, 27, 32, 36, 39, 44, 48, 51, 56, 60, 64, 68, 72, 76].map((d, i) => (
-          <rect x={66 + d} y="55" width={i % 3 === 0 ? 2.5 : 1.2} height="14" fill="#102B3A" />
+
+        {/* ── 見出しの黒帯 ── */}
+        <rect x="6" y="3" width="378" height="14" fill="#111827" />
+        <text x="183" y="13.5" font-size="9.5" font-weight="bold" fill="#FFFFFF" text-anchor="middle">シール台紙</text>
+
+        {/* ── ① 採尿管に貼るシール（左上） ── */}
+        <rect x="4" y="32" width="146" height="19" rx="9" fill="#111827" />
+        <text x="12" y="45" font-size="7.5" fill="#FFFFFF">① 採尿管に貼り付けてください</text>
+        <polygon points="52,51 66,51 56,59" fill="#111827" />
+
+        {[
+          { y: 70, label: '1本', filled: true },
+          { y: 107, label: '2本', filled: false },
+          { y: 136, label: '予備', filled: true },
+        ].map((row) => (
+          <>
+            <rect x="4" y={row.y + 1} width="20" height="12" fill="#FFFFFF" stroke="#111827" stroke-width="0.8" />
+            <text x="7" y={row.y + 10} font-size="5.5" fill="#111827">{row.label}</text>
+            <polygon
+              points={`34,${row.y + 7} 41,${row.y} 139,${row.y} 146,${row.y + 7} 139,${row.y + 14} 41,${row.y + 14}`}
+              fill="#FFFFFF" stroke="#111827" stroke-width="2"
+            />
+            {row.filled && barRects(38, row.y + 2.5, 9, 1.32).map((b) => (
+              <rect x={b.x} y={b.y} width={b.width} height={b.height} fill="#111827" />
+            ))}
+            {row.filled && (
+              <text x="113" y={row.y + 9.5} font-size="4.6" fill="#111827" font-family="ui-monospace, monospace">A704000123A</text>
+            )}
+          </>
         ))}
-        <text x="66" y="77" font-size="7" fill="#94A3B8" font-family="ui-monospace, monospace">A704000***A</text>
-        <rect x="8" y="28" width="190" height="56" rx="5" fill="none" stroke="#287F86" stroke-width="2" />
-        <text x="8" y="93" font-size="8" font-weight="bold" fill="#287F86">↑ ここ（ユーザーIDと、その下のバーコード）</text>
-  
-        {/* 貼付用のシール (右) — 同じ番号が入っている */}
-        <rect x="206" y="30" width="104" height="16" rx="3" fill="#FFFFFF" stroke="#CBD5E1" />
-        <text x="212" y="41" font-size="6.5" fill="#94A3B8">採尿容器に貼るシール</text>
-        <rect x="206" y="50" width="104" height="16" rx="3" fill="#FFFFFF" stroke="#CBD5E1" />
-        <text x="212" y="61" font-size="6.5" fill="#94A3B8">採尿容器に貼るシール</text>
-        <rect x="206" y="70" width="104" height="16" rx="3" fill="#FFFFFF" stroke="#CBD5E1" />
-        <text x="212" y="81" font-size="6.5" fill="#94A3B8">封筒に貼るシール</text>
-  
-        {/* ログイン用のブロック — 読み取らない */}
-        <rect x="10" y="100" width="300" height="42" rx="4" fill="#F8FAFC" stroke="#E2E8F0" />
-        <rect x="18" y="106" width="30" height="30" rx="2" fill="#FFFFFF" stroke="#CBD5E1" />
-        <text x="24" y="125" font-size="7" fill="#CBD5E1">QR</text>
-        <text x="56" y="114" font-size="7" fill="#94A3B8">URL / ユーザーID / パスワード</text>
-        <text x="56" y="126" font-size="7.5" font-weight="bold" fill="#A98558">
-          ここは読み取りません（登録用）
-        </text>
-        <text x="56" y="136" font-size="7" fill="#94A3B8">パスワードは英字と数字が混ざっています</text>
+
+        {/* ── ログイン用（右上）。**ここは読み取らない** ── */}
+        <rect x="163" y="32" width="227" height="70" fill="#FFFFFF" stroke="#111827" stroke-width="1" />
+        <rect x="173" y="46" width="41" height="41" fill="#FFFFFF" stroke="#111827" stroke-width="0.8" />
+        {/* QR の模様は**決まった式で置いた飾り**で、実物を写したものではない（読み取れない）。 */}
+        {QR_FINDERS.map((f) => (
+          <>
+            <rect x={f.x} y={f.y} width={QR_M * 7} height={QR_M * 7} fill="#111827" />
+            <rect x={f.x + QR_M} y={f.y + QR_M} width={QR_M * 5} height={QR_M * 5} fill="#FFFFFF" />
+            <rect x={f.x + QR_M * 2} y={f.y + QR_M * 2} width={QR_M * 3} height={QR_M * 3} fill="#111827" />
+          </>
+        ))}
+        {QR_DOTS.map(([x, y]) => (
+          <rect x={QR_X + x * QR_M} y={QR_Y + y * QR_M} width={QR_M} height={QR_M} fill="#111827" />
+        ))}
+        <text x="222" y="53" font-size="8" font-weight="bold" fill="#111827">◀ログインして登録してください</text>
+        <text x="222" y="65" font-size="5.6" fill="#111827" font-family="ui-monospace, monospace">URL : https://preventme.co.jp/pb/alapds/entry/</text>
+        <text x="222" y="77.5" font-size="6.5" fill="#111827">ユーザーID : 704000123</text>
+        {/* **パスワードの値は書かない。** 行が在ることだけ伝われば足りる。 */}
+        <text x="222" y="90" font-size="6.5" fill="#111827">パスワード : ●●●●●●</text>
+
+        {/* ── ③ 遮光袋に貼るシール（中央右）= **読み取り対象** ── */}
+        <rect x="158" y="107" width="77" height="24" rx="9" fill="#111827" />
+        <text x="163" y="117" font-size="7.5" fill="#FFFFFF">③ 遮光袋に貼り</text>
+        <text x="171" y="127" font-size="7.5" fill="#FFFFFF">付けてください</text>
+        <polygon points="235,115 235,127 241.5,121" fill="#111827" />
+
+        <rect x="243" y="107" width="131" height="57" rx="6" fill="#FFFFFF" stroke="#111827" stroke-width="2" />
+        <text x="252" y="123" font-size="7" fill="#111827">ユーザーID</text>
+        <text x="295" y="124" font-size="9.5" fill="#111827" font-family="ui-monospace, monospace">704000123</text>
+        <line x1="250" y1="131" x2="367" y2="131" stroke="#111827" stroke-width="0.8" />
+        <text x="250" y="141" font-size="7" fill="#111827">バーコード</text>
+        {barRects(268, 146, 11, 1.4).map((b) => (
+          <rect x={b.x} y={b.y} width={b.width} height={b.height} fill="#111827" />
+        ))}
+        <text x="306" y="161" font-size="4.6" fill="#111827" font-family="ui-monospace, monospace" text-anchor="middle">A704000123A</text>
+
+        {/* ── ② 採尿管ケースに貼る「密封シール」（左下） ── */}
+        <rect x="4" y="182" width="158" height="19" rx="9" fill="#111827" />
+        <text x="12" y="195" font-size="7.5" fill="#FFFFFF">② 採尿管ケースに貼り付けてください</text>
+        <polygon points="12,201 26,201 16,209" fill="#111827" />
+        <rect x="4" y="206" width="257" height="49" fill="#FFFFFF" stroke="#111827" stroke-width="1" />
+        <text x="124" y="236" font-size="12" fill="#111827" text-anchor="middle">密封シール</text>
+
+        {/* ── ④ 返信用封筒に貼る「口止めシール」（右下） ── */}
+        <rect x="159" y="177" width="107" height="24" rx="9" fill="#111827" />
+        <text x="163" y="188" font-size="7.5" fill="#FFFFFF">④ 返信用封筒の開口部に</text>
+        <text x="171" y="198" font-size="7.5" fill="#FFFFFF">貼り付けてください</text>
+        <polygon points="266,184 266,196 275,190" fill="#111827" />
+        {[268, 316].map((x) => (
+          <>
+            <rect x={x} y="172" width="45" height="83" fill="#FFFFFF" stroke="#111827" stroke-width="2" />
+            {/*
+              **`writing-mode: vertical-rl` は使わない** — 実測で字が重なった。
+              実物も字は横倒しなので、90 度回転で写す。
+            */}
+            <text
+              x={x + 22.5} y="217" font-size="9" fill="#111827" text-anchor="middle"
+              transform={`rotate(90 ${x + 22.5} 213.5)`}
+            >口止めシール</text>
+          </>
+        ))}
+
+        {/*
+          ── ここから下は**当社の書き込み**。台紙には無い線なので色で分ける ──
+          紙の上に当社の文字は置かない（置くと、実物に印字されていると読まれる）。
+        */}
+        <rect x="241" y="106" width="137" height="60" rx="7" fill="none" stroke="#287F86" stroke-width="2.4" />
+        <rect x="160" y="29" width="233" height="75" rx="4" fill="none" stroke="#A98558" stroke-width="1.2" stroke-dasharray="4 2.5" />
+
+        <line x1="4" y1="263" x2="396" y2="263" stroke="#9CA3AF" stroke-width="0.6" />
+        <rect x="4" y="268" width="14" height="9" rx="2" fill="none" stroke="#287F86" stroke-width="2.4" />
+        <text x="24" y="275.5" font-size="7.5" font-weight="bold" fill="#287F86">撮るのはここ（ユーザーIDと、その下のバーコード）</text>
+        <rect x="4" y="282" width="14" height="9" rx="2" fill="none" stroke="#A98558" stroke-width="1.2" stroke-dasharray="4 2.5" />
+        <text x="24" y="289.5" font-size="7.5" fill="#A98558">ここは読み取りません（QR・URL・パスワード＝登録用）</text>
       </svg>
     )}
 
