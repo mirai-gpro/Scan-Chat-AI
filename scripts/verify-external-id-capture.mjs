@@ -1608,8 +1608,13 @@ console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
   ok('`loadRegisteredCaptures` が在る', loader.length > 0);
   ok('superseded でない行を引く', /\.neq\('status', 'superseded'\)/.test(loader));
   ok('**confirmed を条件にしない** (撮った人を急かさない)', !/'confirmed'\s*\)/.test(loader.replace(/!==\s*'confirmed'/g, '')));
+  // **`mask:` に入る値が `maskExternalId()` を通っていること**を見る。
+  // 「どこかに maskExternalId がある」では足りない（別の行で呼んでいても通ってしまう）。
+  const setBlock = /out\.set\(([\s\S]*?)\n\s*\}\);/.exec(loader)?.[1] ?? '';
+  const maskLine = /\bmask:\s*([^\n]*)/.exec(setBlock)?.[1] ?? '';
   ok('マスクだけを返す (全文を返さない)',
-    /maskExternalId\(/.test(loader) && !/normalized_value:/.test(loader));
+    /^maskExternalId\(/.test(maskLine.trim()) && !/normalized_value:/.test(loader),
+    maskLine.trim().slice(0, 60));
   ok('その人の行だけを引く', /\.eq\('diagnostic_user_id', diagnosticUserId\)/.test(loader));
 
   // ── 画面側 ──
@@ -1637,9 +1642,14 @@ console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
   }
   // ダッシュボードは撮影が on のときだけ台帳を引く（off の回に無駄な問い合わせを出さない）
   const dash = code('src/pages/dashboard.astro');
+  // **`if` の条件そのものに `barcodeCaptureOn` と共有閲覧の除外が在ること**を見る。
+  // 「近くに変数名がある」では足りない（宣言だけ残して条件から外す退行が素通りする・実測）。
+  const dashGuard = /if \(([^)]*(?:\([^)]*\)[^)]*)*)\)\s*\{\s*\n\s*const sb = getServerSupabase\(\);/.exec(dash)?.[1] ?? '';
   ok('ダッシュボードは撮影が off なら台帳を引かない',
-    /cfgBool\('labid\.prevent_capture'\)/.test(dash)
-    && /barcodeCaptureOn[\s\S]{0,200}loadRegisteredCaptures\(/.test(dash));
+    /cfgBool\('labid\.prevent_capture'\)/.test(dash) && /barcodeCaptureOn/.test(dashGuard),
+    `guard = ${dashGuard || '(見つからない)'}`);
+  ok('ダッシュボードは共有閲覧で台帳を引かない', /viewer\.kind !== 'share'/.test(dashGuard),
+    `guard = ${dashGuard || '(見つからない)'}`);
   ok('ダッシュボードでも全文を触らない', !/normalized_value/.test(dash));
 }
 
