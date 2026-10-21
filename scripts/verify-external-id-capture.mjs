@@ -967,8 +967,8 @@ console.log('\n⑬ UI の契約\n');
     && !/type="file"/.test(code('src/components/dashboard/ExternalIdCapture.astro')));
   ok('ファイル選択の `change` 経路も消えている',
     !/data-extid-file/.test(code('src/scripts/external-id-capture.ts')));
-  ok('画面から送る captureMethod は camera と manual だけ',
-    /captureMethod: 'camera' \| 'manual';/.test(code('src/scripts/external-id-capture.ts')));
+  ok('画面から送る captureMethod は camera だけ',
+    /captureMethod: 'camera';/.test(code('src/scripts/external-id-capture.ts')));
   /*
    * **サーバは `file` を受け続ける。** 既に台帳に入っている行と DB の check 制約
    * (`20261011000010:50`) があるので、受け口を狭めると過去の行が読めなくなる。
@@ -993,34 +993,45 @@ console.log('\n⑬ UI の契約\n');
     ok('ページを離れるときに止める', /pagehide[\s\S]{0,300}closeCamera/.test(scr));
     ok('撮ったらカメラを閉じてから読み取りへ回す',
       /closeCamera\(c\);[\s\S]{0,200}captureAndRead\(c, file\)/.test(scr));
-    ok('権限拒否・カメラ無しは手入力へ逃がす（行き止まりにしない）',
-      /onError[\s\S]{0,400}手で入力/.test(scr)
-      && /onError[\s\S]{0,400}show\(c\.manualEl, true\)/.test(scr));
-    ok('カメラの無い端末でも手入力の欄を開く',
-      /cameraAvailable\(\)\) \{[\s\S]{0,300}show\(c\.manualEl, true\)/.test(scr));
+    ok('権限拒否は撮り直しへ戻す（手入力へ落とさない）',
+      /onError[\s\S]{0,400}もう一度お試しください/.test(scr));
   }
   /*
-   * **手入力への逃げ道。** 「写真を選ぶ」を撤去した 2026-10-21 以降、
-   * カメラの無い PC と権限を拒否した端末はここしか残っていない（仕様 §5.1）。
-   * **`touch-only` を付けると PC から登録できなくなる**ので、そこを見る。
+   * ── 手入力は**経路ごと撤去**（発注者指示 2026-10-21）──
+   *
+   * **チェックディジットが無い**ので、1 桁の打ち間違いが**正しい形の別の番号**になり、
+   * 画面も台帳も `linked` と表示したまま**黙って別の検査に紐づく**。
+   * 「行き止まりにしない」(§5.1) は**撮り直し**と**スマートフォンへの導線**で満たす。
+   *
+   * **ここは静かに戻る** — 入力欄を 1 つ足すだけで画面は「親切」に見える。
+   * markup とハンドラの**両方**で口が無いことを見る。
    */
   {
-    const m = comp.match(/<button[^>]*data-extid-manual-open>/);
-    ok('手入力を開く口がある', !!m);
-    ok('手入力の口は touch-only でない (PC でも開ける)', !!m && !/touch-only/.test(m[0]));
-    ok('手入力の口はタップ領域を確保している', !!m && /min-h-touch/.test(m[0]));
-    ok('手入力の口は欄を開くだけ（ここでは何も送らない）',
-      /data-extid-manual-open\]'\)\) \{[\s\S]{0,200}show\(c\.manualEl, true\)/.test(code('src/scripts/external-id-capture.ts'))
-      && !/data-extid-manual-open\]'\)\) \{[\s\S]{0,200}register\(/.test(code('src/scripts/external-id-capture.ts')));
+    const scr2 = code('src/scripts/external-id-capture.ts');
+    ok('**番号を入力する欄が無い**',
+      !/data-extid-input/.test(comp) && !/data-extid-manual\b/.test(comp)
+      && !/<input[^>]*inputmode="numeric"/.test(comp));
+    ok('**手入力を開く口が無い**', !/data-extid-manual-open/.test(comp) && !/data-extid-manual-open/.test(scr2));
+    ok('**番号を直す口が無い**', !/data-extid-edit/.test(comp) && !/data-extid-edit/.test(scr2));
+    ok('**手入力で登録する口が無い**',
+      !/data-extid-register-manual/.test(comp) && !/data-extid-register-manual/.test(scr2));
+    ok('画面の処理に入力欄への参照が残っていない',
+      !/inputEl/.test(scr2) && !/manualEl/.test(scr2));
+    /*
+     * **失敗したときに手入力へ落とさない。** 落とすと、まさに打ち間違いが混ざる場面
+     * （カメラが使えない・S3 が落ちた・読み取れない）でだけ誤りを招き入れる。
+     */
+    ok('S3 が落ちても手入力へ落とさない（撮り直しを促す）',
+      !/captureMethod = 'manual'/.test(scr2) && /もう一度撮影してください/.test(scr2));
+    ok('カメラの無い端末はスマートフォンへ送る（番号を打たせない）',
+      /cameraAvailable\(\)\) \{[\s\S]{0,400}スマートフォン/.test(scr2));
   }
-  ok('撮り直し・手入力の逃げ道がある',
-    /data-extid-retake/.test(comp) && /data-extid-manual/.test(comp));
+  ok('撮り直しの逃げ道がある', /data-extid-retake/.test(comp));
   ok('確認してから登録する (即確定しない)', /data-extid-register/.test(comp) && /この番号で登録する/.test(comp));
 
   const script = code('src/scripts/external-id-capture.ts');
   ok('uid を属性で渡していない', !/diagnosticUserId|data-diagnostic-user-id/.test(script));
   ok('二重 submit よけがある', /busy/.test(script));
-  ok('S3 が落ちたら手入力へ落ちる', /captureMethod = 'manual'/.test(script));
   ok('登録後は再読込で状態を取り直す', /window\.location\.reload\(\)/.test(script));
 
   /*
@@ -1173,8 +1184,9 @@ console.log('\n⑬ UI の契約\n');
         && !/\breturn\b/.test(branch),
         branch.slice(0, 160));
     }
-    ok('読めなかったときも案内を出す (手入力は開く)',
-      /show\(c\.manualEl, true\);[\s\S]{0,400}showWrong/.test(scr));
+    ok('読めなかったときは撮り直しの案内を出す（手入力へ誘導しない）',
+      /showWrong\(c, '番号を読み取れませんでした'[\s\S]{0,200}撮り直してください/.test(scr)
+      && !/手で入力/.test(scr.slice(scr.indexOf("'番号を読み取れませんでした'"))));
     ok('撮り直し・再読取で前回の案内を消す',
       /clearWrong\(c\);/.test(scr) && (scr.match(/clearWrong\(c\)/g) ?? []).length >= 2);
     /*
@@ -1232,7 +1244,7 @@ console.log('\n⑬ UI の契約\n');
       open.slice(0, 120));
     const yes = (() => {
       const i = scr.indexOf('data-extid-redo-yes]');
-      const j = scr.indexOf('data-extid-manual-open]', i);
+      const j = scr.indexOf('data-extid-camera-open]', i);
       return i >= 0 && j > i ? scr.slice(i, j) : '';
     })();
     ok('承諾して初めて面が入れ替わる',
