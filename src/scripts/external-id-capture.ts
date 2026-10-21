@@ -57,6 +57,8 @@ interface Ctx {
   /** 直近の読み取り結果（登録時にサーバへ戻す）。 */
   read: { barcode: string | null; printed: string | null } | null;
   evidenceKey: string | null;
+  /** 発行元の接頭辞（`704`＝Wellfort）。**サーバが返した値だけを使う**（焼き込まない）。 */
+  orgPrefix: string;
   /** 画面から送るのは `camera` と `manual` の 2 つだけ（`file` の経路は撤去済み）。 */
   captureMethod: 'camera' | 'manual';
   busy: boolean;
@@ -90,6 +92,7 @@ function ctx(root: HTMLElement): Ctx {
     redoEl: q('[data-extid-redo-confirm]'),
     read: null,
     evidenceKey: null,
+    orgPrefix: '',
     captureMethod: 'camera',
     busy: false,
   };
@@ -271,6 +274,7 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
     // （サーバ側でもう一度 evaluate されるので、判定はサーバが正）。
     if (c.candidateEl) c.candidateEl.textContent = candidate;
     const reasons = Array.isArray(r.review_reasons) ? (r.review_reasons as string[]) : [];
+    c.orgPrefix = typeof r.org_prefix === 'string' ? r.org_prefix : '';
     if (c.noteEl) c.noteEl.textContent = reasonText(reasons, typeof r.note === 'string' ? r.note : null);
     /*
      * **形が想定と違う = 別の数字を読んだ可能性が高い。**
@@ -278,7 +282,20 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
      * ただし**候補は出したままにする** — 実物の形式が既定と違うだけのこともあり、
      * その回を登録できなくすると撮影そのものが無駄になる。
      */
-    if (reasons.includes('pattern_mismatch') || reasons.includes('pattern_unknown')) {
+    /*
+     * **発行元の接頭辞で読み取りの成否を見る**（`704`＝Wellfort・2026-10-21）。
+     * 当社のキットの番号は必ずこれで始まるので、外れた回は
+     * **別の数字（URL の一部・管理用の記号など）を読んだ疑いが濃い**。
+     * 形の不一致（`pattern_*`）より**具体的に言えるので、こちらを先に出す**。
+     * ただし**候補は消さない** — 実物の形式が既定と違うだけのこともある。
+     */
+    if (reasons.includes('org_prefix_mismatch')) {
+      // **接頭辞はサーバが返した値をそのまま出す**（画面に焼くと app_config と食い違う）。
+      const head = c.orgPrefix ? `${c.orgPrefix} で始まります` : '決まった数字で始まります';
+      showWrong(c, 'この検査キットの番号ではないかもしれません',
+        `この検査キットの${c.idLabel}は${head}が、読み取れた番号はそうなっていません。`
+        + `${whereText(c)} この番号で間違いなければ、そのまま登録できます。`);
+    } else if (reasons.includes('pattern_mismatch') || reasons.includes('pattern_unknown')) {
       showWrong(c, `別の数字を読んだかもしれません`,
         `読み取れた数字が${c.idLabel}の形と違います。${whereText(c)} この番号で間違いなければ、そのまま登録できます。`);
     }
@@ -309,6 +326,9 @@ export function reasonText(reasons: string[], note: string | null): string {
   }
   if (reasons.includes('single_source')) {
     parts.push('片方しか読み取れていません。番号をお確かめください。');
+  }
+  if (reasons.includes('org_prefix_mismatch')) {
+    parts.push('この検査キットの番号ではないようです。お確かめください。');
   }
   if (reasons.includes('pattern_mismatch') || reasons.includes('pattern_unknown')) {
     parts.push('想定の形と違う番号です。お確かめのうえ登録してください。');

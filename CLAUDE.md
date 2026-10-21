@@ -54,7 +54,7 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
   GET でカタログ+現在値、POST で upsert。**UI は wellfort-site admin 側** (この作業ツリーには
   未取得のため実装状況は未確認)。
 
-**app_config の現行キー (38 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
+**app_config の現行キー (39 件・`CONFIG_SPECS` の実測)**: `ui.support_contact` / `ui.health_age_followup` /
 `demo.account_emails` / `demo.account_uids` / `demo.account_denied_uids` / `demo.seeded_from_admins` /
 `special.account_emails` / `special.account_uids` / `special.account_denied_uids` / `special.account_dob` /
 `ui.single_purchase_plan_name` /
@@ -65,8 +65,9 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
 `scan.perception_repair` / `scan.vqa_rowcrop` / `scan.ai_prediction_dedup` /
 `fabgate.unperformed` / `fabgate.refbleed` / `fabgate.reftable` / `fabgate.adjacent` /
 `ui.report_new_days` / `elith.plan_formats` /
-**`labid.prevent_pattern` / `labid.demecal_pattern` / `labid.prevent_capture` / `labid.demecal_capture`**
-(受取時・外部検査ID 撮影。**撮影の 2 つは既定 off**)
+**`labid.prevent_pattern` / `labid.demecal_pattern` / `labid.prevent_org_prefix` /
+`labid.prevent_capture` / `labid.demecal_capture`**
+(受取時・外部検査ID 撮影。**撮影の 2 つは既定 off**。`prevent_org_prefix` 既定 `704`)
 
 **【重要】この文書の下の方に残っている `env SCAN_XXX` という表記は、すべて app_config キーの
 読み替え**で理解すること (`SCAN_BOUNDARY_RECHECK` → `scan.boundary_recheck` のように
@@ -2542,6 +2543,15 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 | `docs/elith/batch_scan_to_elith_usage.md` | サンプル一括スキャン→S3 バッチ手順 (`scripts/batch-scan-to-elith.mjs`) |
 | **`docs/lab/lab_data_pipeline_master_spec.md`** | **検査データ・パイプライン 総合仕様書(E2E正本・上位文書)・現行 v2.1 / 基準日 2026-10-09**。EC購入→キット/タイミング→発送指示/進捗→AI問診/検体返送→各社受渡→受領チェック(週次)→Elithラップ/S3書出→AI診断PDF受取/表示 を6ステップで連結。詳細は(a)(b)(c)へ委譲(二重管理しない)。**【v2.1 で追加】§4-5 = 4検査横断の「検査ID紐づけ／問診受渡／結果受領」の正本**(優先順位 = §4-5 ＞ 会社別詳細仕様 ＞ 旧版。上書き箇所は §4-5.11 に列挙)。**§4-5.8 = v2.1 原案の実装状況を実コードで再確認した訂正 4 件** — ①Partner Portal は本番画面でサンプルは上り入力ファイルの取得だけ ②LAiF XLSX に入るのは人単位の仮名ID 1 か所で**② 整理番号の採番機構は未実装** ③血液の氏名列は**実在する**(`姓`/`名`/`姓かな`/`名かな`)ので残るゲートはパーサ改修と実受領CSV確認 ④**「Scan-Chat-AI は `customer` を読み取り専用でしか触れない」は誤り**(`HP_BRIDGE_READONLY_KEY` は wellfort-site の `app_bridge` 用)。**§4-5.12 の 3 = 最重要の未決**: `customer.lab_tests` に**行を作るコードが両リポジトリに 0 件**(SELECT は `src/lib/chat-context.ts:79-80` の 1 か所だけ)＝**外部ID紐づけ全体の先行条件** |
 | **`docs/lab/kit_receipt_external_id_capture_spec.md`** | **【受取時・外部検査ID 撮影／登録の正本。触る前に必読・v1.2／実装済み・既定 off】**ユーザーがキットを受け取った時点で外部IDをスマホ撮影・読取し、`lab_tests.id` へ紐づける。**P0 = プリベントのバーコードNo.(例 `704000xxx`)** / **P1 = デメカル 15桁「問合せ番号」(Secondary)** / **対象外 = Genoplan**(正本はタカセ返送CSV 方式。**ユーザー撮影方式へ置き換えない**)。**【UI の確定事項】プリベントの撮影対象に QR コードを据えない** — 書面全体を見せ「ユーザーID」と**1次元バーコード**を枠で囲う。
+**【2026-10-21・先方の説明】ユーザーID の頭 `704` は Wellfort 法人を表す** → **読み取りが成功したかの
+検査に使う** (`labid.prevent_org_prefix` 既定 `704`・正本 §2.1.3)。①バーコードと印字が食い違ったら
+**`704` で始まる側を採る** (両方そう/両方そうでないときは従来どおりバーコード・`barcode_ocr_mismatch` は残す)
+②採った値が外れたら `org_prefix_mismatch` + `review_required` (**登録は止めない**・画面は図へ戻す)
+③**問診CSV のゲートは `confirmed` でもブロック**。**期待パターン (`labid.prevent_pattern`) とは別物** —
+あちらは総桁数を含む形式例で実物が未確認なので緩めてよいが、**接頭辞は緩めない**。
+**足りない接頭辞を補わない** (捏造)。**デメカルには置かない** (概念を未確認)。
+**空・数字でない設定は判定しない** (打ち間違いで全件を止めない)。**画面の文言はサーバが返す値を使う** (焼かない)。
+
 **【2026-10-21・発注者指示で UI を 3 点変更 (§4.4.2 / §4.4.3 / §4.6.4)】①「写真を選ぶ」を撤去**し、
 逃げ道を**「番号を手で入力する」1 つ**に寄せた (外しただけだと PC と権限拒否の端末が行き止まりになる。
 サーバは `captureMethod: 'file'` を受け続ける=既存の台帳行と DB の check 制約)。

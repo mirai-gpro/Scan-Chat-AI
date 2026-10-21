@@ -157,6 +157,86 @@ console.log('\n③ 採否判定 (evaluateExternalId)\n');
 }
 
 // ══════════════════════════════════════════════════════════════════════
+// ③' 発行元（法人）の接頭辞 = **読み取りが成功したかの検査**
+//     （発注者指示 2026-10-21「ユーザーIDの頭の 704 は Wellfort 法人を表す」）
+// ══════════════════════════════════════════════════════════════════════
+console.log("\n③' 発行元の接頭辞 (704 = Wellfort)\n");
+{
+  const ev = (o) => core.evaluateExternalId({ provider: 'prevent', expectedPattern: core.DEFAULT_EXPECTED_PATTERN.prevent, ...o });
+
+  eq('コード既定は 704 (プリベント)', core.DEFAULT_ORG_PREFIX.prevent, '704');
+  /*
+   * **デメカルには足さない。** この概念を先方から確認していないので、
+   * 想像で接頭辞を置くと**全件が review_required になる**。
+   */
+  eq('デメカルは空 = 判定しない', core.DEFAULT_ORG_PREFIX.demecal, '');
+
+  const m = core.matchesOrgPrefix;
+  eq('704 で始まる → true', m('704000123', '704'), true);
+  eq('704 で始まらない → false', m('999000123', '704'), false);
+  eq('途中に 704 があっても false', m('170400012', '704'), false);
+  /*
+   * **設定の打ち間違いで全件を止めない。** 値は数字だけなので、数字でない接頭辞は
+   * 必ず不一致になる。そこで「アウト」にすると 1 文字のミスで運用が止まる。
+   */
+  eq('空は判定しない (null)', m('704000123', ''), null);
+  eq('数字でない設定は判定しない (null)', m('704000123', 'ABC'), null);
+  eq('undefined も判定しない', m('704000123', undefined), null);
+
+  // ── 読み取りが成功したかの検査 ──
+  const bad = ev({ barcode: '999000123', ocr: '999000123' });
+  eq('接頭辞が違う → review_required (**登録は止めない**)', [bad.ok, bad.status], [true, 'review_required']);
+  ok('接頭辞が違う → org_prefix_mismatch', bad.reasons.includes('org_prefix_mismatch'));
+  eq('**値を直さない** (704 を足して捏造しない)', bad.value, '999000123');
+
+  const good = ev({ barcode: '704000123', ocr: '704000123' });
+  ok('接頭辞が合えば理由は付かない', !good.reasons.includes('org_prefix_mismatch'));
+
+  /*
+   * **バーコードと印字が食い違ったら、704 で始まる側を採る**
+   * ＝「どちらの読み取りが成功したか」の判定に使う。
+   */
+  const pickOcr = ev({ barcode: '104000123', ocr: '704000123' });
+  eq('バーコードが 704 でなく印字が 704 → **印字を採る**', [pickOcr.value, pickOcr.decodeMethod], ['704000123', 'ocr']);
+  ok('それでも barcode_ocr_mismatch は残す (自動確定しない)',
+    pickOcr.reasons.includes('barcode_ocr_mismatch') && pickOcr.status === 'review_required');
+  ok('採った値は 704 なので org_prefix_mismatch は付かない', !pickOcr.reasons.includes('org_prefix_mismatch'));
+
+  const pickBarcode = ev({ barcode: '704000123', ocr: '104000123' });
+  eq('印字が 704 でなくバーコードが 704 → バーコードを採る',
+    [pickBarcode.value, pickBarcode.decodeMethod], ['704000123', 'barcode']);
+
+  const bothGood = ev({ barcode: '704000123', ocr: '704000999' });
+  eq('どちらも 704 → 従来どおりバーコードを採る',
+    [bothGood.value, bothGood.decodeMethod], ['704000123', 'barcode']);
+  const bothBad = ev({ barcode: '104000123', ocr: '204000123' });
+  eq('どちらも 704 でない → 従来どおりバーコードを採る',
+    [bothBad.value, bothBad.decodeMethod], ['104000123', 'barcode']);
+
+  // 手入力にも効く（手で打ち間違えた回も拾う）
+  const man = ev({ barcode: '704000123', ocr: '704000123', manual: '904000123' });
+  ok('手入力でも接頭辞を見る', man.reasons.includes('org_prefix_mismatch'));
+
+  // 接頭辞は app_config から差し替えられる
+  const other = core.evaluateExternalId({
+    provider: 'prevent', barcode: '704000123', ocr: '704000123',
+    expectedPattern: core.DEFAULT_EXPECTED_PATTERN.prevent, orgPrefix: '801',
+  });
+  ok('接頭辞を差し替えると判定も変わる', other.reasons.includes('org_prefix_mismatch'));
+  const off = core.evaluateExternalId({
+    provider: 'prevent', barcode: '999000123', ocr: '999000123',
+    expectedPattern: '', orgPrefix: '',
+  });
+  ok('接頭辞が空なら判定しない', !off.reasons.includes('org_prefix_mismatch'));
+
+  // デメカルは既定で判定しない
+  const dem = core.evaluateExternalId({
+    provider: 'demecal', barcode: '123456789012345', ocr: '123456789012345',
+  });
+  eq('デメカルは接頭辞で止めない', [dem.status, dem.reasons], ['confirmed', []]);
+}
+
+// ══════════════════════════════════════════════════════════════════════
 // ④ Genoplan を**この経路に通さない**（正本はタカセ返送CSV 方式・仕様 §2.3）
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n④ Genoplan は対象外\n');
@@ -249,12 +329,41 @@ console.log('\n⑦ AI問診 → 問診CSV のゲート\n');
     eq(`lab_test_id=${JSON.stringify(id)} → **ブロック**`, [r.allowed, r.reason], [false, 'lab_test_not_linked']);
   }
 
-  // **パターン外は台帳側で review_required になっている**ので、この段で止まる。
-  // ゲートがパターンを再判定して独自に通す／止めることはしない。
+  /*
+   * **期待パターン（総桁数まで含む形式例）は再判定しない。** 実物が未確認なので、
+   * 台帳の `status` を正とする（外れた回は review_required で次の段が止める）。
+   * → **`704` で始まるがパターンには合わない値**で確かめる。
+   */
   eq('パターン外でも台帳が confirmed なら通す (判定の二重化をしない)',
-    g(cap({ normalizedValue: '999999999' })).allowed, true);
+    g(cap({ normalizedValue: '7041234567' })).allowed, true);
   eq('パターン外で review_required なら止まる',
-    g(cap({ normalizedValue: '999999999', status: 'review_required' })).allowed, false);
+    g(cap({ normalizedValue: '7041234567', status: 'review_required' })).allowed, false);
+
+  /*
+   * ── 発行元の接頭辞（`704`＝Wellfort・発注者指示 2026-10-21）──
+   * **ここはハードな不変条件なので再判定する。** `confirmed` の行でも `704` で
+   * 始まらない値は**当社の検査キットの番号ではない**ので、問診CSV に出してはいけない
+   * （admin の訂正で値が差し替わった回・接頭辞の設定が後から変わった回に効く）。
+   */
+  {
+    const r = g(cap({ normalizedValue: '999999999' }));
+    eq('**接頭辞が違えば confirmed でもブロック**', [r.allowed, r.reason], [false, 'org_prefix_mismatch']);
+    ok('ブロックの説明に外部IDの全文が入らない', !r.detail.includes('999999999'));
+  }
+  eq('接頭辞が合えば通る', g(cap({ normalizedValue: '704000999' })).allowed, true);
+  /*
+   * **設定の打ち間違いで全件を止めない。** 空・数字でない接頭辞は「判定しない」へ倒す
+   * （止める側に倒すと、1 文字の設定ミスで問診CSV が全部出せなくなる）。
+   */
+  eq('接頭辞が空なら判定しない',
+    core.checkPreventQuestionnaireGate({ capture: cap({ normalizedValue: '999999999' }), orgPrefix: '' }).allowed,
+    true);
+  eq('接頭辞が数字でなければ判定しない',
+    core.checkPreventQuestionnaireGate({ capture: cap({ normalizedValue: '999999999' }), orgPrefix: 'ABC' }).allowed,
+    true);
+  eq('接頭辞は app_config から差し替えられる',
+    core.checkPreventQuestionnaireGate({ capture: cap({ normalizedValue: '704000123' }), orgPrefix: '801' }).reason,
+    'org_prefix_mismatch');
 
   ok('ブロックの説明に外部IDの全文が入らない',
     !g(cap({ normalizedValue: '123456789', status: 'review_required' })).detail.includes('123456789'));
@@ -736,8 +845,45 @@ console.log('\n⑪ API の認可とゲート\n');
     const m = new RegExp(`key: '${k.replace('.', '\\.')}'[\\s\\S]{0,400}?default: '([^']*)'`).exec(cfgSrc);
     eq(`${k} の既定は off`, m?.[1], 'off');
   }
-  for (const k of ['labid.prevent_pattern', 'labid.demecal_pattern']) {
+  for (const k of ['labid.prevent_pattern', 'labid.demecal_pattern', 'labid.prevent_org_prefix']) {
     ok(`${k} が app_config に在る (env でもコード定数でもない)`, new RegExp(`key: '${k.replace('.', '\\.')}'`).test(cfgSrc));
+  }
+  /*
+   * ── 発行元の接頭辞の配線（発注者指示 2026-10-21）──
+   * **既定をクライアントに焼かない。** 焼くと app_config を変えても画面の文言が
+   * 追従せず、**「704 で始まります」と言いながら別の接頭辞で判定する**ことになる。
+   */
+  {
+    const prefixDefault = /key: 'labid\.prevent_org_prefix'[\s\S]{0,600}?default: '([^']*)'/.exec(cfgSrc)?.[1];
+    eq('app_config の既定は 704', prefixDefault, '704');
+    eq('コード既定と app_config の既定が一致する',
+      /prevent: '([0-9]*)',/.exec(/DEFAULT_ORG_PREFIX[\s\S]{0,300}?\};/.exec(read('src/lib/external-test-id.ts'))?.[0] ?? '')?.[1],
+      prefixDefault);
+    ok('API が read / register の両方で接頭辞を渡す',
+      (api.match(/orgPrefix: orgPrefixFor\(provider\)/g) ?? []).length === 2);
+    ok('接頭辞は app_config から引く (API に焼かない)',
+      /cfg\('labid\.prevent_org_prefix'\)/.test(api) && !/'704'/.test(api));
+    ok('デメカルには接頭辞を渡さない (この概念を確認していない)',
+      /provider === 'prevent' \? cfg\('labid\.prevent_org_prefix'\) : ''/.test(api));
+    const scr2 = code('src/scripts/external-id-capture.ts');
+    ok('画面は**サーバが返した接頭辞**を使う (焼き込まない)',
+      /org_prefix/.test(scr2) && !/'704'/.test(scr2));
+    ok('接頭辞が違う回は専用の案内を出す',
+      /org_prefix_mismatch'\)\) \{[\s\S]{0,400}showWrong/.test(scr2));
+    /*
+     * **候補は消さない。** 接頭辞が違っても登録はできる（実物の形式が既定と違うことも
+     * あり得る）。ここで止めると撮影そのものを失わせる。分岐の中だけを見る。
+     */
+    const branch = (() => {
+      const i = scr2.indexOf("reasons.includes('org_prefix_mismatch')");
+      const j = scr2.indexOf('show(c.confirmEl, true);', i);
+      return i >= 0 && j > i ? scr2.slice(i, j) : '';
+    })();
+    ok('接頭辞が違っても候補は消さない',
+      branch.includes('showWrong') && !/show\(c\.confirmEl, false\)/.test(branch) && !/\breturn\b/.test(branch),
+      branch.slice(0, 120));
+    ok('read 応答に接頭辞を載せる (画面が具体的に言えるように)',
+      /org_prefix: orgPrefixFor\(provider\)/.test(api));
   }
   // **dev seed の誤ったパターンを使っていないこと**（`^K[0-9]{4}$` は 704000123 を弾く）
   const persistSrc = code('src/lib/external-id-persist.ts');
