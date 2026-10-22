@@ -42,6 +42,8 @@ const KEY = 'demo.account_uids';
 const EMAIL_KEY = 'demo.account_emails';
 const DENY_KEY = 'demo.account_denied_uids';
 const SEEDED_KEY = 'demo.seeded_from_admins';
+/** **表示モード** (admin が決める・利用者は切り替えられない)。§4.2.3。 */
+const DISPLAY_KEY = 'demo.display_uids';
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -72,6 +74,7 @@ export const POST: APIRoute = async ({ request }) => {
     add?: unknown; remove?: unknown;
     add_email?: unknown; remove_email?: unknown;
     deny?: unknown; undeny?: unknown;
+    display_demo?: unknown; display_real?: unknown;
     mark_seeded?: unknown;
     updated_by?: unknown;
   } = {};
@@ -88,9 +91,16 @@ export const POST: APIRoute = async ({ request }) => {
   const removeEmail = Array.isArray(body.remove_email) ? lower(body.remove_email) : [];
   const deny = Array.isArray(body.deny) ? lower(body.deny) : [];
   const undeny = Array.isArray(body.undeny) ? lower(body.undeny) : [];
+  /*
+   * **表示モード** (§4.2.3)。`display_demo` = デモ表示にする / `display_real` = 既定へ戻す。
+   * **利用者が切り替える経路は無い**ので、ここが唯一の書き口。
+   */
+  const displayDemo = Array.isArray(body.display_demo) ? lower(body.display_demo) : [];
+  const displayReal = Array.isArray(body.display_real) ? lower(body.display_real) : [];
   const markSeeded = body.mark_seeded === true;
   if (add.length === 0 && remove.length === 0 && addEmail.length === 0
-      && removeEmail.length === 0 && deny.length === 0 && undeny.length === 0 && !markSeeded) {
+      && removeEmail.length === 0 && deny.length === 0 && undeny.length === 0
+      && displayDemo.length === 0 && displayReal.length === 0 && !markSeeded) {
     return json({ ok: false, error: 'nothing_to_do' }, 400);
   }
 
@@ -232,6 +242,33 @@ export const POST: APIRoute = async ({ request }) => {
     else denied.splice(at, 1);
   }
 
+  /*
+   * ── 表示モード (§4.2.3・発注者指示 2026-10-22) ──────────────────────
+   *
+   * **資格 → 表示 の順を admin 画面でも守る。** デモの資格が無い uid を
+   * デモ表示に指定しても `resolveViewMode()` は無視するので、
+   * **ここで却下して理由を返す** — 黙って受けると
+   * 「指定したのにデモが出ない」を admin が追えなくなる。
+   *
+   * `cur.rows` は組み込み / env / app_config の**和から除外を引いた**結果
+   * (`listDemoAccounts()`)。`denied` を引いた後の姿で見るのが要点。
+   */
+  const display = parseEntries(cur.displayRaw);
+  for (const uid of displayDemo) {
+    if (!isUuid(uid)) { rejected.push({ uid, reason: 'uid の形式が違う' }); continue; }
+    const row = cur.rows.find((r) => r.uid === uid);
+    if (!row || row.denied) {
+      rejected.push({ uid, reason: 'デモの資格が無い (先にデモ用アカウントとして登録する)' });
+      continue;
+    }
+    if (!display.some((e) => e.uid === uid)) display.push({ uid, label: row.label ?? '' });
+  }
+  for (const uid of displayReal) {
+    const at = display.findIndex((e) => e.uid === uid);
+    // **既定へ戻すだけ**なので、名簿に無い uid は却下しない (冪等にする)。
+    if (at >= 0) display.splice(at, 1);
+  }
+
   // 保存形式は **1 行 1 件 + `#` 注釈**。人が読める形で残す (admin が直接編集しても壊れない)。
   const ser = (list: { uid: string; label: string }[]) =>
     list.map((e) => (e.label ? `${e.uid}  # ${e.label}` : e.uid)).join('\n');
@@ -248,6 +285,8 @@ export const POST: APIRoute = async ({ request }) => {
   if (value !== cur.configRaw) updates[KEY] = value;
   if (emailValue !== cur.emailsRaw) updates[EMAIL_KEY] = emailValue;
   if (deniedValue !== cur.deniedRaw) updates[DENY_KEY] = deniedValue;
+  const displayValue = ser(display);
+  if (displayValue !== cur.displayRaw) updates[DISPLAY_KEY] = displayValue;
   /*
    * **初回登録の目印。** これが入っていると管理者リストからの自動登録は二度と走らない。
    * 走り続けると、admin 画面から外した人が次のアクセスで黙って戻ってしまう。

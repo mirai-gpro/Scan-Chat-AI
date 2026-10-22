@@ -60,6 +60,13 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     description: '**供給元に関わらずダミーを出さない uid。** 組み込み / env の行を admin 画面から'
       + '外すための唯一の手段 (供給元を書き換えず引き算するので「戻す」で元に戻る)。'
       + ' 直接編集せず /admin/demo-accounts から操作すること。' },
+  { key: 'demo.display_uids', type: 'string', group: 'デモ', label: 'デモ表示にする uid (表示モード)', default: '',
+    description: '**この uid のダッシュボードをデモ表示 (ダミーデータ) にする。**'
+      + ' 表示モードは**アカウントの属性**で、利用者には切り替えさせない'
+      + ' (マスコミ・大口クライアントの画面に切替 UI を出さないため)。'
+      + ' **デモの資格が無い uid を書いても効かない** (資格 → 表示の順で判定する)。'
+      + ' 空のときの既定は Dual=実データ / デモだけ=デモ。'
+      + ' 直接編集せず /admin/experience-accounts から操作すること。' },
   { key: 'demo.seeded_from_admins', type: 'string', group: 'デモ', label: '管理者リストからの初回登録 (実施日時)', default: '',
     description: '**内部用の目印。手で編集しない。** /admin/demo-accounts を最初に開いたとき、'
       + '管理者リストのメンバーを 1 度だけ自動登録し、その日時を記録する。'

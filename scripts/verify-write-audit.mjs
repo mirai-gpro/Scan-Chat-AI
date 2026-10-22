@@ -151,9 +151,15 @@ console.log('\n② denyDemoWrite (実物を動かす)\n');
     const vm = await load('src/lib/view-mode.ts', [
       [/^import type \{ APIContext \} from 'astro';$/m, ''],
       [/^import type \{ Viewer \} from '[^']+';$/m, ''],
-      [/^import \{ demoDisabledGlobally, isDemoAccount \} from '[^']+';$/m,
+      /*
+       * **`isForcedDemoDisplay` もスタブする** (2026-10-22・表示モードが
+       * admin 管理になり view-mode.ts がこれを引くようになった)。
+       * `__capsForced` = admin が `demo.display_uids` に入れた uid。
+       */
+      [/^import \{ demoDisabledGlobally, isDemoAccount, isForcedDemoDisplay \} from '[^']+';$/m,
         'const demoDisabledGlobally = () => globalThis.__capsOff;\n'
-        + 'const isDemoAccount = (u) => globalThis.__capsDemo.includes(u);'],
+        + 'const isDemoAccount = (u) => globalThis.__capsDemo.includes(u);\n'
+        + 'const isForcedDemoDisplay = (u) => (globalThis.__capsForced ?? []).includes(u);'],
       [/^import \{ isSpecialAccount \} from '[^']+';$/m,
         'const isSpecialAccount = (u) => globalThis.__capsSpecial.includes(u);'],
       [/import\.meta\.env/g, 'globalThis.__env'],
@@ -386,9 +392,12 @@ console.log('\n⑥ 実走 (scan/save)\n');
   const vm = await load('src/lib/view-mode.ts', [
     [/^import type \{ APIContext \} from 'astro';$/m, ''],
     [/^import type \{ Viewer \} from '[^']+';$/m, ''],
-    [/^import \{ demoDisabledGlobally, isDemoAccount \} from '[^']+';$/m,
+    [/^import \{ demoDisabledGlobally, isDemoAccount, isForcedDemoDisplay \} from '[^']+';$/m,
       'const demoDisabledGlobally = () => false;\n'
-      + 'const isDemoAccount = (u) => u === globalThis.__demoUid;'],
+      + 'const isDemoAccount = (u) => u === globalThis.__demoUid;\n'
+      // **デモ用アカウントは admin がデモ表示に指定している**状態で試す
+      // (そうでないと Demo 表示にならず、番人の検査が空振りする)。
+      + 'const isForcedDemoDisplay = (u) => u === globalThis.__demoUid;'],
     [/^import \{ isSpecialAccount \} from '[^']+';$/m, 'const isSpecialAccount = () => false;'],
     [/import\.meta\.env/g, 'globalThis.__env'],
   ]);

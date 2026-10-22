@@ -63,12 +63,15 @@ export const setConfig = async (u) => { Object.assign(__store, u); return { ok: 
     .replace(/from '\.\/demo-accounts'/g, "from './ea-demo-accounts.mjs'")
     .replace(/from '\.\/special-accounts'/g, "from './ea-special-accounts.mjs'")
     .replace(/from '\.\/experience-accounts'/g, "from './ea-experience-accounts.mjs'")
+    // 表示モード (2026-10-22)。一覧は `resolveViewMode()` 本体を呼ぶので実物が要る。
+    .replace(/from '\.\/view-mode'/g, "from './ea-view-mode.mjs'")
     .replace(/import\.meta\.env\.(\w+)/g, 'globalThis.__eaEnv.$1')
     .replace(/import\.meta\.env/g, 'globalThis.__eaEnv'));
   const files = {
     'ea-demo-accounts.mjs': 'src/lib/demo-accounts.ts',
     'ea-special-accounts.mjs': 'src/lib/special-accounts.ts',
     'ea-experience-accounts.mjs': 'src/lib/experience-accounts.ts',
+    'ea-view-mode.mjs': 'src/lib/view-mode.ts',
     'ea-experience-admin.mjs': 'src/lib/experience-admin.ts',
   };
   for (const [out, src] of Object.entries(files)) {
@@ -347,6 +350,82 @@ console.log('\n⑦ 判定の置き場所\n');
     /listDemoAccounts\(\)/.test(src) && /listSpecialAccounts\(\)/.test(src));
   ok('`parseEmailEntries` を自前で呼び直していない', !/parseEmailEntries\(/.test(src),
     '名簿の読み方を 2 つ持たない');
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * ⑧ **「いま出る画面」= 表示モード** (発注者指示 2026-10-22)
+ *
+ * app_config を差し替えて**実物の `resolveViewMode()` を通した結果**を見る。
+ * ここが静かに壊れると、**管理画面の表示と本人に見えている画面が食い違う**
+ * (どちらも画面は正常に見えるので目視では守れない)。
+ * ══════════════════════════════════════════════════════════════════════ */
+console.log('\n⑧ いま出る画面 (admin が決める)\n');
+{
+  const DUAL = {
+    'special.account_emails': `${HASH_A} a***@example.com ${UID_X} # 招待 A`,
+    'demo.account_emails': `${HASH_A} a***@example.com ${UID_X} # お披露目 A`,
+    'special.account_uids': `${UID_X} 招待 A`,
+    'demo.account_uids': `${UID_X} お披露目 A`,
+  };
+
+  // ── 指定が無ければ Dual は実データ (発注者の絶対条件) ──────────
+  {
+    const r = rowOf(listWith(DUAL), HASH_A);
+    eq('Dual の既定は実データ', [r?.displayMode, r?.displayForced], ['real', false]);
+    eq('  資格は両方立っている (資格と表示は別の軸)', [r?.canReal, r?.canDemo], [true, true]);
+    ok('  表示は変えられる (デモの資格が在る)', r?.displayChangeable === true);
+  }
+
+  // ── admin が指定したらデモ表示 ──────────────────────────────
+  {
+    const r = rowOf(listWith({ ...DUAL, 'demo.display_uids': `${UID_X} お披露目 A` }), HASH_A);
+    eq('**admin が指定するとデモ表示になる**', [r?.displayMode, r?.displayForced], ['demo', true]);
+    eq('  資格は 1 つも動いていない', [r?.canReal, r?.canDemo], [true, true]);
+  }
+
+  // ── 資格 → 表示 の順 ────────────────────────────────────────
+  {
+    const r = rowOf(listWith({
+      'special.account_emails': `${HASH_A} a***@example.com ${UID_X} # 招待 A`,
+      'special.account_uids': `${UID_X} 招待 A`,
+      // **デモの資格が無い人を指定しても効かない**
+      'demo.display_uids': `${UID_X} 誤って指定`,
+    }), HASH_A);
+    eq('**デモの資格が無い人を指定しても実データのまま**',
+      [r?.displayMode, r?.displayForced], ['real', false]);
+    ok('  切替ボタンも出させない', r?.displayChangeable === false);
+  }
+
+  // ── 除外中の人は指定しても出ない ────────────────────────────
+  {
+    const r = rowOf(listWith({
+      ...DUAL,
+      'demo.account_denied_uids': UID_X,
+      'demo.display_uids': UID_X,
+    }), HASH_A);
+    eq('**除外中の人は指定してもデモ表示にならない**', r?.displayMode, 'real',
+      '除外 = デモの資格が無い。ここが demo になると画面が嘘をつく');
+  }
+
+  // ── 全停止スイッチが指定より強い ────────────────────────────
+  {
+    globalThis.__eaEnv = { PUBLIC_DEMO_FALLBACK: 'false' };
+    const r = rowOf(listWith({ ...DUAL, 'demo.display_uids': UID_X }), HASH_A);
+    eq('全停止 (PUBLIC_DEMO_FALLBACK=false) が指定より強い', r?.displayMode, 'real');
+    globalThis.__eaEnv = {};
+  }
+
+  // ── 件数 ────────────────────────────────────────────────────
+  {
+    const l = listWith({ ...DUAL, 'demo.display_uids': UID_X });
+    ok('デモ表示の人数を数えている (誰にダミーが出ているか)',
+      typeof l.counts.showingDemo === 'number' && l.counts.showingDemo >= 1);
+  }
+
+  // ── この層は読むだけ ────────────────────────────────────────
+  ok('**表示モードをこの層から書いていない**',
+    !/display_uids/.test(code('src/lib/experience-admin.ts')),
+    '書く口は admin の API 1 本だけ (読む層から書かない)');
 }
 
 summary();

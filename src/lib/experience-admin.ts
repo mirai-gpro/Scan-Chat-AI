@@ -34,6 +34,7 @@ import {
   type SpecialAccountRow,
 } from './special-accounts';
 import { detectConflict, experienceCapabilities, type UidConflict } from './experience-accounts';
+import { resolveViewMode, type ViewMode } from './view-mode';
 
 /** 片方の名簿における、その人の状態。 */
 export interface SideState {
@@ -84,6 +85,22 @@ export interface ExperienceAccountRow {
   dobMasked: string;
   /** `male` / `female` / ''。 */
   sex: string;
+  /**
+   * ════════════════════════════════════════════════════════════════════
+   * **この人がログインしたときに実際に出る画面** (表示モード・§4.2.3)
+   * ════════════════════════════════════════════════════════════════════
+   *
+   * **資格とは別の軸。** 利用者は切り替えられないので、ここが admin から見た
+   * 「いまこの人に何が見えているか」の答えになる。
+   *
+   * 【判定は `resolveViewMode()` 本体を呼ぶ】画面用に条件を書き写すと
+   * **「管理画面では デモ と出ているのに本人には実データが出る」**が静かに起きる。
+   */
+  displayMode: ViewMode;
+  /** `true` = admin が `demo.display_uids` で指定している / `false` = 既定のまま。 */
+  displayForced: boolean;
+  /** 表示モードを admin が変えられるか (= デモの資格が在るか)。 */
+  displayChangeable: boolean;
 }
 
 export interface ExperienceAccountList {
@@ -100,6 +117,11 @@ export interface ExperienceAccountList {
     neither: number;
     /** uid が食い違っている人。**0 でなければ人が見る。** */
     conflicts: number;
+    /**
+     * **いまデモ表示になっている人** (既定・admin 指定の合計)。
+     * 「誰にダミーが出ているか」を一目で見るための数。
+     */
+    showingDemo: number;
   };
   /** `PUBLIC_DEMO_FALLBACK=false` でダミー表示が全停止しているか。 */
   demoDisabledGlobally: boolean;
@@ -136,6 +158,7 @@ export function listExperienceAccounts(): ExperienceAccountList {
     key, kind, hash: '', masked: '', uid: '', label: '',
     demo: emptySide(), special: emptySide(),
     canDemo: false, canReal: false, dual: false, conflict: null,
+    displayMode: 'real' as ViewMode, displayForced: false, displayChangeable: false,
     hasDob: false, dobMasked: '', sex: '',
   });
 
@@ -199,6 +222,16 @@ export function listExperienceAccounts(): ExperienceAccountList {
     row.hasDob = !!(d && d.dob);
     row.dobMasked = d && d.dob ? '****-**-**' : '';
     row.sex = d?.sex ?? '';
+    /*
+     * **本人がログインしたときの画面**を知りたいので `kind: 'self'` で引く。
+     * **代理表示・共有でも同じ結果になる** (2026-10-22 以降モードは
+     * アカウントの属性なので、閲覧者の種別で変わらない)。
+     */
+    const vm = resolveViewMode({ kind: 'self', uid: row.uid || null });
+    row.displayMode = vm.effectiveMode;
+    row.displayForced = vm.forcedDemo;
+    // 資格が無い人の表示は動かせない (指定しても `resolveViewMode` が無視する)。
+    row.displayChangeable = vm.canDemo;
     return row;
   });
 
@@ -219,6 +252,7 @@ export function listExperienceAccounts(): ExperienceAccountList {
       dual: rows.filter((r) => r.dual).length,
       neither: rows.filter((r) => !r.canDemo && !r.canReal).length,
       conflicts: rows.filter((r) => r.conflict).length,
+      showingDemo: rows.filter((r) => r.displayMode === 'demo').length,
     },
     demoDisabledGlobally: demoDisabledGlobally(),
     seededFromAdmins: demo.seededFromAdmins,

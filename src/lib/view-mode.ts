@@ -13,46 +13,42 @@
  *   `resolveViewMode(...)`        … **いまどちらを表示するか** (この層)
  *   `shouldUseDemoData(uid, mode)`… **ダミーを出すかの唯一の判定** (この層)
  *
+ * 【2026-10-22・発注者指示でモードの決め方を変えた】**利用者には切り替えさせない。**
+ * 「ユーザーに切り替えさせる、なんてありえない」「SP アカウントやデモを使う人間は、
+ * マスコミや有力な大口クライアントなんだぞ」。
+ *
+ *   **旧**: Cookie `welltect_mode` (本人がダッシュボードのスイッチで切り替える)
+ *   **新**: **アカウントの属性** — app_config `demo.display_uids` に admin が入れる
+ *
+ * これで**切り替える口がどこにも無くなる**ので、
+ *   ・報道関係者・大口クライアントの画面に切替 UI が出ない (ネガティブな印象を与えない)
+ *   ・相手が自分で切り替えて**空の画面や意図しない側に着く**ことが起きない
+ *   ・**本人・admin 代理表示・共有のどこから見ても同じ画面**になる
+ *     (モードが閲覧者ではなくアカウントに付くので、旧 `switchable` の
+ *      「代理表示では切り替えさせない」という条件自体が要らなくなった)
+ *
  * 【越えてはならない線】
- *   ・**Cookie を権限の根拠にしない。** 毎リクエストで資格を引き直す
- *     (Cookie は「どちらを見たいか」という希望でしかない)
- *   ・**Dual のログイン直後は必ず `real`** (Cookie が無ければ Real)
- *   ・**代理表示・共有・未サインインでは切り替えさせない** (`switchable:false`)
+ *   ・**資格 → 表示 の順。** `demo.display_uids` に書いただけでは Demo は出ない
+ *     (`canDemo` が先。資格の無い uid を名簿に書いても効かない)
+ *   ・**Dual の既定は `real`** (admin が指定しなければ実データ)
+ *   ・**Cookie を読まない・書かない。** 利用者の要求でモードを動かす経路を作らない
  *   ・**ダミーを出す判定をこの 1 か所に閉じる。** 各画面が `isDemoAccount` を
  *     直に見ると、ページごとに Demo / Real が食い違う (§4.3「一部だけ旧判定を残さない」)
  *   ・**モジュール変数に現在のモードを置かない。** SSR は 1 つの isolate で
  *     同時リクエストを捌くので、**他人のモードが漏れる**。常に引数で渡す
  */
 import type { APIContext } from 'astro';
-import { demoDisabledGlobally, isDemoAccount } from './demo-accounts';
+import { demoDisabledGlobally, isDemoAccount, isForcedDemoDisplay } from './demo-accounts';
 import { isSpecialAccount } from './special-accounts';
 import type { Viewer } from './viewer';
 
-/** Cookie 名。**HttpOnly** なので JS から読めない (切り替えはサーバ API 経由)。 */
-export const MODE_COOKIE = 'welltect_mode';
-
-/** 表示モード。**`real` が既定**で、`demo` は明示的に切り替えたときだけ。 */
+/**
+ * 表示モード。
+ *
+ * **`real` が既定**で、`demo` になるのは **admin が `demo.display_uids` に
+ * 入れたアカウントだけ**。利用者が選ぶ経路は無い (Cookie も撤去した)。
+ */
 export type ViewMode = 'real' | 'demo';
-
-/** Cookie の値として妥当か。**知らない値は null** (壊れた Cookie で Demo にしない)。 */
-export function parseMode(raw: string | null | undefined): ViewMode | null {
-  const v = String(raw ?? '').trim().toLowerCase();
-  return v === 'demo' || v === 'real' ? v : null;
-}
-
-/** Cookie の属性。`viewerCookieOptions()` と同じ流儀 (dev は http なので Secure を外す)。 */
-export function modeCookieOptions(): {
-  httpOnly: true; secure: boolean; sameSite: 'lax'; path: string; maxAge: number;
-} {
-  return {
-    httpOnly: true,
-    secure: import.meta.env.DEV !== true,
-    sameSite: 'lax',
-    path: '/',
-    // 30 日 = `welltect_v` と同じ。**これ自身は認証ではない**ので期限は緩くてよい。
-    maxAge: 60 * 60 * 24 * 30,
-  };
-}
 
 export interface ViewModeState {
   /** **実際にどちらを表示するか。** 画面とクエリはこれだけを見る。 */
@@ -63,47 +59,40 @@ export interface ViewModeState {
   canReal: boolean;
   /** 両方の資格を持つ = Dual。**正常な状態。** */
   dual: boolean;
-  /** 画面に切り替えスイッチを出してよいか (＝ `POST /api/session/view-mode` が通るか)。 */
-  switchable: boolean;
-  /** Cookie が要求していたモード (監査・切り分け用)。 */
-  requested: ViewMode | null;
+  /**
+   * **admin が `demo.display_uids` でデモ表示に指定しているか** (監査・切り分け用)。
+   *
+   * `false` かつ `effectiveMode === 'demo'` なら、それは**既定**で demo
+   * (デモの資格だけを持つ枠 / 未サインイン) ということ。
+   */
+  forcedDemo: boolean;
 }
 
 /**
  * **毎リクエストでモードを決める。**
  *
- * 【順序が要点】①切り替えてよい閲覧者か → ②Demo の資格が在るか → ③Cookie の希望。
- * **③ を先に見てはいけない** (Cookie だけで Demo に入れると権限の根拠になる)。
+ * 【順序が要点】**①資格 → ②admin の指定**。
+ * **② を先に見てはいけない** — 名簿に書いただけで Demo に入れると、
+ * `demo.display_uids` が「資格」の二重管理になり、
+ * `demo.account_denied_uids` で止めた人にダミーが出る。
  *
- * 【`real` へ倒す場面】資格を失った / 代理表示 / 共有 / 未サインイン / Cookie 無し。
- * **既定を `demo` にしない** — 実データの利用者に他人名義のダミーを出す方が害が大きい
- * (スペシャル枠で止めていたのと同じ事故。§4.3 でその 1 行を外す代わりに、
- * ここが「明示的に切り替えたときだけ Demo」を担保する)。
+ * 【`real` へ倒す場面】資格を失った / 未サインインでない一般顧客 / admin の指定なし。
+ * **既定を `demo` にしない** — 実データの利用者に他人名義のダミーを出す方が害が大きい。
  *
  * @param viewer `resolveViewer()` の結果 (`kind` と `uid` だけ見る)。
- * @param requested Cookie から読んだ希望 (`parseMode` を通した値)。
  */
-export function resolveViewMode(
-  viewer: Pick<Viewer, 'kind' | 'uid'>,
-  requested: ViewMode | null,
-): ViewModeState {
+export function resolveViewMode(viewer: Pick<Viewer, 'kind' | 'uid'>): ViewModeState {
   const uid = viewer.uid;
   const canDemo = !demoDisabledGlobally() && isDemoAccount(uid);
   const canReal = isSpecialAccount(uid);
   /*
-   * **切り替えてよいのは本人のセッションだけ。**
-   *   `admin_impersonation` / `admin_impersonation_legacy` … admin が他人の画面を見ている。
-   *     ここで Demo へ入れると**「A さんの画面のつもりでダミーを見る」**という
-   *     §13.0 が名指しした最悪の形になる (承認の確認が無意味になる)
-   *   `share`     … URL を開くだけで入る人。表示対象の資格で画面を変えさせない
-   *   `anonymous` … uid が無いので資格も無い
-   *   `uid_entry` … 緊急入場。admin を与えない経路なので切り替えも与えない
+   * **admin がデモ表示に指定しているか。**
+   * `canDemo` で囲っているのが要点 — **資格が無い uid を名簿に書いても効かない**。
    */
-  const selfSession = viewer.kind === 'self' || viewer.kind === 'admin_self';
-  const switchable = selfSession && canDemo;
+  const forcedDemo = canDemo && isForcedDemoDisplay(uid);
   /*
    * ════════════════════════════════════════════════════════════════════
-   * **Cookie が無いときの既定。** 変えるのは Dual だけで、他は PR-C 前と同じ挙動。
+   * **admin の指定が無いときの既定。** PR-C から 1 文字も変えていない。
    * ════════════════════════════════════════════════════════════════════
    *
    *   ① Real の資格あり (**Dual を含む**) → **`real`**
@@ -111,25 +100,23 @@ export function resolveViewMode(
    *      ダミーを先に見せない。
    *   ② Demo の資格だけ (記者・パートナー) → **`demo`**
    *      **実データを 1 件も持たない枠**なので、既定を Real にすると
-   *      **URL を開いた人が空の画面に着く** = お披露目の導線が壊れる
-   *      (PR-C 前と同じ挙動に保つ)。
+   *      **URL を開いた人が空の画面に着く** = お披露目の導線が壊れる。
    *   ③ 未サインイン → **`demo`**
    *      セッションが無いので資格も引けない。**ダミーを出すかは
    *      `shouldUseDemoData()` が「表示する uid」で判定する**ので、
-   *      ここを `demo` にしても一般顧客にダミーは出ない
-   *      (本番は未サインインならサインイン画面で止まる)。
+   *      ここを `demo` にしても一般顧客にダミーは出ない。
    *   ④ どちらの資格も無い (一般顧客) → **`real`**
    *
-   * **代理表示・共有は切り替えられない** (`switchable:false`) が、**既定は
-   * 表示対象の資格に従う** — admin が デモ用アカウントを確認するとき、
-   * 共有相手がデモの紙面を見るときの挙動を PR-C 前から変えないため。
+   * **代理表示・共有も同じ既定・同じ指定に従う** — モードが閲覧者ではなく
+   * アカウントに付くので、**admin が A さんを代理表示したとき、A さん本人が
+   * 見るのと同じ画面になる** (旧 `switchable` の分岐が要らなくなった理由)。
    */
   const fallback: ViewMode = viewer.kind === 'anonymous' ? 'demo'
     : canReal ? 'real'
       : canDemo ? 'demo'
         : 'real';
-  const effectiveMode: ViewMode = switchable && requested !== null ? requested : fallback;
-  return { effectiveMode, canDemo, canReal, dual: canDemo && canReal, switchable, requested };
+  const effectiveMode: ViewMode = forcedDemo ? 'demo' : fallback;
+  return { effectiveMode, canDemo, canReal, dual: canDemo && canReal, forcedDemo };
 }
 
 /**
@@ -154,14 +141,20 @@ export function shouldUseDemoData(uid: string | null | undefined, mode: ViewMode
 }
 
 /**
- * **画面 / API が呼ぶ入口。** Cookie を読んで資格と突き合わせ、モードを決める。
+ * **画面 / API が呼ぶ入口。** 30 か所から呼ばれる。
  *
- * **各ページで Cookie を直に読まない** — 読み方が散ると「あるページだけ
- * 壊れた Cookie を信じる」が生まれる。`resolveViewer()` の結果と対で使う。
+ * 【`_ctx` を残してあるのは意図】2026-10-22 に Cookie を読むのをやめたので
+ * **リクエストからは何も読まない**。それでも引数を外さないのは、
+ * 呼び出し側 30 か所を書き換えないため — そして**ここが唯一の入口である**
+ * という形を崩さないため (各ページが `resolveViewMode` を直に呼び始めると、
+ * PR-D で揃えた「`refreshConfig()` → モード」の順序が崩れる)。
+ *
+ * **ここで Cookie やクエリを読む実装を足さないこと。** 足した瞬間に
+ * 「利用者の要求でモードが動く」= 発注者が禁じた形に戻る。
  */
 export function viewModeFromRequest(
-  ctx: Pick<APIContext, 'cookies'>,
+  _ctx: Pick<APIContext, 'cookies'>,
   viewer: Pick<Viewer, 'kind' | 'uid'>,
 ): ViewModeState {
-  return resolveViewMode(viewer, parseMode(ctx.cookies.get(MODE_COOKIE)?.value));
+  return resolveViewMode(viewer);
 }

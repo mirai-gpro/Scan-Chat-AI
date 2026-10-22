@@ -103,11 +103,20 @@ export const GET: APIRoute = async (ctx) => {
    * 行の有無だけを見て「データは在る」と判断しない、が 2026-08-30 の教訓。
    */
   const report = await inspectReport(viewer.uid, viewer.origin, viewMode.effectiveMode);
-  // 切り替えの可否は viewer の種別で決まるので**ここで**出す (inspectReport は uid しか知らない)。
+  /*
+   * **表示モード。** 2026-10-22 から**アカウントの属性**で、利用者は切り替えられない。
+   *
+   *   `forced_demo:true`  … admin が `demo.display_uids` でデモ表示に指定している
+   *   `forced_demo:false` ＋ `effective:'demo'` … **既定**でデモ
+   *                         (デモの資格だけを持つ枠 / 未サインイン)
+   *   `can_demo:true` ＋ `effective:'real'`     … **Dual の正常な既定** (異常ではない)
+   *
+   * **`switchable` / `requested` は廃止した** — 切り替える口が無くなったので、
+   * この 2 つが返ってきたら古いデプロイを見ている (`build` を見る)。
+   */
   const mode = {
     effective: viewMode.effectiveMode,
-    requested: viewMode.requested,
-    switchable: viewMode.switchable,
+    forced_demo: viewMode.forcedDemo,
     can_demo: viewMode.canDemo,
     can_real: viewMode.canReal,
     dual: viewMode.dual,
