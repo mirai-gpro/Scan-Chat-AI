@@ -84,6 +84,10 @@ jobs:
       # デモから書いた本物の行は**本人にも見えない**まま増える。逆にゲートが
       # 広がると**一般顧客が保存できなくなる**のに、デモで試している側には何も起きない。
       - run: npm run verify:write-audit
+      # 1 人 1 行の統合一覧 (PR-E)。**ここは静かに壊れる** — 束ね方を間違えると
+      # 同じ人が 2 行に割れ、片方だけ外して「外した」と思える。競合 (uid 食い違い) を
+      # 自動でどちらかへ寄せると人が判断する機会が消え、PII が混ざっても画面は正常に見える。
+      - run: npm run verify:experience-admin
       # 登録メールの差し替え。**uid が変わる退行が一番まずい** (検査データの紐付けが全部外れる)。
       - run: npm run verify:special-email-replace
       - run: npm run verify:transcosmos-reports
