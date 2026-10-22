@@ -17,7 +17,7 @@
  * 検査は「そう書いてあるか」で済ませず、**実物を transpile して動かす**。
  */
 
-import { readFileSync, mkdirSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 const ROOT = resolve(import.meta.dirname, '..');
@@ -1951,7 +1951,7 @@ console.log('\n⑱ 読み取りの待ち時間 (thinking / 実測)\n');
     ok('read ブロックが在る', rb.length > 0);
     ok('S3 の取得を実測する', /const s3Ms = Date\.now\(\) - tRead0;/.test(rb));
     ok('控えの保存を実測する', /const cacheMs = Date\.now\(\) - tCache0;/.test(rb));
-    ok('推論の実測は読み取り側から受け取る', /gemini_ms: read\.geminiMs/.test(rb));
+    ok('推論の実測は読み取り側から受け取る', /gemini_ms: read\?\.geminiMs/.test(rb));
     const i2 = rb.indexOf('timing: {');
     const tb = i2 >= 0 ? rb.slice(i2, rb.indexOf('},', i2)) : '';
     ok('応答に `timing` が在る', tb.length > 0);
@@ -1964,7 +1964,11 @@ console.log('\n⑱ 読み取りの待ち時間 (thinking / 実測)\n');
        */
       const keys = (tb.match(/^\s*(\w+)\s*[:,]/gm) || [])
         .map((k) => k.trim().replace(/[:,]$/, ''));
-      const allowed = new Set(['timing', 's3_ms', 'gemini_ms', 'cache_ms', 'total_ms', 'bytes']);
+      const allowed = new Set([
+        'timing', 's3_ms', 'gemini_ms', 'cache_ms', 'total_ms', 'bytes',
+        // §12.4 (決定論デコード) で足した実測。**どれも ms / 真偽 / symbology 名だけ**
+        'decode_ms', 'decode_format', 'decode_source', 'llm_called',
+      ]);
       const extra = keys.filter((k) => !allowed.has(k));
       ok('**ms とバイト数だけ** (番号・鍵・uid を載せない)', extra.length === 0, extra.join(','));
     }
@@ -1978,10 +1982,14 @@ console.log('\n⑱ 読み取りの待ち時間 (thinking / 実測)\n');
   ok('**数字は 5 秒たってから** (速い回に秒数を見せない)', /if \(sec >= 5\)/.test(scr));
   ok('止める手段を返す (呼び出し側が消せる)', /return \(\) => window\.clearInterval\(timer\);/.test(scr));
   {
-    const i = scr.indexOf('async function captureAndRead(');
+    /*
+     * **経過秒を出すのは `uploadAndRead`**（§12.4 の案 A で `captureAndRead` から
+     * アップロード＋読取を切り出した）。出口の数を見る対象もこちら。
+     */
+    const i = scr.indexOf('async function uploadAndRead(');
     const j = scr.indexOf('\nasync function', i + 10);
     const cb = i >= 0 ? scr.slice(i, j > i ? j : undefined) : '';
-    ok('captureAndRead が在る', cb.length > 0);
+    ok('uploadAndRead が在る', cb.length > 0);
     ok('送信の区間で出す', /tick = waiting\(c, '写真を送っています'\)/.test(cb));
     ok('読取の区間で出す', /tick = waiting\(c, '番号を読み取っています'\)/.test(cb));
     /*
@@ -1995,8 +2003,13 @@ console.log('\n⑱ 読み取りの待ち時間 (thinking / 実測)\n');
       /\} catch \(err\) \{\s*tick\(\);[\s\S]{0,400}?写真を送れませんでした/.test(cb));
     ok('読取が落ちたら止めてから案内を出す',
       /\} catch \(err\) \{\s*tick\(\);\s*const msg = err instanceof Error/.test(cb));
+    /*
+     * **止める → サーバが答えたと記す → 実測を残す** の順。
+     * `turn.serverDone` を**実測より前**に立てるのは、遅れて届いた端末内デコードの値で
+     * サーバの値を上書きさせないため（§12.4 の案 A）。
+     */
     ok('読取の成功で止めてから実測を残す',
-      /tick\(\);\s*reportTiming\(c, uploadMs, Date\.now\(\) - tRead0, r\.timing\);/.test(cb));
+      /tick\(\);\s*turn\.serverDone = true;\s*reportTiming\(c, uploadMs, Date\.now\(\) - tRead0, r\.timing\);/.test(cb));
   }
   {
     const i = scr.indexOf('function reportTiming(');
@@ -2004,6 +2017,140 @@ console.log('\n⑱ 読み取りの待ち時間 (thinking / 実測)\n');
     ok('実測の控えが在る', rt.length > 0);
     ok('**番号を控えに入れない**', !/candidate|evidenceKey|c\.idLabel/.test(rt), rt);
     ok('画面の文言にしない (status へ書かない)', !/say\(/.test(rt));
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑲ LLM を使わないデコード (§12.4・発注者指示 2026-10-22 = 案 A ＋ 案 C)
+//
+// 【ここは静かに壊れる】決定論デコードが読めなくなっても**画面は正常に見える**
+// (黙って Gemini だけに戻る = 15 秒のまま)。だから**実物を動かして**見る。
+//   ① サーバ側 `decodeBarcode` を**本物の sharp と wasm で実走**
+//   ② **QR を返さない**こと (allow-list は 1 次元だけ・画面側も同じ集合)
+//   ③ API の結線 (既定は並行・決定論を優先・Gemini が落ちても捨てない)
+//   ④ 画面側は**表示だけ** (登録の値にしない・サーバが答えたら触らない)
+//   ⑤ `labid.decode_skip_llm` は**既定 off** で、説明が罠を名指ししている
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑲ 決定論デコード (§12.4 案 A ＋ 案 C)\n');
+{
+  // ── ① 実走: 本物の sharp と zbar で読む ──
+  // data: URL からは `import('sharp')` を解決できないので、**ファイルに書いて**読む。
+  const bdPath = resolve(ROOT, 'node_modules/.cache/barcode-decode.test.mjs');
+  writeFileSync(bdPath, js(read('src/lib/barcode-decode.ts')));
+  const bd = await import(bdPath);
+  const fixture = readFileSync(resolve(ROOT, 'scripts/barcode-fixtures/codabar_704000123.jpg'));
+  {
+    const r = await bd.decodeBarcode(new Uint8Array(fixture));
+    eq('**合成の Codabar を実際に読む** (値は生値のまま)', r.value, 'A704000123A');
+    eq('symbology も返す', r.format, 'ZBAR_CODABAR');
+    ok('時間を返す (切り分け用)', typeof r.ms === 'number' && r.ms >= 0, String(r.ms));
+    /*
+     * **start/stop の `A` を剥がすのはここではない。** 規則は
+     * `normalizeExternalId` 1 か所 (`external-test-id.ts:162-177`)。
+     */
+    eq('正規化は呼び出し側の規則で通る', core.normalizeExternalId(r.value), '704000123');
+  }
+  {
+    // **投げない**こと。読めない入力でも `ok:false` 相当で返る。
+    let threw = false; let r = null;
+    try { r = await bd.decodeBarcode(new Uint8Array([1, 2, 3])); } catch { threw = true; }
+    ok('壊れた画像でも throw しない', !threw);
+    eq('読めなければ value は null', threw ? 'threw' : r.value, null);
+    ok('理由を返す', !threw && typeof r.error === 'string', threw ? 'threw' : String(r?.error));
+  }
+
+  // ── ② QR を返さない (仕様 §2.1 = 別の番号を相関キーにしない) ──
+  const ui = await load('src/scripts/external-id-barcode.ts', [
+    [/^import zbarWasmUrl from '@undecaf\/zbar-wasm\/dist\/zbar\.wasm\?url';$/m,
+      "const zbarWasmUrl = '/test.wasm';"],
+  ]);
+  {
+    const server = [...bd.ALLOWED_1D].sort();
+    const client = [...ui.ZBAR_1D].sort();
+    eq('**サーバと画面で同じ集合**を許す (ライブラリが別なので共有できない)', client, server);
+    for (const twoD of ['ZBAR_QRCODE', 'ZBAR_PDF417', 'ZBAR_SQCODE', 'ZBAR_DATABAR', 'ZBAR_DATABAR_EXP', 'ZBAR_COMPOSITE']) {
+      ok(`${twoD} を許さない`, !bd.ALLOWED_1D.has(twoD) && !ui.ZBAR_1D.has(twoD));
+    }
+    for (const twoD of ['qr_code', 'pdf417', 'aztec', 'data_matrix']) {
+      ok(`BarcodeDetector 側も ${twoD} を許さない`, !ui.NATIVE_1D.includes(twoD));
+    }
+    ok('BarcodeDetector 側に Codabar が在る (無いと②へ落ちるだけで無駄に遅い)',
+      ui.NATIVE_1D.includes('codabar'));
+  }
+  {
+    const src = code('src/lib/barcode-decode.ts');
+    ok('**allow-list で弾いてから decode する** (QR を文字にしてから捨てない)',
+      /if \(!ALLOWED_1D\.has\(name\)\) continue;[\s\S]{0,200}?s\.decode\(\)/.test(src), src.slice(0, 0));
+    ok('複数の 1 次元が食い違ったら選ばない (捏造ゼロ)',
+      /distinct\.size > 1[\s\S]{0,160}?error: 'multiple'/.test(src));
+    ok('**縮小しない** (バーの細さが読み取りに効く)', !/\.resize\(/.test(src));
+  }
+
+  // ── ③ API の結線 ──
+  {
+    const api = code('src/pages/api/kit/[id]/external-id.ts');
+    const i = api.indexOf("if (mode === 'read')");
+    const j = api.indexOf("if (mode === 'register')");
+    const rb = i >= 0 && j > i ? api.slice(i, j) : '';
+    ok('read ブロックが在る', rb.length > 0);
+    ok('決定論デコードを呼ぶ', /decodeBarcode\(raw\)/.test(rb));
+    ok('**既定は並行** (決定論ぶんの時間を足さない)',
+      /Promise\.all\(\[decodeBarcode\(raw\), callGeminiRead\(\)\]\)/.test(rb));
+    ok('二段構えは `labid.decode_skip_llm` のときだけ',
+      /const skipLlm = cfgBool\('labid\.decode_skip_llm'\);/.test(rb));
+    ok('on のときは**読めなかった回だけ** Gemini を呼ぶ',
+      /if \(skipLlm\) \{\s*[\s\S]{0,200}?decoded = await decodeBarcode\(raw\);\s*if \(!decoded\.value\) read = await callGeminiRead\(\);/.test(rb));
+    ok('**バーコードは決定論を優先**する',
+      /const barcodeValue = decoded\.value \?\? \(llmOk \? read!\.barcode : null\);/.test(rb));
+    ok('印字IDは Gemini からだけ採る', /const printedValue = llmOk \? read!\.printed : null;/.test(rb));
+    ok('**Gemini が落ちても決定論で読めていれば捨てない**',
+      /if \(!llmOk && !decoded\.value\) \{/.test(rb));
+    ok('評価に使った値をそのまま控える (register が同じ判定を再現できる)',
+      /barcode: barcodeValue,\s*printed: printedValue,/.test(rb));
+    ok('判定は従来の 1 か所のまま (evaluateExternalId を呼ぶ)',
+      /evaluateExternalId\(\{\s*provider,\s*barcode: barcodeValue,/.test(rb));
+  }
+
+  // ── ④ 画面側は表示だけ ──
+  {
+    const scr = code('src/scripts/external-id-capture.ts');
+    const i = scr.indexOf('async function showLocalCandidate(');
+    const sb = i >= 0 ? scr.slice(i, scr.indexOf('\nasync function captureAndRead(', i)) : '';
+    ok('端末内デコードの表示処理が在る', sb.length > 0);
+    ok('**サーバへ送らない** (post を呼ばない)', !/post\(/.test(sb), sb);
+    ok('**サーバが答えたあとは触らない**', /if \(turn\.serverDone\) return;/.test(sb));
+    {
+      // 値を当てるより前にガードが在ること (順序が逆だと上書きが起こる)
+      const g = sb.indexOf('turn.serverDone');
+      const a = sb.indexOf('c.candidateEl');
+      ok('ガードは表示より前', g >= 0 && a > g, `${g} / ${a}`);
+    }
+    ok('正規化を**再実装していない**', /normalizeExternalId\(r\.value\)/.test(sb));
+    ok('画面に全角変換を写していない', !/［０-９］|\[０-９\]/.test(scr));
+    ok('差し替えたら黙らない', /サーバで読み直した番号に差し替えました/.test(scr));
+    // 登録は走っている読み取りを待つ
+    const ri = scr.indexOf('async function register(');
+    const reg = ri >= 0 ? scr.slice(ri, scr.indexOf('\n}', scr.indexOf('window.location.reload()', ri))) : '';
+    ok('register が在る', reg.length > 0);
+    ok('**走っている読み取りを待つ**', /if \(c\.pending\) \{[\s\S]{0,200}?await c\.pending;/.test(reg));
+    {
+      const w = reg.indexOf('await c.pending');
+      const po = reg.indexOf('mode: \'register\'');
+      ok('待つのは送信より前', w >= 0 && po > w, `${w} / ${po}`);
+    }
+    ok('読み取りが失敗していたら送らない', /if \(!ok\) \{\s*[\s\S]{0,160}?return;/.test(reg));
+  }
+
+  // ── ⑤ 裁定待ちのスイッチ ──
+  {
+    const cfgSrc = read('src/lib/app-config.ts');
+    const i = cfgSrc.indexOf("key: 'labid.decode_skip_llm'");
+    const blk = i >= 0 ? cfgSrc.slice(i, cfgSrc.indexOf('},', i)) : '';
+    ok('`labid.decode_skip_llm` が在る', blk.length > 0);
+    ok('**既定 off**', /default: 'off'/.test(blk), blk);
+    for (const word of ['single_source', 'review_required', 'ゲート', '裁定']) {
+      ok(`説明が「${word}」を名指ししている (on にする前に読む人へ)`, blk.includes(word));
+    }
   }
 }
 
