@@ -37,10 +37,27 @@ const ts = (await import('typescript')).default;
 const js = (src) => ts.transpileModule(src, {
   compilerOptions: { target: 'ES2022', module: 'ESNext', esModuleInterop: true },
 }).outputText;
+/**
+ * 実物を `data:` URL として読み込む。
+ *
+ * **差し替え漏れを名指しで落とす。** `data:` URL からは相対 import を解決できない
+ * ので、1 本でも残っていると Node が `ERR_UNSUPPORTED_RESOLVE_REQUEST` で
+ * **スクリプトごと落ち**、どの検査が落ちたのか分からなくなる（退行注入で実際に
+ * そうなった = 「資格の関数を直に呼ぶ形に戻す」が名指しにならなかった）。
+ * **残っていたら、その事実を検査の失敗として出してから止める。**
+ */
 const load = async (relPath, subs = []) => {
   let src = read(relPath);
   for (const [re, to] of subs) src = src.replace(re, to ?? '');
-  const b64 = Buffer.from(js(src), 'utf8').toString('base64');
+  const out = js(src);
+  const leftover = [...out.matchAll(/from ["'](\.[^"']*)["']/g)].map((m) => m[1]);
+  if (leftover.length) {
+    ok(`${relPath} の相対 import は全て差し替え済み`, false,
+      `差し替えていない import が残っている (${leftover.join(', ')}) — `
+      + '実物を動かせない。資格の関数を直に引く形に戻っていないか確かめる');
+    summary();
+  }
+  const b64 = Buffer.from(out, 'utf8').toString('base64');
   return import(`data:text/javascript;base64,${b64}`);
 };
 
@@ -50,6 +67,15 @@ const ok = (label, cond, why) => {
 };
 const eq = (label, got, want) => ok(label, JSON.stringify(got) === JSON.stringify(want),
   `got ${JSON.stringify(got)} / want ${JSON.stringify(want)}`);
+/** 集計して終わる。**途中で呼ばれても必ず名指しを出す。** */
+function summary() {
+  console.log(`\n${fails.length === 0 ? '✅' : '❌'} verify:write-audit — ${pass} / ${pass + fails.length}`);
+  if (fails.length) {
+    console.log('\n落ちた検査:');
+    for (const f of fails) console.log(`  - ${f}`);
+    process.exit(1);
+  }
+}
 
 /* ══════════════════════════════════════════════════════════════════════
  * 分類（§4.4）
@@ -101,6 +127,17 @@ console.log('\n① 棚卸し (writeTargetUid を使う口が全部分類され�
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n② denyDemoWrite (実物を動かす)\n');
 {
+  /*
+   * **静的な検査を先に置く。** `load()` は差し替え漏れを名指しで落として止めるので、
+   * 「資格の関数を直に引く形に戻った」ときに**その理由も一緒に出る**ようにする。
+   */
+  const wg = read('src/lib/write-guard.ts');
+  eq('`denyDemoWrite` の定義は 1 つ', (wg.match(/export function denyDemoWrite/g) || []).length, 1);
+  eq('文言は 1 か所', (wg.match(/デモ表示中は本番のデータに保存しません/g) || []).length, 1);
+  ok('判定は `shouldUseDemoData` を通している (資格を直に引かない)',
+    /shouldUseDemoData\(/.test(code('src/lib/write-guard.ts'))
+    && !/isDemoAccount\s*\(|demoDisabledGlobally\s*\(/.test(code('src/lib/write-guard.ts')));
+
   /**
    * 実物の `write-guard.ts` ＋ 実物の `view-mode.ts` を通す（資格 2 関数だけスタブ）。
    *
@@ -175,13 +212,6 @@ console.log('\n② denyDemoWrite (実物を動かす)\n');
       g.denyDemoWrite({ uid: DEMO_UID, writeTargetUid: DEMO_UID }, 'demo'), null);
   }
 
-  // 定義は 1 つ。文言も 1 か所。
-  const wg = read('src/lib/write-guard.ts');
-  eq('`denyDemoWrite` の定義は 1 つ', (wg.match(/export function denyDemoWrite/g) || []).length, 1);
-  eq('文言は 1 か所', (wg.match(/デモ表示中は本番のデータに保存しません/g) || []).length, 1);
-  ok('判定は `shouldUseDemoData` を通している (資格を直に引かない)',
-    /shouldUseDemoData\(/.test(code('src/lib/write-guard.ts'))
-    && !/isDemoAccount\s*\(|demoDisabledGlobally\s*\(/.test(code('src/lib/write-guard.ts')));
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -517,9 +547,4 @@ console.log('\n⑨ 増やさないもの\n');
   }
 }
 
-console.log(`\n${fails.length === 0 ? '✅' : '❌'} verify:write-audit — ${pass} / ${pass + fails.length}`);
-if (fails.length) {
-  console.log('\n落ちた検査:');
-  for (const f of fails) console.log(`  - ${f}`);
-  process.exit(1);
-}
+summary();
