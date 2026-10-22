@@ -271,6 +271,29 @@ const idKind = PROVIDER_ID_KIND[provider];
       </div>
 
       {/*
+        **デモの読取テスト完了**（発注者裁定 2026-10-22・仕様 §8.3・PR-A）。
+
+        デモでは登録しても**本番の台帳へ 1 行も書かない**ので、登録済みの面へ
+        進めない（サーバに状態が無いので再読込しても何も変わらない）。
+        → ここへ戻して**その場で何度でも繰り返せる**ようにする。
+
+        **押すものは 1 つだけ**（§4.4.7 の「2 アクション」と同じ形で、
+        押した瞬間にカメラが開く）。番号は**マスクだけ**出す（全文は出さない）。
+      */}
+      <div class="mt-3 hidden rounded-xl border p-3 status-watch" data-extid-demo role="status">
+        <p class="flex items-start gap-2 text-base font-semibold">
+          <AppIcon name="ok" size={18} class="mt-1 shrink-0" />読取テスト完了
+        </p>
+        <p class="mt-1 text-sm">
+          デモモードのため番号は保存されません。
+          読み取れた{idLabel}: <span class="tnum font-semibold" data-extid-demo-mask></span>
+        </p>
+        <button type="button" class="mt-2 touch-only btn-pair btn-pair-lg btn-data w-full" data-extid-demo-again>
+          <AppIcon name="camera" size={22} />もう一度撮影する
+        </button>
+      </div>
+
+      {/*
         PC 向け: カメラが無いのでスマートフォンへ移ってもらう導線。
         `.pointer-only` = `(pointer: coarse)` で消える (カメラボタンの `touch-only` と対)。
         **入口は撮影だけ**になったので、**PC から登録する手段は無い**。

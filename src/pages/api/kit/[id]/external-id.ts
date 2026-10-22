@@ -5,12 +5,18 @@ import { getServerSupabase } from '../../../../lib/supabase';
 import { cfg, cfgBool, refreshConfig } from '../../../../lib/app-config';
 import {
   evaluateExternalId, isExternalIdProvider, providerMatchesTestType, normalizeExternalId,
+  maskExternalId,
   type CaptureMethod, type ExternalIdProvider,
 } from '../../../../lib/external-test-id';
 import { createEvidenceTicket, fetchEvidence } from '../../../../lib/external-id-evidence';
 import { readExternalIdFromImage, type ExternalIdReadResult } from '../../../../lib/external-id-read';
 import { decodeBarcode, type BarcodeDecodeResult } from '../../../../lib/barcode-decode';
 import { persistExternalIdCapture, expectedTestType } from '../../../../lib/external-id-persist';
+/*
+ * **デモの読取テストを本番の台帳へ書かないため**だけに引く（§8.2・PR-A）。
+ * 判定は 2 つとも要る（片方だけにしない）ので、両方をここで使う。
+ */
+import { demoFallbackEnabled, isDemoShipmentId } from '../../../../lib/demo-data';
 import { rememberRead, recallRead } from '../../../../lib/external-id-read-cache';
 
 export const prerender = false;
@@ -306,6 +312,44 @@ export const POST: APIRoute = async (ctx) => {
         ok: false, error: 'confirmation_mismatch',
         detail: '画面の番号と読み取り結果が一致しませんでした。もう一度撮影してください。',
       }, 409);
+    }
+
+    /*
+     * ══════════════════════════════════════════════════════════════════
+     * **デモの読取テストは本番の台帳へ 1 行も書かない**（発注者裁定 2026-10-22・仕様 §8.2）
+     * ══════════════════════════════════════════════════════════════════
+     *
+     * 【なぜ要るか】デモのがんリスク出荷でも撮影ブロックは出る（`kit.astro` の
+     * 受取の段は**出荷の現在 step に関係なく描かれる**ので、発送済みなら出る）。
+     * ここに分岐が無いと、デモの読取テストが `customer.lab_test_id_captures` と
+     * `customer.lab_tests` へそのまま入る（本番で 1 件実在・§8.5）。
+     *
+     * 【置く位置】**`recallRead` / `evaluateExternalId` / `confirmedValue` 照合の後、
+     * `getServerSupabase()` と `persistExternalIdCapture()` の前。**
+     * 前へ出すと「読めなくても成功する」偽の体験になり、後ろだと書いてから気づく。
+     * → デモでも **fail-closed はそのまま効く**（控えが無ければ撮り直し・
+     *   読めなければ 400・画面と食い違えば 409）。
+     *
+     * 【条件は 2 つとも見る】片方だけにすると穴が開く:
+     *   - 資格だけ → デモ用アカウントが**本物の出荷**を登録できなくなる
+     *   - ID だけ  → 本物の利用者がデモの ID を送れば**偽の成功**を受け取れる
+     *
+     * 【暫定】`demoFallbackEnabled(uid)` は PR-C で
+     * `effectiveMode === 'demo'` の共通判定へ差し替える（発注者裁定 §9）。
+     * **スペシャル排他をここへ移植しない。**
+     *
+     * 【返すもの】`demo: true` と**マスクだけ**。**外部IDの全文は返さない**
+     * （本番の register と同じ約束・仕様 §6.1）。
+     */
+    if (demoFallbackEnabled(uid) && isDemoShipmentId(shipmentRef)) {
+      return json({
+        ok: true, mode, demo: true,
+        masked: maskExternalId(ev.value),
+        status: ev.status,
+        review_reasons: ev.reasons,
+        linked: false,
+        message: 'デモモードのため番号は保存されません。',
+      });
     }
 
     const sb = getServerSupabase();
