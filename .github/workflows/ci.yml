@@ -330,6 +330,10 @@ jobs:
           npm run verify:interview-ui
           npm run verify:scan-pages
           npm run verify:scan-upload
+          # 受取ID の撮影導線: **ページが実際にスクリプトを読んでいるか**を
+          # 押して・移動して・カメラが開くところまでで見る (仕様 §4.4.9)。
+          # dev サーバは要らない (自分で束ねて静的に配る)。
+          npm run verify:extid-flow
           # 原本の S3 直 PUT: Object Lock バケットは checksum 必須。
           # 実ブラウザ + SigV4 の検算つきスタブで 3.3MB / 8.3MB を通す。
           npm run verify:originals-put
