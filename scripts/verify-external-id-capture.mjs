@@ -1023,6 +1023,21 @@ console.log('\n⑬ UI の契約\n');
     !/capture="environment"/.test(code('src/components/dashboard/ExternalIdCapture.astro')));
   ok('カメラボタンは touch-only (PC に出さない)',
     /touch-only[\s\S]{0,200}data-extid-camera-open/.test(comp));
+  /*
+   * 【§4.4.6】「これではありません」は**図の凡例と二重**だったのでプリベントでは出さない
+   * （発注者指示 2026-10-22）。**デメカルは残す** — あちらの図は管理用の記号を描いていない。
+   * **空の provider では見出しごと描かない**（空の囲みを作らない）。
+   */
+  {
+    const guide = code('src/components/dashboard/ExternalIdSheetGuide.astro');
+    const block = /const CONFUSABLE[\s\S]*?\n\};/.exec(guide)?.[0] ?? '';
+    ok('プリベントの「これではありません」は空', /prevent:\s*\[\s*\],/.test(block), block.slice(-60));
+    ok('デメカルの 3 行は残っている',
+      (block.match(/'[^']+'/g) ?? []).length === 3 && /問合せ窓口/.test(block));
+    ok('空なら見出しごと出さない', /confusable\.length > 0 && \(/.test(guide));
+    // 図の凡例が受け持っていることまで見る（文を消して案内が欠けていないこと）。
+    ok('図の凡例が「読み取りません」を描いている', /ここは読み取りません/.test(guide));
+  }
   ok('アプリ内カメラの面がある', /data-extid-camera\b/.test(comp)
     && /data-extid-video/.test(comp) && /data-extid-canvas/.test(comp) && /data-extid-shot/.test(comp));
   ok('カメラ面は既定で閉じている', /class="mt-3 hidden" data-extid-camera/.test(comp));
@@ -1090,14 +1105,15 @@ console.log('\n⑬ UI の契約\n');
      * **起動の呼び出し元は押されたときだけ。** `openCamera` が他から呼ばれると
      * 「画面に出ていないカメラが JS から起動する」ことになる（CLAUDE.md）。
      *
-     * 出現は **3 回**: 定義 1 ＋ card のボタン 1 ＋ **催促の帯 1**
-     * （発注者指示 2026-10-22・§4.4.5）。**どちらの呼び出しも click の中**に在ること
-     * まで見る（数だけだと load 時の呼び出しと差し替えられる）。
+     * 出現は **5 回**: 定義 1 ＋ card のボタン 1 ＋ 催促の帯 1（§4.4.5）
+     * ＋ **「登録し直す」1 ＋ 「撮り直す」1**（§4.4.6・どちらも利用者の press）。
+     * **全部 click の中**に在ることまで見る（数だけだと load 時の呼び出しと
+     * 差し替えられる）。
      */
     const callers = [...scr.matchAll(/openCamera\(/g)];
     const iClick = scr.indexOf("document.addEventListener('click'");
-    ok('`openCamera` の呼び出しは定義 1 + ボタン 1 + 帯 1 だけ', callers.length === 3,
-      `出現 ${callers.length} 回`);
+    ok('`openCamera` の呼び出しは定義 1 + ボタン 1 + 帯 1 + 登録し直す 1 + 撮り直す 1',
+      callers.length === 5, `出現 ${callers.length} 回`);
     ok('**呼び出しは click の中だけ**（load / 他のイベントから開かない）',
       iClick > 0 && callers.slice(1).every((m) => m.index > iClick));
     ok('カメラを開く前に端末を判定する',
@@ -1788,6 +1804,27 @@ console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
     // **読み込みや URL のハッシュで開かない** — カメラは「押したときだけ」。
     ok('load / hashchange では開かない',
       !/DOMContentLoaded|hashchange|location\.hash/.test(scr));
+
+    /*
+     * 【§4.4.6・発注者指示 2026-10-22「ここのボタンを削除」】
+     * **押した時点でカメラが開くので、同じ面にボタンを残さない。**
+     *   - 「登録し直す」「撮り直す」は**それ自体が press** なので、その場で開く
+     *   - 登録済みから入り直した面では**サーバが `hidden` でボタンを出す**
+     *   - **カメラを開けなかったときだけ JS が出す**（行き止まりを作らない）
+     * ここが緩むと「2 段」に戻るか、**撮影を始める口が無い面**ができる。
+     */
+    const handler = (marker) => {
+      const i = scr.indexOf(`[data-extid-${marker}]`);
+      const j = scr.indexOf('return;', i);
+      return i > 0 && j > i ? scr.slice(i, j) : '';
+    };
+    ok('「登録し直す」でその場でカメラを開く', /openCamera\(c\)/.test(handler('redo-yes')));
+    ok('「撮り直す」でもその場でカメラを開く', /openCamera\(c\)/.test(handler('retake')));
+    ok('登録済みから入った面ではボタンを出さない',
+      /registeredMask \? ' hidden' : ''/.test(cap), '（サーバが hidden を付ける）');
+    // **開けなかった回に出す**のは 2 経路 (カメラ非対応・起動エラー) の両方。
+    const reopen = [...scr.matchAll(/show\(c\.cameraOpenEl, true\)/g)].length;
+    ok('カメラを開けなかったらボタンを出す（行き止まりにしない）', reopen === 2, `${reopen} か所`);
 
     // **帯と card で同じ文言**（同じ 1 つの動作が 2 段あるように見せない）。
     const label = '撮影して登録する';
