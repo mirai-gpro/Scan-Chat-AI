@@ -1391,3 +1391,48 @@ Gemini が落ちたら決定論の値も捨てる / スイッチを既定 on に
   ③端末内デコードが iPhone 実機で何秒か。
 - **`labid.decode_skip_llm` の裁定**（上記）。これが通れば、
   **サーバ側の待ち時間そのもの**が消える。
+
+#### 12.4.1 `labid.decode_skip_llm` を on にした（発注者指示 2026-10-22）
+
+> 「decode_skip_llm を on にして」
+
+**コード既定を `off` → `on` に変えた**（`app-config.ts`）。これで
+**バーコードが決定論デコーダで読めた回は Gemini を呼ばない** = §12.3 で残っていた
+`gemini_ms` が待ち時間から消える。読めなかった回だけ従来どおり Gemini へ落ちる（二段構え）。
+
+**変えたのは既定値 1 つだけ。** 判定 (`evaluateExternalId`)・ゲート
+(`checkPreventQuestionnaireGate`)・控え (§12.2)・登録の経路は**1 行も触っていない**。
+
+##### on にしたことの帰結（隠さずここに書く）
+
+決定論デコードで読めた回は **印字ID の OCR が無い** ので、`evaluateExternalId` が
+`single_source` を積む → **`review_required`**。したがって
+
+- 画面の案内は毎回 **「片方しか読み取れていません。番号をお確かめください。」**（`reasonText`）。
+  **登録はできる**（候補は出るし押せる）。
+- 台帳は `status='review_required'` で残る。`lab_test_link_status` は従来どおり `linked`。
+- **プリベント問診CSV の fail-closed ゲートはこれを通さない**（`confirmed` を要求するため）。
+  CSV 生成そのものが未実装なので**今日の本番で止まるものは無い**が、
+  **ON 運用に入るときはここが詰まる**。
+
+##### まだ裁定が出ていないこと（実装で答えを出さない）
+
+1. **「決定論デコードで読めた回は `single_source` でも `confirmed` とする」か。**
+   通せば待ち時間も詰まりも消える。判断の材料は §12.4 のとおり
+   （symbology のデコードは幻覚しない / ただし Codabar にチェックディジットは必須でないので
+   `704` 接頭辞と桁パターンは引き続き検査に使う）。
+   **こちらの判断でゲートを緩めない**（§7.1 は「値だけを見て通さない」設計）。
+2. **§12.1 の admin 確認・訂正経路**（ON の必須条件）。`review_required` が増えるので
+   なおさら要る。
+
+##### 反映と戻し方
+
+- **DB 値が勝つ。** `diagnosis.app_config` に `labid.decode_skip_llm` の行があれば
+  そちらが使われる。このキーは 2026-10-22 に新設したばかりで admin から保存した履歴が無いので
+  **行は無い想定**＝コード既定 `on` がそのまま効く。
+  行があるかは `select value from diagnosis.app_config where key='labid.decode_skip_llm'`。
+- **戻すのは admin から即時**（この設定を `off`）。再デプロイは要らない。
+- 効いているかは `read` の応答 `timing` で分かる:
+  **`llm_called: false` ＋ `decode_source: 'barcode'`** なら Gemini を呼んでいない。
+  `decode_source: 'gemini'` ばかりなら**実写で決定論デコードが効いていない**ので、
+  速くならないし `single_source` にもならない（＝撮り方か前処理の問題）。

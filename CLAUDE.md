@@ -68,8 +68,10 @@ env は「現在値が見えない」「変えるたびに再デプロイが要�
 **`labid.prevent_pattern` / `labid.demecal_pattern` / `labid.prevent_org_prefix` /
 `labid.prevent_capture` / `labid.demecal_capture` / `labid.decode_skip_llm`**
 (受取時・外部検査ID 撮影。**撮影の 2 つは既定 off**。`prevent_org_prefix` 既定 `704`。
-**`decode_skip_llm` も既定 off = 裁定待ち** — on にすると印字IDの OCR が無くなり
-`single_source` で全件 `review_required` になって問診CSV のゲートが全員を止める。正本 §12.4)
+**`decode_skip_llm` は既定 on** = 発注者指示 2026-10-22。決定論デコードで読めた回は Gemini を
+呼ばない=待ち時間が消えるが、**印字IDの OCR が無くなるので `single_source` が付き
+`review_required` になり問診CSV のゲートはそれを通さない**。
+**「決定論で読めた回を confirmed とするか」は未裁定で、実装で答えを出さない**。正本 §12.4 / §12.4.1)
 
 **【重要】この文書の下の方に残っている `env SCAN_XXX` という表記は、すべて app_config キーの
 読み替え**で理解すること (`SCAN_BOUNDARY_RECHECK` → `scan.boundary_recheck` のように
@@ -2616,7 +2618,7 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 **表示だけで登録の値にしない** (§12.2 は不変) / **番号が先に出るのでサーバの読み取り前に「登録」を押せる** → `register` が `c.pending` を待つ (待たないと控えが無く**読めているのに撮り直し**) / **サーバが先に答えた回は画面を触らない** (`turn.serverDone`・遅れて届いた端末側の値で上書きしない) / 食い違ったら**黙って差し替えず 1 行出す** / **正規化は `normalizeExternalId` を import** (規則を 2 か所に置かない)。
 **案 C = サーバも決定論を先に試す** (`src/lib/barcode-decode.ts`・sharp → グレースケール → `scanGrayBuffer`。**実測 119ms で `A704000123A`/`ZBAR_CODABAR`**)。
 **既定は Gemini と並行**なので待ち時間は増えない。狙い= ①バーコード側が LLM の読みより確か (突き合わせが「機械が読んだバーコード × OCR した印字」になる) ②**Gemini が落ちた回でも読み取りが続く** (従来は 422 で撮り直し) ③`labid.decode_skip_llm` を on にすれば Gemini を呼ばない。
-**`labid.decode_skip_llm` は既定 off = 裁定事項で実装で答えを出さない** (on にすると `single_source` で全件 `review_required` → 問診CSV のゲートが全員を止める。要るのは「決定論デコードで読めた回は single_source でも confirmed」の裁定 ＋ §12.1 の admin 訂正経路)。
+**【`labid.decode_skip_llm` は既定 on・発注者指示 2026-10-22「decode_skip_llm を on にして」・§12.4.1】** 決定論デコードで読めた回は **Gemini を呼ばない**＝§12.3 で残っていた `gemini_ms` が待ち時間から消える (読めない回だけ Gemini へ落ちる)。**変えたのは既定値 1 つだけ**で判定・ゲート・控え・登録は 1 行も触っていない。**帰結を隠さない**: 印字IDの OCR が無いので `single_source` → **`review_required`**・画面は毎回「片方しか読み取れていません」・**問診CSV の fail-closed ゲートは通さない** (CSV 生成が未実装なので今日の本番で止まるものは無いが、ON 運用でここが詰まる)。**まだ裁定が出ていない 2 件 = ①「決定論で読めた回は single_source でも confirmed とするか」(こちらの判断でゲートを緩めない) ②§12.1 の admin 確認・訂正経路**。**DB 値が勝つ**ので admin に行があればそちらが使われる (このキーは新設直後＝行は無い想定)。効いているかは `timing` の **`llm_called:false` ＋ `decode_source:'barcode'`** で見る (`gemini` ばかりなら実写で決定論が効いていない)。
 **QR は読まない** (zbar は QR も読むので**1 次元 allow-list で弾いてから decode**・**画面とサーバで同じ集合であることを検査で見張る**) / **縮小しない** (バーの細さが効く) / **複数の 1 次元が食い違ったら選ばない** / **sharp も wasm も遅延 import ＋ 全 try/catch** = Vercel で読めなくても**今日までと同じ挙動 (Gemini だけ) に戻るだけ**。
 `timing` に `decode_ms`/`decode_format`/`decode_source`/`llm_called` を追加 (**`decode_source` が `gemini` ばかりなら実写で効いていない**＝切り分けの材料)。
 **未確認**: 実写での読み取り率 / Vercel の関数で wasm と sharp が読めるか / iPhone 実機の端末内デコード時間。 |

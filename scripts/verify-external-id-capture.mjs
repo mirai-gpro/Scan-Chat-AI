@@ -2141,15 +2141,24 @@ console.log('\n⑲ 決定論デコード (§12.4 案 A ＋ 案 C)\n');
     ok('読み取りが失敗していたら送らない', /if \(!ok\) \{\s*[\s\S]{0,160}?return;/.test(reg));
   }
 
-  // ── ⑤ 裁定待ちのスイッチ ──
+  // ── ⑤ スイッチと、その帰結の明記 ──
   {
     const cfgSrc = read('src/lib/app-config.ts');
     const i = cfgSrc.indexOf("key: 'labid.decode_skip_llm'");
     const blk = i >= 0 ? cfgSrc.slice(i, cfgSrc.indexOf('},', i)) : '';
     ok('`labid.decode_skip_llm` が在る', blk.length > 0);
-    ok('**既定 off**', /default: 'off'/.test(blk), blk);
-    for (const word of ['single_source', 'review_required', 'ゲート', '裁定']) {
-      ok(`説明が「${word}」を名指ししている (on にする前に読む人へ)`, blk.includes(word));
+    /*
+     * **既定 on** (発注者指示 2026-10-22「decode_skip_llm を on にして」)。
+     * 速さのための指示なので、**こちらの判断で off へ戻さない**。
+     */
+    ok('**既定 on** (発注者指示 2026-10-22)', /default: 'on'/.test(blk), blk);
+    /*
+     * on の帰結 (`single_source` → `review_required` → 問診CSV のゲートがブロック) は
+     * **まだ裁定が出ていない**。説明文から消すと、admin 画面で見た人が
+     * 「速いだけの設定」と誤解する。
+     */
+    for (const word of ['single_source', 'review_required', 'ゲート', '未裁定']) {
+      ok(`説明が「${word}」を名指ししている (帰結を隠さない)`, blk.includes(word));
     }
   }
 }
