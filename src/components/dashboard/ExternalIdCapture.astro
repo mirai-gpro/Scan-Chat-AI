@@ -136,7 +136,8 @@ const idKind = PROVIDER_ID_KIND[provider];
         登録し直す (仕様 §8.3「再撮影を第一選択」)。
         **押した時点でカメラが開く** — 利用者の操作は
         **①カメラを起動 ②撮影 の 2 つだけ**（発注者指示 2026-10-22・仕様 §4.4.7）。
-        §4.4.3 で挟んでいた上書きの確認は**この裁定で外した**。
+        §4.4.3 で挟んでいた**押す前**の上書き確認は外し、**登録の確認のほうへ移した**
+        （§4.4.8 = 書き込みの前には必ず確認を置く）。ここを押しても**まだ何も書かない**。
         上書きしても**前の番号は台帳に残る**（`previous_value`）ので、取り返しはつく。
       */}
       <div class="mt-2">
@@ -239,18 +240,34 @@ const idKind = PROVIDER_ID_KIND[provider];
       </div>
 
       {/*
-        読み取れた番号。**ボタンは置かない**（発注者指示 2026-10-22・仕様 §4.4.7
-        「どんな場合でも ①カメラを起動 ②撮影 の 2 アクション」）。
-        読めたらそのまま登録し、**読めなかったらカメラへ戻る** — どちらも押させない。
-        **番号を直す口も置かない**（2026-10-21・チェックディジットが無いので、
-        手で直すと**正しい形の別の番号**になり得る。違っていたら撮り直す）。
-        表示を残すのは、**何が登録されたかを本人が見られるようにする**ため。
+        読み取れた番号 → **登録の確認**（発注者裁定 2026-10-22・仕様 §4.4.8）。
+        §4.4.7 の「2 アクション」は**撮影まで**にかかる規則で、
+        **書き込み（登録）の前の確認は外さない**。この番号には**チェックディジットが
+        無い**ので、誤読を機械で見分けられるのは**先頭 `704` と桁数だけ**＝
+        **本人が番号を見て確定する段が最後の網**になる。
+        **番号を直す口は置かない**（2026-10-21・手で直すと**正しい形の別の番号**に
+        なり得る。違っていたら撮り直す）。
+        **上書きになる回は、ここで上書きだと言う**（§4.4.3 の確認を押す前へ移した段）。
       */}
       <div class="mt-3 hidden" data-extid-confirm>
         <p class="text-base text-slate-800">
           読み取った{idLabel}: <span class="tnum font-semibold" data-extid-candidate></span>
         </p>
         <p class="mt-1 text-sm text-slate-600" data-extid-note></p>
+        {registeredMask && (
+          <p class="mt-1 text-sm text-slate-700">
+            登録すると <span class="tnum font-semibold">{registeredMask}</span> を上書きします。
+            前の番号は記録として残ります。
+          </p>
+        )}
+        <div class="mt-2 flex flex-wrap gap-2">
+          <button type="button" class="btn-pair btn-pair-lg btn-data flex-1" data-extid-register>
+            <AppIcon name="ok" size={22} />{registeredMask ? '上書きして登録する' : 'この番号で登録する'}
+          </button>
+          <button type="button" class="btn-pair btn-graph min-h-touch" data-extid-retake>
+            <AppIcon name="camera" size={18} />撮り直す
+          </button>
+        </div>
       </div>
 
       {/*
