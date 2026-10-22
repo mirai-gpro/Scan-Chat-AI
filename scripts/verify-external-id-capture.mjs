@@ -932,12 +932,28 @@ console.log('\n⑫ migration の不変条件\n');
 console.log('\n⑬ UI の契約\n');
 {
   const comp = read('src/components/dashboard/ExternalIdCapture.astro');
-  ok('QR は読み取らないと書いてある', /QRコード.*読み取りません/.test(comp));
+  /*
+   * **案内の文は `GUIDE` だけを見る。** 同じ語がヘッダのコメントにも出るので、
+   * ファイル全体で探すと**説明文に当たって通る**（⑨ と L-17 で踏んだのと同じ型）。
+   *
+   * **プリベントの説明文は撤去した**（発注者指示 2026-10-22「以下の説明文を削除して」）。
+   * 文と図で同じことを二重に言っていたので、プリベント側の中身は
+   * **図**（下の `preventFig`。「シールを貼る前に撮影」／「ユーザーID ＋ バーコード」／
+   * 「ここは読み取りません」）が受け持つ。
+   */
+  const guide = (() => {
+    const i = comp.indexOf('const GUIDE:');
+    const j = comp.indexOf('};', i);
+    return i >= 0 && j > i ? comp.slice(i, j) : '';
+  })();
+  ok('`GUIDE` を取り出せた', guide.length > 50, `${guide.length} 文字`);
+  ok('**プリベントの説明文は撤去したまま**（案内は図が受け持つ）', /prevent: \[\],/.test(guide));
+  ok('**文が無い provider では `<ul>` を描かない**（空のリストを出さない）',
+    /\{GUIDE\[provider\]\.length > 0 && \(/.test(comp));
   ok('**QR を撮影対象として案内していない**', !/QR.{0,12}(を撮影|に合わせ|を枠)/.test(comp));
-  ok('書面全体を撮るよう案内している', /全体/.test(comp));
-  ok('プリベントはユーザーIDと 1次元バーコードを指している',
-    /ユーザーID/.test(comp) && /バーコード/.test(comp));
-  ok('デメカルは問合せ番号を指している', /問合せ番号/.test(comp));
+  ok('デメカルは QR を読み取らないと書いてある', /QRコードは読み取りません/.test(guide));
+  ok('デメカルは用紙全体を撮るよう案内している', /全体/.test(guide));
+  ok('デメカルは問合せ番号を指している', /問合せ番号/.test(guide));
   /*
    * **カメラはアプリ内で開く（2026-10-13 に方針転換）。**
    * `<input capture>` で OS のカメラアプリを開くと、Android Chrome では端末のカメラが
@@ -956,6 +972,40 @@ console.log('\n⑬ UI の契約\n');
   ok('アプリ内カメラの面がある', /data-extid-camera\b/.test(comp)
     && /data-extid-video/.test(comp) && /data-extid-canvas/.test(comp) && /data-extid-shot/.test(comp));
   ok('カメラ面は既定で閉じている', /class="mt-3 hidden" data-extid-camera/.test(comp));
+  /*
+   * **撮影のボタンは大きく・目立たせる**（発注者指示 2026-10-22
+   * 「『カメラで撮影』ボタンと『この位置で撮る』ボタンを大きくして、目立つようにして」）。
+   * その面でやることは 1 つなので、**面積**で優先度を出す。
+   * **色は `.btn-data` のまま**＝ brand 塗りにしない（塗りは画面に 1 つ
+   * = AI疾病予防報告書のタイル、という確定事項。この帯はダッシュボードでそれと並ぶ）。
+   * 高さ・級数は `global.css` の `.btn-pair.btn-pair-lg` **1 か所**が持つ。
+   */
+  {
+    const btn = (marker) => {
+      const src = code('src/components/dashboard/ExternalIdCapture.astro');
+      const j = src.indexOf(marker);
+      const i = src.lastIndexOf('<button', j);
+      return i >= 0 && j > i ? src.slice(i, j) : '';
+    };
+    const open = btn('data-extid-camera-open');
+    const shot = btn('data-extid-shot');
+    ok('「カメラで撮影」は大きい指定を使う', /\bbtn-pair-lg\b/.test(open), open.replace(/\s+/g, ' '));
+    ok('「この位置で撮る」は大きい指定を使う', /\bbtn-pair-lg\b/.test(shot), shot.replace(/\s+/g, ' '));
+    ok('**brand 塗りにしない**（`btn-primary` を使わない）',
+      !/btn-primary/.test(open) && !/btn-primary/.test(shot)
+      && /btn-data/.test(open) && /btn-data/.test(shot));
+    const css = read('src/styles/global.css');
+    const lg = (() => {
+      const i = css.indexOf('.btn-pair.btn-pair-lg');
+      const j = css.indexOf('}', i);
+      return i >= 0 && j > i ? css.slice(i, j) : '';
+    })();
+    /* **2 クラスで定義する** — 1 クラス同士だと生成順で負けて `px-2` が残る
+       (`.as-item.as-primary` で踏んだのと同じ型)。 */
+    ok('`.btn-pair.btn-pair-lg` は 2 クラスで定義してある', lg.length > 20, lg.replace(/\s+/g, ' '));
+    ok('高さはタップ領域 44px より大きい (56px)', /min-height:\s*3\.5rem/.test(lg));
+    ok('文字は 16px より大きい (18px・12px 以下を作らない)', /\btext-lg\b/.test(lg));
+  }
   /*
    * **「写真を選ぶ」は撤去した（発注者指示 2026-10-21）。**
    * ここで見るのは**口が無いこと**＝ markup。**語の有無で見ない** —
@@ -1115,6 +1165,12 @@ console.log('\n⑬ UI の契約\n');
   ok('実物の 4 つの枠を写している',
     ['密封シール', '口止めシール', 'ログインして登録してください', 'バーコード']
       .every((w) => preventFig.includes(w)));
+  /*
+   * **読み取り対象を指すのは図の仕事になった**（説明文を撤去したので・§4.4.2）。
+   * ここが欠けると、プリベントの面に「どこを撮るのか」がどこにも無くなる。
+   */
+  ok('プリベントの図が「ユーザーID」と「バーコード」を指している',
+    /ユーザーID/.test(preventFig) && /バーコード/.test(preventFig));
   ok('採尿管シールは 3 枚で、2 本目だけ空',
     /\{ y: 70, label: '1本', filled: true \}/.test(preventFig)
     && /\{ y: 107, label: '2本', filled: false \}/.test(preventFig)
