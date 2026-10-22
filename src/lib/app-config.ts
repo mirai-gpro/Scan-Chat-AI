@@ -209,20 +209,22 @@ export const CONFIG_SPECS: ConfigSpec[] = [
     label: 'デメカル 受取時 問合せ番号撮影を出す (Secondary)',
     default: 'off',
     description: 'Secondary なので AI問診のハードゲートにはしない。既定 off。' },
-  // 【裁定待ち・既定 off】発注者指示 2026-10-22 の案 C (LLM を使わない案)。
-  // 決定論デコード (zbar) で読めた回に Gemini を呼ばない = 待ち時間が消える。
-  // **ただし印字ID の OCR が無くなるので `single_source` が積まれ全件 review_required**
-  // になり、問診CSV の fail-closed ゲート (§7.1) が全員を止める。
-  // **これは発注者の裁定事項**なので on は裁定後。正本 §12.4。
+  // 【既定 on・発注者指示 2026-10-22「decode_skip_llm を on にして」】案 C (LLM を使わない)。
+  // 決定論デコード (zbar) で読めた回は Gemini を呼ばない = **待ち時間が消える**。
+  // **帰結: 印字ID の OCR が無くなるので `single_source` が積まれ `review_required` になる。**
+  // 問診CSV の fail-closed ゲート (§7.1) はこれをブロックするので、
+  // **「決定論デコードで読めた回を confirmed とするか」は引き続き発注者の裁定事項**。
+  // ここを実装で変えない (ゲートを緩めるのは別の判断)。正本 §12.4.1。
   { key: 'labid.decode_skip_llm', type: 'bool', group: '外部検査ID',
     label: 'バーコードが決定論で読めたら Gemini を呼ばない',
-    default: 'off',
-    description: '**既定 off。** on にすると読み取りが速くなる (Gemini を呼ばない) が、'
-      + ' **印字ID の OCR が無くなるため `single_source` = 全件 `review_required`** になり、'
-      + ' **プリベント問診CSV のゲートが全員をブロックする** (値だけを見て通さない設計のため)。'
-      + ' on にするには「決定論デコードで読めた回は single_source でも confirmed とする」'
-      + ' という裁定と、§12.1 の admin 確認・訂正経路が要る。'
-      + ' off でも決定論デコードは走る (バーコード側の値はそちらを優先・Gemini が落ちた回の保険)。' },
+    default: 'on',
+    description: '**既定 on** (発注者指示 2026-10-22)。バーコードが決定論デコーダで読めた回は'
+      + ' Gemini を呼ばないので**待ち時間が消える**。読めなかった回だけ Gemini へ落ちる。'
+      + ' **帰結: 印字ID の OCR が無くなるため `single_source` が付き `review_required`** になり、'
+      + ' **プリベント問診CSV のゲートはそれをブロックする** (値だけを見て通さない設計のため)。'
+      + ' **「決定論デコードで読めた回は single_source でも confirmed とする」かは未裁定**で、'
+      + ' §12.1 の admin 確認・訂正経路も要る。'
+      + ' off に戻すと Gemini も必ず呼ぶ (決定論デコード自体は off でも走る)。' },
 ];
 
 const DEFAULTS: Record<string, string> = Object.fromEntries(CONFIG_SPECS.map((s) => [s.key, s.default]));

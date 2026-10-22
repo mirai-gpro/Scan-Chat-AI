@@ -103,6 +103,19 @@
   }
   .btn-data  { @apply border-brand-600 bg-brand-50 text-brand-700 hover:bg-brand-100; }
   .btn-graph { @apply border-navy-400  bg-mist     text-navy-800  hover:bg-navy-100; }
+  /* ─ 大きく見せる (発注者指示 2026-10-22「ボタンを大きくして、目立つようにして」) ─
+     外部検査ID の撮影ボタン (「カメラで撮影」「この位置で撮る」) のように、
+     その面でやることが 1 つしかないボタン用。**色は .btn-data のまま**で面積だけ上げる —
+     brand 塗りは画面に 1 つ (AI疾病予防報告書のタイル) という確定事項があり、
+     この帯はダッシュボードでそのタイルと並ぶため。
+     高さ 56px は min-h-touch (44px) の上積み。文字は 18px (12px 以下は作らない)。
+     **2 クラスで書く** — .btn-pair と 1 クラス同士だと Tailwind の生成順で負けて
+     px-2 が残る (`.as-item.as-primary` で踏んだのと同じ型)。 */
+  .btn-pair.btn-pair-lg {
+    @apply border-2 px-5 text-lg;
+    min-height: 3.5rem;
+  }
+
   /* 未実施などで押せないとき。色は持たせず、押せないことだけを示す。 */
   .btn-pair-off {
     @apply cursor-not-allowed border-slate-200 bg-slate-50 text-slate-600 hover:bg-slate-50;
