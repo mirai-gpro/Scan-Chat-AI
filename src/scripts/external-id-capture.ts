@@ -39,6 +39,10 @@
  *     ハンドラは `[data-extid-capture]` のガードより**前**で受ける。
  *     **勝手には開かない** — 同じページにブロックが在る・スマホ・未登録の 3 つが
  *     揃ったときだけ。別ページへ移った先での自動起動はしない。
+ *   - **「登録し直す」「撮り直す」でもその場でカメラを開く**（§4.4.6）。
+ *     どちらも利用者の press なので**もう 1 枚ボタンを挟まない**。
+ *     撮影の面のボタンは「登録し直す」から入った回はサーバが `hidden` で出し、
+ *     **カメラを開けなかったときだけ JS が出す**（行き止まりにしない）。
  */
 
 import { initCameraScan, type CameraScanController } from './camera-scan';
@@ -69,6 +73,12 @@ interface Ctx {
   cameraStatusEl: HTMLElement | null;
   /** `/scan` と同じコントローラ。**押されるまで作らない**（作っただけでは起動しない）。 */
   camera: CameraScanController | null;
+  /**
+   * 撮影を始めるボタン。**「登録し直す」から入った回はサーバが `hidden` で出す**
+   * （押した時点でカメラが開くので 2 段にしない・仕様 §4.4.6）。
+   * **カメラを開けなかったときだけ JS で出す**＝行き止まりを作らない。
+   */
+  cameraOpenEl: HTMLElement | null;
   /** 登録済みの面 / 撮影の面 / 登録し直すの確認。**登録済みでも両方 markup は在る**。 */
   doneEl: HTMLElement | null;
   formEl: HTMLElement | null;
@@ -111,6 +121,7 @@ function ctx(root: HTMLElement): Ctx {
     videoEl: q<HTMLVideoElement>('[data-extid-video]'),
     canvasEl: q<HTMLCanvasElement>('[data-extid-canvas]'),
     cameraStatusEl: q('[data-extid-camera-status]'),
+    cameraOpenEl: q('[data-extid-camera-open]'),
     camera: null,
     doneEl: q('[data-extid-done]'),
     formEl: q('[data-extid-form]'),
@@ -231,6 +242,7 @@ async function openCamera(c: Ctx): Promise<void> {
      * （`canHandOff` のブロック）。番号を打たせる逃げ道は置かない。
      */
     say(c, 'この端末ではカメラを使えません。スマートフォンでこの画面を開いて撮影してください。');
+    show(c.cameraOpenEl, true);
     return;
   }
   clearWrong(c);
@@ -259,6 +271,8 @@ async function openCamera(c: Ctx): Promise<void> {
         closeCamera(c);
         // 権限拒否・カメラ無しはここに来る。**手入力へは落とさない**（上のヘッダ参照）。
         say(c, `${message} カメラの使用を許可してから、もう一度お試しください。`);
+        // **もう一度試す口を残す**（自動で開いた回はボタンを出していないため）。
+        show(c.cameraOpenEl, true);
       },
     });
   }
@@ -621,6 +635,12 @@ export function initExternalIdCapture(): void {
       show(c.confirmEl, false);
       c.evidenceKey = null; c.captureMethod = 'camera';
       say(c, 'もう一度撮影してください。登録すると今の番号を上書きします。');
+      /*
+       * **ここでカメラを開く**（発注者指示 2026-10-22・仕様 §4.4.6）。
+       * 「登録し直す」自体が利用者の press なので、**もう 1 枚ボタンを挟まない**。
+       * この面のボタンはサーバが `hidden` で出しており、開けなかったときだけ出る。
+       */
+      void openCamera(c);
       return;
     }
 
@@ -648,6 +668,8 @@ export function initExternalIdCapture(): void {
       clearWrong(c);
       show(c.confirmEl, false);
       say(c, 'もう一度撮影してください。');
+      // **撮り直しもその場でカメラを開く**（§4.4.6・ボタンを挟まない）。
+      void openCamera(c);
       return;
     }
   });

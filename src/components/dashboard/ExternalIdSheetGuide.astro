@@ -62,6 +62,12 @@ const hasDiagram = provider === 'demecal' || provider === 'prevent';
 /*
  * 「これではありません」= **実物で確認できた、取り違えやすい印字だけ**を挙げる。
  * 推測で増やさない（挙げた場所が無いと、利用者はそれを探して余計に迷う）。
+ *
+ * 【プリベントは空にした（発注者指示 2026-10-22・仕様 §4.4.6）】
+ * 同じことを**図の凡例が描いている**（破線の囲み ＋「ここは読み取りません
+ * （QR・URL・パスワード＝登録用）」）ので、**文と図で二重に言っていた**。
+ * §4.4.4 で案内文を撤去したのと同じ理由。**空の provider では見出しごと描かない。**
+ * **デメカルは 1 文字も変えない** — あちらの図は「管理用の記号」を描いていない。
  */
 const CONFUSABLE: Record<string, string[]> = {
   demecal: [
@@ -69,10 +75,7 @@ const CONFUSABLE: Record<string, string[]> = {
     '「検査ID」の欄（D で始まるマス目。初めての方は未記入のままで結構です）',
     '用紙の右上・右下にある管理用の記号',
   ],
-  prevent: [
-    'QR コード（四角い模様）と、その横の URL',
-    '**パスワード**（英字と数字が混ざったもの。これは登録用で、番号ではありません）',
-  ],
+  prevent: [],
 };
 const confusable = CONFUSABLE[provider] ?? [];
 
@@ -327,9 +330,14 @@ for (let y = 0; y < QR_N; y += 1) {
       </p>
     )}
 
-    <p class="mt-2 text-sm font-semibold text-slate-800">これではありません</p>
-    <ul class="mt-1 list-disc space-y-0.5 pl-5 text-sm text-slate-700">
-      {confusable.map((t) => <li set:html={t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}></li>)}
-    </ul>
+    {/* **挙げるものが無い provider では見出しごと出さない**（空の囲みを作らない）。 */}
+    {confusable.length > 0 && (
+      <>
+        <p class="mt-2 text-sm font-semibold text-slate-800">これではありません</p>
+        <ul class="mt-1 list-disc space-y-0.5 pl-5 text-sm text-slate-700">
+          {confusable.map((t) => <li set:html={t.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')}></li>)}
+        </ul>
+      </>
+    )}
   </div>
 )}
