@@ -1102,20 +1102,41 @@ console.log('\n⑬ UI の契約\n');
     ok('PC では起動しない（CSS と同じ `(pointer: coarse)` で判定）',
       /matchMedia\?\.\('\(pointer: coarse\)'\)/.test(scr));
     /*
-     * **起動の呼び出し元は押されたときだけ。** `openCamera` が他から呼ばれると
-     * 「画面に出ていないカメラが JS から起動する」ことになる（CLAUDE.md）。
+     * **カメラが開く経路を数で固定する。**「画面に出ていないカメラが JS から起動する」
+     * のを防ぐのが元の規律（CLAUDE.md）。§4.4.7 で**押す回数を 2 つ**にしたので、
+     * 押されたとき以外に 2 つだけ開く経路がある:
      *
-     * 出現は **5 回**: 定義 1 ＋ card のボタン 1 ＋ 催促の帯 1（§4.4.5）
-     * ＋ **「登録し直す」1 ＋ 「撮り直す」1**（§4.4.6・どちらも利用者の press）。
-     * **全部 click の中**に在ることまで見る（数だけだと load 時の呼び出しと
-     * 差し替えられる）。
+     * 出現は **6 回**: 定義 1 ／ card のボタン 1 ／ 催促の帯 1（§4.4.5）
+     * ／「登録し直す」1（§4.4.6）／**撮った写真が読めなかった回 1**
+     * ／**別ページの帯から来た回 1**（`resumeStart`・合図があるときだけ）。
+     * 増えていたら**勝手に開く経路が足された**ということ。
      */
     const callers = [...scr.matchAll(/openCamera\(/g)];
-    const iClick = scr.indexOf("document.addEventListener('click'");
-    ok('`openCamera` の呼び出しは定義 1 + ボタン 1 + 帯 1 + 登録し直す 1 + 撮り直す 1',
-      callers.length === 5, `出現 ${callers.length} 回`);
-    ok('**呼び出しは click の中だけ**（load / 他のイベントから開かない）',
-      iClick > 0 && callers.slice(1).every((m) => m.index > iClick));
+    ok('`openCamera` の呼び出しは 6 か所だけ（定義/ボタン/帯/登録し直す/読めなかった回/別ページ）',
+      callers.length === 6, `出現 ${callers.length} 回`);
+    /*
+     * **load で開くのは「直前に帯を押した」合図がある回だけ。**
+     * `resumeStart` が**最初に合図を取り出し**、無ければ即 return することを見る。
+     * ここが緩むと `/kit` を開いただけでカメラが起動する。
+     */
+    const resume = (() => {
+      const i = scr.indexOf('function resumeStart()');
+      const j = scr.indexOf('\nexport function initExternalIdCapture', i);
+      return i >= 0 && j > i ? scr.slice(i, j) : '';
+    })();
+    ok('load で開くのは合図がある回だけ',
+      /const id = takeStart\(\);\s*\n\s*if \(!id\) return;/.test(resume), resume.slice(0, 120));
+    ok('合図は**一度きり**（読んだら消す）',
+      /removeItem\(START_KEY\)/.test(scr) && /sessionStorage/.test(scr));
+    ok('合図に期限がある（古いタップで開かない）',
+      /START_TTL_MS/.test(scr) && /age >= 0 && age <= START_TTL_MS/.test(scr));
+    ok('合図に uid も番号も入れない（受取 ID と時刻だけ）',
+      /JSON\.stringify\(\{ id, ts: Date\.now\(\) \}\)/.test(scr));
+    ok('**URL には足さない**（受取 ID をクエリに出さない）',
+      !/searchParams\.set/.test(scr) && !/\?extid=/.test(scr));
+    ok('別ページでも登録済みなら開かない',
+      /formEl\?\.classList\.contains\('hidden'\)\) return;/.test(resume));
+    ok('別ページでもカメラを使えない端末では開かない', /if \(!cameraAvailable\(\)\) return;/.test(resume));
     ok('カメラを開く前に端末を判定する',
       /async function openCamera[\s\S]{0,400}cameraAvailable\(\)/.test(scr));
     ok('ページを離れるときに止める', /pagehide[\s\S]{0,300}closeCamera/.test(scr));
@@ -1154,8 +1175,18 @@ console.log('\n⑬ UI の契約\n');
     ok('カメラの無い端末はスマートフォンへ送る（番号を打たせない）',
       /cameraAvailable\(\)\) \{[\s\S]{0,400}スマートフォン/.test(scr2));
   }
-  ok('撮り直しの逃げ道がある', /data-extid-retake/.test(comp));
-  ok('確認してから登録する (即確定しない)', /data-extid-register/.test(comp) && /この番号で登録する/.test(comp));
+  /*
+   * 【§4.4.7・発注者指示 2026-10-22】**どんな場合でも操作は ①カメラを起動 ②撮影 の 2 つ。**
+   * 「この番号で登録する」「撮り直す」は**置かない** — 読めたらそのまま登録し、
+   * 読めなかったらカメラへ戻る。ここが戻ると**押す回数が 3 つ以上**に増える
+   * （画面は普通に動くので目視では気づけない）。
+   */
+  ok('確認のボタンを置かない（読めたらそのまま登録する）',
+    !/data-extid-register/.test(comp) && !/この番号で登録する/.test(comp));
+  ok('「撮り直す」のボタンも置かない（読めなければカメラへ戻す）',
+    !/data-extid-retake/.test(comp));
+  ok('読み取った番号は見せる（何が登録されたか分かる）',
+    /data-extid-candidate/.test(comp) && /data-extid-confirm/.test(comp));
 
   const script = code('src/scripts/external-id-capture.ts');
   ok('uid を属性で渡していない', !/diagnosticUserId|data-diagnostic-user-id/.test(script));
@@ -1361,38 +1392,29 @@ console.log('\n⑬ UI の契約\n');
       /data-extid-done/.test(comp) && /data-extid-form/.test(comp)
       && /class=\{registeredMask \? 'hidden' : ''\} data-extid-form/.test(comp));
     ok('登録し直す口がある', /data-extid-redo-open/.test(comp));
-    ok('確認の面がある（はい／やめる）',
-      /data-extid-redo-confirm/.test(comp) && /data-extid-redo-yes/.test(comp)
-      && /data-extid-redo-no/.test(comp));
-    ok('確認は既定で閉じている',
-      /class="mt-2 hidden rounded-xl border p-3 status-watch" data-extid-redo-confirm/.test(comp));
-    ok('**赤にしない**（誤りではなくやり直せること）',
-      /status-watch" data-extid-redo-confirm/.test(comp));
-    ok('上書きになることと、前の番号が残ることを伝える',
-      /上書き/.test(comp) && /記録として残り/.test(comp));
     /*
-     * **「押しただけで撮影の面が開く」に戻さない。** 1 段挟むのが要点なので、
-     * `redo-open` の分岐だけを切り出して、面を入れ替える操作が無いことを見る
-     * （後ろに `show(c.formEl, true)` があるので、ファイル全体で見ると素通りする）。
+     * 【§4.4.7】**確認を挟まない。** §4.4.3 で入れた「はい／やめる」は
+     * 発注者裁定（2026-10-22）で外した — 押す回数を ①カメラを起動 ②撮影 の 2 つに
+     * するため。上書きしても**前の番号は台帳に残る**ので取り返しはつく。
+     * **確認の面を戻さない**（戻すと 3 押しに増える）。
+     */
+    ok('上書きの確認を挟まない', !/data-extid-redo-confirm/.test(comp)
+      && !/data-extid-redo-yes/.test(comp) && !/data-extid-redo-no/.test(comp));
+    ok('上書きになることと、前の番号が残ることは**常時**伝える',
+      /上書きします/.test(comp) && /記録として残ります/.test(comp));
+    /*
+     * `redo-open` の分岐だけを切り出して、**1 押しでカメラまで行く**ことを見る
+     * （ファイル全体で見ると他の `openCamera` を拾って素通りする）。
      */
     const open = (() => {
       const i = scr.indexOf('data-extid-redo-open]');
-      const j = scr.indexOf('data-extid-redo-no]', i);
-      return i >= 0 && j > i ? scr.slice(i, j) : '';
-    })();
-    ok('登録し直すは**確認を出すだけ**（いきなり撮影の面にしない）',
-      open.includes('show(c.redoEl, true)')
-      && !/show\(c\.formEl, true\)/.test(open) && !/show\(c\.doneEl, false\)/.test(open),
-      open.slice(0, 120));
-    const yes = (() => {
-      const i = scr.indexOf('data-extid-redo-yes]');
       const j = scr.indexOf('data-extid-camera-open]', i);
       return i >= 0 && j > i ? scr.slice(i, j) : '';
     })();
-    ok('承諾して初めて面が入れ替わる',
-      /show\(c\.doneEl, false\)/.test(yes) && /show\(c\.formEl, true\)/.test(yes));
-    ok('前回の証跡を持ち越さない', /c\.evidenceKey = null/.test(yes));
-    ok('上書きになることを撮影中も出す', /上書きします/.test(yes));
+    ok('登録し直すは**その場でカメラまで開く**',
+      /show\(c\.doneEl, false\)/.test(open) && /show\(c\.formEl, true\)/.test(open)
+      && /openCamera\(c\)/.test(open), open.slice(0, 120));
+    ok('前回の証跡を持ち越さない', /c\.evidenceKey = null/.test(open));
     /*
      * **撮り直しは API を変えずに成立している。** 台帳は旧行を `superseded` に
      * 落として入れ直す（`external-id-persist.ts`）。ここが「消して入れ直す」に
@@ -1794,16 +1816,29 @@ console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
       iStart > 0 && iGuard > 0 && iStart < iGuard, `start=${iStart} / guard=${iGuard}`);
 
     const h = iStart > 0 && iGuard > iStart ? scr.slice(iStart, iGuard) : '';
-    ok('同じページに撮影ブロックが無ければ何もしない (移った先で自動起動しない)',
-      /getElementById\(`extid-\$\{id\}`\)/.test(h) && /if \(!block[\s\S]{0,120}return;/.test(h), h.slice(0, 80));
+    /*
+     * 同じページにブロックが無い＝**別ページへ飛ぶ回**（ダッシュボード → `/kit`）。
+     * §4.4.7 で**着いた先で開く**ようにしたので、ここでは
+     * **合図を残してリンクに任せる**（カメラはこの場では開かない）。
+     */
+    ok('同じページにブロックが無ければ合図を残してリンクに任せる',
+      /getElementById\(`extid-\$\{id\}`\)/.test(h)
+      && /rememberStart\(id\);\s*\n\s*return;/.test(h)
+      && !/openCamera/.test(h.slice(0, h.indexOf('rememberStart'))), h.slice(0, 80));
     ok('カメラを使えない端末では開かない (PC は QR で手渡し)',
       /if \(!cameraAvailable\(\)\) return;/.test(h));
     ok('**登録済みの回は上書きの確認を飛ばさない**',
       /formEl\?\.classList\.contains\('hidden'\)[\s\S]{0,40}return;/.test(h));
     ok('開いたらブロックへ移動する (画面外でカメラを起動しない)', /scrollIntoView/.test(h));
-    // **読み込みや URL のハッシュで開かない** — カメラは「押したときだけ」。
-    ok('load / hashchange では開かない',
-      !/DOMContentLoaded|hashchange|location\.hash/.test(scr));
+    /*
+     * **URL のハッシュでは開かない。** `#extid-…` は誰でも作れるので、
+     * これで開けると「リンクを踏んだらカメラが起動する」になる。
+     * `DOMContentLoaded` は `resumeStart`（合図つき）のためだけに使う。
+     */
+    ok('URL のハッシュでは開かない', !/hashchange|location\.hash/.test(scr));
+    ok('load で呼ぶのは `resumeStart` だけ',
+      /addEventListener\('DOMContentLoaded', resumeStart, \{ once: true \}\)/.test(scr)
+      && [...scr.matchAll(/DOMContentLoaded/g)].length === 1);
 
     /*
      * 【§4.4.6・発注者指示 2026-10-22「ここのボタンを削除」】
@@ -1818,8 +1853,17 @@ console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
       const j = scr.indexOf('return;', i);
       return i > 0 && j > i ? scr.slice(i, j) : '';
     };
-    ok('「登録し直す」でその場でカメラを開く', /openCamera\(c\)/.test(handler('redo-yes')));
-    ok('「撮り直す」でもその場でカメラを開く', /openCamera\(c\)/.test(handler('retake')));
+    ok('「登録し直す」でその場でカメラを開く', /openCamera\(c\)/.test(handler('redo-open')));
+    /*
+     * 【§4.4.7】**読めたらそのまま登録・読めなければカメラへ戻す。**
+     * `captureAndRead` の末尾がこの 2 つになっていること（押させない）。
+     */
+    const after = (() => {
+      const i = scr.indexOf('if (ok) {');
+      return i > 0 ? scr.slice(i, i + 220) : '';
+    })();
+    ok('読めたら確認を挟まず登録する', /register\(c,/.test(after), after.slice(0, 100));
+    ok('読めなかったら押させずにカメラへ戻す', /\} else \{\s*\n\s*await openCamera\(c\);/.test(after));
     ok('登録済みから入った面ではボタンを出さない',
       /registeredMask \? ' hidden' : ''/.test(cap), '（サーバが hidden を付ける）');
     // **開けなかった回に出す**のは 2 経路 (カメラ非対応・起動エラー) の両方。

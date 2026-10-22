@@ -134,29 +134,19 @@ const idKind = PROVIDER_ID_KIND[provider];
 
       {/*
         登録し直す (仕様 §8.3「再撮影を第一選択」)。
-        **押しただけでは撮影の面を出さない** — 1 段挟んで、上書きになることを先に伝える。
+        **押した時点でカメラが開く** — 利用者の操作は
+        **①カメラを起動 ②撮影 の 2 つだけ**（発注者指示 2026-10-22・仕様 §4.4.7）。
+        §4.4.3 で挟んでいた上書きの確認は**この裁定で外した**。
+        上書きしても**前の番号は台帳に残る**（`previous_value`）ので、取り返しはつく。
       */}
       <div class="mt-2">
-        <button type="button" class="btn-pair btn-graph min-h-touch" data-extid-redo-open>
-          <AppIcon name="camera" size={18} />番号を登録し直す
+        <button type="button" class="touch-only btn-pair btn-pair-lg btn-data w-full" data-extid-redo-open>
+          <AppIcon name="camera" size={22} />番号を登録し直す
         </button>
-      </div>
-
-      {/* 確認。**赤にしない** (誤りではなく、やり直せることなので `status-watch`)。 */}
-      <div class="mt-2 hidden rounded-xl border p-3 status-watch" data-extid-redo-confirm role="status">
-        <p class="text-base">
-          現在 <span class="tnum font-semibold">{registeredMask}</span> が登録されています。
-          撮り直して<strong>この番号を上書き</strong>しますか？
+        <p class="mt-1 text-sm text-slate-600">
+          撮り直すと <span class="tnum font-semibold">{registeredMask}</span> を上書きします。
+          前の番号は記録として残ります。
         </p>
-        <p class="mt-1 text-sm">前の番号は記録として残り、事務局で確認できます。</p>
-        <div class="mt-2 flex flex-wrap gap-2">
-          <button type="button" class="btn-pair btn-data min-h-touch" data-extid-redo-yes>
-            <AppIcon name="camera" size={18} />登録し直す
-          </button>
-          <button type="button" class="btn-pair btn-graph min-h-touch" data-extid-redo-no>
-            <AppIcon name="close" size={18} />やめる
-          </button>
-        </div>
       </div>
     </div>
   )}
@@ -248,24 +238,19 @@ const idKind = PROVIDER_ID_KIND[provider];
         <p class="mt-1 text-sm" data-extid-wrong-body></p>
       </div>
 
+      {/*
+        読み取れた番号。**ボタンは置かない**（発注者指示 2026-10-22・仕様 §4.4.7
+        「どんな場合でも ①カメラを起動 ②撮影 の 2 アクション」）。
+        読めたらそのまま登録し、**読めなかったらカメラへ戻る** — どちらも押させない。
+        **番号を直す口も置かない**（2026-10-21・チェックディジットが無いので、
+        手で直すと**正しい形の別の番号**になり得る。違っていたら撮り直す）。
+        表示を残すのは、**何が登録されたかを本人が見られるようにする**ため。
+      */}
       <div class="mt-3 hidden" data-extid-confirm>
         <p class="text-base text-slate-800">
           読み取った{idLabel}: <span class="tnum font-semibold" data-extid-candidate></span>
         </p>
         <p class="mt-1 text-sm text-slate-600" data-extid-note></p>
-        <div class="mt-2 flex flex-wrap gap-2">
-          <button type="button" class="btn-pair btn-data min-h-touch" data-extid-register>
-            <AppIcon name="ok" size={18} />この番号で登録する
-          </button>
-          {/*
-            **番号を直す口は置かない** (発注者指示 2026-10-21)。
-            チェックディジットが無いので、手で直すと**正しい形の別の番号**になり得る。
-            読み取りが違っていたら**撮り直す**。
-          */}
-          <button type="button" class="btn-pair btn-graph min-h-touch" data-extid-retake>
-            <AppIcon name="camera" size={18} />撮り直す
-          </button>
-        </div>
       </div>
 
       {/*
