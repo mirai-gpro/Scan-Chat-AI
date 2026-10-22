@@ -43,6 +43,16 @@
  *     どちらも利用者の press なので**もう 1 枚ボタンを挟まない**。
  *     撮影の面のボタンは「登録し直す」から入った回はサーバが `hidden` で出し、
  *     **カメラを開けなかったときだけ JS が出す**（行き止まりにしない）。
+ *
+ * 【2026-10-22 の裁定（発注者指示・§4.4.7）】**どんな場合でも操作は 2 つだけ**:
+ *   **①カメラを起動 ②撮影**。これを満たすために次を外した／足した。
+ *   - **読めたら確認を挟まず登録する**（「この番号で登録する」を撤去）。
+ *   - **読めなかったら押させずにカメラへ戻す**（「撮り直す」を撤去）。
+ *   - **「登録し直す」の上書き確認を外した**（§4.4.3 で挟んだ 1 段。
+ *     前の番号は台帳に残る＝取り返しがつくので、押させる価値より手数を優先）。
+ *   - **別ページ（ダッシュボード）の帯から来た回は、着いた先でカメラを開く**。
+ *     押したのは利用者なので「勝手に開く」には当たらないが、**合図は
+ *     直前のタップの控え（sessionStorage・一度きり・60 秒）だけ**に限る。
  */
 
 import { initCameraScan, type CameraScanController } from './camera-scan';
@@ -79,10 +89,9 @@ interface Ctx {
    * **カメラを開けなかったときだけ JS で出す**＝行き止まりを作らない。
    */
   cameraOpenEl: HTMLElement | null;
-  /** 登録済みの面 / 撮影の面 / 登録し直すの確認。**登録済みでも両方 markup は在る**。 */
+  /** 登録済みの面 / 撮影の面。**登録済みでも両方 markup は在る**。 */
   doneEl: HTMLElement | null;
   formEl: HTMLElement | null;
-  redoEl: HTMLElement | null;
   /** 直近の読み取り結果（登録時にサーバへ戻す）。 */
   evidenceKey: string | null;
   /** 発行元の接頭辞（`704`＝Wellfort）。**サーバが返した値だけを使う**（焼き込まない）。 */
@@ -125,7 +134,6 @@ function ctx(root: HTMLElement): Ctx {
     camera: null,
     doneEl: q('[data-extid-done]'),
     formEl: q('[data-extid-form]'),
-    redoEl: q('[data-extid-redo-confirm]'),
     evidenceKey: null,
     orgPrefix: '',
     captureMethod: 'camera',
@@ -374,12 +382,26 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
    * 利用者はこれが終わる前に「登録」を押せる（`register` がここで待つ）。
    */
   c.pending = running;
+  let ok = false;
   try {
-    return await running;
+    ok = await running;
   } finally {
     await local.catch(() => undefined);
     if (c.pending === running) c.pending = null;
   }
+
+  /*
+   * **ここで押させない**（発注者指示 2026-10-22・§4.4.7「①カメラを起動 ②撮影」）。
+   *   - 読めた   → **そのまま登録する**（確認のボタンを挟まない）
+   *   - 読めない → **カメラへ戻す**（「撮り直す」を押させない）
+   * 登録後は `register` が再読込するので、**何が登録されたかは登録済みの面で見られる**。
+   */
+  if (ok) {
+    await register(c, c.candidateEl?.textContent?.trim() ?? '', 'camera');
+  } else {
+    await openCamera(c);
+  }
+  return ok;
 }
 
 async function uploadAndRead(c: Ctx, file: File, turn: Turn): Promise<boolean> {
@@ -544,6 +566,65 @@ async function register(c: Ctx, value: string, method: 'camera'): Promise<void> 
   }
 }
 
+/**
+ * 「直前に帯のボタンを押した」ことだけを残す合図（§4.4.7）。
+ *
+ * **一度きり・60 秒。** これが無い回は**絶対に開かない**ので、
+ * 「別ページを開いたらカメラが起動した」は起きない。
+ * **uid も番号も入れない**（受取 ID だけ・`sessionStorage` なのでタブを閉じれば消える）。
+ */
+const START_KEY = 'welltect.extid.start';
+const START_TTL_MS = 60_000;
+
+function rememberStart(id: string): void {
+  if (!id) return;
+  try {
+    sessionStorage.setItem(START_KEY, JSON.stringify({ id, ts: Date.now() }));
+  } catch {
+    /* 使えない環境では従来どおり（着いた先でボタンを押してもらう） */
+  }
+}
+
+/** 控えを**取り出して消す**（読んだ時点で使い切る）。期限切れ・壊れていれば null。 */
+function takeStart(): string | null {
+  let raw: string | null = null;
+  try {
+    raw = sessionStorage.getItem(START_KEY);
+    if (raw !== null) sessionStorage.removeItem(START_KEY);
+  } catch {
+    return null;
+  }
+  if (!raw) return null;
+  try {
+    const v = JSON.parse(raw) as { id?: unknown; ts?: unknown };
+    const id = typeof v.id === 'string' ? v.id : '';
+    const ts = typeof v.ts === 'number' ? v.ts : 0;
+    if (!id || !Number.isFinite(ts)) return null;
+    // **未来の時刻も期限切れ扱い**（時計のずれで無期限に残らないように）。
+    const age = Date.now() - ts;
+    return age >= 0 && age <= START_TTL_MS ? id : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 別ページの帯から来た回だけ、着いた先でカメラを開く（§4.4.7）。
+ * **条件は控えがあること ＋ そのブロックが在る ＋ スマホ ＋ 未登録**。
+ * 開けなかったら `openCamera` がボタンを出すので行き止まりにならない。
+ */
+function resumeStart(): void {
+  const id = takeStart();
+  if (!id) return;
+  const block = document.getElementById(`extid-${id}`);
+  if (!block || !block.matches('[data-extid-capture]')) return;
+  if (!cameraAvailable()) return;
+  const c = ctx(block);
+  if (c.formEl?.classList.contains('hidden')) return; // 登録済みの回は開かない
+  block.scrollIntoView({ block: 'start' });
+  void openCamera(c);
+}
+
 export function initExternalIdCapture(): void {
   if (bound) return;
   bound = true;
@@ -569,7 +650,7 @@ export function initExternalIdCapture(): void {
      *
      * **3 つの場合は何もしない**（`href` の既定の動作＝撮影ブロックへ移動に任せる）:
      *   ① 撮影ブロックがこのページに無い（ダッシュボード → `/kit` へ移動する回）。
-     *      **移った先で自動起動はしない** — カメラは「押したときだけ」開く。
+     *      **合図を残してリンクに任せる** — 着いた先で `resumeStart` が開く（§4.4.7）。
      *   ② カメラを使えない端末（PC）。下の QR でスマートフォンへ送るのが出口。
      *   ③ 既に登録済みの回。**上書きの確認（§8.3）を飛ばさない**。
      */
@@ -577,7 +658,16 @@ export function initExternalIdCapture(): void {
     if (starter) {
       const id = starter.getAttribute('data-extid-start') ?? '';
       const block = id ? document.getElementById(`extid-${id}`) : null;
-      if (!block || !block.matches('[data-extid-capture]')) return; // ①
+      if (!block || !block.matches('[data-extid-capture]')) {
+        /*
+         * ①別ページ（ダッシュボード → `/kit`）。**着いた先でカメラを開くための合図**を
+         * 残して、リンクはそのまま飛ばす（§4.4.7・押したのは利用者なので
+         * 「勝手に開く」には当たらない）。**URL には何も足さない** — 受取 ID が
+         * クエリに出てアクセスログへ残るのを避ける（`#extid-…` は元から在る）。
+         */
+        rememberStart(id);
+        return;
+      }
       if (!cameraAvailable()) return; // ②
       const sc = ctx(block);
       if (sc.formEl?.classList.contains('hidden')) return; // ③
@@ -619,16 +709,12 @@ export function initExternalIdCapture(): void {
      * 「登録し直す」を押してもらってから面を入れ替える。
      */
     if (t?.closest?.('[data-extid-redo-open]')) {
-      show(c.redoEl, true);
-      return;
-    }
-    if (t?.closest?.('[data-extid-redo-no]')) {
-      show(c.redoEl, false);
-      return;
-    }
-    if (t?.closest?.('[data-extid-redo-yes]')) {
+      /*
+       * **1 押しでカメラまで行く**（§4.4.7）。§4.4.3 の上書き確認はこの裁定で外した。
+       * 上書きしても**前の番号は台帳に残る**（`previous_value`）ので取り返しはつく。
+       * 画面には「撮り直すと … を上書きします」をボタンの下に常時出してある。
+       */
       // 登録済みの面を畳んで撮影の面を出す。**値は消さない**（登録に失敗しても元の登録は残る）。
-      show(c.redoEl, false);
       show(c.doneEl, false);
       show(c.formEl, true);
       clearWrong(c);
@@ -657,20 +743,16 @@ export function initExternalIdCapture(): void {
       return;
     }
 
-    if (t?.closest?.('[data-extid-register]')) {
-      const v = c.candidateEl?.textContent?.trim() ?? '';
-      if (!v) { say(c, '登録できる番号がありません。'); return; }
-      void register(c, v, c.captureMethod);
-      return;
-    }
-    if (t?.closest?.('[data-extid-retake]')) {
-      c.evidenceKey = null;
-      clearWrong(c);
-      show(c.confirmEl, false);
-      say(c, 'もう一度撮影してください。');
-      // **撮り直しもその場でカメラを開く**（§4.4.6・ボタンを挟まない）。
-      void openCamera(c);
-      return;
-    }
+    /*
+     * **「この番号で登録する」「撮り直す」は置いていない**（§4.4.7）。
+     * 読めたら `captureAndRead` がそのまま登録し、読めなければカメラへ戻す。
+     */
   });
+
+  // **別ページの帯から来た回だけ**カメラを開く（合図が無ければ何もしない）。
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', resumeStart, { once: true });
+  } else {
+    resumeStart();
+  }
 }
