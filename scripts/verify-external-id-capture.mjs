@@ -1043,7 +1043,7 @@ console.log('\n⑬ UI の契約\n');
     };
     const open = btn('data-extid-camera-open');
     const shot = btn('data-extid-shot');
-    ok('「カメラで撮影」は大きい指定を使う', /\bbtn-pair-lg\b/.test(open), open.replace(/\s+/g, ' '));
+    ok('「撮影して登録する」は大きい指定を使う', /\bbtn-pair-lg\b/.test(open), open.replace(/\s+/g, ' '));
     ok('「この位置で撮る」は大きい指定を使う', /\bbtn-pair-lg\b/.test(shot), shot.replace(/\s+/g, ' '));
     ok('**brand 塗りにしない**（`btn-primary` を使わない）',
       !/btn-primary/.test(open) && !/btn-primary/.test(shot)
@@ -1087,11 +1087,19 @@ console.log('\n⑬ UI の契約\n');
     ok('PC では起動しない（CSS と同じ `(pointer: coarse)` で判定）',
       /matchMedia\?\.\('\(pointer: coarse\)'\)/.test(scr));
     /*
-     * **起動の呼び出し元はボタンだけ。** `openCamera` が他から呼ばれると
+     * **起動の呼び出し元は押されたときだけ。** `openCamera` が他から呼ばれると
      * 「画面に出ていないカメラが JS から起動する」ことになる（CLAUDE.md）。
+     *
+     * 出現は **3 回**: 定義 1 ＋ card のボタン 1 ＋ **催促の帯 1**
+     * （発注者指示 2026-10-22・§4.4.5）。**どちらの呼び出しも click の中**に在ること
+     * まで見る（数だけだと load 時の呼び出しと差し替えられる）。
      */
-    const callers = [...scr.matchAll(/openCamera\(/g)].length;
-    ok('`openCamera` の呼び出しは定義 1 + ボタン 1 だけ', callers === 2, `出現 ${callers} 回`);
+    const callers = [...scr.matchAll(/openCamera\(/g)];
+    const iClick = scr.indexOf("document.addEventListener('click'");
+    ok('`openCamera` の呼び出しは定義 1 + ボタン 1 + 帯 1 だけ', callers.length === 3,
+      `出現 ${callers.length} 回`);
+    ok('**呼び出しは click の中だけ**（load / 他のイベントから開かない）',
+      iClick > 0 && callers.slice(1).every((m) => m.index > iClick));
     ok('カメラを開く前に端末を判定する',
       /async function openCamera[\s\S]{0,400}cameraAvailable\(\)/.test(scr));
     ok('ページを離れるときに止める', /pagehide[\s\S]{0,300}closeCamera/.test(scr));
@@ -1746,6 +1754,54 @@ console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
   ok('撮影へ促す文言が在る', /撮影/.test(remUi));
 
   const cap = code('src/components/dashboard/ExternalIdCapture.astro');
+
+  /*
+   * 【1 タップでカメラへ】発注者指示 2026-10-22「『カメラで撮影』ボタンのフローを
+   * 省略して、『撮影して登録する』ボタンだけで即、カメラを起動して」。
+   *
+   * ここで見張るのは **4 つ**:
+   *   ① 帯のボタンに `data-extid-start` が在る（これが無いと従来の 2 段に戻る）
+   *   ② `href` を**外していない**（JS 無効・PC・別ページの行き先が消えると行き止まり）
+   *   ③ ハンドラが `[data-extid-capture]` の **ガードより前**に在る
+   *      （後ろに置くと帯は撮影ブロックの外なので**到達しない**＝静かに元の挙動へ戻る）
+   *   ④ **カメラを勝手に開かない**（同じページにブロックが在る・スマホ・未登録のときだけ）
+   */
+  {
+    const scr = code('src/scripts/external-id-capture.ts');
+    ok('帯のボタンが撮影の開始を名乗る (data-extid-start)',
+      /data-extid-start=\{r\.shipmentId\}/.test(remUi));
+    ok('**`href` は残す** (JS 無効・PC・別ページの行き先)', /href=\{r\.href\}/.test(remUi));
+
+    const iStart = scr.indexOf("[data-extid-start]");
+    const iGuard = scr.indexOf("const root = t?.closest?.('[data-extid-capture]')");
+    ok('開始ハンドラは撮影ブロックのガードより前に在る',
+      iStart > 0 && iGuard > 0 && iStart < iGuard, `start=${iStart} / guard=${iGuard}`);
+
+    const h = iStart > 0 && iGuard > iStart ? scr.slice(iStart, iGuard) : '';
+    ok('同じページに撮影ブロックが無ければ何もしない (移った先で自動起動しない)',
+      /getElementById\(`extid-\$\{id\}`\)/.test(h) && /if \(!block[\s\S]{0,120}return;/.test(h), h.slice(0, 80));
+    ok('カメラを使えない端末では開かない (PC は QR で手渡し)',
+      /if \(!cameraAvailable\(\)\) return;/.test(h));
+    ok('**登録済みの回は上書きの確認を飛ばさない**',
+      /formEl\?\.classList\.contains\('hidden'\)[\s\S]{0,40}return;/.test(h));
+    ok('開いたらブロックへ移動する (画面外でカメラを起動しない)', /scrollIntoView/.test(h));
+    // **読み込みや URL のハッシュで開かない** — カメラは「押したときだけ」。
+    ok('load / hashchange では開かない',
+      !/DOMContentLoaded|hashchange|location\.hash/.test(scr));
+
+    // **帯と card で同じ文言**（同じ 1 つの動作が 2 段あるように見せない）。
+    const label = '撮影して登録する';
+    const openBtn = (() => {
+      const j = cap.indexOf('data-extid-camera-open');
+      const i = cap.lastIndexOf('<button', j);
+      const k = cap.indexOf('</button>', j);
+      return i >= 0 && k > i ? cap.slice(i, k) : '';
+    })();
+    ok('card のボタンも帯と同じ文言',
+      openBtn.includes(label) && remUi.includes(label) && !/\/>\s*カメラで撮影/.test(cap),
+      openBtn.replace(/\s+/g, ' ').slice(0, 120));
+  }
+
   ok('撮影ブロックに飛び先の id が在る', /id=\{`extid-\$\{shipmentId\}`\}/.test(cap));
   ok('呼び名の定義は 1 か所 (external-test-id.ts)',
     /PROVIDER_ID_LABEL\[provider\]/.test(cap) && /PROVIDER_ID_LABEL: Record/.test(code('src/lib/external-test-id.ts')));
@@ -2278,6 +2334,336 @@ console.log('\n⑲ 決定論デコード (§12.4 案 A ＋ 案 C)\n');
     for (const word of ['single_source', 'confirmed', 'ゲート', '突合']) {
       ok(`説明が「${word}」を名指ししている (帰結を隠さない)`, blk.includes(word));
     }
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑳ admin の確認・訂正経路 — **出口が無い例外系を解決できるか**（仕様 §8.4 / §12.1）
+//
+// 【ここは静かに壊れる】
+//   - 画面だけ `confirmed` にして**紐づいていない回を通した**ことにする
+//   - **理由・操作者を残さずに**台帳を書き換える（監査が成立しない）
+//   - `conflict` を**自動で上書き**する（他人の検査の番号を奪う）
+//   - 一覧に**番号の全文**が出る
+//   - `persistExternalIdCapture` を通さず **status を直書き**する
+//     （重複判定と紐付けが二重になり、片方だけ直されて食い違う）
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑳ admin の確認・訂正経路 (実物を動かす)\n');
+{
+  /*
+   * **実物を本物の依存で組む。** ①〜⑭ の `load()` は import をリテラルへ置き換えるが、
+   * ここは `evaluateExternalId` / `checkPreventQuestionnaireGate` を**そのまま**使いたい
+   * （関数を文字列化すると内部の依存が落ちる）ので、**data: URL を import 先にする**。
+   * 差し替えるのは S3 だけ（鍵が無いので署名 URL は作れない）。
+   */
+  const dataUrl = (src) => `data:text/javascript;base64,${Buffer.from(js(src), 'utf8').toString('base64')}`;
+  const modUrl = (relPath, subs = []) => {
+    let src = read(relPath).replace(/^import type \{[\s\S]*?\} from '[^']*';$/gm, '');
+    for (const [re, to] of subs) src = src.replace(re, to ?? '');
+    return dataUrl(src);
+  };
+  const CORE_URL = modUrl('src/lib/external-test-id.ts');
+  const PERSIST_URL = modUrl('src/lib/external-id-persist.ts', [
+    [/from '\.\/external-test-id'/g, `from '${CORE_URL}'`],
+  ]);
+  // S3 のスタブ。**キーが無い回は null**（「写真が無い」を区別できるようにする）。
+  const EVIDENCE_STUB = dataUrl(
+    'export async function createEvidenceViewUrl(key) {'
+    + " return key ? { ok: true, url: 'https://example.invalid/' + encodeURIComponent(key), expiresIn: 300 }"
+    + " : { ok: false, status: 400, error: 'invalid_key' }; }",
+  );
+  const admin = await import(modUrl('src/lib/external-id-admin.ts', [
+    [/from '\.\/external-test-id'/g, `from '${CORE_URL}'`],
+    [/from '\.\/external-id-persist'/g, `from '${PERSIST_URL}'`],
+    [/from '\.\/external-id-evidence'/g, `from '${EVIDENCE_STUB}'`],
+  ]));
+
+  const UID = 'aaaaaaaa-0000-0000-0000-000000000001';
+  const OTHER = 'bbbbbbbb-0000-0000-0000-000000000002';
+  const CAP = 'cccccccc-0000-0000-0000-000000000001';
+  /** `adminIdentity()` の digest の形（base64url 43 文字）。**素の email を入れない。** */
+  const BY = 'AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
+  const CFG = { patternFor: () => '^704000[0-9]{3}$', orgPrefixFor: () => '704' };
+
+  /** 台帳と lab_tests を状態として持つスタブ（⑭ と同じ作り）。 */
+  function stateful(seed = {}) {
+    const db = {
+      lab_test_id_captures: [...(seed.captures ?? [])],
+      lab_tests: [...(seed.labTests ?? [])],
+      customer_profiles: seed.noProfile ? [] : [{ user_id: 'cust-1', diagnostic_user_id: UID }],
+      lab_companies: [{ id: 'co-1', test_types: ['cancer_urine'] }],
+      kit_shipments: [],
+    };
+    let seq = 0;
+    const match = (row, filters) => Object.entries(filters).every(([k, v]) => {
+      if (k.startsWith('!')) return row[k.slice(1)] !== v;
+      if (Array.isArray(v)) return Array.isArray(row[k]) && v.every((x) => row[k].includes(x));
+      return row[k] === v;
+    });
+    const handler = (st) => {
+      const rows = db[st.table] ?? [];
+      if (st.op === 'insert') {
+        const id = `${st.table}-${++seq}`;
+        rows.push({ id, ...st.values });
+        return { data: [{ id }], error: null };
+      }
+      if (st.op === 'update') {
+        const hit = rows.filter((r) => match(r, st.filters));
+        for (const r of hit) Object.assign(r, st.values);
+        return { data: hit.map((r) => ({ id: r.id })), error: null };
+      }
+      return { data: rows.filter((r) => match(r, st.filters)), error: null };
+    };
+    const stub = MAKE_STUB({
+      lab_test_id_captures: handler, lab_tests: handler,
+      customer_profiles: handler, lab_companies: handler, kit_shipments: handler,
+    });
+    return { stub, db };
+  }
+
+  const row = (over = {}) => ({
+    id: CAP, diagnostic_user_id: UID, shipment_ref: 'ord_2026',
+    provider: 'prevent', test_type: 'cancer_urine',
+    normalized_value: '704000123', status: 'review_required',
+    review_reasons: ['barcode_ocr_mismatch'],
+    capture_method: 'camera', decode_method: 'barcode',
+    evidence_key: 'scan-accuracy-test/kit-id-captures/2026/10/20/11111111-2222-3333-4444-555555555555.jpg',
+    lab_test_id: null, lab_test_link_status: 'deferred', lab_test_link_detail: null,
+    captured_at: '2026-10-20T01:00:00Z', confirmed_at: null,
+    previous_value: null, corrected_at: null, corrected_by: null, correction_reason: null,
+    ...over,
+  });
+
+  // ── (a) 一覧 — マスクだけ・ゲートの判定つき・superseded は出さない ──────
+  {
+    const passing = row({
+      id: 'cccccccc-0000-0000-0000-000000000003', shipment_ref: 'ord_pass',
+      status: 'confirmed', review_reasons: [], lab_test_id: 'lt-1', lab_test_link_status: 'linked',
+    });
+    const dead = row({ id: 'cccccccc-0000-0000-0000-000000000009', shipment_ref: 'ord_old', status: 'superseded' });
+    const { stub } = stateful({ captures: [row(), passing, dead] });
+    const review = await admin.listAdminCaptures({ sb: stub, bucket: 'review', cfg: CFG });
+    const confirmed = await admin.listAdminCaptures({ sb: stub, bucket: 'confirmed', cfg: CFG });
+    const all = await admin.listAdminCaptures({ sb: stub, bucket: 'all', cfg: CFG });
+    ok('(a) 一覧が引ける', review.ok === true, JSON.stringify(review).slice(0, 120));
+    eq('(a) **確認が必要な行だけ**を返す', review.ok && review.rows.map((r) => r.id), [CAP]);
+    eq('(a) 通過済だけも引ける', confirmed.ok && confirmed.rows.map((r) => r.id), [passing.id]);
+    eq('(a) superseded は出さない', all.ok && all.rows.length, 2);
+    eq('(a) 番号はマスクだけ', review.ok && review.rows[0].masked, '*****0123');
+    ok('(a) **全文が応答に入らない**', !JSON.stringify(review).includes('704000123'));
+    ok('(a) 証跡の S3 キーも返さない', !JSON.stringify(review).includes('kit-id-captures'));
+    eq('(a) 証跡が在ることだけ伝える', review.ok && review.rows[0].hasEvidence, true);
+    // **ゲートは実関数で判定する**（画面に条件を書かせない）
+    eq('(a) 止まっている理由はゲートの判定', review.ok && review.rows[0].gate.reason, 'capture_not_confirmed');
+    eq('(a) 通過済はゲートが通っている', confirmed.ok && confirmed.rows[0].gate.allowed, true);
+  }
+
+  // ── (b) 台帳未適用を 0 件と混同しない ──────────────────────────────
+  {
+    const stub = MAKE_STUB({
+      lab_test_id_captures: () => ({ data: null, error: { message: 'relation "customer.lab_test_id_captures" does not exist' } }),
+    });
+    const r = await admin.listAdminCaptures({ sb: stub, cfg: CFG });
+    ok('(b) 未適用でも例外にしない', r.ok === true);
+    eq('(b) **未適用だと明示する**', r.ok && r.migrationApplied, false);
+    eq('(b) 0 件として返す', r.ok && r.rows.length, 0);
+  }
+
+  // ── (c) 詳細 — ここだけ全文と証跡・`conflict` の相手も返す ──────────
+  {
+    const mate = row({ id: 'cccccccc-0000-0000-0000-000000000004', diagnostic_user_id: OTHER, shipment_ref: 'ord_x' });
+    const { stub } = stateful({ captures: [row({ previous_value: '704000111', correction_reason: '前回の訂正' }), mate] });
+    const d = await admin.adminCaptureDetail({ sb: stub, captureId: CAP, cfg: CFG });
+    ok('(c) 詳細が引ける', d.ok === true, JSON.stringify(d).slice(0, 120));
+    eq('(c) **全文はここだけ**', d.ok && d.detail.value, '704000123');
+    eq('(c) 訂正前の値も見せる', d.ok && d.detail.previousValue, '704000111');
+    ok('(c) 証跡は短時間の署名 URL', d.ok && String(d.detail.evidenceUrl).startsWith('https://'));
+    eq('(c) `conflict` の相手を返す', d.ok && d.detail.duplicates.map((x) => x.id), [mate.id]);
+    eq('(c) 自分自身は相手に入れない', d.ok && d.detail.duplicates.some((x) => x.id === CAP), false);
+    const miss = await admin.adminCaptureDetail({ sb: stateful().stub, captureId: CAP, cfg: CFG });
+    eq('(c) 無い行は 404', [miss.ok, !miss.ok && miss.status], [false, 404]);
+  }
+
+  // ── (d) 確認（値そのまま）= `review_required` の出口 ──────────────
+  {
+    const { stub, db } = stateful({ captures: [row()] });
+    const r = await admin.correctAdminCapture({
+      sb: stub, captureId: CAP, reason: '写真と一致を確認', correctedBy: BY, cfg: CFG,
+    });
+    ok('(d) 確認が成功する', r.ok === true, JSON.stringify(r).slice(0, 160));
+    eq('(d) **確定になる**', r.ok && r.record.status, 'confirmed');
+    eq('(d) 紐づけまで進む', r.ok && r.record.labTestLinkStatus, 'linked');
+    eq('(d) **ゲートが通る**', r.ok && r.gate.allowed, true);
+    eq('(d) 値は変えていない', r.ok && r.changed, false);
+    // 監査（仕様 §8.4 = 変更前 / 変更後 / 理由 / 操作者 / 時刻）
+    const live = db.lab_test_id_captures.filter((x) => x.status !== 'superseded');
+    eq('(d) 有効な行は 1 つ', live.length, 1);
+    eq('(d) 旧行は消さず superseded', db.lab_test_id_captures.length, 2);
+    eq('(d) 変更前の値を残す', live[0].previous_value, '704000123');
+    eq('(d) 理由を残す', live[0].correction_reason, '写真と一致を確認');
+    eq('(d) 操作者は digest', live[0].corrected_by, BY);
+    ok('(d) 時刻を残す', typeof live[0].corrected_at === 'string' && live[0].corrected_at.length > 10);
+    ok('(d) **素の email を残さない**', !/@/.test(JSON.stringify(db.lab_test_id_captures)));
+    eq('(d) 訂正は manual で記録する', [live[0].capture_method, live[0].decode_method], ['manual', 'manual']);
+    ok('(d) 管理者が触ったことを理由コードに残す', (live[0].review_reasons ?? []).includes('manual_entry'));
+    ok('(d) 証跡は引き継ぐ', String(live[0].evidence_key).includes('kit-id-captures'));
+  }
+
+  // ── (e) 訂正（値を直す） ─────────────────────────────────────────
+  {
+    const { stub, db } = stateful({ captures: [row()] });
+    const r = await admin.correctAdminCapture({
+      sb: stub, captureId: CAP, value: '704-000-456', reason: '写真は 456', correctedBy: BY, cfg: CFG,
+    });
+    ok('(e) 訂正が成功する', r.ok === true, JSON.stringify(r).slice(0, 160));
+    eq('(e) 値が変わったと返す', r.ok && r.changed, true);
+    const live = db.lab_test_id_captures.filter((x) => x.status !== 'superseded');
+    eq('(e) **区切りは外すが数字は変えない**', live[0].normalized_value, '704000456');
+    eq('(e) 変更前の値を残す', live[0].previous_value, '704000123');
+    eq('(e) lab_tests にも新しい番号が入る', db.lab_tests.map((x) => x.external_barcode), ['704000456']);
+  }
+
+  // ── (f) 理由が無ければ 1 バイトも書かない ──────────────────────────
+  {
+    const { stub, db } = stateful({ captures: [row()] });
+    const r = await admin.correctAdminCapture({ sb: stub, captureId: CAP, reason: '  ', correctedBy: BY, cfg: CFG });
+    eq('(f) 理由なしは 400', [r.ok, !r.ok && r.error], [false, 'reason_required']);
+    eq('(f) **台帳を書かない**', db.lab_test_id_captures.length, 1);
+    eq('(f) 問い合わせもしない', stub.calls.length, 0);
+    const d = await admin.discardAdminCapture({ sb: stub, captureId: CAP, reason: '', correctedBy: BY });
+    eq('(f) 無効化も理由なしは 400', [d.ok, !d.ok && d.error], [false, 'reason_required']);
+    eq('(f) 無効化でも書かない', stub.calls.length, 0);
+    const long = await admin.correctAdminCapture({
+      sb: stub, captureId: CAP, reason: 'あ'.repeat(admin.REASON_MAX + 1), correctedBy: BY, cfg: CFG,
+    });
+    eq('(f) 長すぎる理由は 400', [long.ok, !long.ok && long.error], [false, 'reason_too_long']);
+  }
+
+  // ── (g) 見ていた行が置き換わっていたら 409（0 件/複数件を自動確定しない） ──
+  {
+    const { stub, db } = stateful({ captures: [row({ status: 'superseded' })] });
+    const r = await admin.correctAdminCapture({ sb: stub, captureId: CAP, reason: 'ok', correctedBy: BY, cfg: CFG });
+    eq('(g) superseded の行は 409', [r.ok, !r.ok && r.status, !r.ok && r.error], [false, 409, 'already_superseded']);
+    eq('(g) 書き換えない', db.lab_test_id_captures.length, 1);
+    const d = await admin.discardAdminCapture({ sb: stub, captureId: CAP, reason: 'ok', correctedBy: BY });
+    eq('(g) 無効化も 409', [d.ok, !d.ok && d.status], [false, 409]);
+  }
+
+  // ── (h) 数字でない値は受けない（形の検査は上流にも在る） ──────────────
+  {
+    const { stub, db } = stateful({ captures: [row()] });
+    const r = await admin.correctAdminCapture({
+      sb: stub, captureId: CAP, value: 'ABC', reason: 'ok', correctedBy: BY, cfg: CFG,
+    });
+    eq('(h) 数字でない値は 400', [r.ok, !r.ok && r.error], [false, 'invalid_value']);
+    eq('(h) 書き換えない', db.lab_test_id_captures.filter((x) => x.status !== 'superseded').length, 1);
+  }
+
+  // ── (i) **`conflict` は admin でも自動で奪わない** ─────────────────
+  {
+    const mate = row({ id: 'cccccccc-0000-0000-0000-000000000004', diagnostic_user_id: OTHER, shipment_ref: 'ord_x' });
+    const { stub, db } = stateful({ captures: [row(), mate], labTests: [] });
+    const r = await admin.correctAdminCapture({ sb: stub, captureId: CAP, reason: 'ok', correctedBy: BY, cfg: CFG });
+    ok('(i) 登録自体は通る（撮影を失わせない）', r.ok === true, JSON.stringify(r).slice(0, 160));
+    eq('(i) **conflict になる**', r.ok && r.record.labTestLinkStatus, 'conflict');
+    eq('(i) 確定にはならない', r.ok && r.record.status, 'review_required');
+    eq('(i) **ゲートは通らない**', r.ok && r.gate.allowed, false);
+    eq('(i) lab_tests を 1 バイトも触らない', db.lab_tests.length, 0);
+    eq('(i) 相手の行はそのまま', db.lab_test_id_captures.find((x) => x.id === mate.id).status, 'review_required');
+  }
+
+  // ── (j) 無効化 = `superseded` だけ書く（`conflict` の出口） ───────────
+  {
+    const { stub, db } = stateful({ captures: [row(), { ...row(), id: 'x', lab_test_id: 'lt-9' }], labTests: [{ id: 'lt-9' }] });
+    const r = await admin.discardAdminCapture({ sb: stub, captureId: CAP, reason: '誤登録', correctedBy: BY });
+    ok('(j) 無効化が成功する', r.ok === true, JSON.stringify(r));
+    const target = db.lab_test_id_captures.find((x) => x.id === CAP);
+    eq('(j) status は superseded', target.status, 'superseded');
+    eq('(j) 理由と操作者を残す', [target.correction_reason, target.corrected_by], ['誤登録', BY]);
+    eq('(j) **行は消さない**', db.lab_test_id_captures.length, 2);
+    const upd = stub.calls.find((c) => c.table === 'lab_test_id_captures' && c.op === 'update');
+    eq('(j) **書くのは 4 列だけ**', Object.keys(upd.values).sort(),
+      ['corrected_at', 'corrected_by', 'correction_reason', 'status']);
+    eq('(j) 書く status は superseded だけ', upd.values.status, 'superseded');
+    eq('(j) lab_tests へは 1 件も触らない', stub.calls.filter((c) => c.table === 'lab_tests').length, 0);
+  }
+
+  // ── (k) 実装の約束（ソース）─────────────────────────────────────
+  {
+    const lib = code('src/lib/external-id-admin.ts');
+    ok('(k) 確定は `persistExternalIdCapture` を通す', /persistExternalIdCapture\(/.test(lib));
+    // **status を直書きする口を作らない**（§12.1）。`superseded` だけが例外。
+    const updates = [...lib.matchAll(/\.update\(\{([\s\S]*?)\}\)/g)].map((m) => m[1]);
+    eq('(k) update は 1 か所だけ（無効化）', updates.length, 1);
+    ok('(k) その update が書くのは superseded だけ',
+      /status:\s*'superseded'/.test(updates[0]) && !/confirmed/.test(updates[0]),
+      updates[0].replace(/\s+/g, ' ').slice(0, 120));
+    ok('(k) **`lab_test_link_status` を手で書かない**', !/lab_test_link_status:/.test(lib));
+    ok('(k) `lab_tests` を直接触らない', !/from\('lab_tests'\)/.test(lib));
+    ok('(k) ゲートを再実装しない（実関数を呼ぶ）',
+      /checkPreventQuestionnaireGate\(/.test(lib) && !/'lab_test_not_linked'/.test(lib));
+    ok('(k) 判定を再実装しない（`evaluateExternalId` を呼ぶ）',
+      /evaluateExternalId\(/.test(lib) && !/704/.test(lib));
+    ok('(k) 一覧の行に全文の列を持たない', !/^\s*value: string;$/m.test(code('src/lib/external-id-admin.ts').replace(/export interface AdminCaptureDetail[\s\S]*/, '')));
+
+    // 設定の読み方を 3 つの API へ写していない（判定がずれると画面とゲートが食い違う）
+    const cfgSrc = code('src/lib/external-id-admin-config.ts');
+    ok('(k) `labid.*` の読み方は 1 か所', /labid\.prevent_pattern/.test(cfgSrc) && /labid\.prevent_org_prefix/.test(cfgSrc));
+    for (const f of ['list', 'detail', 'correct']) {
+      ok(`(k) ${f} API は共通の設定を使う`,
+        /adminConfigFromAppConfig\(\)/.test(code(`src/pages/api/admin/external-id-captures/${f}.ts`)));
+    }
+  }
+
+  // ── (l) API の約束 ─────────────────────────────────────────────
+  {
+    for (const f of ['list', 'detail', 'correct', 'discard']) {
+      const src = code(`src/pages/api/admin/external-id-captures/${f}.ts`);
+      ok(`(l) ${f} は Bearer ADMIN_API_KEY で守る`, /isAdminAuthorized\(request\)/.test(src) && /401/.test(src));
+      /*
+       * **呼び出し元で比べる。** 素の名前で `indexOf` すると **import 行**に当たり、
+       * 認可を DB 取得より後ろへ動かしても通ってしまう（退行注入 #10 で実測）。
+       */
+      ok(`(l) ${f} は認可を**最初に**見る`,
+        src.indexOf('isAdminAuthorized(request)') > 0
+        && src.indexOf('isAdminAuthorized(request)') < src.indexOf('getServerSupabase()'),
+        `auth=${src.indexOf('isAdminAuthorized(request)')} / sb=${src.indexOf('getServerSupabase()')}`);
+      ok(`(l) ${f} は台帳未適用を 503 で言う`, /503/.test(src));
+    }
+    for (const f of ['correct', 'discard']) {
+      const src = code(`src/pages/api/admin/external-id-captures/${f}.ts`);
+      // **操作者が特定できない訂正を通さない**（監査に残らない）
+      ok(`(l) ${f} は操作者が無ければ中止`, /operator_required/.test(src));
+      ok(`(l) ${f} の digest は adminIdentity で作る`, /await adminIdentity\(body\.triggeredByEmail\)/.test(src));
+      ok(`(l) ${f} は素の email を DB へ渡さない`,
+        !/correctedBy:\s*body\./.test(src) && !/triggeredByEmail\s*\)/.test(src.replace(/adminIdentity\(body\.triggeredByEmail\)/g, '')));
+      ok(`(l) ${f} は capture の id の形を見る`, /UUID_RE\.test\(captureId\)/.test(src));
+      ok(`(l) ${f} は画面から status を受けない`, !/body\.status/.test(src) && !/body\.labTestLinkStatus/.test(src));
+    }
+    const correct = code('src/pages/api/admin/external-id-captures/correct.ts');
+    ok('(l) correct はゲートの判定をそのまま返す', /gate: res\.gate/.test(correct));
+    ok('(l) correct は全文を返さない', !/value: res/.test(correct) && /masked: res\.record\.masked/.test(correct));
+    ok('(l) 一括の口を作らない',
+      !/captureIds|forEach|Promise\.all/.test(correct)
+      && !/captureIds/.test(code('src/pages/api/admin/external-id-captures/discard.ts')));
+    const detail = code('src/pages/api/admin/external-id-captures/detail.ts');
+    ok('(l) 証跡は署名 URL（公開 URL を作らない）',
+      !/public|ACL|acl/.test(detail));
+    const ev = code('src/lib/external-id-evidence.ts');
+    /*
+     * **関数の中だけを見る。** `createEvidenceViewUrl[\s\S]*?isEvidenceKey` だと
+     * **後ろの `fetchEvidence` の検査に当たって**、署名 GET からキー検証を外しても
+     * 通ってしまう（退行注入 #17 で実測）。
+     */
+    const viewFn = (() => {
+      const i = ev.indexOf('export async function createEvidenceViewUrl');
+      const j = ev.indexOf('\nexport ', i + 10);
+      return i >= 0 ? ev.slice(i, j > i ? j : undefined) : '';
+    })();
+    ok('(l) 署名 GET もキーを完全一致で検査する',
+      viewFn.length > 0 && /isEvidenceKey\(key, cfg\)/.test(viewFn), viewFn.slice(0, 80));
+    const exp = /VIEW_EXPIRES_SEC = (\d+)/.exec(ev)?.[1];
+    ok('(l) 表示の署名は短命 (10 分以内)', Number(exp) > 0 && Number(exp) <= 600, `expires=${exp}`);
   }
 }
 

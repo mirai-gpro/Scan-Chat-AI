@@ -23,6 +23,14 @@ import type { BarcodeReminder } from '../../lib/external-id-reminder';
  * 撮影ブロックが出ていない画面（代理表示・共有閲覧・撮影が off）では
  * 呼び出し側が `reminders` を空で渡すので、ここには来ない。
  *
+ * 【1 タップでカメラへ】発注者指示 2026-10-22「『カメラで撮影』ボタンのフローを
+ * 省略して、『撮影して登録する』ボタンだけで即、カメラを起動して」。
+ * `data-extid-start` を見て `external-id-capture.ts` が**同じページの撮影ブロックを
+ * 引き当て、その場でカメラを開く**（スマホのみ）。
+ * **`href` は外さない** — JS が動かない回・PC・**別ページ（ダッシュボード）**は
+ * 従来どおり撮影ブロックへ移動する。**別ページへ移った先で自動起動はしない**
+ * （カメラは「押したときだけ」開く・`openCamera` のヘッダ）。
+ *
  * 【赤にしない】`status-watch`（注意）。期限切れでも失敗でもなく、
  * **やってもらえば済むこと**なので救急の赤は使わない（`CLAUDE.md`「赤は救急サインだけ」）。
  */
@@ -64,6 +72,7 @@ const rows = reminders
     </p>
     <a
       href={r.href}
+      data-extid-start={r.shipmentId}
       class="flex min-h-touch shrink-0 items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-3.5 text-base font-semibold text-slate-800 transition hover:bg-brand-50"
     >
       <AppIcon name="camera" size={18} />撮影して登録する
