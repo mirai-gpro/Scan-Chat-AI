@@ -1106,14 +1106,15 @@ console.log('\n⑬ UI の契約\n');
      * のを防ぐのが元の規律（CLAUDE.md）。§4.4.7 で**押す回数を 2 つ**にしたので、
      * 押されたとき以外に 2 つだけ開く経路がある:
      *
-     * 出現は **7 回**: 定義 1 ／ card のボタン 1 ／ 催促の帯 1（§4.4.5）
+     * 出現は **8 回**: 定義 1 ／ card のボタン 1 ／ 催促の帯 1（§4.4.5）
      * ／「登録し直す」1（§4.4.6）／「撮り直す」1 ／**撮った写真が読めなかった回 1**
-     * ／**別ページの帯から来た回 1**（`resumeStart`・合図があるときだけ）。
+     * ／**別ページの帯から来た回 1**（`resumeStart`・合図があるときだけ）
+     * ／**デモの「もう一度撮影する」1**（§8.3・PR-A）。
      * 増えていたら**勝手に開く経路が足された**ということ。
      */
     const callers = [...scr.matchAll(/openCamera\(/g)];
-    ok('`openCamera` の呼び出しは 7 か所だけ（定義/ボタン/帯/登録し直す/撮り直す/読めなかった回/別ページ）',
-      callers.length === 7, `出現 ${callers.length} 回`);
+    ok('`openCamera` の呼び出しは 8 か所だけ（定義/ボタン/帯/登録し直す/撮り直す/読めなかった回/別ページ/デモ）',
+      callers.length === 8, `出現 ${callers.length} 回`);
     /*
      * **load で開くのは「直前に帯を押した」合図がある回だけ。**
      * `resumeStart` が**最初に合図を取り出し**、無ければ即 return することを見る。
@@ -2793,6 +2794,205 @@ console.log('\n⑳ admin の確認・訂正経路 (実物を動かす)\n');
       viewFn.length > 0 && /isEvidenceKey\(key, cfg\)/.test(viewFn), viewFn.slice(0, 80));
     const exp = /VIEW_EXPIRES_SEC = (\d+)/.exec(ev)?.[1];
     ok('(l) 表示の署名は短命 (10 分以内)', Number(exp) > 0 && Number(exp) <= 600, `expires=${exp}`);
+  }
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ㉑ デモの読取テストを本番の台帳へ書かない (発注者裁定 2026-10-22・仕様 §8.2 / §8.3・PR-A)
+// ══════════════════════════════════════════════════════════════════════
+//
+// 【なぜ要るか】デモのがんリスク出荷でも撮影ブロックは出る (`kit.astro` の受取の段は
+// **出荷の現在 step に関係なく描かれる**ので、発送済みなら出る)。`register` に分岐が
+// 無かったため、デモの読取テストが `customer.lab_test_id_captures` へそのまま入った
+// (本番で 1 件実在)。
+//
+// 【静的検査で済ませない】「そう書いてあるか」だけだと、条件の順序・片方落ち・
+// 置き場所の退行を拾えない。**API の POST を transpile して実際に動かし、
+// `persistExternalIdCapture` の呼び出し回数を数える。**
+console.log('\n㉑ デモの読取テスト (本番の台帳へ書かない・PR-A)\n');
+{
+  const api = code('src/pages/api/kit/[id]/external-id.ts');
+
+  // ── 静的: 置き場所と条件の形 ──────────────────────────────────
+  {
+    const i = api.indexOf("if (mode === 'register')");
+    const reg = i >= 0 ? api.slice(i) : '';
+    const iDemo = reg.indexOf('isDemoShipmentId(shipmentRef)');
+    const iSb = reg.indexOf('getServerSupabase()');
+    const iPersist = reg.indexOf('persistExternalIdCapture(');
+    const iRecall = reg.indexOf('recallRead(');
+    const iEval = reg.indexOf('evaluateExternalId(');
+    const iConfirm = reg.indexOf('confirmation_mismatch');
+    ok('デモの分岐が register に在る', iDemo > 0, `idx=${iDemo}`);
+    ok('**デモの分岐は `getServerSupabase()` より前**', iDemo > 0 && iDemo < iSb, `demo=${iDemo} sb=${iSb}`);
+    ok('**デモの分岐は `persistExternalIdCapture()` より前**', iDemo > 0 && iDemo < iPersist);
+    // 前へ出すと「読めなくても成功する」偽の体験になる (fail-closed を飛ばさない)
+    ok('読み取りの控え (`recallRead`) より後ろ', iDemo > iRecall && iRecall > 0);
+    ok('判定 (`evaluateExternalId`) より後ろ', iDemo > iEval && iEval > 0);
+    ok('画面との突き合わせ (`confirmedValue`) より後ろ', iDemo > iConfirm && iConfirm > 0);
+    ok('**条件は 2 つとも見る** (資格だけ・ID だけにしない)',
+      /demoFallbackEnabled\(uid\) && isDemoShipmentId\(shipmentRef\)/.test(api));
+    // **全文を返さない** = 本番の register と同じ約束 (§6.1)
+    const demoRet = (() => {
+      const j = api.indexOf('demoFallbackEnabled(uid) && isDemoShipmentId(shipmentRef)');
+      const k = api.indexOf('\n    }', j);
+      return j > 0 && k > j ? api.slice(j, k) : '';
+    })();
+    ok('デモの応答はマスクだけ (全文を返さない)',
+      /masked: maskExternalId\(ev\.value\)/.test(demoRet) && !/value: ev\.value/.test(demoRet), demoRet.slice(0, 120));
+    ok('デモだと分かる印を返す (黙って成功を装わない)', /demo: true/.test(demoRet));
+  }
+
+  // ── 実走: POST を動かして `persistExternalIdCapture` の回数を数える ──
+  //
+  // **差し替えるのは外界だけ** (viewer / supabase / S3 / Gemini / 台帳)。
+  // 判定 (`external-test-id.ts`) と `isDemoShipmentId` の集合は**実物**を使う。
+  let persistCalls = 0;
+  let viewerUid = '11111111-1111-1111-1111-111111111111';
+  let isDemoUid = false;
+  let cached = { barcode: '704000123', printed: '704000123' };
+  const DEMO_ID = (() => {
+    const arr = /export const DEMO_SHIPMENT_IDS: readonly string\[\] = \[([\s\S]*?)\];/
+      .exec(read('src/lib/demo-data.ts'))?.[1] ?? '';
+    return [...arr.matchAll(/'([^']+)'/g)].map((m) => m[1])[1] ?? '';
+  })();
+  const REAL_ID = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee';
+
+  const PATTERN = '^704000[0-9]{3}' + String.fromCharCode(36);
+  globalThis.__labidCfg = (k) => (k === 'labid.prevent_pattern' ? PATTERN
+    : k === 'labid.prevent_org_prefix' ? '704' : '');
+  globalThis.__core = core;
+  globalThis.__persist = () => { persistCalls++; };
+  globalThis.__demoIds = [DEMO_ID];
+  Object.defineProperty(globalThis, '__uid', { get: () => viewerUid, configurable: true });
+  Object.defineProperty(globalThis, '__isDemoUid', { get: () => isDemoUid, configurable: true });
+  globalThis.__recall = () => (cached ? { ok: true, read: cached } : { ok: false, error: 'read_result_missing', status: 409 });
+
+  const route = await load('src/pages/api/kit/[id]/external-id.ts', [
+    [/^import type \{ APIRoute \} from 'astro';$/m, ''],
+    [/^import \{ resolveViewer \} from '[^']+';$/m,
+      "const resolveViewer = async () => ({ kind: 'self', writeTargetUid: globalThis.__uid });"],
+    [/^import \{ denyReadOnlyWrite, denyForShare, denyAnonymous \} from '[^']+';$/m,
+      'const denyReadOnlyWrite = () => null;\nconst denyForShare = () => null;\nconst denyAnonymous = () => null;'],
+    [/^import \{ getServerSupabase \} from '[^']+';$/m,
+      'const getServerSupabase = () => ({ __stub: true });'],
+    [/^import \{ cfg, cfgBool, refreshConfig \} from '[^']+';$/m,
+      /*
+       * **置換文字列に `$` を入れない。** `String.replace` の文字列置換では
+       * `$'` が「一致より後ろ」を意味する特殊記法になり、**黙って壊れたコードが
+       * 生成される**（一度そうなった）。設定は globalThis 経由で渡す。
+       */
+      'const cfg = (k) => globalThis.__labidCfg(k);\n'
+      + 'const cfgBool = () => true;\nconst refreshConfig = async () => {};'],
+    [/^import \{\n  evaluateExternalId[\s\S]*?\} from '[^']+';$/m,
+      'const { evaluateExternalId, isExternalIdProvider, providerMatchesTestType,'
+      + ' normalizeExternalId, maskExternalId } = globalThis.__core;'],
+    [/^import \{ createEvidenceTicket, fetchEvidence \} from '[^']+';$/m,
+      'const createEvidenceTicket = async () => ({ ok: false, error: "x", status: 503 });\n'
+      + 'const fetchEvidence = async () => ({ ok: false });'],
+    [/^import \{ readExternalIdFromImage[\s\S]*?\} from '[^']+';$/m, 'const readExternalIdFromImage = async () => null;'],
+    [/^import \{ decodeBarcode[\s\S]*?\} from '[^']+';$/m, 'const decodeBarcode = async () => null;'],
+    [/^import \{ persistExternalIdCapture, expectedTestType \} from '[^']+';$/m,
+      'const persistExternalIdCapture = async () => { globalThis.__persist(); '
+      + 'return { ok: true, record: { masked: "*****0123", status: "confirmed", reviewReasons: [],'
+      + ' labTestLinkStatus: "linked" } }; };\nconst expectedTestType = () => "cancer_urine";'],
+    [/^import \{ demoFallbackEnabled, isDemoShipmentId \} from '[^']+';$/m,
+      'const demoFallbackEnabled = () => globalThis.__isDemoUid;\n'
+      + 'const isDemoShipmentId = (id) => globalThis.__demoIds.includes(id);'],
+    [/^import \{ rememberRead, recallRead \} from '[^']+';$/m,
+      'const rememberRead = async () => ({ ok: true });\n'
+      + 'const recallRead = async () => globalThis.__recall();'],
+  ]);
+
+  const post = async (id, body) => {
+    const res = await route.POST({
+      params: { id },
+      request: new Request('https://x/api', { method: 'POST', body: JSON.stringify(body) }),
+      cookies: { get: () => undefined },
+    });
+    return { status: res.status, body: await res.json() };
+  };
+  const reg = (id, over = {}) => post(id, {
+    mode: 'register', provider: 'prevent', testType: 'cancer_urine', captureMethod: 'camera',
+    evidenceKey: 'k', ...over,
+  });
+
+  // ① デモで 10 回 → 台帳への書き込みは 0 回
+  persistCalls = 0; isDemoUid = true;
+  {
+    const rs = [];
+    for (let i = 0; i < 10; i++) rs.push(await reg(DEMO_ID));
+    ok('**デモで 10 回登録しても `persistExternalIdCapture` は 0 回**', persistCalls === 0, `${persistCalls} 回`);
+    ok('10 回とも成功として返る (何度でも試せる)', rs.every((r) => r.status === 200 && r.body.ok === true));
+    ok('10 回とも `demo: true`', rs.every((r) => r.body.demo === true));
+    ok('**応答に外部IDの全文が無い**',
+      rs.every((r) => !JSON.stringify(r.body).includes('704000123')), JSON.stringify(rs[0].body));
+    ok('マスクは返る (何を読んだか本人が見られる)', typeof rs[0].body.masked === 'string' && rs[0].body.masked.length > 0);
+  }
+
+  // ② デモ資格 × **本物の出荷** → no-op にしない (本物の登録を奪わない)
+  persistCalls = 0; isDemoUid = true;
+  {
+    const r = await reg(REAL_ID);
+    ok('**デモ資格 × 本物の出荷 ID は no-op にしない**', persistCalls === 1 && r.body.demo !== true,
+      `persist=${persistCalls} demo=${r.body.demo}`);
+  }
+
+  // ③ 本物の利用者 × **デモの出荷** → デモ扱いにしない (偽の成功を渡さない)
+  persistCalls = 0; isDemoUid = false;
+  {
+    const r = await reg(DEMO_ID);
+    ok('**本物の利用者 × デモの出荷 ID はデモ扱いにしない**', persistCalls === 1 && r.body.demo !== true,
+      `persist=${persistCalls} demo=${r.body.demo}`);
+  }
+
+  // ④ 本物の経路は従来どおり
+  persistCalls = 0; isDemoUid = false;
+  {
+    const r = await reg(REAL_ID);
+    ok('本物の登録は従来どおり台帳へ書く', persistCalls === 1);
+    ok('本物の応答に `demo` は入らない', r.body.demo === undefined, JSON.stringify(r.body));
+    ok('本物の応答もマスクだけ', r.body.masked === '*****0123' && !JSON.stringify(r.body).includes('704000123'));
+  }
+
+  // ⑤ fail-closed はデモでも効く
+  persistCalls = 0; isDemoUid = true;
+  {
+    const r = await reg(DEMO_ID, { confirmedValue: '704000999' });
+    ok('**デモでも画面と食い違えば 409** (素通りさせない)',
+      r.status === 409 && r.body.error === 'confirmation_mismatch', JSON.stringify(r.body));
+    ok('そのとき台帳も触らない', persistCalls === 0);
+  }
+  {
+    cached = null;
+    const r = await reg(DEMO_ID);
+    ok('**デモでも控えが無ければ止める** (fail-closed)', r.status === 409 && r.body.ok === false, JSON.stringify(r.body));
+    cached = { barcode: '704000123', printed: '704000123' };
+  }
+  {
+    isDemoUid = true;
+    const r = await reg(DEMO_ID, { barcode: '704000123' });
+    ok('**デモでも画面から値は送れない** (400)', r.status === 400 && r.body.error === 'client_supplied_value');
+  }
+
+  // ── 画面: デモでは再読込しない / その場で繰り返せる ──────────────
+  {
+    const scr = code('src/scripts/external-id-capture.ts');
+    const cap = code('src/components/dashboard/ExternalIdCapture.astro');
+    const iDemo = scr.indexOf('r.demo === true');
+    ok('画面がデモの応答を見る', iDemo > 0);
+    ok('**デモでは再読込しない** (何も変わらない画面に戻さない)',
+      iDemo > 0 && iDemo < scr.indexOf('window.location.reload()'));
+    ok('読取テスト完了の面が在る', /data-extid-demo\b/.test(cap) && /読取テスト完了/.test(cap));
+    ok('保存されないと伝える', /デモモードのため番号は保存されません/.test(cap));
+    ok('もう一度撮影する口が在る', /data-extid-demo-again/.test(cap));
+    const again = (() => {
+      const i = scr.indexOf('[data-extid-demo-again]');
+      const j = scr.indexOf('return;', i);
+      return i > 0 && j > i ? scr.slice(i, j) : '';
+    })();
+    ok('**その場でカメラが開く** (確認の段を挟まない)', /openCamera\(c\)/.test(again), again.slice(0, 80));
+    ok('次の撮影で証跡を取り直す (同じ控えを使い回さない)', /c\.evidenceKey = null/.test(again));
   }
 }
 

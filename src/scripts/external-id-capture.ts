@@ -95,6 +95,9 @@ interface Ctx {
    * **カメラを開けなかったときだけ JS で出す**＝行き止まりを作らない。
    */
   cameraOpenEl: HTMLElement | null;
+  /** デモの読取テスト完了の面（§8.3）。**デモは登録済みの面へ進めない**ので別に持つ。 */
+  demoEl: HTMLElement | null;
+  demoMaskEl: HTMLElement | null;
   /** 登録済みの面 / 撮影の面。**登録済みでも両方 markup は在る**。 */
   doneEl: HTMLElement | null;
   formEl: HTMLElement | null;
@@ -138,6 +141,8 @@ function ctx(root: HTMLElement): Ctx {
     cameraStatusEl: q('[data-extid-camera-status]'),
     cameraOpenEl: q('[data-extid-camera-open]'),
     camera: null,
+    demoEl: q('[data-extid-demo]'),
+    demoMaskEl: q('[data-extid-demo-mask]'),
     doneEl: q('[data-extid-done]'),
     formEl: q('[data-extid-form]'),
     evidenceKey: null,
@@ -563,6 +568,23 @@ async function register(c: Ctx, value: string, method: 'camera'): Promise<void> 
       evidenceKey: c.evidenceKey,
       confirmedValue: value,
     });
+    /*
+     * **デモは再読込しない**（発注者裁定 2026-10-22・仕様 §8.3）。
+     * サーバは台帳へ 1 行も書いていないので、読み込み直しても**画面は何も変わらない**
+     * （登録済みの面は出ず、押した人は何が起きたか分からない）。
+     * → 「読取テスト完了」の面へ戻し、**その場で何度でも繰り返せる**ようにする。
+     * マスクはサーバが返した値をそのまま出す（**全文は返ってこない**）。
+     */
+    if (r.demo === true) {
+      show(c.confirmEl, false);
+      clearWrong(c);
+      if (c.demoMaskEl) c.demoMaskEl.textContent = String(r.masked ?? '');
+      show(c.demoEl, true);
+      say(c, '');
+      c.evidenceKey = null;   // 次の撮影で控えを取り直す（同じ証跡を使い回さない）
+      c.busy = false;
+      return;
+    }
     // 成功したら**再読込して状態をサーバから取り直す**（JS で組み立て直さない）。
     say(c, String(r.message ?? '登録しました。'));
     window.location.reload();
@@ -715,6 +737,18 @@ export function initExternalIdCapture(): void {
       const v = c.candidateEl?.textContent?.trim() ?? '';
       if (!v) { say(c, '登録できる番号がありません。'); return; }
       void register(c, v, c.captureMethod);
+      return;
+    }
+    /*
+     * **デモの「もう一度撮影する」**（§8.3）。押した瞬間にカメラを開く
+     * （§4.4.7 と同じ流儀で、確認の段を挟まない）。
+     */
+    if (t?.closest?.('[data-extid-demo-again]')) {
+      show(c.demoEl, false);
+      c.evidenceKey = null;
+      clearWrong(c);
+      show(c.confirmEl, false);
+      void openCamera(c);
       return;
     }
     if (t?.closest?.('[data-extid-retake]')) {
