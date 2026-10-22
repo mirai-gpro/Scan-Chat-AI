@@ -106,10 +106,15 @@ const identPath = emit('verify-viewer-origin-admin-identity.mjs', identSrc);
  * （繋がないと `ERR_MODULE_NOT_FOUND: .cache/view-mode` で**実行すらできない**。
  *  上の 2026-10-02 と同じ形の事故なので、同じやり方で閉じる）。
  *
- * **番人は実物のまま。** スタブにするのは `view-mode.ts` が引く**資格の 2 関数**
- * （`isDemoAccount` / `demoDisabledGlobally`）と `isSpecialAccount` だけで、
- * これはこの検査が見ている挙動（origin の引き継ぎ・共有からの遮断）とは無関係。
- * デモ判定そのものの中身は `verify:write-audit` が実物で動かして見ている。
+ * **番人は実物のまま。** スタブにするのは `view-mode.ts` が引く**名簿の 4 関数**
+ * （`isDemoAccount` / `demoDisabledGlobally` / `isForcedDemoDisplay` と
+ *  `isSpecialAccount`）だけで、これはこの検査が見ている挙動（origin の引き継ぎ・
+ * 共有からの遮断）とは無関係。デモ判定そのものの中身は `verify:write-audit` と
+ * `verify:view-mode` が実物で動かして見ている。
+ *
+ * **`view-mode.ts` の import を増やしたらここも足す。** 足さないと
+ * `SyntaxError: does not provide an export named …` で**実行すらできない**
+ * （2026-10-22 に `isForcedDemoDisplay` を足して CI で踏んだ）。
  */
 const capsPath = emit(
   'verify-viewer-origin-caps.mjs',
@@ -117,6 +122,7 @@ const capsPath = emit(
 export const demoDisabledGlobally = () => false;
 export const isDemoAccount = () => false;
 export const isSpecialAccount = () => false;
+export const isForcedDemoDisplay = () => false;
 `,
 );
 const viewModePath = emit(
