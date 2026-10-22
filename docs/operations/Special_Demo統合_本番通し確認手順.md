@@ -4,10 +4,14 @@
 この文書は**その「未確認」を本番で 1 回ずつ潰すための手順だけ**を書く。仕様は書かない。
 
 - 対象 = 2026-10-22 にマージした **PR-A（バーコード Demo-safe）/ PR-B（canonical UID）/
-  PR-C（表示モード）/ PR-D（書込み監査）/ PR-E（統合管理画面）**。
-- **DB migration は 1 本も無い。app_config のキーも増えていない**（裁定 2）。
+  PR-C（表示モード）/ PR-D（書込み監査）/ PR-E（統合管理画面）**
+  ＋ 同日の **§4.2.3（表示モードを admin が決める形へ・切替 UI と Cookie を撤去）**。
+- **DB migration は 1 本も無い。**
+  **app_config のキーは `demo.display_uids` 1 本だけ増えた**（§4.2.3・既定は空なので
+  入れた時点では挙動が変わらない）。
   → **順序の制約は 1 つだけ**: Scan-Chat-AI（API）→ wellfort-site（画面）。
-  画面が先に出ると `GET /api/admin/experience-accounts` が 404 になる。
+  画面が先に出ると `GET /api/admin/experience-accounts` が 404 になり、
+  ［デモを出す］は中継の allow-list が無いので何も起きない。
   マージは **Scan `68d08f9` → wellfort `6da2a03`** の順で入れてある。
 
 ---
@@ -32,7 +36,7 @@
 | 鍵 | 意味 |
 |---|---|
 | `mode.effective` | **いまどちらを表示しているか**（`real` / `demo`） |
-| `mode.switchable` | 切り替えスイッチを出してよいか（本人セッション ∧ Demo 資格） |
+| `mode.forced_demo` | **admin がデモ表示に指定しているか**。`false` ＋ `effective:'demo'` は**既定**でデモ（デモの資格だけの枠 / 未サインイン） |
 | `mode.dual` | 両方の資格を持つか |
 | `report.can_demo` / `report.can_real` | その uid が持つ**資格**。**両方 true は正常な Dual**（裁定 6） |
 | `report.dual_capability` | 同上（資格の側の Dual） |
@@ -80,23 +84,30 @@ B-2 は意図的に壊す操作なので、**テスト用のメールで行い�
 
 ---
 
-## 4. C. 表示モード（PR-C・4 項目）
+## 4. C. 表示モード（PR-C ＋ §4.2.3・7 項目）
 
-切替スイッチは **`/dashboard` の上部**（`ViewModeSwitch`）。`mode.switchable` が true の人にだけ出る。
-Cookie は `welltect_mode`（**HttpOnly** なので JS からは読めない・書けない）。
+**切替は利用者側に無い**（発注者指示 2026-10-22）。相手はマスコミ・大口クライアントなので、
+本人の画面に「デモ / 実データ」の切替は出さない。**admin が管理画面で決める** —
+`/admin/experience-accounts` の列「**いま出る画面**」の ［デモを出す］／［実データを出す］。
+反映は **最大 45 秒**（app_config の TTL・再デプロイ不要）。
 
 | # | 操作 | 期待 |
 |---|---|---|
-| **C-1** | Dual のアカウントでログインした**直後** | **Real**（`mode.effective:'real'`）。スイッチが見えている |
-| **C-2** | スイッチで Demo へ | ダッシュボードの検査結果・推移グラフ・お知らせが**ダミー**（`artifacts.using_demo_data:true`） |
-| **C-3** | Real へ戻す | **同じ uid の実データ**に戻る（切替で実データを変更・削除・re-key しない＝裁定 3） |
-| **C-4** | **Demo 表示中**に `/dashboard` と `/scan` を見る | **単品購入の枠（`singlePurchase`）と複数年の枠（`multiYear`）が出ない**（Special 専用 UI は `effectiveMode === 'real'` のときだけ＝裁定 3） |
-| **C-5** | 一般の顧客（Demo 資格なし）でログイン | **スイッチが 1 px も出ない**・`mode.effective:'real'` |
-| **C-6** | admin 代理表示（`/admin-view/<ctx>/…`）で開く | **スイッチが出ない**。`POST /api/session/view-mode` を直接叩いても **403 `mode_switch_not_allowed`** |
+| **C-1** | Dual のアカウントでログインした**直後** | **Real**（`mode.effective:'real'` / `mode.forced_demo:false`）。**ダッシュボードに切替 UI が 1 px も無い** |
+| **C-2** | 管理画面で その人を ［デモを出す］ → 本人が開き直す | 検査結果・推移グラフ・お知らせが**ダミー**（`artifacts.using_demo_data:true` / `mode.forced_demo:true`） |
+| **C-3** | 管理画面で ［実データを出す］ → 本人が開き直す | **同じ uid の実データ**に戻る（切替で実データを変更・削除・re-key しない＝裁定 3） |
+| **C-4** | **デモ表示にした状態**で `/dashboard` と `/scan` を見る | **単品購入の枠（`singlePurchase`）と複数年の枠（`multiYear`）が出ない**（Special 専用 UI は `effectiveMode === 'real'` のときだけ＝裁定 3） |
+| **C-5** | 一般の顧客（Demo 資格なし）でログイン | `mode.effective:'real'`・切替 UI なし・管理一覧にも出てこない |
+| **C-6** | admin 代理表示（`/admin-view/<ctx>/…`）で Dual を開く | **本人が見るのと同じ画面**（デモ表示にしていれば admin にもデモが見える）。閲覧者の種別でモードは変わらない |
+| **C-7** | 管理画面で **デモの資格が無い人**を ［デモを出す］ | **却下され理由が出る**（「デモの資格が無い」）。表示は実データのまま＝**資格 → 表示 の順** |
 
-**既定の表**（Cookie が無いとき）= Dual は `real` / Demo だけの枠は `demo` /
-一般顧客は `real` / 未サインインは `demo`。**裁定は Dual についてのものなので、
-他の枠は PR-C 前の挙動と同じ**。
+**既定の表**（admin が指定していないとき）= Dual は `real` / Demo だけの枠は `demo` /
+一般顧客は `real` / 未サインインは `demo`。**§4.2.3 で既定は 1 つも変えていない**ので、
+admin が指定しなければ PR-C 前と同じ挙動。
+
+> **旧 Cookie が残っている人**: `welltect_mode` は**誰も読まなくなった**ので、
+> admin の指定（既定は real）に従う。能動的な削除はしていない（30 日で失効）。
+> **`POST /api/session/view-mode` は存在しないので 404**。
 
 ---
 
@@ -151,8 +162,10 @@ Cookie は `welltect_mode`（**HttpOnly** なので JS からは読めない・�
 |---|---|
 | 統合画面が「一覧を取得できません」 | **デプロイ順**。Scan 側（API）が入っているか。`GET /api/admin/experience-accounts` を token 無しで叩いて **401** が返るか（404 なら Scan 側が古い） |
 | 登録したのに資格が立たない | **app_config の TTL 45 秒**。45 秒待って `/api/debug/viewer` を見る。それでも `can_*` が false なら uid が未発行か除外リストに入っている（画面に「除外中」と出る） |
-| スイッチが出ない | `mode.switchable`。`false` の理由は 代理表示 / 共有 / 未サインイン / **Demo 資格なし** の 4 つだけ |
-| 切り替えたのに画面が変わらない | `mode.effective`。`demo` なのにダミーが出ないなら `report.demo_enabled` と **`PUBLIC_DEMO_FALLBACK`**（全停止）を見る |
+| 管理画面に切替ボタンが出ない | その行に**デモの資格が無い**（`displayChangeable:false`）。uid 未発行 / 除外中 / デモ未登録 / uid 食い違い のどれか。資格の列に理由が出る |
+| 切り替えたのに画面が変わらない | ①**45 秒待つ**（app_config の TTL）②本人が**開き直す**（SSR なので再読込が要る）③`mode.forced_demo` が true か ④`report.demo_enabled` と **`PUBLIC_DEMO_FALLBACK`**（全停止）|
+| 管理画面は「デモ」なのに本人は実データ | `mode.forced_demo` を見る。**false なら指定が保存されていない** — 管理画面の却下理由（「デモの資格が無い」）を読む |
+| `/api/session/view-mode` が 404 | **正常**。利用者がモードを書く口は撤去した（§4.2.3）|
 | Demo なのに実データが出る | `report.effective_uid` と `artifacts.using_demo_data`。**代理表示のタブで見ていないか**を先に確認 |
 | 本人がログインできない（409） | **uid 競合**。統合画面の先頭に出ているはず。**自動統合しないのが仕様**なので、どちらを本物にするかは人が決める |
 
@@ -164,7 +177,11 @@ Cookie は `welltect_mode`（**HttpOnly** なので JS からは読めない・�
   SQL 案は PR-A の完了報告にある。**実行は発注者判断**。
 - **既存 Special の検査データ・Elith 納品・報告書を re-key しない**（絶対条件 12）。
 - **Demo の fixture を増やさない**（裁定 1）。
-- **Demo 専用の flag / app_config キー / migration を作らない**（裁定 2）。
+- **Demo 専用の flag / migration を作らない**（裁定 2）。
+  app_config は **`demo.display_uids` 1 本だけ**（§4.2.3・表示モードの置き場所）。
+  `labid.prevent_capture_demo` のような**デモ専用の flag は作らない**。
+- **利用者側に表示モードの切替を戻さない**（絶対条件 13）。
+  `/dashboard` にスイッチを置かない・Cookie を読まない・`?mode=` を作らない。
 - **スペシャル排他を別の場所へ移植しない**（裁定 9。PR-C で表示モードへ移してある）。
 - 本番の Dual 2 件は**正常**なので直さない（裁定 6）。
 

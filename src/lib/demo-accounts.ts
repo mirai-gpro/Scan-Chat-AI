@@ -93,6 +93,38 @@ function deniedUids(): ReadonlySet<string> {
 }
 
 /**
+ * ════════════════════════════════════════════════════════════════════════════
+ * **表示モード (admin が決める) の名簿**
+ * ════════════════════════════════════════════════════════════════════════════
+ *
+ * 正本 `docs/specs/special_demo_integration_spec_20261022.md` §4.2.3
+ * (発注者指示 2026-10-22「ユーザーに切り替えさせる、なんてありえない」)。
+ *
+ * **ここに在る uid のダッシュボードはデモ表示になる。** 表示モードは
+ * **アカウントの属性**であって、利用者が選ぶものではない —
+ * SP / デモの枠を使うのは**マスコミ・大口クライアント**なので、
+ * 本人の画面に「デモ / 実データ」の切替を出さない (出すと、相手が
+ * 自分で切り替えて空の画面や意図しない側に着く)。
+ *
+ * 【資格 → 表示 の順は崩さない】ここに書いただけでは**デモは出ない**。
+ * `resolveViewMode()` が `canDemo` (この名簿ではなく `isDemoAccount`) を
+ * 先に見るので、**デモの資格が無い uid を書いても効かない**。
+ *
+ * 【空のときの既定は変えていない】Dual → 実データ / デモだけ → デモ。
+ * **admin が指定しない限り今日までと同じ挙動**。
+ */
+export function forcedDemoDisplayUids(): ReadonlySet<string> {
+  return new Set(splitUids(cfg('demo.display_uids')));
+}
+
+/** その uid が **admin によってデモ表示に指定されているか**。資格の判定ではない。 */
+export function isForcedDemoDisplay(uid?: string | null): boolean {
+  const v = String(uid ?? '').trim().toLowerCase();
+  if (!v) return false;
+  return forcedDemoDisplayUids().has(v);
+}
+
+/**
  * 一覧の文字列を uid の配列にする。
  *
  * **`#` から行末までは注釈**として捨てる。admin の管理画面で
@@ -363,6 +395,13 @@ export interface DemoAccountRow extends DemoAccountEntry {
   viaEmail?: boolean;
   /** 除外リストに入っていて、いまダミーが出ない行。画面では「除外中」＋「戻す」。 */
   denied?: boolean;
+  /**
+   * **admin がこの人をデモ表示に指定しているか** (表示モード・§4.2.3)。
+   *
+   * 資格 (`source` / `denied`) とは別の軸。**資格があっても、ここが false なら
+   * 既定** (Dual=実データ / デモだけ=デモ)。利用者は切り替えられない。
+   */
+  displayDemo?: boolean;
 }
 
 export function listDemoAccounts(): {
@@ -376,11 +415,15 @@ export function listDemoAccounts(): {
   configRaw: string;
   emailsRaw: string;
   deniedRaw: string;
+  /** **デモ表示に指定した uid** の生テキスト (表示モード・§4.2.3)。 */
+  displayRaw: string;
 } {
   const configRaw = cfg('demo.account_uids');
   const emailsRaw = cfg('demo.account_emails');
   const deniedRaw = cfg('demo.account_denied_uids');
+  const displayRaw = cfg('demo.display_uids');
   const denied = deniedUids();
+  const forcedDemo = forcedDemoDisplayUids();
   const rows: DemoAccountRow[] = [
     ...BUILTIN_DEMO_UIDS.map((uid) => ({ uid, label: BUILTIN_LABELS[uid] ?? '', source: 'builtin' as const })),
     ...parseEntries(String(import.meta.env.DEMO_ALLOWED_UIDS ?? '')).map((e) => ({ ...e, source: 'env' as const })),
@@ -404,6 +447,13 @@ export function listDemoAccounts(): {
   for (const r of rows) {
     if (fromEmail.has(r.uid)) r.viaEmail = true;
     if (denied.has(r.uid)) r.denied = true;
+    /*
+     * **表示モード** (§4.2.3)。`true` = admin がこの人をデモ表示に指定している。
+     * **除外された行には立てない** — 除外 = デモの資格が無いので、
+     * 名簿に残っていても `resolveViewMode()` は Demo にしない
+     * (ここで立てると画面が「デモ表示」と嘘をつく)。
+     */
+    if (!r.denied && forcedDemo.has(r.uid)) r.displayDemo = true;
   }
 
   return {
@@ -414,6 +464,7 @@ export function listDemoAccounts(): {
     configRaw,
     emailsRaw,
     deniedRaw,
+    displayRaw,
   };
 }
 

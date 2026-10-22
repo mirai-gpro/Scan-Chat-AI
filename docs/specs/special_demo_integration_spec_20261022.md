@@ -26,7 +26,14 @@
 9. Real のバーコード登録は**現在の本番動作を一切壊さない**
 10. UID が Demo / Special で既に異なる場合は**自動統合しない**（fail-closed で管理者確認）
 11. admin 代理表示・share では**モード切替不可**
+    → **13 で上位化**。切り替える口が利用者側にもう無いので、この条件は自動的に満たされる
 12. 既存 Special の検査データ・Elith 納品・報告書を **re-key しない**
+13. **【2026-10-22 追加・発注者指示】表示モードは利用者に切り替えさせない。**
+    「ユーザーに切り替えさせる、なんてありえない」「SP アカウントやデモを使う人間は、
+    マスコミや有力な大口クライアントなんだぞ」「ダッシュボードのスイッチ＋Cookie ＞＞＞
+    メディアにネガティブプロモーションする気か？」
+    → **表示モードはアカウントの属性**で、**admin が管理画面で決める**。
+    ダッシュボードの切替 UI と Cookie `welltect_mode` は**撤去**した（§4.2.3）
 
 ---
 
@@ -43,6 +50,7 @@
 | **7** | 正規入口は `/admin/experience-accounts` に一本化。旧 2 画面は削除しないが**新画面へ redirect** し、旧 API も**必ず canonical UID 解決層を通す**。**旧 API 経由で UID 分裂を再発させない**／**新 UI 以外に UID 採番ロジックを持たない** |
 | **8** | PR-A の条件は暫定で `demoFallbackEnabled(uid) && isDemoShipmentId(shipmentRef)` の**両方**。片方だけで判定しない |
 | **9** | 順序は PR-A → B（canonical UID）→ C（view-mode ＋ `shouldUseDemoData`）→ D（write 監査）→ E（統合管理画面）。**PR-C で PR-A の暫定判定を `effectiveMode === 'demo'` 系の共通判定へ必ず差し替える。スペシャル排他を別の場所へ移植しない** |
+| **10** | **【2026-10-22・PR-E 後】表示モードの切替を利用者側から撤去し、管理画面へ移す。** 相手はマスコミ・有力な大口クライアントなので、本人の画面に「デモ / 実データ」の切替を出さない（印象を損ねる・相手が自分で切り替えて空の画面や意図しない側に着く）。**Cookie `welltect_mode` と `POST /api/session/view-mode` と `ViewModeSwitch.astro` を削除**し、`app_config` `demo.display_uids` に admin が入れる形にする。**資格 → 表示 の順は崩さない**（デモの資格が無い uid を名簿に書いても効かない）。**既定は 1 つも変えない**（Dual=real / デモだけ=demo） |
 
 ---
 
@@ -108,7 +116,7 @@ Cookie 発行の**すべてより前**。admin API の競合は **`setConfig` �
 
 **変えていないもの**: Google × パスワードの 409 / 事前発行 uid の 409 / `issueAdminCred` の位置 /
 本人解決の順序（実顧客 → staging → 体験アカウント）/ 体験アカウント内の Real → Demo の優先順 /
-`demoFallbackEnabled` の Special 排他（PR-C で移す）/ `welltect_mode` Cookie（PR-C）/
+`demoFallbackEnabled` の Special 排他（PR-C で移す）/ 表示モードの扱い（PR-C → §4.2.3）/
 **migration も app_config キーも 1 つも足していない**。
 
 **既存 verify 3 本は弱めずに書き直した**（旧コードの名前をリテラルで固定していた箇所）:
@@ -120,15 +128,21 @@ Cookie 発行の**すべてより前**。admin API の競合は **`setConfig` �
 **未確認（本番で 1 回通すこと）**: Demo 登録済みの人を Real へ足して uid が写ること /
 競合を人為的に作った回に 409 で何も書かないこと（この環境に Supabase も app_config も無い）。
 
-### 4.2 表示モード（PR-C・**2026-10-22 実装済み**）
+### 4.2 表示モード（PR-C・**2026-10-22 実装済み**／同日 §4.2.3 で切替の持ち主が変わった）
 
-- Cookie `welltect_mode`（`real` / `demo`・HttpOnly・SameSite=Lax・本番 Secure・30 日）
-- **Cookie は権限根拠にしない。** サーバで毎回資格を再検証して `effectiveMode` を決める
-- `POST /api/session/view-mode`。**admin 代理表示・share・anonymous・Demo 資格なしは 403**
-- Dual のログイン直後は **`real`**
+> **【この節の読み方】** PR-C は「本人が Cookie で切り替える」形で実装した。
+> **同日の発注者指示でそれを撤回し**、表示モードを**アカウントの属性**にして
+> **admin が管理画面で決める**形にした（§4.2.3）。
+> **変わったのは「誰が決めるか」だけ**で、**既定も `shouldUseDemoData` も 1 文字も変えていない**。
+> 以下 §4.2.1 の表はいまも正本。§4.2.2 の実装表は**撤去したものを含む履歴**。
+
+- **表示モードはアカウントの属性**（app_config `demo.display_uids`）
+- **資格 → 表示 の順。** 名簿に書いただけでは Demo にならない（`canDemo` が先）
+- Dual の既定は **`real`**
 - `welltect_v` の構造・署名・30 日・admin 判定・origin 判定は**変えない**
+- **撤去済み**: Cookie `welltect_mode` / `POST /api/session/view-mode` / `ViewModeSwitch.astro`
 
-#### 4.2.1 Cookie が無いときの既定（実装で確定）
+#### 4.2.1 admin が指定していないときの既定（実装で確定・**不変**）
 
 裁定は Dual についてのものなので、**他の枠は PR-C 前の挙動を変えない**ことにした。
 
@@ -139,23 +153,114 @@ Cookie 発行の**すべてより前**。admin API の競合は **`setConfig` �
 | Real の資格だけ / 一般顧客 | `real` | 従来どおり |
 | 未サインイン | `demo` | 資格が引けない。**ダミーの可否は `shouldUseDemoData` が「表示する uid」で判定する**ので一般顧客にダミーは出ない（本番はサインイン画面で止まる） |
 
-**代理表示・共有・緊急入場は切り替え不可**（`switchable:false` = Cookie を見ない）だが、
-**既定は表示対象の資格に従う** — スペシャル枠を代理表示・共有しているときは `real` で
-ダミーが混ざらない。デモ専用アカウントを代理表示して `demo` になるのは PR-C 前と同じ。
+**誰が見てもモードは同じ**（§4.2.3）。モードが閲覧者ではなくアカウントに付くので、
+**admin が A さんを代理表示したとき、A さん本人が見るのと同じ画面になる** —
+`switchable` という概念自体が無くなった。スペシャル枠を代理表示・共有しているときは
+`real` でダミーが混ざらない、という要件はそのまま満たす。
 
-#### 4.2.2 実装（PR-C）
+#### 4.2.2 実装（PR-C・**うち 3 つは §4.2.3 で撤去**）
 
 | 置き場所 | 中身 |
 |---|---|
-| **新規** `src/lib/view-mode.ts`（leaf） | `MODE_COOKIE` / `parseMode` / `modeCookieOptions` / `resolveViewMode` / `shouldUseDemoData` / `viewModeFromRequest` |
-| **新規** `src/pages/api/session/view-mode.ts` | Cookie を書く唯一の口。403 は `state.switchable` 1 本（条件を書き写さない） |
-| **新規** `src/components/dashboard/ViewModeSwitch.astro` | `switchable` の人にだけ出る。既存の同格の淡色ペアだけを使う |
-| 画面 7 本 | `viewModeFromRequest(Astro, viewer)` を 1 回通して `effectiveMode` を全部の問い合わせへ渡す |
-| `api/debug/viewer.ts` | `mode`（effective / requested / switchable / can_demo / can_real / dual）を追加 |
-| **新規** `scripts/verify-view-mode.mjs` | 147 件（CI の A 層） |
+| **新規** `src/lib/view-mode.ts`（leaf） | `resolveViewMode` / `shouldUseDemoData` / `viewModeFromRequest`。**`MODE_COOKIE` / `parseMode` / `modeCookieOptions` は §4.2.3 で撤去** |
+| ~~`src/pages/api/session/view-mode.ts`~~ | **撤去**（利用者が Cookie を書く口） |
+| ~~`src/components/dashboard/ViewModeSwitch.astro`~~ | **撤去**（ダッシュボードの切替 UI） |
+| 画面 7 本 | `viewModeFromRequest(Astro, viewer)` を 1 回通して `effectiveMode` を全部の問い合わせへ渡す（**不変**） |
+| `api/debug/viewer.ts` | `mode`（effective / **forced_demo** / can_demo / can_real / dual）。**`requested` / `switchable` は廃止** |
+| **新規** `scripts/verify-view-mode.mjs` | CI の A 層 |
 
 **モジュール変数にモードを置かない** — SSR は 1 つの isolate で同時リクエストを捌くので、
 置くと**他人のモードが漏れる**。常に引数で渡す。
+
+#### 4.2.3 **表示モードは admin が決める**（発注者指示 2026-10-22・絶対条件 13・裁定 10）
+
+> 発注者：「デモと SP を切り替えるスイッチは管理画面にも必要じゃない？」
+> 「**ユーザーに切り替えさせる、なんてありえない！！！**」
+> 「**SP アカウントやデモを使う人間は、マスコミや有力な大口クライアントなんだぞ！**」
+> 「ダッシュボードのスイッチ＋Cookie ＞＞＞ **メディアにネガティブプロモーションする気か？**」
+
+**この節が表示モードの正本。** §4.2.2 の Cookie 実装は履歴として残してあるだけ。
+
+##### なぜ変えたか
+
+利用者側に切替を置くと、
+
+1. **報道関係者・大口クライアントの画面に「デモ / 実データ」の切替が出る**（印象を損ねる）
+2. 相手が自分で切り替えて**空の画面や意図しない側に着く**
+3. お披露目の最中に誤操作が起こり得る
+
+どれも「相手が誰か」に由来する問題なので、**UI の磨き方では解けない**。
+切替の**持ち主を変える**（利用者 → admin）のが唯一の解。
+
+##### 形
+
+| | 旧（PR-C） | **新** |
+|---|---|---|
+| モードの持ち主 | 閲覧者のセッション（Cookie） | **アカウント** |
+| 決める人 | **本人** | **admin** |
+| 置き場所 | Cookie `welltect_mode` | app_config **`demo.display_uids`** |
+| 書く口 | `POST /api/session/view-mode` | `POST /api/admin/demo-accounts` の `display_demo` / `display_real` |
+| UI | `ViewModeSwitch.astro`（ダッシュボード） | `/admin/experience-accounts` の列「**いま出る画面**」 |
+| 閲覧者による差 | `switchable` で分岐 | **無い**（誰が見ても同じ） |
+
+##### 越えてはならない線
+
+- **資格 → 表示 の順。** `demo.display_uids` に書いただけでは Demo は出ない
+  （`resolveViewMode` が `canDemo` を先に見る）。逆にすると
+  `demo.display_uids` が「資格」の二重管理になり、**除外リストで止めた人にダミーが出る**
+- **既定は 1 つも変えていない**（§4.2.1 の表）。admin が指定しなければ今日までと同じ挙動
+- **全停止スイッチ（`PUBLIC_DEMO_FALLBACK=false`）が指定より強い**
+- **`viewModeFromRequest` でリクエストから何も読まない。** Cookie もクエリも読む実装を
+  足さないこと（足した瞬間に「利用者の要求でモードが動く」= 禁じた形に戻る）
+- **モジュール変数にモードを置かない**（SSR は 1 isolate なので他人のモードが漏れる）
+- 管理一覧は **`resolveViewMode()` 本体を呼ぶ**。画面用に条件を書き写すと
+  **「管理画面ではデモと出ているのに本人には実データが出る」**が静かに起きる
+
+##### 思わぬ収穫 — 絶対条件 11 が構造的に満たされた
+
+モードがアカウントに付いたので、**admin が A さんを代理表示すると A さん本人と同じ画面**に
+なる。旧実装が `switchable:false` で守っていた
+「**A さんの画面のつもりでダミーを見る**」（§13.0 が名指しした最悪の形）が、
+**分岐ではなく構造で起きなくなった**。
+
+##### 実装
+
+| 置き場所 | 中身 |
+|---|---|
+| `src/lib/demo-accounts.ts` | `forcedDemoDisplayUids()` / `isForcedDemoDisplay(uid)`（名簿を読む唯一の場所）／`listDemoAccounts()` が `displayRaw` と行の `displayDemo` を返す（**除外中の行には立てない** = 画面が嘘をつかない） |
+| `src/lib/view-mode.ts` | `resolveViewMode(viewer)`（**引数は viewer 1 つ**）。`forcedDemo = canDemo && isForcedDemoDisplay(uid)`。`ViewModeState` は `switchable` / `requested` を廃止し **`forcedDemo`** を持つ |
+| `src/lib/app-config.ts` | **`demo.display_uids`** 1 本だけ追加（既定空）。`mode.*` / `experience.*` の名前空間は作らない |
+| `src/pages/api/admin/demo-accounts.ts` | `display_demo` / `display_real`。**資格の無い uid・除外中の uid は却下して理由を返す**（黙って受けると「指定したのにデモが出ない」を admin が追えない）。`display_real` は冪等 |
+| `src/lib/experience-admin.ts` | 行に `displayMode` / `displayForced` / `displayChangeable`、件数に `showingDemo`。**`resolveViewMode()` 本体を呼ぶ**（`isForcedDemoDisplay` を直に呼ばない = 資格のガードを飛ばさない） |
+| **削除** | `src/pages/api/session/view-mode.ts` / `src/components/dashboard/ViewModeSwitch.astro` / `MODE_COOKIE` / `parseMode` / `modeCookieOptions` |
+| wellfort `src/pages/admin/experience-accounts.astro` | 列「**いま出る画面**」＋ ［デモを出す］／［実データを出す］。**確認を 1 段挟む**・**押した側だけを送る**・却下理由をそのまま出す・**資格が無い行には出さない** |
+| wellfort `src/pages/api/admin/demo-accounts.ts` | 中継の payload allow-list に `display_demo` / `display_real`（**allow-list なので足し忘れると画面から押しても何も起きない**） |
+
+**DB migration は 1 本も足していない。**
+
+##### 検証
+
+- `npm run verify:view-mode`（④ 利用者側の切替が存在しないこと／⑧ 書く口は admin だけ／⑨ 名簿と管理一覧）
+- `npm run verify:special-accounts`（① 両方に登録されていても黙ってダミーは出ない）
+- `npm run verify:experience-admin`（⑧ app_config を差し替えて**実物の `resolveViewMode()` を通した結果**を見る）
+- `npm run verify:write-audit` / `verify:demo-gate` / `verify:experience-accounts`（スタブの追従）
+- wellfort `npm run verify:experience-accounts-ui` ⑪（列・ガード・確認・文言）
+
+**退行注入 11 種**とも名指しで落ちることを確認済み。
+**うち 2 件は注入して初めて検査の穴が見つかり直した** —
+①`verify:view-mode` が**引数の数を見ていなかった**ので「利用者の希望を第 2 引数に戻す」が
+素通りした ②`verify:special-accounts` が `shouldUseDemoData` の結果だけを見ていて
+`effectiveMode` を見ていなかったので、「資格のガードを外す」が素通りした
+（`effectiveMode` が嘘の `demo` になると **`singlePurchase` / `multiYear` が黙って消える**）。
+
+##### 未確認（本番で 1 回通すこと）
+
+- 管理画面で ［デモを出す］→ 本人のダッシュボードがデモになる／［実データを出す］で戻る
+  （この環境に Supabase が無いので app_config の往復は未確認）
+- **既存の Cookie が残っている人**：読まなくなるので admin 指定（既定は real）に従う。
+  Cookie は 30 日で失効するまで残るが**誰も読まない**（能動的な削除はしていない）
+
+---
 
 ### 4.3 Demo データ読込の明示化（PR-C・**2026-10-22 実装済み**）
 
@@ -252,7 +357,7 @@ PR-A / PR-C で塞いだのは **2 本だけ**（`external-id` / `self-report`�
 
 migration 0 本 ・ app_config キー 0 件 ・ Demo 専用 flag なし ・
 `isDemoAccount` / `isSpecialAccount` / `shouldUseDemoData` の中身 ・
-`resolveViewMode` の既定 ・ `welltect_mode` の扱い ・ 共有と代理表示の判定 ・
+`resolveViewMode` の既定 ・ 共有と代理表示の判定 ・
 **AI問診・AIスキャンの画面の流れ**（擬似成功も進捗の作り物も足していない）
 
 #### 4.4.6 検証
@@ -260,7 +365,7 @@ migration 0 本 ・ app_config キー 0 件 ・ Demo 専用 flag なし ・
 - 新規 `npm run verify:write-audit` **96 件**（CI の A 層）。番人は**実物を動かし**、
   `notices/[id]/read` と `scan/save` の POST を実走させて**書き込み関数の呼び出し
   回数を数える**（デモで 0 回・一般顧客で 1 回）
-- `verify:view-mode` は 147 → **161 件**（書き込みの 5 本も LIVE に入れた）
+- `verify:view-mode` は 147 → 161 件（書き込みの 5 本も LIVE に入れた）→ §4.2.3 で **177 件**
 - `verify:viewer-origin` が `write-guard.ts` の新しい実行時 import を繋ぐようになった
   （繋がないと `ERR_MODULE_NOT_FOUND` で**実行すらできない**。2026-10-02 と同じ形の
   事故なので同じやり方で閉じた）。**番人は実物のまま**
@@ -327,6 +432,16 @@ migration 0 本 ・ app_config キー 0 件 ・ Demo 専用 flag なし ・
   **デモの行がスペシャル側の除外リストへ書かれて「外したのに効かない」**
 - **全停止（`PUBLIC_DEMO_FALLBACK=false`）は資格と別に出す**。資格は残るのに
   誰にもダミーが出ない状態があり得るので、混ぜると理由が追えない
+- **列「いま出る画面」は資格の列と混ぜない**（§4.2.3）。
+  資格 = 見せられるか / この列 = **いま見えているか**。
+  「▲ デモ」の資格があっても、ここが「実データ」なら本人には実データが出る
+- **指定（admin）と既定を区別して出す**。デモの資格だけの人は指定しなくても
+  デモ表示なので「▲ デモ ＋ 既定」と出す（**指定したつもりの取り違えを防ぐ**）
+- **切替は資格のある行にだけ出す**。資格が無い uid を指定しても上流が却下するので、
+  **押せるのに効かないボタンを置かない**
+- **切替に確認を 1 段挟む**。押した瞬間に**相手に見えている画面が変わる**ので、
+  お披露目の最中の誤操作を止める
+- **競合している行の表示は「—」**。どちらの uid の画面か決まっていないので答えを出さない
 
 #### 4.5.4 直した誤り 2 件
 
@@ -338,9 +453,11 @@ migration 0 本 ・ app_config キー 0 件 ・ Demo 専用 flag なし ・
 
 #### 4.5.5 検証
 
-- 新規 `npm run verify:experience-admin` **55 件**（Scan・CI の A 層）
-- `npm run verify:experience-accounts-ui` **166 件**（wellfort・117 → +49・
-  regression-guard に追加）。画面の inline script を切り出して**実際に描かせる**
+- `npm run verify:experience-admin` **66 件**（Scan・CI の A 層。
+  55 → +11 は §4.2.3 の「いま出る画面」）
+- `npm run verify:experience-accounts-ui` **187 件**（wellfort・117 → +49（PR-E）
+  → +21（§4.2.3）・regression-guard に追加）。画面の inline script を
+  切り出して**実際に描かせる**
 - `verify:admin-target` / `verify:admin-onclick` は**読む先を新 URL へ直した**
   （直さないと空の redirect を検査して全部落ちる）。**検査を弱めていない**
 - **退行注入 30 種**（Scan 15 ＋ wellfort 15）とも名指しで落ちる。

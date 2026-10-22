@@ -29,7 +29,6 @@ import { getLatestInterviewCompletion } from '../lib/interview-completion';
 import { isBridgeConfigured, getServerSupabase } from '../lib/supabase';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
 import { viewModeFromRequest } from '../lib/view-mode';
-import ViewModeSwitch from '../components/dashboard/ViewModeSwitch.astro';
 import {
   extractUrgentAlert,
   extractDailyQuests,
@@ -387,11 +386,12 @@ const reportHref = manualPdfReport
       <main class="flex flex-1 flex-col gap-5 px-5 pb-12 pt-5">
 
         {/*
-          ⓪ 表示モードの切り替え (Real / Demo・PR-C)。
-          **`switchable` の人にだけ出る** = 本人のセッションで Demo の資格を持つ人。
-          一般の利用者・代理表示・共有・未サインインには 1 px も出ない。
+          ⓪ **表示モードの切替 UI はここに置かない** (発注者指示 2026-10-22)。
+          SP / デモの枠を使うのは**マスコミ・大口クライアント**なので、本人の画面に
+          「デモ / 実データ」の切替を出さない。モードは**アカウントの属性**で、
+          admin が /admin/experience-accounts で決める (`demo.display_uids`)。
+          正本 `docs/specs/special_demo_integration_spec_20261022.md` §4.2.3。
         */}
-        {viewMode.switchable && <ViewModeSwitch mode={viewMode.effectiveMode} dual={viewMode.dual} />}
 
         {/* ① 注意項目 — 非表示 (緊急受診勧告 URGENT ALERT): {urgentAlert && <UrgentAlertBanner alert={urgentAlert} />} */}
 
