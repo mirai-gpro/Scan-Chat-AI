@@ -2552,9 +2552,34 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 **足りない接頭辞を補わない** (捏造)。**デメカルには置かない** (概念を未確認)。
 **空・数字でない設定は判定しない** (打ち間違いで全件を止めない)。**画面の文言はサーバが返す値を使う** (焼かない)。
 
-**【2026-10-21・発注者指示で UI を 3 点変更 (§4.4.2 / §4.4.3 / §4.6.4)】①「写真を選ぶ」を撤去**し、
-逃げ道を**「番号を手で入力する」1 つ**に寄せた (外しただけだと PC と権限拒否の端末が行き止まりになる。
-サーバは `captureMethod: 'file'` を受け続ける=既存の台帳行と DB の check 制約)。
+**【2026-10-21・発注者指示で UI を 3 点変更 (§4.4.2 / §4.4.3 / §4.6.4)】①入口は撮影だけ**にした
+=**「写真を選ぶ」も「手で入力」も置かない**。**手入力は 1 回目の直しで私が足して撤回させられたもの**
+(発注者「**チェックデジットもないのに、重要な検査IDを手入力させる対応はありえない**」)。
+**この番号にはチェックディジットが無い**ので 1 桁の打ち間違いが**正しい形の別の番号**になり、
+形式検証も `704` 接頭辞検査も通って `confirmed`+`linked` になる=**画面も台帳も正常に見えたまま
+別の検査に紐づく**。撮影の誤りは突合・接頭辞・証跡画像で拾えるが、**手入力の誤りは何も拾えず
+証跡も無い**。**「行き止まりにしない」(§5.1) は撮り直しと QR でスマホへ送る導線で満たす** —
+**誤りを混ぜる逃げ道を置くことでは満たさない**。PC からの登録手段は無くなった (QR が唯一の口)。
+サーバは `captureMethod: 'file'/'manual'` を受け続ける (既存の台帳行と DB の check 制約・
+§12.1 の admin 訂正も `manual`)。**画面から送るのは `camera` だけ**。
+**【解決済み・§12.2・発注者判断 2026-10-22 = 案 (c)】登録の値を画面から採らない。**
+画面が `read` の候補を `manual` で送り返していたため、**どんなにきれいに読めても
+`confirmed` にならず問診CSV のゲートが全件ブロック**していた (本番は off なので無傷)。
+→ **`read` の結果 (`barcode`/`printed` の生値だけ) をサーバ側に控え、`register` は
+`evidenceKey` で引き直して評価する** (`src/lib/external-id-read-cache.ts`)。
+**控え先は証跡画像の隣の S3** (`<evidenceKey>.read.json`) = **migration を足さない**・
+保存期間の決定 (§9 D-3) が画像と控えに同時に効く。**プロセス内メモリには置かない**
+(serverless は read と register が別インスタンスに載り得る)。`.read.json` は
+`isEvidenceKey` を通らないので**ブラウザは PUT も読み出しもできない**。
+**判定は控えない** — `register` が `evaluateExternalId` を呼び直す (判定の置き場所を
+2 つにしない。控えると `labid.*` を直したあとに古い判定が貼り付く)。
+**結び付き (uid / 受取 / 検査) を全部確認**・TTL 60 分 (未来日時と読めない日時も期限切れ扱い)・
+引けなければ**撮り直しへ (fail-closed)**。**body が値を持ってきたら 400 で落とす**
+(黙って無視しない・控えを引くより前・保存より前)。`confirmedValue` は**画面が古くないかの
+突き合わせ専用で値の出どころではない**。**案 (a)=画面に barcode/printed を送り返させるのは却下**
+(一致する 2 値を送れば誰でも `confirmed` を作れゲートの前提が崩れる)。
+**本番での通し確認は未実施** — on にする前に実機で 撮影→読取→登録 を 1 回通し
+`confirmed`+`linked` を確かめる。
 **②登録済みでも「登録し直す」から撮り直せる** (§8.3「再撮影を第一選択」なのに画面に戻る口が無かった。
 **確認を 1 段挟む**・**API と DB は無変更**=旧行を `superseded` に落として入れ直す既存の挙動に乗るだけ)。
 **③プリベントの用紙の図を実物のトレースに差し替えた** (**1 回目は色だけ合わせて配置を作ってしまい実物と別物**
@@ -2562,7 +2587,25 @@ Supabase database linter の指摘を棚卸しした結果。**テストフェ�
 左に六角形のシール 3 枚 (2 本目は空)・右上にログイン枠・中央右が読み取り対象・左下に密封シール・右下に口止めシール ×2。
 **紙の上に当社の文字を置かない**=書き込みは囲み 2 本と紙の外の凡例だけ・**実物の写真とパスワードの値は入れない**)。
 **admin の確認・訂正経路 (§12.1) は ON の必須条件のまま** — 利用者の撮り直しで直るのは撮り方の問題だけで、
-`pattern_mismatch` / `deferred` / `conflict` は直らない (**`conflict` を利用者に撮り直させてはいけない**)。**§3.2 = 裁定 D-1 = 案A (登録時に `lab_tests` 行を作る)**: 本番の shipment は `app_bridge`(= `orders` のミラー)由来で `lab_company_id` が空・`customer_id` が実は `diagnostic_user_id`・受取 ID が `customer.kit_shipments` に無いので、**材料はその場で引き直し `shipment_id` は実在を確かめた時だけ入れる**(埋めに行くと本番で FK 違反)。材料が揃わない回は **`deferred` で台帳に残し撮影を失わない**。**§6.2 = 画像は `scan-upload-ticket.ts` の形を流用**(サーバ採番キー+完全一致 validator+署名に Content-Type/長さ固定)。**`putOriginal()` は使わない**(Object Lock 10年=撮り直しが消せない)。**§6.4 = 裁定 D-4 = サーバ側 Gemini**(`BarcodeDetector` は iOS Safari 非対応＝単独では不可。`/scan` と同じ「ブラウザ → S3 → Gemini」で追加依存ゼロ)。**§7.1 = AI問診ゲートは二段**(本当のゲートは**プリベント問診CSV 生成側の fail-closed**。`interview-cycle.ts` には足さない＝fail-safe が「催促しない」側なので fail-open になる)。**ゲートは部品として先に置いた** = `checkPreventQuestionnaireGate()`(純関数) ＋ `loadCapturedExternalId()`。**CSV 生成を実装する人は出力前に必ず通すこと**(CSV 生成そのものは未実装)。**【v1.1 の是正 2 点・発注者指示 2026-10-11・§3.2.1 / §7.1】①`lab_tests` 行を「人 + 検査種別で 1 件だから」という理由で使い回さない** — プリベントは年 1 回なので 2 年目の撮影で前年の行がちょうど 1 件ヒットし、**前年の `external_barcode` を今年の値で上書きする**(画面も台帳も `linked` と表示するので黙って壊れる)。使い回す根拠は**同じ `(diagnostic_user_id, shipment_ref, provider)` の台帳行が持つ `lab_test_id` だけ**(=同じ回の撮り直し)・初回は今回用の行を作る・`linkLabTest()` は **`test_type` で `lab_tests` を引く問い合わせを 1 本も出さない**。**②問診CSV のゲートは `status='confirmed'` ∧ `lab_test_link_status='linked'` ∧ `lab_test_id` 非 null の 3 条件**で、`review_required`/`deferred`/`conflict` は fail-closed でブロック(**値だけを見て通すと、この検査のものだと確定していない番号でプリベントへ出る**)。`loadCapturedExternalId()` は **`shipmentRef` か `labTestId` が必須**(「その人の最新」を返すと前年のレコードで今年が通る)。**migration の構造は変えていない**。**【③-1 の設計原則・確定 2026-10-11・発注者指示】正本 = `lab_data_pipeline_master_spec.md` §4-5.12 の 3。** ③-1(出荷時に `lab_tests` 行を作る)の正本キーは**「1 回・1 検査」を一意に示す cross-system key (`test_instance_ref` 相当・名前は既存命名を調べて決める)**。**`orders.id` 単独は使わない**(1 注文に複数検査が含まれ得る)・**`shipment_id` も流用しない**(本番の受取 ID は `orders.id` で `customer.kit_shipments.id` とは別物=配送の単位は検査の単位でない)。**③-1 が入ったら出荷時にそのキーで `lab_tests` を作り、受取撮影側は新規作成せずその行を更新する** → 二重行の懸念は消える。いまの「初回撮影は必ず新しい行を作る」は ③-1 が無い間の形。**今回の範囲では ③-1 まで拡張しない**。**【既定 off】`labid.prevent_capture` / `labid.demecal_capture` が off なので画面にも API にも出ない** — **実物の同梱書面 1 枚でバーコード規格と桁数を確定してから on にする**(`704000xxx` は業務上の形式例にすぎない。**v2.1 の「両リポジトリに `704000` は 0 件」は実装着手前の実測**で、現在は app_config の既定値として入っているので**「0 件」を現在の実測として引用しない**)。桁数は app_config `labid.prevent_pattern` で、**外れても登録は通り `review_required` になるだけ**(止めると実物の形式が違う回に何も記録できない)。**【ON の必須条件・発注者指示 2026-10-11・§12.1】`review_required` を解決する admin の確認・訂正経路 (証跡つき) は「あとで足す UI」ではなく ON の必須条件。** ゲートが fail-closed になったので、**パターン外・片側しか読めない・手入力・`deferred`・`conflict` の回は「撮影はできたが先へ進めない」状態で滞留する** (正常系は問題ないが例外系に出口が無い)。台帳の受け皿 (`previous_value`/`corrected_at`/`corrected_by`/`correction_reason` ＋ `persistExternalIdCapture` の `correction` 引数) は実装済みなので、要るのは **admin 画面 (wellfort-site) と API だけ**。**`status` を直に書き換える口を作らない**(同じ `persistExternalIdCapture` を通す)・**`lab_test_link_status` を手で `linked` にしない**・**ゲートを緩めて回避しない**。検証 `npm run verify:external-id-capture` 259 件 (CI の A 層。**⑭ が年跨ぎの回帰①〜⑤** = 2 年連続で `lab_tests` が 2 行・前年未撮影でブロック・`review_required` でブロック・`deferred`/`conflict` でブロック・二重 submit で同じ `lab_test_id`)・**退行注入 23 種** |
+`pattern_mismatch` / `deferred` / `conflict` は直らない (**`conflict` を利用者に撮り直させてはいけない**)。**§3.2 = 裁定 D-1 = 案A (登録時に `lab_tests` 行を作る)**: 本番の shipment は `app_bridge`(= `orders` のミラー)由来で `lab_company_id` が空・`customer_id` が実は `diagnostic_user_id`・受取 ID が `customer.kit_shipments` に無いので、**材料はその場で引き直し `shipment_id` は実在を確かめた時だけ入れる**(埋めに行くと本番で FK 違反)。材料が揃わない回は **`deferred` で台帳に残し撮影を失わない**。**§6.2 = 画像は `scan-upload-ticket.ts` の形を流用**(サーバ採番キー+完全一致 validator+署名に Content-Type/長さ固定)。**`putOriginal()` は使わない**(Object Lock 10年=撮り直しが消せない)。**§6.4 = 裁定 D-4 = サーバ側 Gemini**(`BarcodeDetector` は iOS Safari 非対応＝単独では不可。`/scan` と同じ「ブラウザ → S3 → Gemini」で追加依存ゼロ)。**§7.1 = AI問診ゲートは二段**(本当のゲートは**プリベント問診CSV 生成側の fail-closed**。`interview-cycle.ts` には足さない＝fail-safe が「催促しない」側なので fail-open になる)。
+**【2026-10-21・発注者指示でフローを 3 点修正 (§7.1)】①AI問診の開始は条件なしで可能** —
+一度こちらが「がんリスク検査がプランにある人は登録済みを開始条件にする」案を出したが
+**発注者が取り消した**。`chat.astro` に開始ゲートを足さない (**この決定を蒸し返さない**)。
+**②先方の一覧に出すのは登録済みの回だけ** = プリベント専用ポータルの「問診CSV を取得」の
+一覧から未登録の回を**行ごと落とす** (「準備中」等でも出さない)。判定は
+`checkPreventQuestionnaireGate()` を**一覧の組み立て時にも**通す
+(ダウンロード時だけに置くと押せるのに落ちる行が並ぶ)。**未実装** — 本番の一覧そのものが無く
+ポータルの「取得」は静的サンプルを返している (wellfort-site `public/partner-samples/704000123.csv`・実測)。
+**一覧を作るときに同時に入れる**。
+**③7 日ワーニング (実装済み)** = がんリスク検査キットの `shipped_at` から **7 日以上**たっていて
+台帳に有効な行が無い回に、**カメラ読込の受取確認を促す帯**を出す
+(`/kit` のカード内 ＋ ダッシュボードの進捗の直上)。判定は純関数
+`src/lib/external-id-reminder.ts` の `barcodeReminders()` **1 か所**で、画面は描くだけ。
+**「登録済」は台帳に有効な行が在るか (`status <> 'superseded'`) で見る。`confirmed` を条件にしない**
+— ここは「撮ってもらう」ための催促なので**撮影が済んでいる人を急かさない**のが要件
+(§12.2 の不具合が直るまで全員を催促し続けることになる)。**②の fail-closed なゲートとは別物で混ぜない**。
+`labid.prevent_capture` が off の間は 1 件も出さず**台帳を引きもしない**・共有閲覧では出さない・
+日数は実測値をそのまま出す (丸めない)・赤にしない (`status-watch`)。**ゲートは部品として先に置いた** = `checkPreventQuestionnaireGate()`(純関数) ＋ `loadCapturedExternalId()`。**CSV 生成を実装する人は出力前に必ず通すこと**(CSV 生成そのものは未実装)。**【v1.1 の是正 2 点・発注者指示 2026-10-11・§3.2.1 / §7.1】①`lab_tests` 行を「人 + 検査種別で 1 件だから」という理由で使い回さない** — プリベントは年 1 回なので 2 年目の撮影で前年の行がちょうど 1 件ヒットし、**前年の `external_barcode` を今年の値で上書きする**(画面も台帳も `linked` と表示するので黙って壊れる)。使い回す根拠は**同じ `(diagnostic_user_id, shipment_ref, provider)` の台帳行が持つ `lab_test_id` だけ**(=同じ回の撮り直し)・初回は今回用の行を作る・`linkLabTest()` は **`test_type` で `lab_tests` を引く問い合わせを 1 本も出さない**。**②問診CSV のゲートは `status='confirmed'` ∧ `lab_test_link_status='linked'` ∧ `lab_test_id` 非 null の 3 条件**で、`review_required`/`deferred`/`conflict` は fail-closed でブロック(**値だけを見て通すと、この検査のものだと確定していない番号でプリベントへ出る**)。`loadCapturedExternalId()` は **`shipmentRef` か `labTestId` が必須**(「その人の最新」を返すと前年のレコードで今年が通る)。**migration の構造は変えていない**。**【③-1 の設計原則・確定 2026-10-11・発注者指示】正本 = `lab_data_pipeline_master_spec.md` §4-5.12 の 3。** ③-1(出荷時に `lab_tests` 行を作る)の正本キーは**「1 回・1 検査」を一意に示す cross-system key (`test_instance_ref` 相当・名前は既存命名を調べて決める)**。**`orders.id` 単独は使わない**(1 注文に複数検査が含まれ得る)・**`shipment_id` も流用しない**(本番の受取 ID は `orders.id` で `customer.kit_shipments.id` とは別物=配送の単位は検査の単位でない)。**③-1 が入ったら出荷時にそのキーで `lab_tests` を作り、受取撮影側は新規作成せずその行を更新する** → 二重行の懸念は消える。いまの「初回撮影は必ず新しい行を作る」は ③-1 が無い間の形。**今回の範囲では ③-1 まで拡張しない**。**【既定 off】`labid.prevent_capture` / `labid.demecal_capture` が off なので画面にも API にも出ない** — **実物の同梱書面 1 枚でバーコード規格と桁数を確定してから on にする**(`704000xxx` は業務上の形式例にすぎない。**v2.1 の「両リポジトリに `704000` は 0 件」は実装着手前の実測**で、現在は app_config の既定値として入っているので**「0 件」を現在の実測として引用しない**)。桁数は app_config `labid.prevent_pattern` で、**外れても登録は通り `review_required` になるだけ**(止めると実物の形式が違う回に何も記録できない)。**【ON の必須条件・発注者指示 2026-10-11・§12.1】`review_required` を解決する admin の確認・訂正経路 (証跡つき) は「あとで足す UI」ではなく ON の必須条件。** ゲートが fail-closed になったので、**パターン外・片側しか読めない・手入力・`deferred`・`conflict` の回は「撮影はできたが先へ進めない」状態で滞留する** (正常系は問題ないが例外系に出口が無い)。台帳の受け皿 (`previous_value`/`corrected_at`/`corrected_by`/`correction_reason` ＋ `persistExternalIdCapture` の `correction` 引数) は実装済みなので、要るのは **admin 画面 (wellfort-site) と API だけ**。**`status` を直に書き換える口を作らない**(同じ `persistExternalIdCapture` を通す)・**`lab_test_link_status` を手で `linked` にしない**・**ゲートを緩めて回避しない**。検証 `npm run verify:external-id-capture` 486 件 (CI の A 層。**⑭ が年跨ぎの回帰①〜⑤** = 2 年連続で `lab_tests` が 2 行・前年未撮影でブロック・`review_required` でブロック・`deferred`/`conflict` でブロック・二重 submit で同じ `lab_test_id`。**⑯ が 7 日ワーニング**=閾値・暦日の数え方・off・発送前・登録済み・別検査を純関数で実測し、画面側は「同じ関数を使っているか」「押す先があるか」を見る。**⑰ が §12.2 の控え**=S3 をメモリへ差し替えて往復・結び付き・期限・鍵を実走し、**画面が送る形で `confirmed` になりゲートが通ること**と**旧実装の payload では `manual_entry` でブロックされること**まで固定)・**退行注入 54 種** (③ の 17 種＋§12.2 の 14 種を追加。**うち 3 件は注入して初めて検査の穴が見つかり直した** = マスクの検査が `maskExternalId` の出現しか見ていなかった / off の検査が変数名の近さしか見ていなかった / 控えの書き込み失敗を throw へ変えるとスクリプトごと落ちて名指しの FAIL にならなかった) |
 | `docs/lab/lab_data_reception_overview.md` | **4検査のデータ受取 詳細**(血液=リージャー/**PowerShell**・がん=プリベント/専用ポータル+S3+パスキー=**採用方式(v2.1 で「提案中」は失効)**・AI疾病予測=LAiF/専用ポータル+S3・遺伝子=Genoplan/**サーバ側API取得**。方式/経路/現状/課題/次アクション)。**§5 = ID 連携の実務断面**(3 層の ID・`customer.lab_tests`・② 上りIDの採番規則案 §5.3・実装ギャップ §5.4)。E2E全体像は上記 master_spec が上位で、**検査ID紐づけ/問診受渡/結果受領の横断は同書 §4-5 が正本**(本書は §4-5 と矛盾しない範囲で有効) |
 | `docs/lab/questionnaire_to_lab_csv_spec.md` | **AI問診回答→各社CSV 変換仕様(実装用)**。共通設問No→各社必要行のマスターマッピング表+各社項目リスト+生成ルール(フリー/選択/範囲/複数)+PII確認事項。元=Wellfort問診項目マトリクスExcel |
 | `docs/lab/demecal_auto_download_overview_spec.md` | 血液検査データ自動DL (デメカル/mTLS) 概要 |

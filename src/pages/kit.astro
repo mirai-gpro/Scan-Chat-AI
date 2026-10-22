@@ -14,7 +14,10 @@ import {
 import { countUnreadImportant } from '../lib/notice-queries';
 import { refreshConfig, cfg, cfgBool } from '../lib/app-config';
 import ExternalIdCapture from '../components/dashboard/ExternalIdCapture.astro';
-import { providerForTestType, maskExternalId, type ExternalIdProvider } from '../lib/external-test-id';
+import { providerForTestType, PROVIDER_ID_LABEL, type ExternalIdProvider } from '../lib/external-test-id';
+import { loadRegisteredCaptures } from '../lib/external-id-persist';
+import { barcodeReminders } from '../lib/external-id-reminder';
+import ExternalIdReminder from '../components/dashboard/ExternalIdReminder.astro';
 import { getServerSupabase } from '../lib/supabase';
 import { qrSvgPath } from '../lib/qr';
 import { publicOrigin } from '../lib/public-url';
@@ -105,25 +108,32 @@ const extIdQrSymbolId = 'extid-handoff-qr';
 const extIdShareUrl = `${publicOrigin(Astro.request)}/kit`;
 const extIdQr = (captureOn.prevent || captureOn.demecal) ? qrSvgPath(extIdShareUrl, { cell: 4, margin: 4, ec: 'M' }) : null;
 
-/** `shipment_ref` → 登録済みの (マスク, 確認待ちか)。**全文は画面に出さない**。 */
-const captured = new Map<string, { mask: string; needsReview: boolean }>();
+/**
+ * `shipment_ref` → 登録済みの (マスク, 確認待ちか)。**全文は画面に出さない**。
+ *
+ * 引くのは `loadRegisteredCaptures()` (`external-id-persist.ts`)。**ここで SQL を書かない** —
+ * ダッシュボードの 7 日ワーニングも同じ集合を使うので、条件
+ * (`status <> 'superseded'`) を 2 か所に写すと片方だけ腐る。
+ */
+let captured = new Map<string, { mask: string; needsReview: boolean }>();
 if (data && canSelfReport && (captureOn.prevent || captureOn.demecal)) {
   const sb = getServerSupabase();
-  if (sb) {
-    const r = await sb
-      .schema('customer')
-      .from('lab_test_id_captures')
-      .select('shipment_ref, normalized_value, status')
-      .eq('diagnostic_user_id', data.diagnosticUserId)
-      .neq('status', 'superseded');
-    for (const row of r.data ?? []) {
-      captured.set(String(row.shipment_ref), {
-        mask: maskExternalId(String(row.normalized_value ?? '')),
-        needsReview: row.status !== 'confirmed',
-      });
-    }
-  }
+  if (sb) captured = await loadRegisteredCaptures(sb, data.diagnosticUserId);
 }
+
+/**
+ * **撮り忘れの催促 (7 日ワーニング)**。正本 = 仕様 §7.1・判定は `barcodeReminders()`。
+ *
+ * 出すのは**撮影ブロックが同じ画面に在るとき**だけ (`captureOn.prevent` ∧ `canSelfReport`)。
+ * 押す先は**その出荷の撮影ブロック** (`#extid-<id>`) で、ページ先頭へは送らない。
+ */
+const barcodeWarnings = (data && canSelfReport)
+  ? barcodeReminders({
+      shipments: shipments.map((s) => ({ id: s.id, test_type: s.test_type, shipped_at: s.shipped_at })),
+      registered: new Set(captured.keys()),
+      captureEnabled: captureOn.prevent,
+    })
+  : [];
 
 /** この出荷で撮影ブロックを出すか。出すなら provider を返す。 */
 function captureProviderFor(s: { test_type: string; shipped_at: string | null }): ExternalIdProvider | null {
@@ -264,7 +274,18 @@ function selfReportFor(
                         </span>
                       </header>
 
-                      <div class="lg:grid lg:grid-cols-[minmax(0,1fr)_18rem] lg:gap-8">
+                      {/*
+                        **撮り忘れの催促 (7 日ワーニング)**・仕様 §7.1。
+                        **その出荷の分だけ**をカード内に出す (どのキットの話か迷わせない)。
+                        押すと同じカードの撮影ブロック (`#extid-<id>`) へ飛ぶ。
+                      */}
+                      <ExternalIdReminder
+                        reminders={barcodeWarnings.filter((w) => w.shipmentId === s.id)}
+                        hrefFor={(id) => `#extid-${id}`}
+                        idLabel={PROVIDER_ID_LABEL.prevent}
+                      />
+
+                      <div class="mt-4 lg:grid lg:grid-cols-[minmax(0,1fr)_18rem] lg:gap-8">
                       {/* 6 段階のタイムライン。到達済み / 現在地 / 未到達 / 未取得 を形でも区別する。 */}
                       <ol class="flex flex-col gap-0">
                         {SHIPMENT_STAGES.map((st, i) => {

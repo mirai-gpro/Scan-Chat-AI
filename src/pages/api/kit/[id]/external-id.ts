@@ -4,12 +4,13 @@ import { denyReadOnlyWrite, denyForShare, denyAnonymous } from '../../../../lib/
 import { getServerSupabase } from '../../../../lib/supabase';
 import { cfg, cfgBool, refreshConfig } from '../../../../lib/app-config';
 import {
-  evaluateExternalId, isExternalIdProvider, providerMatchesTestType,
+  evaluateExternalId, isExternalIdProvider, providerMatchesTestType, normalizeExternalId,
   type CaptureMethod, type ExternalIdProvider,
 } from '../../../../lib/external-test-id';
 import { createEvidenceTicket, fetchEvidence } from '../../../../lib/external-id-evidence';
 import { readExternalIdFromImage } from '../../../../lib/external-id-read';
 import { persistExternalIdCapture, expectedTestType } from '../../../../lib/external-id-persist';
+import { rememberRead, recallRead } from '../../../../lib/external-id-read-cache';
 
 export const prerender = false;
 
@@ -25,7 +26,11 @@ export const prerender = false;
  *   'read'     … S3 の画像を Gemini で読み、**候補だけ**返す（DB は 1 バイトも書かない）
  *                 **読み取りが成功したかは発行元の接頭辞（`704`＝Wellfort）でも見る**
  *                 （`labid.prevent_org_prefix`・外れたら `org_prefix_mismatch`）。
- *   'register' … ユーザーが確認した値を確定して登録（台帳 ＋ `lab_tests` 紐付け）
+ *   'register' … ユーザーが確認したうえで確定し、登録する（台帳 ＋ `lab_tests` 紐付け）
+ *                 **値は body から採らない。`read` が控えた結果をサーバ側で引き直す**
+ *                 （仕様 §12.2 の案 (c)・発注者指示 2026-10-22）。画面が送れるのは
+ *                 「どの証跡か」(`evidenceKey`) と「画面に出ていた値」(`confirmedValue`・
+ *                 突き合わせ用) だけ。**画面の自己申告を値の出どころにしない。**
  *
  * 【認可は `self-report.ts:26-40` の 3 段ガードをそのまま使う。新しい認可を発明しない】
  *   - 代理表示中は書かせない（`denyReadOnlyWrite`）
@@ -101,10 +106,14 @@ export const POST: APIRoute = async (ctx) => {
       apiKey: apiKey(),
     });
     if (!read.ok) {
-      // **行き止まりにしない。** 読めなかったことを伝えて、手入力へ落とせるようにする。
+      /*
+       * **行き止まりにしない = 撮り直しへ戻す。** 手入力へは落とさない
+       * （§4.4.2 で経路ごと撤去した。チェックディジットが無いので打ち間違いが
+       *   正しい形の別の番号になり、何にも拾えない）。
+       */
       return json({
         ok: false, error: read.error ?? 'read_failed',
-        detail: '画像から番号を読み取れませんでした。撮り直すか、番号を手で入力してください。',
+        detail: '画像から番号を読み取れませんでした。明るい場所で、もう一度撮影してください。',
         note: read.note,
       }, 422);
     }
@@ -119,9 +128,31 @@ export const POST: APIRoute = async (ctx) => {
     if (!ev.ok) {
       return json({
         ok: false, error: 'no_readable_value',
-        detail: '番号として読み取れませんでした。撮り直すか、番号を手で入力してください。',
+        detail: '番号として読み取れませんでした。枠に番号とバーコードを入れて、もう一度撮影してください。',
         note: read.note,
       }, 422);
+    }
+
+    /*
+     * **読み取りの生値をサーバ側に控える**（仕様 §12.2 の案 (c)）。
+     * `register` はここで控えたものだけを使うので、**控えられなかった回は
+     * 確認画面へ進めない** — 進めると「確認したのに登録できない」で詰まる。
+     * 控えるのは `barcode` / `printed` の生値だけで、判定は控えない
+     * （`register` が `evaluateExternalId` を呼び直す＝判定を 2 か所に置かない）。
+     */
+    const kept = await rememberRead({
+      evidenceKey: body.evidenceKey,
+      diagnosticUserId: uid,
+      shipmentRef,
+      provider,
+      barcode: read.barcode,
+      printed: read.printed,
+    });
+    if (!kept.ok) {
+      return json({
+        ok: false, error: kept.error,
+        detail: '読み取りの結果を保存できませんでした。通信の状態をお確かめのうえ、もう一度撮影してください。',
+      }, 503);
     }
 
     // **候補を返すだけ。ここでは確定しない**（確定はユーザーの確認操作のあと）。
@@ -147,17 +178,61 @@ export const POST: APIRoute = async (ctx) => {
     const captureMethod = normalizeCaptureMethod(body.captureMethod);
     if (!captureMethod) return json({ ok: false, error: 'invalid_capture_method' }, 400);
 
-    // **ユーザーが画面で確認した値**を採る。manual は手入力補正。
+    /*
+     * **画面が値を持ち込む口を閉じる**（仕様 §12.2・発注者指示 2026-10-22 = 案 (c)）。
+     * ここで `barcode` / `printed` / `manual` を受けると、**一致する 2 値を送るだけで
+     * 誰でも `confirmed` を作れる** = 問診CSV の fail-closed ゲートが意味を失う。
+     * **黙って無視せず 400 で落とす** — 将来クライアントが送り始めたら
+     * その場で見えるようにしておく（静かに効かなくなるのを避ける）。
+     */
+    if (body.barcode != null || body.printed != null || body.manual != null) {
+      return json({
+        ok: false, error: 'client_supplied_value',
+        detail: '番号は画面から送れません（サーバが読み取った結果だけを使います）',
+      }, 400);
+    }
+
+    /*
+     * **値の出どころは `read` が控えた結果だけ。** 結び付き（本人・今回の受取・検査種別）と
+     * 期限は `recallRead` が見る。引けない回は**撮り直しへ戻す** (fail-closed)。
+     */
+    const recalled = await recallRead({
+      evidenceKey: body.evidenceKey,
+      diagnosticUserId: uid,
+      shipmentRef,
+      provider,
+    });
+    if (!recalled.ok) {
+      return json({
+        ok: false, error: recalled.error,
+        detail: '読み取りの結果が見つかりませんでした。お手数ですが、もう一度撮影してください。',
+      }, recalled.status);
+    }
+
+    // **判定はここで 1 回だけ**（控えた生値 → `evaluateExternalId`）。
+    // 控えに判定を入れていないので、`labid.*` を直したあとは新しい判定が当たる。
     const ev = evaluateExternalId({
       provider,
-      barcode: body.barcode,
-      ocr: body.printed,
-      manual: body.manual,
+      barcode: recalled.read.barcode,
+      ocr: recalled.read.printed,
       expectedPattern: patternFor(provider),
       orgPrefix: orgPrefixFor(provider),
     });
     if (!ev.ok) {
       return json({ ok: false, error: 'no_readable_value', detail: '登録できる番号がありません' }, 400);
+    }
+
+    /*
+     * **画面に出ていた値と一致するか**だけ突き合わせる（任意）。
+     * これは**値の出どころではなく、利用者が確認した画面が古くないかの検査**。
+     * 食い違う回は、別のタブ・前の撮影の確認画面を押している可能性がある。
+     */
+    if (typeof body.confirmedValue === 'string' && body.confirmedValue.trim() !== ''
+      && normalizeExternalId(body.confirmedValue) !== ev.value) {
+      return json({
+        ok: false, error: 'confirmation_mismatch',
+        detail: '画面の番号と読み取り結果が一致しませんでした。もう一度撮影してください。',
+      }, 409);
     }
 
     const sb = getServerSupabase();

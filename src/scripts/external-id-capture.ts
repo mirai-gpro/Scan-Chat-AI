@@ -19,9 +19,16 @@
  * （`kit-self-report.ts:16-18` と同じ・他人の uid を書かせない）。
  *
  * 【2026-10-21 の変更（発注者指示）】
- *   - **「写真を選ぶ」を撤去**した。ファイル選択の `change` 経路も一緒に消えたので、
- *     画面から入る口は**アプリ内カメラと手入力の 2 つだけ**。
- *     サーバは `captureMethod: 'file'` を受け続ける（既存の台帳行と DB の check 制約）。
+ *   - **「写真を選ぶ」を撤去**した。ファイル選択の `change` 経路も一緒に消えた。
+ *   - **手入力も撤去**した（「**チェックデジットもないのに、重要な検査IDを手入力させる
+ *     対応はありえない**」）。**この番号にはチェックディジットが無い**ので、1 桁の
+ *     打ち間違いが**正しい形の別の番号**になり、黙って別の検査に紐づく。
+ *     → **画面から入る口はアプリ内カメラ 1 つだけ**。読めなかった回は**撮り直す**。
+ *     **失敗したときに手入力へ落とさない** — 落とすと、まさに打ち間違いが混ざる場面
+ *     （カメラが使えない・S3 が落ちた・読み取れない）でだけ誤りを招き入れることになる。
+ *     それでも読めない回は **admin の確認・訂正経路（仕様 §12.1）**が引き受ける。
+ *     サーバは `captureMethod: 'file' / 'manual'` を受け続ける
+ *     （既存の台帳行と DB の check 制約）。
  *   - **登録済みでも「登録し直す」から撮り直せる**ようにした（仕様 §8.3）。
  *     API は以前から撮り直しに対応しているので、**ここで足したのは面の出し入れだけ**。
  */
@@ -39,7 +46,6 @@ interface Ctx {
   confirmEl: HTMLElement | null;
   candidateEl: HTMLElement | null;
   noteEl: HTMLElement | null;
-  manualEl: HTMLElement | null;
   /** 「別の用紙／別の数字かもしれません」の案内。 */
   wrongEl: HTMLElement | null;
   /** アプリ内カメラの面と、その中の要素。 */
@@ -49,18 +55,16 @@ interface Ctx {
   cameraStatusEl: HTMLElement | null;
   /** `/scan` と同じコントローラ。**押されるまで作らない**（作っただけでは起動しない）。 */
   camera: CameraScanController | null;
-  inputEl: HTMLInputElement | null;
   /** 登録済みの面 / 撮影の面 / 登録し直すの確認。**登録済みでも両方 markup は在る**。 */
   doneEl: HTMLElement | null;
   formEl: HTMLElement | null;
   redoEl: HTMLElement | null;
   /** 直近の読み取り結果（登録時にサーバへ戻す）。 */
-  read: { barcode: string | null; printed: string | null } | null;
   evidenceKey: string | null;
   /** 発行元の接頭辞（`704`＝Wellfort）。**サーバが返した値だけを使う**（焼き込まない）。 */
   orgPrefix: string;
-  /** 画面から送るのは `camera` と `manual` の 2 つだけ（`file` の経路は撤去済み）。 */
-  captureMethod: 'camera' | 'manual';
+  /** 画面から送るのは `camera` だけ（`file` も `manual` も経路ごと撤去済み）。 */
+  captureMethod: 'camera';
   busy: boolean;
 }
 
@@ -79,18 +83,15 @@ function ctx(root: HTMLElement): Ctx {
     confirmEl: q('[data-extid-confirm]'),
     candidateEl: q('[data-extid-candidate]'),
     noteEl: q('[data-extid-note]'),
-    manualEl: q('[data-extid-manual]'),
     wrongEl: q('[data-extid-wrong]'),
     cameraEl: q('[data-extid-camera]'),
     videoEl: q<HTMLVideoElement>('[data-extid-video]'),
     canvasEl: q<HTMLCanvasElement>('[data-extid-canvas]'),
     cameraStatusEl: q('[data-extid-camera-status]'),
     camera: null,
-    inputEl: q<HTMLInputElement>('[data-extid-input]'),
     doneEl: q('[data-extid-done]'),
     formEl: q('[data-extid-form]'),
     redoEl: q('[data-extid-redo-confirm]'),
-    read: null,
     evidenceKey: null,
     orgPrefix: '',
     captureMethod: 'camera',
@@ -201,8 +202,11 @@ function closeCamera(c: Ctx): void {
 async function openCamera(c: Ctx): Promise<void> {
   if (!c.videoEl || !c.canvasEl || !c.cameraEl) return;
   if (!cameraAvailable()) {
-    say(c, 'この端末ではカメラを使えません。「番号を手で入力する」からご登録ください。');
-    show(c.manualEl, true);
+    /*
+     * **手入力へ落とさない。** PC は下の QR からスマートフォンへ移ってもらう
+     * （`canHandOff` のブロック）。番号を打たせる逃げ道は置かない。
+     */
+    say(c, 'この端末ではカメラを使えません。スマートフォンでこの画面を開いて撮影してください。');
     return;
   }
   clearWrong(c);
@@ -229,9 +233,8 @@ async function openCamera(c: Ctx): Promise<void> {
       },
       onError: (message: string) => {
         closeCamera(c);
-        // **行き止まりにしない** — 権限拒否・カメラ無しはここに来る。
-        say(c, `${message} 「番号を手で入力する」からご登録ください。`);
-        show(c.manualEl, true);
+        // 権限拒否・カメラ無しはここに来る。**手入力へは落とさない**（上のヘッダ参照）。
+        say(c, `${message} カメラの使用を許可してから、もう一度お試しください。`);
       },
     });
   }
@@ -252,10 +255,11 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
     const put = await fetch(url, { method: 'PUT', headers, body: file });
     if (!put.ok) throw new Error(`アップロードに失敗しました (${put.status})`);
   } catch (err) {
-    // S3 未設定 / CORS 未設定 / 回線断 は**区別できない**。手入力へ落とす。
-    say(c, `写真を送れませんでした。${c.idLabel}を手で入力してください。`);
-    c.captureMethod = 'manual';
-    show(c.manualEl, true);
+    /*
+     * S3 未設定 / CORS 未設定 / 回線断 は**区別できない**ので原因を断定しない。
+     * **手入力へ落とさない** — 通信が不調なだけの回に、打ち間違いの余地を作ってしまう。
+     */
+    say(c, '写真を送れませんでした。通信の状態をお確かめのうえ、もう一度撮影してください。');
     show(c.confirmEl, false);
     void err;
     return false;
@@ -266,12 +270,11 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
   try {
     const r = await post(c, { mode: 'read', evidenceKey: key });
     const candidate = String(r.candidate ?? '');
-    c.read = {
-      barcode: null,
-      printed: null,
-    };
-    // サーバは採った値だけを返す。登録時は**同じ値**を manual として送り直す
-    // （サーバ側でもう一度 evaluate されるので、判定はサーバが正）。
+    /*
+     * サーバは採った値だけを返す。**登録時に送り返さない** —
+     * 読み取りの生値はサーバが `evidenceKey` で控えてある（仕様 §12.2 の案 (c)）。
+     * ここで持っているのは**画面に出す文字**で、登録の根拠ではない。
+     */
     if (c.candidateEl) c.candidateEl.textContent = candidate;
     const reasons = Array.isArray(r.review_reasons) ? (r.review_reasons as string[]) : [];
     c.orgPrefix = typeof r.org_prefix === 'string' ? r.org_prefix : '';
@@ -300,20 +303,20 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
         `読み取れた数字が${c.idLabel}の形と違います。${whereText(c)} この番号で間違いなければ、そのまま登録できます。`);
     }
     show(c.confirmEl, true);
-    show(c.manualEl, false);
     say(c, '');
     return true;
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
     say(c, `${msg}`);
     show(c.confirmEl, false);
-    show(c.manualEl, true);
     /*
      * 読めなかったとき。**原因はこちらから見えない**（別の用紙 / 手ブレ / 影 / 画像が粗い）
-     * ので、**断定せずに「どこを撮るか」をもう一度出す**。手入力も開いてあるので
-     * 行き止まりにはならない。
+     * ので、**断定せずに「どこを撮るか」をもう一度出す**。
+     * **手入力へは誘導しない** — ここで番号を打たせると、読めなかった回にだけ
+     * 打ち間違いが混ざる（§12.1 の admin 訂正が引き受ける）。
      */
-    showWrong(c, '番号を読み取れませんでした', `${whereText(c)} うまくいかないときは、下の欄に手で入力してください。`);
+    showWrong(c, '番号を読み取れませんでした',
+      `${whereText(c)} 明るい場所で、影や反射が入らないように撮り直してください。`);
     return false;
   }
 }
@@ -337,16 +340,24 @@ export function reasonText(reasons: string[], note: string | null): string {
   return parts.join(' ');
 }
 
-async function register(c: Ctx, value: string, method: 'camera' | 'manual'): Promise<void> {
+async function register(c: Ctx, value: string, method: 'camera'): Promise<void> {
   if (c.busy) return;              // 二重 submit よけ（サーバ側も冪等）
   c.busy = true;
   say(c, '登録しています…');
   try {
+    /*
+     * **番号そのものは送らない**（仕様 §12.2 の案 (c)・発注者指示 2026-10-22）。
+     * サーバは `read` で控えた読み取り結果を `evidenceKey` で引き直して登録する。
+     * ここで値を送っていた頃は、それが `manual` として扱われて
+     * **必ず `review_required`（`manual_entry`）になり問診CSV へ 1 件も出なかった**。
+     * `confirmedValue` は**画面に出ていた値が古くないかの突き合わせ用**で、
+     * 値の出どころではない（サーバは一致しなければ 409 で止める）。
+     */
     const r = await post(c, {
       mode: 'register',
-      manual: value,
       captureMethod: method,
       evidenceKey: c.evidenceKey,
+      confirmedValue: value,
     });
     // 成功したら**再読込して状態をサーバから取り直す**（JS で組み立て直さない）。
     say(c, String(r.message ?? '登録しました。'));
@@ -417,20 +428,8 @@ export function initExternalIdCapture(): void {
       show(c.formEl, true);
       clearWrong(c);
       show(c.confirmEl, false);
-      show(c.manualEl, false);
-      c.read = null; c.evidenceKey = null; c.captureMethod = 'camera';
+      c.evidenceKey = null; c.captureMethod = 'camera';
       say(c, 'もう一度撮影してください。登録すると今の番号を上書きします。');
-      return;
-    }
-
-    /*
-     * 手入力の欄を開く。**撮影の代わりではなく逃げ道**なので、ここでは何も送らない
-     * （「写真を選ぶ」を撤去した 2026-10-21 以降、カメラの無い端末の唯一の口）。
-     */
-    if (t?.closest?.('[data-extid-manual-open]')) {
-      show(c.manualEl, true);
-      c.inputEl?.focus();
-      say(c, `${c.idLabel}を入力して登録してください。`);
       return;
     }
 
@@ -454,22 +453,10 @@ export function initExternalIdCapture(): void {
       return;
     }
     if (t?.closest?.('[data-extid-retake]')) {
-      c.read = null; c.evidenceKey = null;
+      c.evidenceKey = null;
       clearWrong(c);
-      show(c.confirmEl, false); show(c.manualEl, false);
+      show(c.confirmEl, false);
       say(c, 'もう一度撮影してください。');
-      return;
-    }
-    if (t?.closest?.('[data-extid-edit]')) {
-      if (c.inputEl) c.inputEl.value = c.candidateEl?.textContent?.trim() ?? '';
-      show(c.manualEl, true);
-      say(c, '番号を直してから登録してください。');
-      return;
-    }
-    if (t?.closest?.('[data-extid-register-manual]')) {
-      const v = c.inputEl?.value?.trim() ?? '';
-      if (!v) { say(c, `${c.idLabel}を入力してください。`); return; }
-      void register(c, v, 'manual');
       return;
     }
   });

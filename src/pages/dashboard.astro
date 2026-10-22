@@ -18,11 +18,15 @@ import AddToHomeCard from '../components/AddToHomeCard.astro';
 import { loadDashboard, formatGreeting, getHealthAge, formatJpDate, testTypeLabel } from '../lib/dashboard-queries';
 import { getLatestMeasurements } from '../lib/measurement-queries';
 import { countUnreadImportant } from '../lib/notice-queries';
-import { refreshConfig, cfg } from '../lib/app-config';
+import { refreshConfig, cfg, cfgBool } from '../lib/app-config';
+import { loadRegisteredCaptures } from '../lib/external-id-persist';
+import { barcodeReminders } from '../lib/external-id-reminder';
+import { PROVIDER_ID_LABEL } from '../lib/external-test-id';
+import ExternalIdReminder from '../components/dashboard/ExternalIdReminder.astro';
 import { demoFallbackEnabled } from '../lib/demo-data';
 import { isSpecialAccount } from '../lib/special-accounts';
 import { getLatestInterviewCompletion } from '../lib/interview-completion';
-import { isBridgeConfigured } from '../lib/supabase';
+import { isBridgeConfigured, getServerSupabase } from '../lib/supabase';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
 import {
   extractUrgentAlert,
@@ -176,6 +180,31 @@ const singlePurchaseTypes = singlePurchase
  */
 const interviewDone = data ? await getLatestInterviewCompletion(data.diagnosticUserId) : null;
 const checkups = (data?.artifacts ?? []).filter((a) => a.test_type === 'health_checkup');
+
+/*
+ * ──────────────────────────────────────────────────────────────────────
+ * **外部検査ID の撮り忘れの催促 (7 日ワーニング)**。正本 = 仕様 §7.1。
+ * ──────────────────────────────────────────────────────────────────────
+ * 発注者指示 2026-10-21:「がんリスク検査キットの出荷済日付から 7 日以上で
+ * 登録済ステータスでない場合、カメラ読込受取確認を促す」。
+ *
+ * **判定は `barcodeReminders()` が持つ** (`/kit` と同じ関数・同じ集合)。
+ * ここで条件を書き直すと、片方の画面だけ催促が出る / 出ないになる。
+ *
+ * **共有閲覧では出さない** — 撮影は本人の操作で、共有相手には撮影ブロックも出ない。
+ * 撮影が off (`labid.prevent_capture`) の間は `barcodeReminders` が 0 件を返す。
+ */
+const barcodeCaptureOn = cfgBool('labid.prevent_capture');
+const barcodeWarnings: { shipmentId: string; days: number }[] = [];
+if (data && viewer.kind !== 'share' && barcodeCaptureOn) {
+  const sb = getServerSupabase();
+  const registered = sb ? await loadRegisteredCaptures(sb, data.diagnosticUserId) : new Map();
+  barcodeWarnings.push(...barcodeReminders({
+    shipments: (data.shipments ?? []).map((x) => ({ id: x.id, test_type: x.test_type, shipped_at: x.shipped_at })),
+    registered: new Set(registered.keys()),
+    captureEnabled: true,
+  }));
+}
 
 /*
  * **報告書のタイルを押せるか** (発注者指示 2026-09-15「報告書が無い場合はグレーアウトに」)。
@@ -375,6 +404,19 @@ const reportHref = manualPdfReport
             course … ① AI問診 → ② スキャン → ③ 検査キット → ④ 報告書
             single … ① AI問診 → ② スキャン →           ③ 報告書
         */}
+        {/*
+          **撮り忘れの催促 (7 日ワーニング)**。進捗セクションの**すぐ上**に置く —
+          これは「次にすること」そのものなので、進捗より下だと見つけてもらえない。
+          押すと `/kit` の**その出荷の撮影ブロック**へ飛ぶ (ページ先頭へは送らない)。
+        */}
+        {barcodeWarnings.length > 0 && (
+          <ExternalIdReminder
+            reminders={barcodeWarnings}
+            hrefFor={(id) => `${linkPrefix}/kit${q}#extid-${id}`}
+            idLabel={PROVIDER_ID_LABEL.prevent}
+          />
+        )}
+
         <ProgressSection
           mode={singlePurchase ? 'single' : 'course'}
           planName={singlePurchase ? singlePurchasePlanName : data?.subscription?.plan_name}

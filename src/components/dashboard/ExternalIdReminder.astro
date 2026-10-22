@@ -1,0 +1,72 @@
+---
+import AppIcon from '../AppIcon.astro';
+import type { BarcodeReminder } from '../../lib/external-id-reminder';
+
+/**
+ * 受取時・外部検査ID — **撮り忘れの催促**（7 日ワーニング）。
+ *
+ * 正本: `docs/lab/kit_receipt_external_id_capture_spec.md` §7.1。
+ *
+ * > 発注者指示 2026-10-21:
+ * > 「バーコードNo登録済か？のワーニングは、がんリスク検査キットの出荷済日付から
+ * > 7 日以上で登録済ステータスでない場合、カメラ読込受取確認を促す」
+ *
+ * 【出す / 出さないの判定は持たない】
+ * 対象の選別は `barcodeReminders()`（純関数）が済ませてある。
+ * ここは**渡された分を描くだけ** — 条件をこの器にも書くと、画面ごとに
+ * 判定が食い違う（片方だけ催促が出る / 出ない）。
+ *
+ * 【行き先を必ず持つ】
+ * 「促す」ための帯なので、**押す先が無いなら出さない**。
+ *   - `/kit` … 同じページの撮影ブロックへ（`href` = `#extid-<id>`）
+ *   - ダッシュボード … `/kit` の該当ブロックへ
+ * 撮影ブロックが出ていない画面（代理表示・共有閲覧・撮影が off）では
+ * 呼び出し側が `reminders` を空で渡すので、ここには来ない。
+ *
+ * 【赤にしない】`status-watch`（注意）。期限切れでも失敗でもなく、
+ * **やってもらえば済むこと**なので救急の赤は使わない（`CLAUDE.md`「赤は救急サインだけ」）。
+ */
+interface Props {
+  reminders: BarcodeReminder[];
+  /** 出荷 ID → 押したときの行き先。無い出荷は描かない（行き止まりを作らない）。 */
+  hrefFor: (shipmentId: string) => string | null;
+  /** 先方の呼び方そのまま（当社で言い換えない）。 */
+  idLabel: string;
+}
+const { reminders, hrefFor, idLabel } = Astro.props as Props;
+
+/** 行き先が無いものは落とす。**0 件なら帯ごと出さない。** */
+const rows = reminders
+  .map((r) => ({ ...r, href: hrefFor(r.shipmentId) }))
+  .filter((r): r is BarcodeReminder & { href: string } => !!r.href);
+---
+
+{rows.length > 0 && rows.map((r) => (
+  <div
+    class="flex flex-col gap-2 rounded-xl border p-3 status-watch sm:flex-row sm:items-center sm:gap-3"
+    role="status"
+    data-extid-reminder
+    data-shipment-id={r.shipmentId}
+    data-days={String(r.days)}
+  >
+    <AppIcon name="watch" size={20} />
+    <p class="min-w-0 flex-1 text-sm">
+      {/*
+        **日数は実測値をそのまま出す**（「7 日以上」と丸めない）。
+        閾値を持つのは `external-id-reminder.ts` 1 か所だけなので、文言と判定がずれない。
+      */}
+      がんリスク検査キットの発送から<span class="tnum font-semibold">{r.days}</span>日が
+      たっていますが、{idLabel}がまだ登録されていません。
+      同梱の用紙をカメラで撮影して、受取確認をお願いします。
+      <span class="block text-slate-700">
+        登録がないと検査機関へ問診データをお渡しできないため、検査が始まりません。
+      </span>
+    </p>
+    <a
+      href={r.href}
+      class="flex min-h-touch shrink-0 items-center justify-center gap-2 rounded-xl border border-navy-400 bg-white px-3.5 text-base font-semibold text-slate-800 transition hover:bg-brand-50"
+    >
+      <AppIcon name="camera" size={18} />撮影して登録する
+    </a>
+  </div>
+))}

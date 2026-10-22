@@ -967,8 +967,8 @@ console.log('\n⑬ UI の契約\n');
     && !/type="file"/.test(code('src/components/dashboard/ExternalIdCapture.astro')));
   ok('ファイル選択の `change` 経路も消えている',
     !/data-extid-file/.test(code('src/scripts/external-id-capture.ts')));
-  ok('画面から送る captureMethod は camera と manual だけ',
-    /captureMethod: 'camera' \| 'manual';/.test(code('src/scripts/external-id-capture.ts')));
+  ok('画面から送る captureMethod は camera だけ',
+    /captureMethod: 'camera';/.test(code('src/scripts/external-id-capture.ts')));
   /*
    * **サーバは `file` を受け続ける。** 既に台帳に入っている行と DB の check 制約
    * (`20261011000010:50`) があるので、受け口を狭めると過去の行が読めなくなる。
@@ -993,34 +993,45 @@ console.log('\n⑬ UI の契約\n');
     ok('ページを離れるときに止める', /pagehide[\s\S]{0,300}closeCamera/.test(scr));
     ok('撮ったらカメラを閉じてから読み取りへ回す',
       /closeCamera\(c\);[\s\S]{0,200}captureAndRead\(c, file\)/.test(scr));
-    ok('権限拒否・カメラ無しは手入力へ逃がす（行き止まりにしない）',
-      /onError[\s\S]{0,400}手で入力/.test(scr)
-      && /onError[\s\S]{0,400}show\(c\.manualEl, true\)/.test(scr));
-    ok('カメラの無い端末でも手入力の欄を開く',
-      /cameraAvailable\(\)\) \{[\s\S]{0,300}show\(c\.manualEl, true\)/.test(scr));
+    ok('権限拒否は撮り直しへ戻す（手入力へ落とさない）',
+      /onError[\s\S]{0,400}もう一度お試しください/.test(scr));
   }
   /*
-   * **手入力への逃げ道。** 「写真を選ぶ」を撤去した 2026-10-21 以降、
-   * カメラの無い PC と権限を拒否した端末はここしか残っていない（仕様 §5.1）。
-   * **`touch-only` を付けると PC から登録できなくなる**ので、そこを見る。
+   * ── 手入力は**経路ごと撤去**（発注者指示 2026-10-21）──
+   *
+   * **チェックディジットが無い**ので、1 桁の打ち間違いが**正しい形の別の番号**になり、
+   * 画面も台帳も `linked` と表示したまま**黙って別の検査に紐づく**。
+   * 「行き止まりにしない」(§5.1) は**撮り直し**と**スマートフォンへの導線**で満たす。
+   *
+   * **ここは静かに戻る** — 入力欄を 1 つ足すだけで画面は「親切」に見える。
+   * markup とハンドラの**両方**で口が無いことを見る。
    */
   {
-    const m = comp.match(/<button[^>]*data-extid-manual-open>/);
-    ok('手入力を開く口がある', !!m);
-    ok('手入力の口は touch-only でない (PC でも開ける)', !!m && !/touch-only/.test(m[0]));
-    ok('手入力の口はタップ領域を確保している', !!m && /min-h-touch/.test(m[0]));
-    ok('手入力の口は欄を開くだけ（ここでは何も送らない）',
-      /data-extid-manual-open\]'\)\) \{[\s\S]{0,200}show\(c\.manualEl, true\)/.test(code('src/scripts/external-id-capture.ts'))
-      && !/data-extid-manual-open\]'\)\) \{[\s\S]{0,200}register\(/.test(code('src/scripts/external-id-capture.ts')));
+    const scr2 = code('src/scripts/external-id-capture.ts');
+    ok('**番号を入力する欄が無い**',
+      !/data-extid-input/.test(comp) && !/data-extid-manual\b/.test(comp)
+      && !/<input[^>]*inputmode="numeric"/.test(comp));
+    ok('**手入力を開く口が無い**', !/data-extid-manual-open/.test(comp) && !/data-extid-manual-open/.test(scr2));
+    ok('**番号を直す口が無い**', !/data-extid-edit/.test(comp) && !/data-extid-edit/.test(scr2));
+    ok('**手入力で登録する口が無い**',
+      !/data-extid-register-manual/.test(comp) && !/data-extid-register-manual/.test(scr2));
+    ok('画面の処理に入力欄への参照が残っていない',
+      !/inputEl/.test(scr2) && !/manualEl/.test(scr2));
+    /*
+     * **失敗したときに手入力へ落とさない。** 落とすと、まさに打ち間違いが混ざる場面
+     * （カメラが使えない・S3 が落ちた・読み取れない）でだけ誤りを招き入れる。
+     */
+    ok('S3 が落ちても手入力へ落とさない（撮り直しを促す）',
+      !/captureMethod = 'manual'/.test(scr2) && /もう一度撮影してください/.test(scr2));
+    ok('カメラの無い端末はスマートフォンへ送る（番号を打たせない）',
+      /cameraAvailable\(\)\) \{[\s\S]{0,400}スマートフォン/.test(scr2));
   }
-  ok('撮り直し・手入力の逃げ道がある',
-    /data-extid-retake/.test(comp) && /data-extid-manual/.test(comp));
+  ok('撮り直しの逃げ道がある', /data-extid-retake/.test(comp));
   ok('確認してから登録する (即確定しない)', /data-extid-register/.test(comp) && /この番号で登録する/.test(comp));
 
   const script = code('src/scripts/external-id-capture.ts');
   ok('uid を属性で渡していない', !/diagnosticUserId|data-diagnostic-user-id/.test(script));
   ok('二重 submit よけがある', /busy/.test(script));
-  ok('S3 が落ちたら手入力へ落ちる', /captureMethod = 'manual'/.test(script));
   ok('登録後は再読込で状態を取り直す', /window\.location\.reload\(\)/.test(script));
 
   /*
@@ -1173,8 +1184,9 @@ console.log('\n⑬ UI の契約\n');
         && !/\breturn\b/.test(branch),
         branch.slice(0, 160));
     }
-    ok('読めなかったときも案内を出す (手入力は開く)',
-      /show\(c\.manualEl, true\);[\s\S]{0,400}showWrong/.test(scr));
+    ok('読めなかったときは撮り直しの案内を出す（手入力へ誘導しない）',
+      /showWrong\(c, '番号を読み取れませんでした'[\s\S]{0,200}撮り直してください/.test(scr)
+      && !/手で入力/.test(scr.slice(scr.indexOf("'番号を読み取れませんでした'"))));
     ok('撮り直し・再読取で前回の案内を消す',
       /clearWrong\(c\);/.test(scr) && (scr.match(/clearWrong\(c\)/g) ?? []).length >= 2);
     /*
@@ -1232,13 +1244,12 @@ console.log('\n⑬ UI の契約\n');
       open.slice(0, 120));
     const yes = (() => {
       const i = scr.indexOf('data-extid-redo-yes]');
-      const j = scr.indexOf('data-extid-manual-open]', i);
+      const j = scr.indexOf('data-extid-camera-open]', i);
       return i >= 0 && j > i ? scr.slice(i, j) : '';
     })();
     ok('承諾して初めて面が入れ替わる',
       /show\(c\.doneEl, false\)/.test(yes) && /show\(c\.formEl, true\)/.test(yes));
-    ok('前回の候補・証跡を持ち越さない',
-      /c\.read = null; c\.evidenceKey = null/.test(yes));
+    ok('前回の証跡を持ち越さない', /c\.evidenceKey = null/.test(yes));
     ok('上書きになることを撮影中も出す', /上書きします/.test(yes));
     /*
      * **撮り直しは API を変えずに成立している。** 台帳は旧行を `superseded` に
@@ -1324,7 +1335,12 @@ console.log('\n⑬ UI の契約\n');
   ok('共有閲覧では出さない', /if \(!canSelfReport\) return null;/.test(kit));
   ok('発送前には出さない', /if \(!s\.shipped_at\) return null;/.test(kit));
   ok('provider は test_type から引く (名前で推測しない)', /providerForTestType\(s\.test_type\)/.test(kit));
-  ok('全文ではなくマスクを渡す', /maskExternalId/.test(kit) && !/normalized_value\s*\}\s*\)/.test(kit));
+  // **全文ではなくマスクを渡す。** 引くのは共通の `loadRegisteredCaptures()` なので、
+  // ページ側は `normalized_value` を 1 文字も触らない（触れたら全文が画面へ出る口になる）。
+  ok('全文ではなくマスクを渡す (ページは normalized_value を触らない)',
+    /loadRegisteredCaptures\(/.test(kit) && !/normalized_value/.test(kit));
+  ok('台帳の読み出しは共通関数が持つ (ページで SQL を書かない)',
+    !/lab_test_id_captures/.test(kit));
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -1533,6 +1549,338 @@ console.log('\n⑮ 手順書の同期\n');
   ok('プリベントの system プロンプトが手順書に載っている',
     firstLine.length > 0 && (cur ?? '').includes(firstLine), firstLine.slice(0, 40));
   ok('**実物の写真を入れないと書いてある**', (cur ?? '').includes('リポジトリに入れない'));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑯ 7 日ワーニング — 撮り忘れの催促 (仕様 §7.1・発注者指示 2026-10-21)
+//
+// 【ここは静かに壊れる】催促は**出なくてもエラーにならない**。
+// 出ないまま検体だけが検査会社に届き、問診データを渡せないので検査が始まらない
+// （しかも画面は正常に見える）。逆に**撮った人を催促し続ける**のも静かな壊れ方。
+//
+// 判定は純関数なので**実物を動かして**測る。画面側は「同じ関数を使っているか」と
+// 「押す先があるか」を見る。
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
+{
+  const rem = await load('src/lib/external-id-reminder.ts', [
+    [/import \{ PROVIDER_TEST_TYPE \} from '\.\/external-test-id';/, "const PROVIDER_TEST_TYPE = { prevent: 'cancer_urine', demecal: 'blood' };"],
+  ]);
+  const { barcodeReminders, daysBetweenJst, BARCODE_REMINDER_DAYS, REMINDER_TEST_TYPE } = rem;
+  const NOW = new Date('2026-10-21T01:00:00Z');   // JST 2026-10-21 10:00
+  const ship = (over) => ({ id: 'ord_1', test_type: 'cancer_urine', shipped_at: '2026-10-10', ...over });
+  const run = (over = {}) => barcodeReminders({
+    shipments: [ship(over.ship ?? {})], registered: new Set(over.registered ?? []),
+    captureEnabled: over.captureEnabled ?? true, now: over.now ?? NOW,
+  });
+
+  eq('閾値は 7 日', BARCODE_REMINDER_DAYS, 7);
+  eq('対象はがんリスク (プリベント) だけ', REMINDER_TEST_TYPE, 'cancer_urine');
+
+  // 暦日で数える（時刻の端数で 1 日ずれない）
+  eq('暦日の差', daysBetweenJst('2026-10-10', '2026-10-17T14:59:00Z'), 7);   // JST 10-17 23:59
+  eq('JST で日を切る (UTC 15:00 = JST 翌日 0:00)', daysBetweenJst('2026-10-10', '2026-10-16T15:00:00Z'), 7);
+  eq('読めない日付は null', daysBetweenJst('なんだこれ', NOW), null);
+
+  eq('11 日たっていれば催促する', run().length, 1);
+  eq('経過日数は実測値 (丸めない)', run()[0]?.days, 11);
+  eq('ちょうど 7 日で催促する', run({ now: new Date('2026-10-17T03:00:00Z') }).length, 1);
+  eq('6 日では催促しない', run({ now: new Date('2026-10-16T03:00:00Z') }).length, 0);
+  eq('**撮影が off のときは 1 件も返さない** (行き先が無い)', run({ captureEnabled: false }).length, 0);
+  eq('発送前 (shipped_at なし) は催促しない', run({ ship: { shipped_at: null } }).length, 0);
+  eq('**登録済みの人を急かさない**', run({ registered: ['ord_1'] }).length, 0);
+  eq('別の検査 (血液) は対象外', run({ ship: { test_type: 'blood' } }).length, 0);
+  eq('読めない発送日は催促しない (当てずっぽうで日数を作らない)',
+    run({ ship: { shipped_at: 'いつか' } }).length, 0);
+  eq('複数の出荷でもそれぞれ返す', barcodeReminders({
+    shipments: [ship({ id: 'a' }), ship({ id: 'b' }), ship({ id: 'c', shipped_at: '2026-10-20' })],
+    registered: new Set(['b']), captureEnabled: true, now: NOW,
+  }).map((r) => r.shipmentId), ['a']);
+
+  // ── 「登録済み」の判定を問診CSV のゲートと混ぜない ──
+  // ここは `status <> 'superseded'` で見る（撮った人を急かさないため）。
+  // ゲート (`checkPreventQuestionnaireGate`) は `confirmed` ∧ `linked` を要求する fail-closed。
+  // 片方をもう片方の代わりに使うと「確定していない番号で先方へ出す」か
+  // 「撮った人を催促し続ける」のどちらかになる。
+  const persistSrc = code('src/lib/external-id-persist.ts');
+  const loader = /export async function loadRegisteredCaptures[\s\S]*?\n\}/.exec(persistSrc)?.[0] ?? '';
+  ok('`loadRegisteredCaptures` が在る', loader.length > 0);
+  ok('superseded でない行を引く', /\.neq\('status', 'superseded'\)/.test(loader));
+  ok('**confirmed を条件にしない** (撮った人を急かさない)', !/'confirmed'\s*\)/.test(loader.replace(/!==\s*'confirmed'/g, '')));
+  // **`mask:` に入る値が `maskExternalId()` を通っていること**を見る。
+  // 「どこかに maskExternalId がある」では足りない（別の行で呼んでいても通ってしまう）。
+  const setBlock = /out\.set\(([\s\S]*?)\n\s*\}\);/.exec(loader)?.[1] ?? '';
+  const maskLine = /\bmask:\s*([^\n]*)/.exec(setBlock)?.[1] ?? '';
+  ok('マスクだけを返す (全文を返さない)',
+    /^maskExternalId\(/.test(maskLine.trim()) && !/normalized_value:/.test(loader),
+    maskLine.trim().slice(0, 60));
+  ok('その人の行だけを引く', /\.eq\('diagnostic_user_id', diagnosticUserId\)/.test(loader));
+
+  // ── 画面側 ──
+  const remUi = code('src/components/dashboard/ExternalIdReminder.astro');
+  ok('器は判定を持たない (日数・閾値・登録済みを自分で判断しない)',
+    !/shipped_at|registered|captureEnabled|BARCODE_REMINDER_DAYS/.test(remUi));
+  ok('**行き先が無いものは描かない** (押しても何も起きない帯を出さない)',
+    /hrefFor\(r\.shipmentId\)/.test(remUi) && /\.filter\(/.test(remUi));
+  ok('赤にしない (status-watch)', /status-watch/.test(remUi) && !/status-(?:alert|danger|error)/.test(remUi));
+  ok('呼び名は共通の定義から受け取る (画面で焼かない)',
+    /idLabel/.test(remUi) && !/バーコードNo\./.test(remUi));
+  ok('撮影へ促す文言が在る', /撮影/.test(remUi));
+
+  const cap = code('src/components/dashboard/ExternalIdCapture.astro');
+  ok('撮影ブロックに飛び先の id が在る', /id=\{`extid-\$\{shipmentId\}`\}/.test(cap));
+  ok('呼び名の定義は 1 か所 (external-test-id.ts)',
+    /PROVIDER_ID_LABEL\[provider\]/.test(cap) && /PROVIDER_ID_LABEL: Record/.test(code('src/lib/external-test-id.ts')));
+
+  for (const [page, label] of [['src/pages/kit.astro', '/kit'], ['src/pages/dashboard.astro', 'ダッシュボード']]) {
+    const src = code(page);
+    ok(`${label} が同じ判定関数を使う`, /barcodeReminders\(/.test(src));
+    ok(`${label} が条件を書き直していない`, !/BARCODE_REMINDER_DAYS|>=\s*7|7\s*\*\s*86400/.test(src));
+    ok(`${label} は共有閲覧で催促しない`, /canSelfReport|viewer\.kind !== 'share'/.test(src));
+    ok(`${label} の飛び先は該当の撮影ブロック (ページ先頭へ送らない)`, /#extid-\$\{id\}/.test(src));
+  }
+  // ダッシュボードは撮影が on のときだけ台帳を引く（off の回に無駄な問い合わせを出さない）
+  const dash = code('src/pages/dashboard.astro');
+  // **`if` の条件そのものに `barcodeCaptureOn` と共有閲覧の除外が在ること**を見る。
+  // 「近くに変数名がある」では足りない（宣言だけ残して条件から外す退行が素通りする・実測）。
+  const dashGuard = /if \(([^)]*(?:\([^)]*\)[^)]*)*)\)\s*\{\s*\n\s*const sb = getServerSupabase\(\);/.exec(dash)?.[1] ?? '';
+  ok('ダッシュボードは撮影が off なら台帳を引かない',
+    /cfgBool\('labid\.prevent_capture'\)/.test(dash) && /barcodeCaptureOn/.test(dashGuard),
+    `guard = ${dashGuard || '(見つからない)'}`);
+  ok('ダッシュボードは共有閲覧で台帳を引かない', /viewer\.kind !== 'share'/.test(dashGuard),
+    `guard = ${dashGuard || '(見つからない)'}`);
+  ok('ダッシュボードでも全文を触らない', !/normalized_value/.test(dash));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑰ 読み取り結果をサーバ側に控える (§12.2 の案 (c)・発注者指示 2026-10-22)
+//
+// 【この穴は検査が緑のまま通った】③ は `evaluateExternalId` を barcode / ocr で
+// **直接**呼んでおり、**画面が実際に送る payload を 1 度も通していなかった**。
+// そのため「register は必ず `manual_entry` になり問診CSV へ 1 件も出ない」を
+// 435 件の検査が見逃した。→ ここでは
+//   ①控えの往復を**実物で回す** (S3 はメモリへ差し替え・鍵の検証は実物)
+//   ②API が**画面から値を採らない**こと
+//   ③画面が**値を送らない**こと
+//   ④**画面が送る形で `confirmed` になり、ゲートが通る**こと (= 旧実装では通らなかった)
+// を見る。
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑰ 読み取り結果の控え (§12.2 の案 (c))\n');
+{
+  // ── メモリの S3。**鍵の検証は実物の `isEvidenceKey`** を使う ──
+  const S3CFG = { prefix: 'scan-accuracy-test/', bucket: 'b', region: 'r' };
+  const evMod = await load('src/lib/external-id-evidence.ts', [
+    [/^import \{ PutObjectCommand[\s\S]*?from '@aws-sdk\/client-s3';$/m, ''],
+    [/^import \{ getSignedUrl \}[\s\S]*?from '@aws-sdk\/s3-request-presigner';$/m, ''],
+    [/^import \{ getS3Config[\s\S]*?from '\.\/s3';$/m, ''],
+  ]);
+  globalThis.__isEvidenceKey = evMod.isEvidenceKey;
+
+  let BUCKET = new Map();
+  let failPut = false;
+  globalThis.__cfg = S3CFG;
+  globalThis.__s3 = {
+    send: async (cmd) => {
+      if (cmd.kind === 'put') {
+        if (failPut) throw new Error('s3 down');
+        BUCKET.set(cmd.input.Key, String(cmd.input.Body));
+        return {};
+      }
+      if (!BUCKET.has(cmd.input.Key)) throw new Error('NoSuchKey');
+      const text = BUCKET.get(cmd.input.Key);
+      return { Body: { transformToString: async () => text } };
+    },
+  };
+
+  const cache = await load('src/lib/external-id-read-cache.ts', [
+    [/^import \{ PutObjectCommand, GetObjectCommand \} from '@aws-sdk\/client-s3';$/m,
+      'class PutObjectCommand { constructor(i) { this.input = i; this.kind = "put"; } }\n'
+      + 'class GetObjectCommand { constructor(i) { this.input = i; this.kind = "get"; } }'],
+    [/^import \{ getS3Config, makeS3Client \} from '\.\/s3';$/m,
+      'const getS3Config = () => globalThis.__cfg;\nconst makeS3Client = () => globalThis.__s3;'],
+    [/^import \{ isEvidenceKey \} from '\.\/external-id-evidence';$/m,
+      'const isEvidenceKey = (k, c) => globalThis.__isEvidenceKey(k, c);'],
+  ]);
+
+  const KEY = 'scan-accuracy-test/kit-id-captures/2026/10/22/11111111-2222-3333-4444-555555555555.jpg';
+  const BIND = { diagnosticUserId: 'u-1', shipmentRef: 's-1', provider: 'prevent' };
+  const keep = (over = {}) => cache.rememberRead({
+    evidenceKey: KEY, ...BIND, barcode: '704000123', printed: '704000123', ...over,
+  });
+  const recall = (over = {}) => cache.recallRead({ evidenceKey: KEY, ...BIND, ...over });
+
+  // ── 控えのキー。**ブラウザからは触れない形**であること ──
+  eq('控えは証跡キーの隣に置く', cache.readCacheKey(KEY), `${KEY}.read.json`);
+  ok('**控えのキーは証跡キーとして通らない** (ブラウザは PUT も読み出しもできない)',
+    !evMod.isEvidenceKey(cache.readCacheKey(KEY), S3CFG));
+
+  // ── 往復 ──
+  BUCKET = new Map();
+  eq('控えられる', (await keep()).ok, true);
+  {
+    const r = await recall();
+    ok('引ける', r.ok === true, JSON.stringify(r));
+    eq('バーコードの生値が戻る', r.ok && r.read.barcode, '704000123');
+    eq('印字の生値が戻る', r.ok && r.read.printed, '704000123');
+  }
+  // **判定は控えない** (`labid.*` を直したあとに古い判定が貼り付かないこと)
+  {
+    const raw = BUCKET.get(cache.readCacheKey(KEY)) ?? '';
+    ok('控えに判定 (status / reasons) を入れない', !/status|reason|confirmed|review_required/.test(raw), raw);
+    ok('控えは結び付きを持つ (uid / 受取 / 検査)',
+      /"uid"/.test(raw) && /"shipment_ref"/.test(raw) && /"provider"/.test(raw));
+  }
+
+  // ── 結び付きが 1 つでも違えば通さない ──
+  eq('**別人の控えは使えない**', (await recall({ diagnosticUserId: 'u-2' })).error, 'read_result_mismatch');
+  eq('**別の受取の控えは使えない**', (await recall({ shipmentRef: 's-2' })).error, 'read_result_mismatch');
+  eq('**別の検査の控えは使えない**', (await recall({ provider: 'demecal' })).error, 'read_result_mismatch');
+  eq('食い違いは 409', (await recall({ diagnosticUserId: 'u-2' })).status, 409);
+
+  // ── 期限 ──
+  const past = new Date(Date.now() + cache.READ_CACHE_TTL_MS + 60_000);
+  eq('期限を過ぎたら通さない', (await recall({ now: past })).error, 'read_result_expired');
+  eq('期限内は通る', (await recall({ now: new Date() })).ok, true);
+  {
+    // **未来日時の控えを無期限にしない** (時計のずれ・改ざんで永久に有効化しない)
+    BUCKET.set(cache.readCacheKey(KEY), JSON.stringify({
+      v: 1, uid: 'u-1', shipment_ref: 's-1', provider: 'prevent',
+      barcode: '704000123', printed: '704000123',
+      read_at: new Date(Date.now() + 10 * 60 * 60 * 1000).toISOString(),
+    }));
+    eq('遠い未来の控えも通さない', (await recall()).error, 'read_result_expired');
+    BUCKET.set(cache.readCacheKey(KEY), JSON.stringify({
+      v: 1, uid: 'u-1', shipment_ref: 's-1', provider: 'prevent',
+      barcode: '704000123', printed: '704000123', read_at: 'いつか',
+    }));
+    eq('読めない日時も通さない (無期限にしない)', (await recall()).error, 'read_result_expired');
+  }
+
+  // ── 無い / 壊れている / 鍵が違う ──
+  BUCKET = new Map();
+  eq('控えが無ければ 409 で止める (fail-closed)', (await recall()).error, 'read_result_missing');
+  BUCKET.set(cache.readCacheKey(KEY), '{壊れた');
+  eq('壊れた控えも通さない', (await recall()).error, 'read_result_unreadable');
+  BUCKET.set(cache.readCacheKey(KEY), JSON.stringify({ v: 2, uid: 'u-1' }));
+  eq('知らない版の控えは通さない', (await recall()).error, 'read_result_unreadable');
+
+  const JSONKEY = 'scan-accuracy-test/user/d0000001/date/2026_10_22/HealthCheckupData_x.json';
+  eq('**納品 JSON のキーでは引けない**', (await cache.recallRead({ evidenceKey: JSONKEY, ...BIND })).error, 'invalid_key');
+  {
+    BUCKET = new Map();
+    const w = await cache.rememberRead({ evidenceKey: JSONKEY, ...BIND, barcode: '1', printed: '1' });
+    eq('**納品 JSON のキーへは控えない**', w.ok, false);
+    eq('書き込みも起きない', BUCKET.size, 0);
+  }
+
+  // ── 控えられなかったことを飲み込まない ──
+  BUCKET = new Map(); failPut = true;
+  {
+    // **例外で抜けない**こと自体を見る（throw にすると `read` が 500 になり、
+    // 「撮り直してください」の案内まで届かない）。
+    let w = null; let threw = false;
+    try { w = await keep(); } catch { threw = true; }
+    ok('S3 が落ちても throw しない', !threw);
+    eq('ok:false を返す', threw ? null : w.ok, false);
+    eq('理由が分かる', threw ? null : w.error, 'read_cache_write_failed');
+  }
+  failPut = false;
+
+  // ── ④ **画面が送る形で confirmed になる** (旧実装では必ず review_required) ──
+  {
+    const fromCache = core.evaluateExternalId({
+      provider: 'prevent', barcode: '704000123', ocr: '704000123',
+      expectedPattern: '^704000[0-9]{3}$', orgPrefix: '704',
+    });
+    eq('控えから評価すると confirmed', fromCache.status, 'confirmed');
+    eq('decode は barcode+ocr', fromCache.decodeMethod, 'barcode+ocr');
+    const gate = core.checkPreventQuestionnaireGate({
+      capture: {
+        normalizedValue: fromCache.value, status: fromCache.status,
+        labTestLinkStatus: 'linked', labTestId: 'lt-1',
+      },
+      expectedPattern: '^704000[0-9]{3}$', orgPrefix: '704',
+    });
+    eq('**問診CSV のゲートが通る**', [gate.allowed, gate.reason], [true, 'ok']);
+
+    // 旧実装 (画面が候補を `manual` で送り返す) は**必ず**ここで止まっていた
+    const asManual = core.evaluateExternalId({
+      provider: 'prevent', manual: '704000123',
+      expectedPattern: '^704000[0-9]{3}$', orgPrefix: '704',
+    });
+    eq('旧実装の payload は review_required', asManual.status, 'review_required');
+    eq('理由は manual_entry', asManual.reasons, ['manual_entry']);
+    eq('旧実装ではゲートが全件ブロックした', core.checkPreventQuestionnaireGate({
+      capture: {
+        normalizedValue: asManual.value, status: asManual.status,
+        labTestLinkStatus: 'linked', labTestId: 'lt-1',
+      },
+      expectedPattern: '^704000[0-9]{3}$', orgPrefix: '704',
+    }).reason, 'capture_not_confirmed');
+  }
+
+  // ── ② API: register は画面から値を採らない ──
+  const api = code('src/pages/api/kit/[id]/external-id.ts');
+  const regBlock = (() => {
+    const i = api.indexOf("if (mode === 'register')");
+    return i >= 0 ? api.slice(i) : '';
+  })();
+  const readBlock = (() => {
+    const i = api.indexOf("if (mode === 'read')");
+    const j = api.indexOf("if (mode === 'register')", i);
+    return i >= 0 && j > i ? api.slice(i, j) : '';
+  })();
+  ok('register ブロックが在る', regBlock.length > 0);
+  ok('**控えを引いてから登録する**', /recallRead\(/.test(regBlock));
+  ok('引くときに結び付きを渡す',
+    /diagnosticUserId: uid/.test(regBlock) && /shipmentRef,/.test(regBlock) && /provider,/.test(regBlock));
+  // **評価の入力が控えだけ**であること。`manual:` が復活したらここで落ちる。
+  const regEval = (() => {
+    const i = regBlock.indexOf('evaluateExternalId({');
+    const j = regBlock.indexOf('});', i);
+    return i >= 0 && j > i ? regBlock.slice(i, j) : '';
+  })();
+  ok('評価の入力は控えた生値', /barcode: recalled\.read\.barcode/.test(regEval) && /ocr: recalled\.read\.printed/.test(regEval), regEval);
+  ok('**評価に manual を渡さない**', !/manual:/.test(regEval), regEval);
+  ok('**body の値を評価へ渡さない**', !/barcode: body\.|ocr: body\.|manual: body\./.test(regBlock));
+  // **黙って無視せず落とす** (将来クライアントが送り始めたら見えるように)
+  ok('body が値を持ってきたら 400 で落とす',
+    /body\.barcode != null \|\| body\.printed != null \|\| body\.manual != null/.test(regBlock)
+    && /client_supplied_value/.test(regBlock));
+  {
+    const guard = regBlock.indexOf('client_supplied_value');
+    const persist = regBlock.indexOf('persistExternalIdCapture(');
+    const rc = regBlock.indexOf('recallRead(');
+    ok('その 400 は控えを引くより前・保存より前', guard > 0 && guard < rc && guard < persist);
+  }
+  ok('画面に出ていた値は突き合わせだけに使う (値の出どころにしない)',
+    /confirmation_mismatch/.test(regBlock) && !/manual: body\.confirmedValue/.test(regBlock));
+
+  // ── ② API: read は控えてから候補を返す ──
+  ok('read が控える', /rememberRead\(/.test(readBlock));
+  {
+    const kept = readBlock.indexOf('rememberRead(');
+    const ret = readBlock.indexOf('candidate: ev.value');
+    ok('**控えてから候補を返す** (控えられない回を確認画面へ進めない)', kept > 0 && ret > kept);
+    ok('控えに失敗したら候補を返さない', /if \(!kept\.ok\)[\s\S]{0,400}?503/.test(readBlock));
+  }
+  ok('read は DB を書かない (従来どおり)', !/persistExternalIdCapture\(/.test(readBlock));
+  // 手入力は経路ごと撤去済み (§4.4.2) — サーバの案内文もそれに合わせる
+  ok('read の案内が手入力へ誘導しない', !/手で入力/.test(readBlock));
+
+  // ── ③ 画面: 値を送らない ──
+  const scr = code('src/scripts/external-id-capture.ts');
+  const regPost = (() => {
+    const i = scr.indexOf("mode: 'register'");
+    const j = scr.indexOf('});', i);
+    return i >= 0 && j > i ? scr.slice(i, j) : '';
+  })();
+  ok('register の payload が在る', regPost.length > 0);
+  ok('**番号を送らない** (manual / barcode / printed を載せない)',
+    !/manual:/.test(regPost) && !/barcode:/.test(regPost) && !/printed:/.test(regPost), regPost);
+  ok('どの証跡かだけを送る', /evidenceKey: c\.evidenceKey/.test(regPost));
+  ok('画面の値は突き合わせ用に送る', /confirmedValue: value/.test(regPost));
+  ok('**読み取りの生値を画面に持たない**', !/read: \{ barcode/.test(scr));
 }
 
 console.log(`\n${fails.length === 0 ? `✓ ${pass} / ${pass} passed` : `✗ ${fails.length} 件 FAIL (${pass} passed)`}`);
