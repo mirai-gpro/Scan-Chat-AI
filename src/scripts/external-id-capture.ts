@@ -34,6 +34,12 @@
  */
 
 import { initCameraScan, type CameraScanController } from './camera-scan';
+import { decodeBarcodeInBrowser } from './external-id-barcode';
+/*
+ * **正規化の規則を 2 か所に置かない**（`external-test-id.ts:153-178` が唯一の本体）。
+ * この module は依存ゼロの純関数しか持たないので画面から import してよい。
+ */
+import { normalizeExternalId } from '../lib/external-test-id';
 
 let bound = false;
 
@@ -65,6 +71,15 @@ interface Ctx {
   orgPrefix: string;
   /** 画面から送るのは `camera` だけ（`file` も `manual` も経路ごと撤去済み）。 */
   captureMethod: 'camera';
+  /**
+   * 走っているサーバ側の読み取り（§12.4 の案 A）。
+   *
+   * **端末内デコードで番号を先に出す**ので、利用者は**サーバの読み取りが終わる前に
+   * 「登録」を押せる**。登録はサーバが控えた値だけを使う（§12.2）ので、
+   * **押された回はここで待つ**。待たずに送ると控えが無く
+   * 「もう一度撮影してください」になる＝**読めているのに撮り直させる**ことになる。
+   */
+  pending: Promise<boolean> | null;
   busy: boolean;
 }
 
@@ -95,6 +110,7 @@ function ctx(root: HTMLElement): Ctx {
     evidenceKey: null,
     orgPrefix: '',
     captureMethod: 'camera',
+    pending: null,
     busy: false,
   };
   ctxOf.set(root, c);
@@ -291,8 +307,60 @@ function waiting(c: Ctx, text: string): () => void {
   return () => window.clearInterval(timer);
 }
 
+/**
+ * 1 回の撮影ぶんの状態。**端末内デコードとサーバの読み取りが同時に走る**ので、
+ * **どちらが先に答えたか**を持たないと表示が前後する（遅れて届いた端末側の値で
+ * サーバの値を上書きしてしまう）。
+ */
+interface Turn {
+  /** サーバの読み取りが答えたか。**答えたあとは端末側の値で触らない。** */
+  serverDone: boolean;
+  /** 端末内デコードで先に出した値（正規化済み）。無ければ null。 */
+  localShown: string | null;
+}
+
+/**
+ * **撮ったその場で番号を出す**（§12.4 の案 A・発注者指示 2026-10-22）。
+ *
+ * **表示だけ。登録の値にはしない**（§12.2 = サーバが控えた読み取り結果だけを使う）。
+ * アップロードを待たせないよう**並行に**走らせ、**サーバが先に答えた回は何もしない**。
+ * 読めなければ黙って諦める（従来どおりサーバの応答を待つ画面になる）。
+ */
+async function showLocalCandidate(c: Ctx, file: File, turn: Turn): Promise<void> {
+  try {
+    const r = await decodeBarcodeInBrowser(file);
+    if (turn.serverDone) return;
+    const v = r.value ? normalizeExternalId(r.value) : null;
+    if (!v) return;
+    turn.localShown = v;
+    if (c.candidateEl) c.candidateEl.textContent = v;
+    if (c.noteEl) c.noteEl.textContent = '読み取りを確認しています…';
+    show(c.confirmEl, true);
+  } catch {
+    /* 表示のためだけの処理なので、失敗しても何もしない */
+  }
+}
+
 async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
   clearWrong(c);
+  const turn: Turn = { serverDone: false, localShown: null };
+  // **待たない**（番号は端末内デコードが先に出す / サーバの読み取りはその裏で進む）
+  const local = showLocalCandidate(c, file, turn);
+  const running = uploadAndRead(c, file, turn);
+  /*
+   * **走っている読み取りを握っておく。** 番号が先に出るので
+   * 利用者はこれが終わる前に「登録」を押せる（`register` がここで待つ）。
+   */
+  c.pending = running;
+  try {
+    return await running;
+  } finally {
+    await local.catch(() => undefined);
+    if (c.pending === running) c.pending = null;
+  }
+}
+
+async function uploadAndRead(c: Ctx, file: File, turn: Turn): Promise<boolean> {
   const tUpload0 = Date.now();
   let tick = waiting(c, '写真を送っています');
   let key: string;
@@ -325,6 +393,7 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
   try {
     const r = await post(c, { mode: 'read', evidenceKey: key });
     tick();
+    turn.serverDone = true;
     reportTiming(c, uploadMs, Date.now() - tRead0, r.timing);
     const candidate = String(r.candidate ?? '');
     /*
@@ -335,7 +404,15 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
     if (c.candidateEl) c.candidateEl.textContent = candidate;
     const reasons = Array.isArray(r.review_reasons) ? (r.review_reasons as string[]) : [];
     c.orgPrefix = typeof r.org_prefix === 'string' ? r.org_prefix : '';
-    if (c.noteEl) c.noteEl.textContent = reasonText(reasons, typeof r.note === 'string' ? r.note : null);
+    /*
+     * **端末内デコードと食い違ったら黙って差し替えない。** 画面に出ていた番号が
+     * 変わるので、変わったことを 1 行で言う（登録に使うのはサーバの値）。
+     */
+    const replaced = turn.localShown && turn.localShown !== candidate
+      ? 'サーバで読み直した番号に差し替えました。'
+      : '';
+    const why = reasonText(reasons, typeof r.note === 'string' ? r.note : null);
+    if (c.noteEl) c.noteEl.textContent = [replaced, why].filter(Boolean).join(' ');
     /*
      * **形が想定と違う = 別の数字を読んだ可能性が高い。**
      * 用紙には電話番号や管理用の記号も印字されているので、ここで図へ戻す。
@@ -401,8 +478,23 @@ export function reasonText(reasons: string[], note: string | null): string {
 async function register(c: Ctx, value: string, method: 'camera'): Promise<void> {
   if (c.busy) return;              // 二重 submit よけ（サーバ側も冪等）
   c.busy = true;
-  say(c, '登録しています…');
   try {
+    /*
+     * **走っている読み取りを待つ**（§12.4 の案 A）。番号は端末内デコードが先に出すので、
+     * **サーバの読み取りが終わる前に押され得る**。登録はサーバが控えた値だけを使う
+     * （§12.2）ので、待たずに送ると控えが無く「もう一度撮影してください」になる
+     * ＝**読めているのに撮り直させる**ことになる。
+     */
+    if (c.pending) {
+      say(c, '読み取りの確認を待っています…');
+      const ok = await c.pending;
+      if (!ok) {
+        // 読み取りが失敗していた回。案内は `uploadAndRead` が出している。
+        c.busy = false;
+        return;
+      }
+    }
+    say(c, '登録しています…');
     /*
      * **番号そのものは送らない**（仕様 §12.2 の案 (c)・発注者指示 2026-10-22）。
      * サーバは `read` で控えた読み取り結果を `evidenceKey` で引き直して登録する。

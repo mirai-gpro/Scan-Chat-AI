@@ -8,7 +8,8 @@ import {
   type CaptureMethod, type ExternalIdProvider,
 } from '../../../../lib/external-test-id';
 import { createEvidenceTicket, fetchEvidence } from '../../../../lib/external-id-evidence';
-import { readExternalIdFromImage } from '../../../../lib/external-id-read';
+import { readExternalIdFromImage, type ExternalIdReadResult } from '../../../../lib/external-id-read';
+import { decodeBarcode, type BarcodeDecodeResult } from '../../../../lib/barcode-decode';
 import { persistExternalIdCapture, expectedTestType } from '../../../../lib/external-id-persist';
 import { rememberRead, recallRead } from '../../../../lib/external-id-read-cache';
 
@@ -109,29 +110,66 @@ export const POST: APIRoute = async (ctx) => {
     if (!got.ok) return json({ ok: false, error: got.error }, got.status);
     const s3Ms = Date.now() - tRead0;
 
-    const read = await readExternalIdFromImage({
+    /*
+     * **決定論デコード（LLM を使わない）を先に置く**（§12.4 の案 C・発注者指示 2026-10-22）。
+     *
+     * バーコードは **symbology のデコード = 決定論**で読める。狙いは 3 つ:
+     *   ①**バーコード側の値が LLM の読みより確かになる**（推測の余地が無い）
+     *   ②**Gemini が落ちた回でも読み取りが続く**（従来は 422 で撮り直しだった）
+     *   ③`labid.decode_skip_llm` を on にすれば**Gemini を呼ばずに済む**
+     *
+     * **既定は off = Gemini も必ず呼ぶ。** 印字IDの OCR が無くなると
+     * `evaluateExternalId` が `single_source` を積んで**全件 `review_required`**
+     * になり、問診CSV の fail-closed ゲート（§7.1）が全員を止める。
+     * **これは発注者の裁定事項**なので実装で答えを出さない（`app-config.ts` の説明に明記）。
+     * off のときは**並行に走らせる**ので、決定論デコードぶんの時間は増えない。
+     */
+    const skipLlm = cfgBool('labid.decode_skip_llm');
+    const raw = Buffer.from(got.base64, 'base64');
+    const callGeminiRead = () => readExternalIdFromImage({
       provider,
       mime: got.mime,
       base64: got.base64,
       apiKey: apiKey(),
     });
-    if (!read.ok) {
+    let decoded: BarcodeDecodeResult;
+    let read: ExternalIdReadResult | null = null;
+    if (skipLlm) {
+      // 二段構え: 決定論で読めた回は Gemini を呼ばない
+      decoded = await decodeBarcode(raw);
+      if (!decoded.value) read = await callGeminiRead();
+    } else {
+      // 既定: 両方を並行に（互いに依存しないので待ち時間は増えない）
+      const both = await Promise.all([decodeBarcode(raw), callGeminiRead()]);
+      decoded = both[0];
+      read = both[1];
+    }
+    const llmOk = !!read && read.ok;
+    if (!llmOk && !decoded.value) {
       /*
        * **行き止まりにしない = 撮り直しへ戻す。** 手入力へは落とさない
        * （§4.4.2 で経路ごと撤去した。チェックディジットが無いので打ち間違いが
        *   正しい形の別の番号になり、何にも拾えない）。
+       * **決定論デコードで読めていればここへ来ない**（Gemini の失敗で捨てない）。
        */
       return json({
-        ok: false, error: read.error ?? 'read_failed',
+        ok: false, error: read?.error ?? decoded.error ?? 'read_failed',
         detail: '画像から番号を読み取れませんでした。明るい場所で、もう一度撮影してください。',
-        note: read.note,
+        note: read?.note ?? null,
       }, 422);
     }
 
+    /*
+     * **バーコード側は決定論の結果を優先する。** 印字ID は Gemini しか読めない。
+     * → 突き合わせは「機械が読んだバーコード × OCR した印字」になり、
+     *   「LLM が読んだ 2 つ」より強い（§12.4）。
+     */
+    const barcodeValue = decoded.value ?? (llmOk ? read!.barcode : null);
+    const printedValue = llmOk ? read!.printed : null;
     const ev = evaluateExternalId({
       provider,
-      barcode: read.barcode,
-      ocr: read.printed,
+      barcode: barcodeValue,
+      ocr: printedValue,
       expectedPattern: patternFor(provider),
       orgPrefix: orgPrefixFor(provider),
     });
@@ -139,7 +177,7 @@ export const POST: APIRoute = async (ctx) => {
       return json({
         ok: false, error: 'no_readable_value',
         detail: '番号として読み取れませんでした。枠に番号とバーコードを入れて、もう一度撮影してください。',
-        note: read.note,
+        note: llmOk ? read!.note : null,
       }, 422);
     }
 
@@ -156,8 +194,9 @@ export const POST: APIRoute = async (ctx) => {
       diagnosticUserId: uid,
       shipmentRef,
       provider,
-      barcode: read.barcode,
-      printed: read.printed,
+      // **評価に使ったものをそのまま控える**（`register` が同じ判定を再現できるように）
+      barcode: barcodeValue,
+      printed: printedValue,
     });
     const cacheMs = Date.now() - tCache0;
     if (!kept.ok) {
@@ -182,7 +221,7 @@ export const POST: APIRoute = async (ctx) => {
        * 既定値をクライアントに焼かないので、**app_config を変えれば文言も追従する**。
        */
       org_prefix: orgPrefixFor(provider),
-      note: read.note,
+      note: llmOk ? read!.note : null,
       /**
        * **切り分け用の実測値。画面には出さない**（コンソールと `data-` 属性だけ）。
        *   `s3_ms`     … 東京のバケットから証跡画像を取るまで
@@ -193,7 +232,14 @@ export const POST: APIRoute = async (ctx) => {
        */
       timing: {
         s3_ms: s3Ms,
-        gemini_ms: read.geminiMs ?? null,
+        /** 決定論デコード（LLM なし）にかかった時間と、読めた symbology。 */
+        decode_ms: decoded.ms,
+        decode_format: decoded.format,
+        /** **どちらの値を採ったか**（`barcode` = 決定論・`gemini` = LLM・`none` = 読めず）。 */
+        decode_source: decoded.value ? 'barcode' : (llmOk && read!.barcode ? 'gemini' : 'none'),
+        /** Gemini を呼んだか（`labid.decode_skip_llm` が on の回は読めれば false）。 */
+        llm_called: read !== null,
+        gemini_ms: read?.geminiMs ?? null,
         cache_ms: cacheMs,
         total_ms: Date.now() - tRead0,
         bytes: got.bytes,
