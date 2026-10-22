@@ -198,6 +198,49 @@ console.log('\n⑤ 判定の口は 1 つだけ\n');
     !/isSpecialAccount\s*\(\s*uid\s*\)\s*\)\s*return false/.test(code('src/lib/experience-accounts.ts')));
   ok('ダミーを出す判定の定義は 1 つ',
     (read('src/lib/view-mode.ts').match(/export function shouldUseDemoData/g) || []).length === 1);
+
+  /*
+   * ════════════════════════════════════════════════════════════════════
+   * **資格の関数を直に呼んでダミーを出す経路を作らない。**
+   * ════════════════════════════════════════════════════════════════════
+   *
+   * `demoFallbackEnabled` が無いことだけを見ていると、**`isDemoAccount(uid)` を
+   * 直に呼ぶ形で旧判定が戻る**。それはモードを見ないので、**そのページだけ
+   * Demo / Real が食い違う** (§4.3 がいちばん嫌う形)。
+   * **退行注入でこの穴が見つかったので足した** (「notices だけ旧判定へ」が素通りした)。
+   *
+   * ALLOW は**理由つき**で、しかも**別の検査が裏打ちしているもの**だけ:
+   *   `experience-accounts.ts` … **資格の層そのもの** (PR-B)。資格を引くのが仕事で
+   *     表示を決めない。表示モードを知らないことは
+   *     `verify:experience-accounts` ⑧ が見ている
+   *   `api/debug/viewer.ts` … **切り分けの出力だけ**。資格と表示モードを並べて
+   *     出すのがこの口の役目で、画面の分岐には使わない
+   *   `dashboard.astro` / `scan.astro` の `isSpecialAccount`
+   *     … スペシャル専用 UI の判定。**`effectiveMode === 'real'` と AND** に
+   *       なっていることは ⑦ が見ている
+   */
+  const CAPS_ALLOW = {
+    'src/lib/view-mode.ts': 'この判定を所有する層',
+    'src/lib/experience-accounts.ts': '資格の層 (PR-B)。表示は決めない',
+    'src/pages/api/debug/viewer.ts': '切り分けの出力だけ。画面の分岐に使わない',
+  };
+  const SPECIAL_ALLOW = {
+    ...CAPS_ALLOW,
+    'src/pages/dashboard.astro': 'スペシャル専用 UI (⑦ が real との AND を見る)',
+    'src/pages/scan.astro': 'スペシャル専用 UI (⑦ が real との AND を見る)',
+  };
+  for (const f of LIVE) {
+    if (!(f in CAPS_ALLOW)) {
+      ok(`${f.split('/').pop()} が資格の関数を直に呼んでいない`,
+        !/\b(isDemoAccount|demoDisabledGlobally)\s*\(/.test(code(f)),
+        'ダミーの可否は shouldUseDemoData(uid, mode) を通す (直に呼ぶとモードを見ない旧判定が戻る)');
+    }
+    if (!(f in SPECIAL_ALLOW)) {
+      ok(`  ${f.split('/').pop()} が isSpecialAccount を直に呼んでいない`,
+        !/\bisSpecialAccount\s*\(/.test(code(f)),
+        '排他を別の場所へ移植しない (§4.3)');
+    }
+  }
 }
 
 // ══════════════════════════════════════════════════════════════════════
