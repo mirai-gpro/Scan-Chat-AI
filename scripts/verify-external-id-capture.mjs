@@ -1249,8 +1249,7 @@ console.log('\n⑬ UI の契約\n');
     })();
     ok('承諾して初めて面が入れ替わる',
       /show\(c\.doneEl, false\)/.test(yes) && /show\(c\.formEl, true\)/.test(yes));
-    ok('前回の候補・証跡を持ち越さない',
-      /c\.read = null; c\.evidenceKey = null/.test(yes));
+    ok('前回の証跡を持ち越さない', /c\.evidenceKey = null/.test(yes));
     ok('上書きになることを撮影中も出す', /上書きします/.test(yes));
     /*
      * **撮り直しは API を変えずに成立している。** 台帳は旧行を `superseded` に
@@ -1651,6 +1650,233 @@ console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
   ok('ダッシュボードは共有閲覧で台帳を引かない', /viewer\.kind !== 'share'/.test(dashGuard),
     `guard = ${dashGuard || '(見つからない)'}`);
   ok('ダッシュボードでも全文を触らない', !/normalized_value/.test(dash));
+}
+
+// ══════════════════════════════════════════════════════════════════════
+// ⑰ 読み取り結果をサーバ側に控える (§12.2 の案 (c)・発注者指示 2026-10-22)
+//
+// 【この穴は検査が緑のまま通った】③ は `evaluateExternalId` を barcode / ocr で
+// **直接**呼んでおり、**画面が実際に送る payload を 1 度も通していなかった**。
+// そのため「register は必ず `manual_entry` になり問診CSV へ 1 件も出ない」を
+// 435 件の検査が見逃した。→ ここでは
+//   ①控えの往復を**実物で回す** (S3 はメモリへ差し替え・鍵の検証は実物)
+//   ②API が**画面から値を採らない**こと
+//   ③画面が**値を送らない**こと
+//   ④**画面が送る形で `confirmed` になり、ゲートが通る**こと (= 旧実装では通らなかった)
+// を見る。
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑰ 読み取り結果の控え (§12.2 の案 (c))\n');
+{
+  // ── メモリの S3。**鍵の検証は実物の `isEvidenceKey`** を使う ──
+  const S3CFG = { prefix: 'scan-accuracy-test/', bucket: 'b', region: 'r' };
+  const evMod = await load('src/lib/external-id-evidence.ts', [
+    [/^import \{ PutObjectCommand[\s\S]*?from '@aws-sdk\/client-s3';$/m, ''],
+    [/^import \{ getSignedUrl \}[\s\S]*?from '@aws-sdk\/s3-request-presigner';$/m, ''],
+    [/^import \{ getS3Config[\s\S]*?from '\.\/s3';$/m, ''],
+  ]);
+  globalThis.__isEvidenceKey = evMod.isEvidenceKey;
+
+  let BUCKET = new Map();
+  let failPut = false;
+  globalThis.__cfg = S3CFG;
+  globalThis.__s3 = {
+    send: async (cmd) => {
+      if (cmd.kind === 'put') {
+        if (failPut) throw new Error('s3 down');
+        BUCKET.set(cmd.input.Key, String(cmd.input.Body));
+        return {};
+      }
+      if (!BUCKET.has(cmd.input.Key)) throw new Error('NoSuchKey');
+      const text = BUCKET.get(cmd.input.Key);
+      return { Body: { transformToString: async () => text } };
+    },
+  };
+
+  const cache = await load('src/lib/external-id-read-cache.ts', [
+    [/^import \{ PutObjectCommand, GetObjectCommand \} from '@aws-sdk\/client-s3';$/m,
+      'class PutObjectCommand { constructor(i) { this.input = i; this.kind = "put"; } }\n'
+      + 'class GetObjectCommand { constructor(i) { this.input = i; this.kind = "get"; } }'],
+    [/^import \{ getS3Config, makeS3Client \} from '\.\/s3';$/m,
+      'const getS3Config = () => globalThis.__cfg;\nconst makeS3Client = () => globalThis.__s3;'],
+    [/^import \{ isEvidenceKey \} from '\.\/external-id-evidence';$/m,
+      'const isEvidenceKey = (k, c) => globalThis.__isEvidenceKey(k, c);'],
+  ]);
+
+  const KEY = 'scan-accuracy-test/kit-id-captures/2026/10/22/11111111-2222-3333-4444-555555555555.jpg';
+  const BIND = { diagnosticUserId: 'u-1', shipmentRef: 's-1', provider: 'prevent' };
+  const keep = (over = {}) => cache.rememberRead({
+    evidenceKey: KEY, ...BIND, barcode: '704000123', printed: '704000123', ...over,
+  });
+  const recall = (over = {}) => cache.recallRead({ evidenceKey: KEY, ...BIND, ...over });
+
+  // ── 控えのキー。**ブラウザからは触れない形**であること ──
+  eq('控えは証跡キーの隣に置く', cache.readCacheKey(KEY), `${KEY}.read.json`);
+  ok('**控えのキーは証跡キーとして通らない** (ブラウザは PUT も読み出しもできない)',
+    !evMod.isEvidenceKey(cache.readCacheKey(KEY), S3CFG));
+
+  // ── 往復 ──
+  BUCKET = new Map();
+  eq('控えられる', (await keep()).ok, true);
+  {
+    const r = await recall();
+    ok('引ける', r.ok === true, JSON.stringify(r));
+    eq('バーコードの生値が戻る', r.ok && r.read.barcode, '704000123');
+    eq('印字の生値が戻る', r.ok && r.read.printed, '704000123');
+  }
+  // **判定は控えない** (`labid.*` を直したあとに古い判定が貼り付かないこと)
+  {
+    const raw = BUCKET.get(cache.readCacheKey(KEY)) ?? '';
+    ok('控えに判定 (status / reasons) を入れない', !/status|reason|confirmed|review_required/.test(raw), raw);
+    ok('控えは結び付きを持つ (uid / 受取 / 検査)',
+      /"uid"/.test(raw) && /"shipment_ref"/.test(raw) && /"provider"/.test(raw));
+  }
+
+  // ── 結び付きが 1 つでも違えば通さない ──
+  eq('**別人の控えは使えない**', (await recall({ diagnosticUserId: 'u-2' })).error, 'read_result_mismatch');
+  eq('**別の受取の控えは使えない**', (await recall({ shipmentRef: 's-2' })).error, 'read_result_mismatch');
+  eq('**別の検査の控えは使えない**', (await recall({ provider: 'demecal' })).error, 'read_result_mismatch');
+  eq('食い違いは 409', (await recall({ diagnosticUserId: 'u-2' })).status, 409);
+
+  // ── 期限 ──
+  const past = new Date(Date.now() + cache.READ_CACHE_TTL_MS + 60_000);
+  eq('期限を過ぎたら通さない', (await recall({ now: past })).error, 'read_result_expired');
+  eq('期限内は通る', (await recall({ now: new Date() })).ok, true);
+  {
+    // **未来日時の控えを無期限にしない** (時計のずれ・改ざんで永久に有効化しない)
+    BUCKET.set(cache.readCacheKey(KEY), JSON.stringify({
+      v: 1, uid: 'u-1', shipment_ref: 's-1', provider: 'prevent',
+      barcode: '704000123', printed: '704000123',
+      read_at: new Date(Date.now() + 10 * 60 * 60 * 1000).toISOString(),
+    }));
+    eq('遠い未来の控えも通さない', (await recall()).error, 'read_result_expired');
+    BUCKET.set(cache.readCacheKey(KEY), JSON.stringify({
+      v: 1, uid: 'u-1', shipment_ref: 's-1', provider: 'prevent',
+      barcode: '704000123', printed: '704000123', read_at: 'いつか',
+    }));
+    eq('読めない日時も通さない (無期限にしない)', (await recall()).error, 'read_result_expired');
+  }
+
+  // ── 無い / 壊れている / 鍵が違う ──
+  BUCKET = new Map();
+  eq('控えが無ければ 409 で止める (fail-closed)', (await recall()).error, 'read_result_missing');
+  BUCKET.set(cache.readCacheKey(KEY), '{壊れた');
+  eq('壊れた控えも通さない', (await recall()).error, 'read_result_unreadable');
+  BUCKET.set(cache.readCacheKey(KEY), JSON.stringify({ v: 2, uid: 'u-1' }));
+  eq('知らない版の控えは通さない', (await recall()).error, 'read_result_unreadable');
+
+  const JSONKEY = 'scan-accuracy-test/user/d0000001/date/2026_10_22/HealthCheckupData_x.json';
+  eq('**納品 JSON のキーでは引けない**', (await cache.recallRead({ evidenceKey: JSONKEY, ...BIND })).error, 'invalid_key');
+  {
+    BUCKET = new Map();
+    const w = await cache.rememberRead({ evidenceKey: JSONKEY, ...BIND, barcode: '1', printed: '1' });
+    eq('**納品 JSON のキーへは控えない**', w.ok, false);
+    eq('書き込みも起きない', BUCKET.size, 0);
+  }
+
+  // ── 控えられなかったことを飲み込まない ──
+  BUCKET = new Map(); failPut = true;
+  {
+    const w = await keep();
+    eq('S3 が落ちたら ok:false を返す (throw しない)', w.ok, false);
+    eq('理由が分かる', w.error, 'read_cache_write_failed');
+  }
+  failPut = false;
+
+  // ── ④ **画面が送る形で confirmed になる** (旧実装では必ず review_required) ──
+  {
+    const fromCache = core.evaluateExternalId({
+      provider: 'prevent', barcode: '704000123', ocr: '704000123',
+      expectedPattern: '^704000[0-9]{3}$', orgPrefix: '704',
+    });
+    eq('控えから評価すると confirmed', fromCache.status, 'confirmed');
+    eq('decode は barcode+ocr', fromCache.decodeMethod, 'barcode+ocr');
+    const gate = core.checkPreventQuestionnaireGate({
+      capture: {
+        normalizedValue: fromCache.value, status: fromCache.status,
+        labTestLinkStatus: 'linked', labTestId: 'lt-1',
+      },
+      expectedPattern: '^704000[0-9]{3}$', orgPrefix: '704',
+    });
+    eq('**問診CSV のゲートが通る**', [gate.allowed, gate.reason], [true, 'ok']);
+
+    // 旧実装 (画面が候補を `manual` で送り返す) は**必ず**ここで止まっていた
+    const asManual = core.evaluateExternalId({
+      provider: 'prevent', manual: '704000123',
+      expectedPattern: '^704000[0-9]{3}$', orgPrefix: '704',
+    });
+    eq('旧実装の payload は review_required', asManual.status, 'review_required');
+    eq('理由は manual_entry', asManual.reasons, ['manual_entry']);
+    eq('旧実装ではゲートが全件ブロックした', core.checkPreventQuestionnaireGate({
+      capture: {
+        normalizedValue: asManual.value, status: asManual.status,
+        labTestLinkStatus: 'linked', labTestId: 'lt-1',
+      },
+      expectedPattern: '^704000[0-9]{3}$', orgPrefix: '704',
+    }).reason, 'capture_not_confirmed');
+  }
+
+  // ── ② API: register は画面から値を採らない ──
+  const api = code('src/pages/api/kit/[id]/external-id.ts');
+  const regBlock = (() => {
+    const i = api.indexOf("if (mode === 'register')");
+    return i >= 0 ? api.slice(i) : '';
+  })();
+  const readBlock = (() => {
+    const i = api.indexOf("if (mode === 'read')");
+    const j = api.indexOf("if (mode === 'register')", i);
+    return i >= 0 && j > i ? api.slice(i, j) : '';
+  })();
+  ok('register ブロックが在る', regBlock.length > 0);
+  ok('**控えを引いてから登録する**', /recallRead\(/.test(regBlock));
+  ok('引くときに結び付きを渡す',
+    /diagnosticUserId: uid/.test(regBlock) && /shipmentRef,/.test(regBlock) && /provider,/.test(regBlock));
+  // **評価の入力が控えだけ**であること。`manual:` が復活したらここで落ちる。
+  const regEval = (() => {
+    const i = regBlock.indexOf('evaluateExternalId({');
+    const j = regBlock.indexOf('});', i);
+    return i >= 0 && j > i ? regBlock.slice(i, j) : '';
+  })();
+  ok('評価の入力は控えた生値', /barcode: recalled\.read\.barcode/.test(regEval) && /ocr: recalled\.read\.printed/.test(regEval), regEval);
+  ok('**評価に manual を渡さない**', !/manual:/.test(regEval), regEval);
+  ok('**body の値を評価へ渡さない**', !/barcode: body\.|ocr: body\.|manual: body\./.test(regBlock));
+  // **黙って無視せず落とす** (将来クライアントが送り始めたら見えるように)
+  ok('body が値を持ってきたら 400 で落とす',
+    /body\.barcode != null \|\| body\.printed != null \|\| body\.manual != null/.test(regBlock)
+    && /client_supplied_value/.test(regBlock));
+  {
+    const guard = regBlock.indexOf('client_supplied_value');
+    const persist = regBlock.indexOf('persistExternalIdCapture(');
+    const rc = regBlock.indexOf('recallRead(');
+    ok('その 400 は控えを引くより前・保存より前', guard > 0 && guard < rc && guard < persist);
+  }
+  ok('画面に出ていた値は突き合わせだけに使う (値の出どころにしない)',
+    /confirmation_mismatch/.test(regBlock) && !/manual: body\.confirmedValue/.test(regBlock));
+
+  // ── ② API: read は控えてから候補を返す ──
+  ok('read が控える', /rememberRead\(/.test(readBlock));
+  {
+    const kept = readBlock.indexOf('rememberRead(');
+    const ret = readBlock.indexOf('candidate: ev.value');
+    ok('**控えてから候補を返す** (控えられない回を確認画面へ進めない)', kept > 0 && ret > kept);
+    ok('控えに失敗したら候補を返さない', /if \(!kept\.ok\)[\s\S]{0,400}?503/.test(readBlock));
+  }
+  ok('read は DB を書かない (従来どおり)', !/persistExternalIdCapture\(/.test(readBlock));
+  // 手入力は経路ごと撤去済み (§4.4.2) — サーバの案内文もそれに合わせる
+  ok('read の案内が手入力へ誘導しない', !/手で入力/.test(readBlock));
+
+  // ── ③ 画面: 値を送らない ──
+  const scr = code('src/scripts/external-id-capture.ts');
+  const regPost = (() => {
+    const i = scr.indexOf("mode: 'register'");
+    const j = scr.indexOf('});', i);
+    return i >= 0 && j > i ? scr.slice(i, j) : '';
+  })();
+  ok('register の payload が在る', regPost.length > 0);
+  ok('**番号を送らない** (manual / barcode / printed を載せない)',
+    !/manual:/.test(regPost) && !/barcode:/.test(regPost) && !/printed:/.test(regPost), regPost);
+  ok('どの証跡かだけを送る', /evidenceKey: c\.evidenceKey/.test(regPost));
+  ok('画面の値は突き合わせ用に送る', /confirmedValue: value/.test(regPost));
+  ok('**読み取りの生値を画面に持たない**', !/read: \{ barcode/.test(scr));
 }
 
 console.log(`\n${fails.length === 0 ? `✓ ${pass} / ${pass} passed` : `✗ ${fails.length} 件 FAIL (${pass} passed)`}`);

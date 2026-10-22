@@ -60,7 +60,6 @@ interface Ctx {
   formEl: HTMLElement | null;
   redoEl: HTMLElement | null;
   /** 直近の読み取り結果（登録時にサーバへ戻す）。 */
-  read: { barcode: string | null; printed: string | null } | null;
   evidenceKey: string | null;
   /** 発行元の接頭辞（`704`＝Wellfort）。**サーバが返した値だけを使う**（焼き込まない）。 */
   orgPrefix: string;
@@ -93,7 +92,6 @@ function ctx(root: HTMLElement): Ctx {
     doneEl: q('[data-extid-done]'),
     formEl: q('[data-extid-form]'),
     redoEl: q('[data-extid-redo-confirm]'),
-    read: null,
     evidenceKey: null,
     orgPrefix: '',
     captureMethod: 'camera',
@@ -272,12 +270,11 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
   try {
     const r = await post(c, { mode: 'read', evidenceKey: key });
     const candidate = String(r.candidate ?? '');
-    c.read = {
-      barcode: null,
-      printed: null,
-    };
-    // サーバは採った値だけを返す。登録時は**同じ値**を manual として送り直す
-    // （サーバ側でもう一度 evaluate されるので、判定はサーバが正）。
+    /*
+     * サーバは採った値だけを返す。**登録時に送り返さない** —
+     * 読み取りの生値はサーバが `evidenceKey` で控えてある（仕様 §12.2 の案 (c)）。
+     * ここで持っているのは**画面に出す文字**で、登録の根拠ではない。
+     */
     if (c.candidateEl) c.candidateEl.textContent = candidate;
     const reasons = Array.isArray(r.review_reasons) ? (r.review_reasons as string[]) : [];
     c.orgPrefix = typeof r.org_prefix === 'string' ? r.org_prefix : '';
@@ -348,11 +345,19 @@ async function register(c: Ctx, value: string, method: 'camera'): Promise<void> 
   c.busy = true;
   say(c, '登録しています…');
   try {
+    /*
+     * **番号そのものは送らない**（仕様 §12.2 の案 (c)・発注者指示 2026-10-22）。
+     * サーバは `read` で控えた読み取り結果を `evidenceKey` で引き直して登録する。
+     * ここで値を送っていた頃は、それが `manual` として扱われて
+     * **必ず `review_required`（`manual_entry`）になり問診CSV へ 1 件も出なかった**。
+     * `confirmedValue` は**画面に出ていた値が古くないかの突き合わせ用**で、
+     * 値の出どころではない（サーバは一致しなければ 409 で止める）。
+     */
     const r = await post(c, {
       mode: 'register',
-      manual: value,
       captureMethod: method,
       evidenceKey: c.evidenceKey,
+      confirmedValue: value,
     });
     // 成功したら**再読込して状態をサーバから取り直す**（JS で組み立て直さない）。
     say(c, String(r.message ?? '登録しました。'));
@@ -423,7 +428,7 @@ export function initExternalIdCapture(): void {
       show(c.formEl, true);
       clearWrong(c);
       show(c.confirmEl, false);
-      c.read = null; c.evidenceKey = null; c.captureMethod = 'camera';
+      c.evidenceKey = null; c.captureMethod = 'camera';
       say(c, 'もう一度撮影してください。登録すると今の番号を上書きします。');
       return;
     }
@@ -448,7 +453,7 @@ export function initExternalIdCapture(): void {
       return;
     }
     if (t?.closest?.('[data-extid-retake]')) {
-      c.read = null; c.evidenceKey = null;
+      c.evidenceKey = null;
       clearWrong(c);
       show(c.confirmEl, false);
       say(c, 'もう一度撮影してください。');
