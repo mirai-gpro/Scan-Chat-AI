@@ -2620,8 +2620,14 @@ console.log('\n⑳ admin の確認・訂正経路 (実物を動かす)\n');
     for (const f of ['list', 'detail', 'correct', 'discard']) {
       const src = code(`src/pages/api/admin/external-id-captures/${f}.ts`);
       ok(`(l) ${f} は Bearer ADMIN_API_KEY で守る`, /isAdminAuthorized\(request\)/.test(src) && /401/.test(src));
+      /*
+       * **呼び出し元で比べる。** 素の名前で `indexOf` すると **import 行**に当たり、
+       * 認可を DB 取得より後ろへ動かしても通ってしまう（退行注入 #10 で実測）。
+       */
       ok(`(l) ${f} は認可を**最初に**見る`,
-        src.indexOf('isAdminAuthorized') < src.indexOf('getServerSupabase'));
+        src.indexOf('isAdminAuthorized(request)') > 0
+        && src.indexOf('isAdminAuthorized(request)') < src.indexOf('getServerSupabase()'),
+        `auth=${src.indexOf('isAdminAuthorized(request)')} / sb=${src.indexOf('getServerSupabase()')}`);
       ok(`(l) ${f} は台帳未適用を 503 で言う`, /503/.test(src));
     }
     for (const f of ['correct', 'discard']) {
@@ -2644,8 +2650,18 @@ console.log('\n⑳ admin の確認・訂正経路 (実物を動かす)\n');
     ok('(l) 証跡は署名 URL（公開 URL を作らない）',
       !/public|ACL|acl/.test(detail));
     const ev = code('src/lib/external-id-evidence.ts');
+    /*
+     * **関数の中だけを見る。** `createEvidenceViewUrl[\s\S]*?isEvidenceKey` だと
+     * **後ろの `fetchEvidence` の検査に当たって**、署名 GET からキー検証を外しても
+     * 通ってしまう（退行注入 #17 で実測）。
+     */
+    const viewFn = (() => {
+      const i = ev.indexOf('export async function createEvidenceViewUrl');
+      const j = ev.indexOf('\nexport ', i + 10);
+      return i >= 0 ? ev.slice(i, j > i ? j : undefined) : '';
+    })();
     ok('(l) 署名 GET もキーを完全一致で検査する',
-      /createEvidenceViewUrl[\s\S]*?isEvidenceKey\(key, cfg\)/.test(ev));
+      viewFn.length > 0 && /isEvidenceKey\(key, cfg\)/.test(viewFn), viewFn.slice(0, 80));
     const exp = /VIEW_EXPIRES_SEC = (\d+)/.exec(ev)?.[1];
     ok('(l) 表示の署名は短命 (10 分以内)', Number(exp) > 0 && Number(exp) <= 600, `expires=${exp}`);
   }
