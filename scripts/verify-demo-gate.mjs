@@ -305,14 +305,33 @@ if (!/Array\.isArray\(row\.report\)\s*&&\s*demoFallbackEnabled\(/.test(read('src
    * デモ登録が何の役にも立たない (実測 2026-08-31)。
    */
   {
-    const iDemo = resolveSrc.indexOf('resolveDemoUidByEmail(email');
+    /*
+     * **2026-10-22 (PR-B)**: ここは `resolveDemoUidByEmail` の直呼びから
+     * **canonical uid 層 (`resolveCanonicalUidByEmail`)** に変わった。
+     * Demo と Real の名簿を**同時に**引くようになっただけで、**この節の要件は
+     * 1 つも変わっていない** — ①記者・パートナーが入口で弾かれない
+     * ②未連携の early return より前 ③`linkedUid` を渡す ④`findLinkedUid` が先。
+     * デモ側の実挙動 (登録済みなら uid が出る) は `npm run verify:experience-accounts` ③
+     * が実物を動かして見ている。
+     */
+    const iDemo = resolveSrc.indexOf('resolveCanonicalUidByEmail(email');
     const iBail = resolveSrc.indexOf('return json({ linked: false }');
     if (iDemo < 0) {
-      fails.push('api/auth/resolve.ts: resolveDemoUidByEmail を呼んでいない'
+      fails.push('api/auth/resolve.ts: canonical uid 層 (resolveCanonicalUidByEmail) を呼んでいない'
         + ' — EC の顧客でないデモ用アカウント (記者・パートナー) が入口で弾かれる');
     } else if (iBail >= 0 && iDemo > iBail) {
-      fails.push('api/auth/resolve.ts: resolveDemoUidByEmail が未連携の early return より後ろ'
+      fails.push('api/auth/resolve.ts: canonical uid 層が未連携の early return より後ろ'
         + ' — そこまで到達しないので、デモ登録しても記者は入れない');
+    }
+    /*
+     * **デモ枠が canonical 層から外れていないこと。**
+     * Real 側だけを見る実装に変わると、デモ登録だけの記者が通らなくなる
+     * (「どちらの名簿にも無い」と判定されて未連携へ落ちる)。
+     */
+    if (!/look\.demo\.registered/.test(read('src/lib/experience-accounts.ts'))
+      || !/demoEmailEntries/.test(code('src/lib/experience-accounts.ts'))) {
+      fails.push('experience-accounts.ts: canonical 層がデモの名簿を見ていない'
+        + ' — デモ登録だけの記者が未連携へ落ちる');
     }
     /*
      * **既存の割り当てを渡すこと。** 渡さないと毎回新しい uid を作り、
@@ -320,15 +339,15 @@ if (!/Array\.isArray\(row\.report\)\s*&&\s*demoFallbackEnabled\(/.test(read('src
      * しかも保存は後段の `linkDemoEmail` なので、**500 で止まると永久に直らない**
      * (2026-08-31 に本番で実測)。
      */
-    if (!/resolveDemoUidByEmail\(email,\s*linkedUid\)/.test(resolveSrc)) {
-      fails.push('api/auth/resolve.ts: resolveDemoUidByEmail に既存の割り当て (linkedUid) を渡していない'
+    if (!/resolveCanonicalUidByEmail\(email,\s*linkedUid\)/.test(resolveSrc)) {
+      fails.push('api/auth/resolve.ts: canonical uid 層に既存の割り当て (linkedUid) を渡していない'
         + ' — 毎回新しい uid を作って app_users の UNIQUE 制約に衝突し、サインインが壊れる');
     }
     const iLinked = resolveSrc.indexOf('const linkedUid = await findLinkedUid(');
     if (iLinked < 0) {
       fails.push('api/auth/resolve.ts: findLinkedUid で既存の連携を引いていない');
     } else if (iDemo >= 0 && iLinked > iDemo) {
-      fails.push('api/auth/resolve.ts: findLinkedUid が resolveDemoUidByEmail より後ろ — 渡せていない');
+      fails.push('api/auth/resolve.ts: findLinkedUid が canonical uid 層より後ろ — 渡せていない');
     }
     // **生の Postgres メッセージを画面に出さない** (実際にサインイン画面へ出た)
     if (/app_users upsert: \$\{upErr\.message\}/.test(resolveSrc)) {
@@ -361,9 +380,33 @@ if (!/Array\.isArray\(row\.report\)\s*&&\s*demoFallbackEnabled\(/.test(read('src
    * 保存するのは ①sha256 ②表示用マスク ③uid ④用途のメモ の 4 つだけ。
    */
   if (!/SHA-256/.test(acct)) fails.push('demo-accounts.ts: hashEmail が SHA-256 を使っていない');
-  if (!/emails\.push\(\{\s*hash: h, masked: maskEmail\(addr\), uid: '', label\s*\}\)/.test(apiSrc)) {
-    fails.push('api/admin/demo-accounts.ts: メール登録の保存内容が変わっている'
-      + ' — 保存してよいのは hash / masked / uid / label だけ (現物のアドレスを残さない)');
+  /*
+   * **2026-10-22 (PR-B)**: 新規行の uid は `''` 固定ではなくなった
+   * (Real 側に uid が在ればそれを**写す**)。**約束は同じ** — 保存してよいのは
+   * hash / masked / uid / label の 4 つだけ。**フィールドの集合で見る**
+   * (リテラルで固定すると、仕様が動いたときに意味のない FAIL になる)。
+   */
+  {
+    const m = apiSrc.match(/emails\.push\(\{([^}]*)\}\)/);
+    const fields = m ? m[1].split(',').map((x) => x.split(':')[0].trim()).filter(Boolean).sort() : [];
+    if (JSON.stringify(fields) !== JSON.stringify(['hash', 'label', 'masked', 'uid'])) {
+      fails.push(`api/admin/demo-accounts.ts: メール登録の保存内容が変わっている (${fields.join('/')})`
+        + ' — 保存してよいのは hash / masked / uid / label だけ (現物のアドレスを残さない)');
+    }
+    // 値の側にも現物を入れていないこと (`masked` は `maskEmail(addr)` 経由のみ)。
+    if (!/masked: maskEmail\(addr\)/.test(apiSrc)) {
+      fails.push('api/admin/demo-accounts.ts: masked が maskEmail(addr) 経由でない'
+        + ' — 現物のアドレスが保存形式に入り得る');
+    }
+  }
+  /*
+   * **デモ側で uid を新規発行しないこと** (PR-B)。
+   * デモ枠の uid はサインイン時に決まる約束で、admin の登録時に発行すると
+   * **UID を増やす側に倒れる** (1 人 1 uid が崩れる)。
+   */
+  if (/crypto\.randomUUID|mintSpecialUid/.test(code('src/pages/api/admin/demo-accounts.ts'))) {
+    fails.push('api/admin/demo-accounts.ts: デモの登録で uid を採番している'
+      + ' — デモの uid はサインイン時に決まる (採番の口は canonical 層だけ)');
   }
   if (/`\$\{[a-zA-Z]*[eE]mail\}`|email: (addr|email)\b/.test(code('src/lib/demo-accounts.ts'))) {
     fails.push('demo-accounts.ts: メールアドレスの現物を保存形式に入れている');

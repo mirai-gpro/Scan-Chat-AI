@@ -10,8 +10,9 @@ import { VIEWER_COOKIE, signViewer, viewerCookieOptions, resolveViewer } from '.
 import { denyForShare } from '../../../lib/write-guard';
 import { isAdminEmailAsync } from '../../../lib/admin-auth';
 import { issueAdminCred } from '../../../lib/admin-identity';
-import { linkDemoEmail, resolveDemoUidByEmail } from '../../../lib/demo-accounts';
-import { linkSpecialEmail, resolveSpecialUidByEmail, specialPreassignedUidByEmail } from '../../../lib/special-accounts';
+import { linkDemoEmail } from '../../../lib/demo-accounts';
+import { linkSpecialEmail, specialPreassignedUidByEmail } from '../../../lib/special-accounts';
+import { resolveCanonicalUidByEmail } from '../../../lib/experience-accounts';
 
 export const prerender = false;
 
@@ -233,13 +234,49 @@ export const POST: APIRoute = async (apiCtx) => {
    *
    * `linkedUid` を渡すのが要点 (渡さないと毎回新しい uid を作って UNIQUE 違反になる)。
    */
+  /*
+   * **uid を決めるのはこの 1 か所だけ** (PR-B・正本
+   * `docs/specs/special_demo_integration_spec_20261022.md`)。
+   *
+   * 以前はここで `resolveSpecialUidByEmail` → `resolveDemoUidByEmail` を順に呼んでいた。
+   * **優先順 (Special → Demo → 既存 uid → 新規発行) は 1 つも変えていない** —
+   * 変えたのは「**2 つの名簿を同時に引く**」ことだけ。片方しか見ないと、
+   * Demo に uid が在る人を Special へ足したときに**別の uid を採番**してしまい
+   * (R2)、次のサインインで事前発行 uid ガードが 409 を返して
+   * **本人がログインできなくなる** (R3)。
+   *
+   * 【競合は自動統合しない (fail-closed)】両方の名簿に uid が在って**値が違う**ときは、
+   * **どちらが本物かを機械が決めてよい場面ではない**ので何も書かずに 409。
+   * `issueAdminCred` より前なので **set / delete とも 1 回も呼ばない**。
+   * **同じ uid が両方に在るのは正常な Dual** なので、ここには来ない。
+   *
+   * 【照会が落ちたら通さない】引けなかったことを「登録なし」と同一視しない
+   * (同一視すると新しい uid を採番してしまう)。何も書かずに 503。
+   */
   if (!diagnosticUserId) {
-    diagnosticUserId = await resolveSpecialUidByEmail(email, linkedUid);
-    if (diagnosticUserId) resolvedFrom = 'special';
-  }
-  if (!diagnosticUserId) {
-    diagnosticUserId = await resolveDemoUidByEmail(email, linkedUid);
-    if (diagnosticUserId) resolvedFrom = 'demo';
+    const canon = await resolveCanonicalUidByEmail(email, linkedUid);
+    if (!canon.ok && canon.reason === 'uid_conflict') {
+      console.error(
+        '[auth/resolve] Demo / Real の名簿で uid が食い違っています。'
+        + ' 自動統合はせず、何も書かずに中止しました'
+        + ` (demo=${canon.conflict.demoUid}, special=${canon.conflict.specialUid})。`,
+      );
+      return json({
+        error: 'アカウント連携情報が既存のIDと競合しています。事務局へご連絡ください。',
+      }, 409);
+    }
+    if (!canon.ok) {
+      console.error(
+        '[auth/resolve] 体験アカウントの名簿を照会できませんでした。'
+        + ' 「登録なし」とは扱わず、何も書かずに中止します'
+        + ` (detail=${canon.detail})。`,
+      );
+      return json({ error: 'ただいま混み合っています。時間をおいて再度お試しください。' }, 503);
+    }
+    if (canon.uid) {
+      diagnosticUserId = canon.uid;
+      resolvedFrom = canon.side ?? 'special';
+    }
   }
 
   /*

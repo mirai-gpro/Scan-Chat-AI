@@ -58,9 +58,9 @@
 
 ---
 
-## 4. PR-B 以降（未実装・設計の確定事項）
+## 4. PR-B 以降
 
-### 4.1 canonical UID（PR-B）
+### 4.1 canonical UID（PR-B・**2026-10-22 実装済み**）
 
 `src/lib/experience-accounts.ts` を新設し、`canDemo` / `canReal` / `canonicalUid` /
 `uidConflict` を 1 か所で返す。既存 app_config キー（`demo.*` / `special.*`）は維持。
@@ -77,7 +77,47 @@
 **現行の分裂経路（Phase 0 実測）**: Demo 登録済み（uid=B・サインイン済み）の人を Special に
 メール登録すると、Special 登録 API が**その場で新 uid=C を発行**して B を見ない。
 次のサインインで `resolve.ts` の事前発行ガードが **409**（＝本人がログインできない）。
-→ PR-B でここを canonical 解決へ寄せる。**409 自体は維持**し、conflict として管理画面に出す。
+→ PR-B でここを canonical 解決へ寄せた。**409 自体は維持**し、conflict として管理画面に出す（管理画面は PR-D）。
+
+#### 4.1.1 実装（PR-B）
+
+| 置き場所 | 中身 |
+|---|---|
+| **新規** `src/lib/experience-accounts.ts` | `detectConflict` / `lookupExperienceByEmail` / `resolveCanonicalUidByEmail` / `canonicalUidForRegistration` / `experienceCapabilities` |
+| `api/auth/resolve.ts` | **変更は 1 か所だけ**。2 行の直呼びを canonical 層の 1 呼び出しへ |
+| `api/admin/special-accounts.ts` | uid の決定を委譲。**`mintSpecialUid` の直呼びを撤去** |
+| `api/admin/demo-accounts.ts` | Real 側に uid が在れば**写す**。**自分では採番しない** |
+| `api/debug/viewer.ts` | `can_demo` / `can_real` / `dual_capability` を追加 |
+| **新規** `scripts/verify-experience-accounts.mjs` | 62 件（CI の A 層） |
+
+**side ごとに採番の扱いが違う**（設計提示時の「どちらも無ければ 1 個だけ発行」を実装で分けた）:
+
+- `special` … uid が無ければ**その場で発行する**（本人のログイン前に検査データを入れる
+  運用が成立しないため。スペシャル仕様書 §4.1.1）
+- `demo` … uid が無ければ**発行しない**（`uid: null`）。デモ枠の uid は**従来どおり
+  サインイン時に `linkDemoEmail` が埋める**。ここで発行すると現行の Demo の仕様を変えたうえ、
+  **UID を増やす側へ倒れる**
+
+**Demo 側に uid を写したときは `demo.account_uids` にも足す**（Special 側の「両方へ書く」と同じ）。
+片方だけだと `isDemoAccount(uid)` が立たず、**画面上は登録済みなのにデモが出ない**。
+
+**fail-closed の位置**: 競合は 409 / 名簿の照会失敗は 503 で、どちらも
+`issueAdminCred`・未連携 early return・detach / upsert・`linkDemoEmail` / `linkSpecialEmail`・
+Cookie 発行の**すべてより前**。admin API の競合は **`setConfig` に 1 度も到達しない**。
+
+**変えていないもの**: Google × パスワードの 409 / 事前発行 uid の 409 / `issueAdminCred` の位置 /
+本人解決の順序（実顧客 → staging → 体験アカウント）/ 体験アカウント内の Real → Demo の優先順 /
+`demoFallbackEnabled` の Special 排他（PR-C で移す）/ `welltect_mode` Cookie（PR-C）/
+**migration も app_config キーも 1 つも足していない**。
+
+**既存 verify 3 本は弱めずに書き直した**（旧コードの名前をリテラルで固定していた箇所）:
+`verify-special-accounts` ③ と 5' ・ `verify-demo-gate` ・ `verify-email-auth` S-06 / S-07。
+あわせて `verify-email-auth` に **P-17 / P-18** を追加し、競合 409・照会失敗 503 で
+**DB 書き込み 0 / Cookie 0 / admin credential 0** を実走で固定した。
+**退行注入 12 種**とも名指しで落ちることを確認済み。
+
+**未確認（本番で 1 回通すこと）**: Demo 登録済みの人を Real へ足して uid が写ること /
+競合を人為的に作った回に 409 で何も書かないこと（この環境に Supabase も app_config も無い）。
 
 ### 4.2 表示モード（PR-C）
 

@@ -145,21 +145,34 @@ console.log('\n② 資格の判定 (admin を混ぜない・uid だけで決ま�
 console.log('\n③ サインインの橋渡し (api/auth/resolve.ts)\n');
 {
   const r = read('src/pages/api/auth/resolve.ts');
-  const iSpecial = r.indexOf('resolveSpecialUidByEmail(email');
-  const iDemo = r.indexOf('resolveDemoUidByEmail(email');
+  /*
+   * **2026-10-22 (PR-B)**: 橋渡しは `resolveSpecialUidByEmail` の直呼びから
+   * **canonical uid 層 (`resolveCanonicalUidByEmail`)** に変わった。
+   * 名簿を 2 つ同時に引くようになっただけで、**要件は 1 つも変わっていない** —
+   * ①EC 顧客でない人を通す ②未連携の early return より前 ③Demo より Real が先
+   * ④`linkedUid` を渡す ⑤`findLinkedUid` が先。**同じ 5 件をここで見る。**
+   */
+  const iSpecial = r.indexOf('resolveCanonicalUidByEmail(email');
   // 2026-09-30: 未連携の応答に `admin` を足した (uid を持たない admin を handoff で通すため)。
   // **場所は同じ**なので、前方一致で拾う。
   const iBail = r.indexOf('return json({ linked: false');
   const iLinked = r.indexOf('const linkedUid = await findLinkedUid(');
 
-  ok('resolveSpecialUidByEmail を呼んでいる', iSpecial >= 0,
+  ok('canonical uid 層を呼んでいる', iSpecial >= 0,
     'EC 顧客でないスペシャルアカウントが入口で弾かれる');
   ok('**未連携の early return より前**にある', iSpecial >= 0 && iBail >= 0 && iSpecial < iBail,
     '後ろだと到達しないので、登録しても本人は入れない');
-  ok('**デモ枠より先**に置いている', iSpecial >= 0 && iDemo >= 0 && iSpecial < iDemo,
-    '両方に誤って登録されたとき、実データ側を優先してダミーを掴ませないため (仕様書 §6)');
+  /*
+   * **Real を Demo より先に見る**のは canonical 層の中へ移った。
+   * `resolve.ts` 側では「両方に登録されていたら side は special」で表れる。
+   * 実挙動は `npm run verify:experience-accounts` ③ が動かして見ている。
+   */
+  ok('**実データ側 (Real) を優先している**',
+    /canon\.side \?\? 'special'/.test(r)
+    && /uid = look\.special\.uid \|\| look\.demo\.uid/.test(read('src/lib/experience-accounts.ts')),
+    '両方に登録されたとき、実データ側を優先してダミーを掴ませないため (仕様書 §6)');
   ok('既存の割り当て (linkedUid) を渡している',
-    /resolveSpecialUidByEmail\(email,\s*linkedUid\)/.test(r),
+    /resolveCanonicalUidByEmail\(email,\s*linkedUid\)/.test(r),
     '毎回新しい uid を作ると app_users の UNIQUE 制約に衝突しサインインが 500 で壊れる');
   ok('findLinkedUid が橋渡しより前', iLinked >= 0 && iSpecial >= 0 && iLinked < iSpecial);
   ok('linkSpecialEmail で uid を写している', /await linkSpecialEmail\(email, diagnosticUserId\)/.test(r),
@@ -433,6 +446,15 @@ const API = await (async () => {
   writeFileSync(resolve(CACHE, 'sa-supabase.mjs'), 'export const getServerSupabase = () => null;\n');
   // 純ロジック (型 import だけ) なので**実物を transpile して渡す**。
   writeFileSync(resolve(CACHE, 'sa-email-replace.mjs'), js(read('src/lib/special-email-replace.ts')));
+  /*
+   * **canonical uid 層も実物を渡す** (PR-B)。
+   * ここをスタブにすると、uid を決める本体 (`canonicalUidForRegistration`) が
+   * 検査の外に出てしまい、**この節の「その場で uid を発行する」が何も測らなくなる**。
+   */
+  writeFileSync(resolve(CACHE, 'sa-experience.mjs'), js(read('src/lib/experience-accounts.ts')
+    .replace(/from '\.\/app-config'/g, "from './sa-app-config.mjs'")
+    .replace(/from '\.\/demo-accounts'/g, "from './sa-demo-accounts.mjs'")
+    .replace(/from '\.\/special-accounts'/g, "from './sa-special-accounts.mjs'")));
   let src = read('src/pages/api/admin/special-accounts.ts')
     .replace(/^import type .*?;$/gm, '')
     .replace(/from '\.\.\/\.\.\/\.\.\/lib\/app-config'/g, "from './sa-app-config.mjs'")
@@ -441,7 +463,8 @@ const API = await (async () => {
     .replace(/from '\.\.\/\.\.\/\.\.\/lib\/api-auth'/g, "from './sa-api-auth.mjs'")
     .replace(/from '\.\.\/\.\.\/\.\.\/lib\/account-progress'/g, "from './sa-progress.mjs'")
     .replace(/from '\.\.\/\.\.\/\.\.\/lib\/supabase'/g, "from './sa-supabase.mjs'")
-    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/special-email-replace'/g, "from './sa-email-replace.mjs'");
+    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/special-email-replace'/g, "from './sa-email-replace.mjs'")
+    .replace(/from '\.\.\/\.\.\/\.\.\/lib\/experience-accounts'/g, "from './sa-experience.mjs'");
   // 差し替え漏れを**黙って通さない** (import の形が変わったら気づけるように)。
   if (/\.\.\/\.\.\/\.\.\/lib\//.test(src)) fails.push('verify: API の import 差し替えに失敗');
   const out = resolve(CACHE, 'sa-api.mjs');
@@ -566,9 +589,18 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
    * 衝突 (2^122) は実挙動では再現できないので、「渡し忘れ」は動かしても捕まらない。
    */
   const api = read('src/pages/api/admin/special-accounts.ts');
+  /*
+   * **2026-10-22 (PR-B)**: 採番は canonical 層へ移したので、API が渡すのは
+   * `canonicalUidForRegistration({ ..., taken: takenUids })`。**要件は同じ** —
+   * 空を渡すと既存 uid と衝突したときに上書きしてしまう。
+   */
   ok("5'. API は既存 uid の集合を渡している (上書きを作らない)",
-    /mintSpecialUid\(takenUids\)/.test(api) && !/mintSpecialUid\(\[\]\)/.test(api),
+    /taken: takenUids/.test(api) && !/taken: \[\]/.test(api),
     '空を渡すと既存 uid と衝突したときに上書きしてしまう');
+  // **コメント行を落としてから見る** — 経緯の説明に旧コードの名前が書いてあるため。
+  ok("5'.   採番の口を API 側に持たない (canonical 層だけ)",
+    !/mintSpecialUid|crypto\.randomUUID/.test(code('src/pages/api/admin/special-accounts.ts')),
+    '採番の口が 2 つに戻ると、片方の名簿しか見ずに uid を作る経路が復活する');
   ok("5'.   集合に 3 つの供給元すべてを入れている",
     /const takenUids = new Set<string>\(\[[\s\S]{0,400}?cur\.rows[\s\S]{0,200}?entries[\s\S]{0,200}?emails/.test(api),
     '組み込み / env / config / メール行 のどれかが漏れると衝突を見逃す');
