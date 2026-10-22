@@ -462,9 +462,13 @@ export function reasonText(reasons: string[], note: string | null): string {
   if (reasons.includes('barcode_ocr_mismatch')) {
     parts.push('バーコードと印字の番号が食い違っています。番号をお確かめください。');
   }
-  if (reasons.includes('single_source')) {
-    parts.push('片方しか読み取れていません。番号をお確かめください。');
-  }
+  /*
+   * **`single_source` は出さない**（発注者裁定 2026-10-22・仕様 §12.4.2）。
+   * 決定論デコードで読めた回は**印字の OCR が無いのが正常系**なので、
+   * 出すと**毎回「片方しか読み取れていません」が出る**。
+   * 判定側でも自動確定を妨げない（`NON_BLOCKING_REASONS`）。
+   * **理由コードは台帳と監査に残る**（画面に出さないだけ）。
+   */
   if (reasons.includes('org_prefix_mismatch')) {
     parts.push('この検査キットの番号ではないようです。お確かめください。');
   }

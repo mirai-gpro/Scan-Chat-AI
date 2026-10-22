@@ -128,14 +128,68 @@ console.log('\n③ 採否判定 (evaluateExternalId)\n');
   eq('不一致 → **バーコードを採る**', mis.value, '704000123');
   ok('不一致 → 理由コードが付く', mis.reasons.includes('barcode_ocr_mismatch'));
 
+  /*
+   * **片方しか読めていない回も `confirmed`**（発注者裁定 2026-10-22・仕様 §12.4.2
+   * 「片方しか、、、の表示を止めて、最初に読めた状態で確定にして」）。
+   * `labid.decode_skip_llm` を on にした以上、**正常系は毎回 `single_source`** なので、
+   * ここを review に倒すと**全件が問診CSV のゲートで止まる**。
+   * **理由コードは消さない**（台帳と監査に残す）。
+   */
   const onlyB = ev({ barcode: '704000123', ocr: null });
-  eq('バーコードのみ → review_required', onlyB.status, 'review_required');
-  ok('バーコードのみ → single_source', onlyB.reasons.includes('single_source'));
+  eq('バーコードのみ → **confirmed**（裁定 2026-10-22）', onlyB.status, 'confirmed');
+  ok('バーコードのみ → single_source は理由に残る', onlyB.reasons.includes('single_source'));
   eq('バーコードのみ → decode=barcode', onlyB.decodeMethod, 'barcode');
 
   const onlyO = ev({ barcode: null, ocr: '704000123' });
   eq('印字のみ → decode=ocr', onlyO.decodeMethod, 'ocr');
-  eq('印字のみ → review_required', onlyO.status, 'review_required');
+  eq('印字のみ → **confirmed**（同じ扱い）', onlyO.status, 'confirmed');
+  ok('印字のみ → single_source は理由に残る', onlyO.reasons.includes('single_source'));
+
+  /*
+   * **確定を妨げないのは `single_source` だけ**。接頭辞・パターン・突合・手入力は
+   * 従来どおりブロックする（裁定は「読めたら確定」で、検査を外す話ではない）。
+   */
+  const sbPat = ev({ barcode: '999999999', ocr: null });
+  eq('片方だけ + パターン外 → review_required', sbPat.status, 'review_required');
+  const sbUnk = core.evaluateExternalId({ provider: 'prevent', barcode: '704000123', ocr: null, expectedPattern: '' });
+  ok('**片方だけ + パターン未設定 → review_required**（桁数を検査できない回は確定しない）',
+    sbUnk.status === 'review_required' && sbUnk.reasons.includes('pattern_unknown'));
+  const sbPre = core.evaluateExternalId({
+    provider: 'prevent', barcode: '123456789', ocr: null, expectedPattern: '^[0-9]{9}$', orgPrefix: '704',
+  });
+  ok('片方だけ + 接頭辞外 → review_required',
+    sbPre.status === 'review_required' && sbPre.reasons.includes('org_prefix_mismatch'));
+  const sbMan = ev({ barcode: null, ocr: null, manual: '704000123' });
+  eq('手入力だけ → review_required（admin 訂正の経路）', sbMan.status, 'review_required');
+
+  /*
+   * **allow-list で持っていること**を固定する。将来 `ReviewReason` を足した人が
+   * 何もしなくても**既定でブロック側**になる形でなければならない
+   * （deny-list だと新しい理由が黙って自動確定を通す）。
+   */
+  eq('確定を妨げない理由は single_source だけ', [...core.NON_BLOCKING_REASONS], ['single_source']);
+  {
+    const src = code('src/lib/external-test-id.ts');
+    ok('**status は allow-list で決める**（`reasons.length === 0` に戻していない）',
+      /reasons\.some\(blocksAutoConfirm\)/.test(src) && !/reasons\.length === 0 \? 'confirmed'/.test(src));
+    ok('allow-list は包含で判定する（既定はブロック）',
+      /!NON_BLOCKING_REASONS\.includes\(reason\)/.test(src));
+  }
+  /* 画面にも出さない（毎回「片方しか読み取れていません」が出ていた）。 */
+  ok('**画面は「片方しか」を出さない**',
+    !/片方しか/.test(code('src/scripts/external-id-capture.ts')));
+  /*
+   * ゲートまで通ることを**ゲートの関数で**確かめる（status だけ見て満足しない）。
+   */
+  {
+    const g = core.checkPreventQuestionnaireGate({
+      capture: {
+        normalizedValue: onlyB.value, status: onlyB.status,
+        labTestLinkStatus: 'linked', labTestId: '11111111-1111-4111-8111-111111111111',
+      },
+    });
+    ok('片方だけでも問診CSV のゲートを通る', g.allowed === true, JSON.stringify(g));
+  }
 
   const pat = ev({ barcode: '999999999', ocr: '999999999' });
   eq('パターン外 → review_required (登録は通す)', [pat.ok, pat.status], [true, 'review_required']);
@@ -2221,7 +2275,7 @@ console.log('\n⑲ 決定論デコード (§12.4 案 A ＋ 案 C)\n');
      * **まだ裁定が出ていない**。説明文から消すと、admin 画面で見た人が
      * 「速いだけの設定」と誤解する。
      */
-    for (const word of ['single_source', 'review_required', 'ゲート', '未裁定']) {
+    for (const word of ['single_source', 'confirmed', 'ゲート', '突合']) {
       ok(`説明が「${word}」を名指ししている (帰結を隠さない)`, blk.includes(word));
     }
   }

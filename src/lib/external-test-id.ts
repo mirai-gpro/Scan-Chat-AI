@@ -164,15 +164,19 @@ export function normalizeExternalId(raw: unknown): string | null {
    * 実物のプリベントのシール台紙（2026-10-13 に確認）では、バーコードの下に
    * **`A` で挟んだ形**（`A` + ユーザーID + `A`）が印字されている。Codabar (NW-7) は
    * **A〜D を start/stop に使う**ので、デコーダがそれを含めて返すことがある。
-   * 剥がさないと `^[0-9]+$` で落ちて **バーコード側が常に捨てられ**、
-   * 印字の OCR だけが残って**毎回 `single_source` = `review_required`** になる（実測）。
+   * 剥がさないと `^[0-9]+$` で落ちて **バーコード側が常に捨てられる**。
+   * **`labid.decode_skip_llm` が on の今はこれが致命的** — 印字の OCR を取らないので
+   * **読める値が 1 つも無くなり毎回「撮り直してください」**になる
+   * （この罠を踏んだときは「毎回 `single_source` = `review_required`」だった・実測）。
    *
    * **中身が全部数字のときだけ**剥がす。`7O4000123` のように**間に**英字が混ざる場合は
    * 従来どおり null（`O`→`0` のような補正をすると別の番号に化ける）。
    *
    * **Code39 の `*` は剥がさない。** 実物で見ていないので入れない。
-   * もし `*` 付きで返るデコーダがあれば、その回は確定せず `review_required` に落ちる
-   * ＝**黙って別の値になるより安全な側**に倒れる。
+   * もし `*` 付きで返るデコーダがあれば**その回はバーコード側が捨てられる**:
+   * 印字の OCR が在ればそちらを採り（`single_source`。**裁定 2026-10-22 以降は
+   * 接頭辞とパターンを通れば `confirmed`**）、OCR も無ければ撮り直しになる。
+   * どちらも**黙って別の値になることはない**。
    */
   const m = /^[A-Da-d]?([0-9]+)[A-Da-d]?$/.exec(s);
   return m ? m[1] : null;
@@ -237,6 +241,36 @@ export type ReviewReason =
   | 'pattern_unknown'        // 期待パターンが未設定／壊れている＝判定不能
   | 'manual_entry';          // 手入力で入れた値
 
+/**
+ * **`review_required` へ倒さない理由コード**（＝自動確定を妨げない理由）。
+ *
+ * 【`single_source` はここに入る（発注者裁定 2026-10-22・仕様 §12.4.2）】
+ * 発注者指示:「**片方しか、、、の表示を止めて、最初に読めた状態で確定にして**」。
+ * `labid.decode_skip_llm` を on にした (§12.4.1) ので、**正常系は毎回**
+ * 「バーコードは機械が読めた / 印字の OCR は無い」= `single_source` になる。
+ * これを `review_required` のままにすると**全件が問診CSV のゲートで止まる**。
+ *
+ * **残る検査は 2 つ**（どちらも外れたらこれまでどおり `review_required`）:
+ *   - **発行元の接頭辞** `704`（`labid.prevent_org_prefix`・**先方の説明で確認済み**）
+ *   - **期待パターン** `labid.prevent_pattern`（既定 `^704000[0-9]{3}$` = 9 桁。
+ *     **ただしこの桁数は業務上の形式例が出どころで、実物の同梱書面では未確認**・§2.3）
+ *
+ * **引き換えに失うもの**: バーコード × 印字の突合。機械デコードが誤読した値が
+ * **9 桁で `704` から始まっていれば自動確定する**（この番号にチェックディジットは無い・
+ * §4.4.2）。残る網は **証跡画像**と、同じ番号が別の検査に在るときの `conflict` だけ。
+ * **`pattern_unknown`（パターン未設定・壊れている）は入れない** — 桁数を検査できない回は
+ * 上の前提が崩れるので、**判定不能は従来どおりブロックする**（fail-closed）。
+ *
+ * **allow-list で持つ**のが要点。将来 `ReviewReason` を足した人が何もしなくても
+ * **既定でブロック側になる**（ここへ明示的に入れない限り自動確定しない）。
+ */
+export const NON_BLOCKING_REASONS: readonly ReviewReason[] = ['single_source'];
+
+/** その理由だけなら自動確定してよいか。 */
+function blocksAutoConfirm(reason: ReviewReason): boolean {
+  return !NON_BLOCKING_REASONS.includes(reason);
+}
+
 export interface EvaluateInput {
   provider: ExternalIdProvider;
   /** 1次元バーコードのデコード結果（無ければ null）。 */
@@ -289,8 +323,11 @@ export type EvaluateResult =
  *
  * 優先順位（仕様 §5.1）: ① 手入力補正 ② 1次元バーコード ③ 印字IDの OCR。
  *
- * **自動確定（`confirmed`）になるのは、両方読めて一致し、期待パターンにも合うときだけ。**
- * それ以外は全部 `review_required`。`review_required` でも**登録は通す** —
+ * **自動確定（`confirmed`）の条件は「ブロックする理由が 1 つも無いこと」**
+ * （`NON_BLOCKING_REASONS` の allow-list）。**片方しか読めていない回も確定する**
+ * （発注者裁定 2026-10-22・§12.4.2）が、**接頭辞 `704` と期待パターンは必ず通す**
+ * （どちらも外れたら `review_required`・パターンが未設定／壊れている回も同じ）。
+ * `review_required` でも**登録は通す** —
  * 止めてしまうと実物の形式が既定と違う回に**何も記録できなくなる**（仕様 §2.3）。
  */
 export function evaluateExternalId(input: EvaluateInput): EvaluateResult {
@@ -366,10 +403,16 @@ export function evaluateExternalId(input: EvaluateInput): EvaluateResult {
   if (m === null) reasons.push('pattern_unknown');
   else if (m === false) reasons.push('pattern_mismatch');
 
+  /*
+   * **自動確定の判定は `NON_BLOCKING_REASONS` の allow-list で行う**
+   * (発注者裁定 2026-10-22・§12.4.2)。`single_source` だけの回は `confirmed`。
+   * **理由コードは消さない** — 「片方しか読めていなかった」ことは台帳と監査に残す
+   * (画面には出さない)。
+   */
   return {
     ok: true,
     value,
-    status: reasons.length === 0 ? 'confirmed' : 'review_required',
+    status: reasons.some(blocksAutoConfirm) ? 'review_required' : 'confirmed',
     decodeMethod,
     reasons,
     sources,

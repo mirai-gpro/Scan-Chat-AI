@@ -124,13 +124,13 @@
 |---|---|---|---|---|---|
 | `A704000123A` | `704000123` | `704000123` | **confirmed** | — | **これが合格形**。start/stop を剥がして一致 |
 | `704000123` | `704000123` | `704000123` | **confirmed** | — | デコーダが start/stop を返さない場合も同じ |
-| `null` | `704000123` | `704000123` | **review_required** | single_source | バーコードが読めず印字だけ |
-| `A704000123A` | `null` | `704000123` | **review_required** | single_source | 印字が読めない |
+| `null` | `704000123` | `704000123` | **confirmed** | single_source | バーコードが読めず印字だけ |
+| `A704000123A` | `null` | `704000123` | **confirmed** | single_source | 印字が読めない |
 | `A704000123A` | `704000124` | `704000123` | **review_required** | barcode_ocr_mismatch | **食い違い**（バーコードを採る） |
-| `*704000123*` | `704000123` | `704000123` | **review_required** | single_source | Code39 で返ると剥がさない |
+| `*704000123*` | `704000123` | `704000123` | **confirmed** | single_source | Code39 で返ると剥がさない |
 | `704000` | `704000` | `704000` | **review_required** | pattern_mismatch | 桁が足りない |
 | `202500000000000` | `202500000000000` | `202500000000000` | **confirmed** | — | **これが合格形**（15 桁・両方読めた） |
-| `null` | `202500000000000` | `202500000000000` | **review_required** | single_source | 印字だけ |
+| `null` | `202500000000000` | `202500000000000` | **confirmed** | single_source | 印字だけ |
 | `0120100302` | `null` | `0120100302` | **review_required** | single_source, pattern_mismatch | **電話番号を読んだ** |
 
 ### 見るべき点（この 4 つ）
