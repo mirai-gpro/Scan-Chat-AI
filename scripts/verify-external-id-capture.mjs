@@ -1776,9 +1776,13 @@ console.log('\n⑰ 読み取り結果の控え (§12.2 の案 (c))\n');
   // ── 控えられなかったことを飲み込まない ──
   BUCKET = new Map(); failPut = true;
   {
-    const w = await keep();
-    eq('S3 が落ちたら ok:false を返す (throw しない)', w.ok, false);
-    eq('理由が分かる', w.error, 'read_cache_write_failed');
+    // **例外で抜けない**こと自体を見る（throw にすると `read` が 500 になり、
+    // 「撮り直してください」の案内まで届かない）。
+    let w = null; let threw = false;
+    try { w = await keep(); } catch { threw = true; }
+    ok('S3 が落ちても throw しない', !threw);
+    eq('ok:false を返す', threw ? null : w.ok, false);
+    eq('理由が分かる', threw ? null : w.error, 'read_cache_write_failed');
   }
   failPut = false;
 
