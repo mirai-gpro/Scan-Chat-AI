@@ -356,6 +356,8 @@ for (const c of oldB) {
     // **本番のデモ環境と同じ条件**: 別の回のがんリスク検査を持っている
     hasCancerRisk: true,
     cycleSeq: null,
+    // 2026-10-22 (PR-C): サンプルは **Demo 表示中だけ**出るので mode を渡す。
+    mode: 'demo' as const,
   });
   check('サンプルが出る (isSample)', asDemoWithCancer.isSample === true,
     `isSample=${asDemoWithCancer.isSample}`);
@@ -389,6 +391,8 @@ for (const c of oldB) {
   const asDemoNoCancer = await loadReportVM({
     diagnosticUserId: DEMO_UID, name: 'テスト 様', chronologicalAge: 56,
     ourWellnessAge: null, hasCancerRisk: false, cycleSeq: null,
+    // 2026-10-22 (PR-C): サンプルは **Demo 表示中だけ**出るので mode を渡す。
+    mode: 'demo' as const,
   });
   check('閲覧者の検査でサンプルのタイプが変わらない', asDemoNoCancer.reportType === 1,
     `reportType=${asDemoNoCancer.reportType}`);
@@ -404,6 +408,12 @@ for (const c of oldB) {
     ourWellnessAge: null,
     hasCancerRisk: false,
     cycleSeq: null,
+    /*
+     * **あえて `'demo'` を渡す** (2026-10-22・PR-C)。モードが demo でも
+     * **デモ用アカウントでない uid にはサンプルが出ない**ことを見る
+     * = 検査が 1 段強くなっている (`shouldUseDemoData` は資格も併せて見る)。
+     */
+    mode: 'demo' as const,
   });
   check('一般顧客にサンプルを出さない', asCustomer.isSample === false && asCustomer.chapters.length === 0,
     `isSample=${asCustomer.isSample} / 全編 ${asCustomer.chapters.length} 章`);

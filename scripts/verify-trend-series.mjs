@@ -86,8 +86,7 @@ export function getServerSupabase() { return _stub; }
 export function getBrowserSupabase() { return null; }
 `);
 // デモ層は通さない (実データ経路を検査する)。
-writeFileSync(`${CACHE}/trend-demo-stub.mjs`, `export function demoFallbackEnabled() { return false; }
-export function demoMetricTrend() { return []; }
+writeFileSync(`${CACHE}/trend-demo-stub.mjs`, `export function demoMetricTrend() { return []; }
 `);
 
 await build({
@@ -118,7 +117,7 @@ const ok = (cond, label, extra = '') => {
 // ── ① 3 表記が 1 系列 4 点になる ─────────────────────────────────
 console.log('\n① 塩分 3 表記 → 1 系列 4 点');
 {
-  const s = await mod.getMeasurementTrend(UID, ['1日の塩分摂取量'], 12, 'cancer_urine');
+  const s = await mod.getMeasurementTrend(UID, 'real', ['1日の塩分摂取量'], 12, 'cancer_urine');
   ok(s.length === 1, '系列は 1 本', `len=${s.length}`);
   const pts = s[0]?.points ?? [];
   ok(pts.length === 4, '**点が 4 つ** (修正前は 2 点だった)', `n=${pts.length}`);
@@ -133,7 +132,7 @@ console.log('\n① 塩分 3 表記 → 1 系列 4 点');
 // ── ② 候補一覧に 1 件だけ出る ────────────────────────────────────
 console.log('\n② 「表示項目の設定」の候補');
 {
-  const c = await mod.getTrendCandidates(UID, 'cancer_urine');
+  const c = await mod.getTrendCandidates(UID, 'real', 'cancer_urine');
   const salty = c.filter((n) => n.includes('塩'));
   ok(c.filter((n) => n === '1日の塩分摂取量').length === 1, '候補に 1日の塩分摂取量 が 1 件', JSON.stringify(salty));
   ok(!c.includes('塩分摂取量') && !c.includes('1日の食塩摂取量'),
@@ -142,7 +141,7 @@ console.log('\n② 「表示項目の設定」の候補');
   // (1 回ずつしか無いので) 候補に出ない = **上の 2 行だけでは退行を捕まえられない**。
   // 旧表記で引いて空になることまで見て初めて「畳まれた」と言える。
   for (const old of ['塩分摂取量', '1日の食塩摂取量']) {
-    const s = await mod.getMeasurementTrend(UID, [old], 12, 'cancer_urine');
+    const s = await mod.getMeasurementTrend(UID, 'real', [old], 12, 'cancer_urine');
     ok(s.length === 0, `旧表記「${old}」では系列が引けない (畳まれている)`, `len=${s.length}`);
   }
 }
@@ -158,10 +157,10 @@ console.log('\n③ 他系列は不変');
    * 引くときの名前だけが変わる = 塩分と同じ「読み出し時のエイリアス」。
    */
   const names = ['BMI', '尿中のポルフィリン量'];
-  const s = await mod.getMeasurementTrend(UID, names, 12, 'cancer_urine');
+  const s = await mod.getMeasurementTrend(UID, 'real', names, 12, 'cancer_urine');
   ok(s.length === 2, 'BMI / 尿中のポルフィリン量 は従来どおり 2 系列', `len=${s.length}`);
   for (const x of s) ok(x.points.length === 2, `${x.label} は 2 点`, `n=${x.points.length}`);
-  ok((await mod.getMeasurementTrend(UID, ['尿中ポルフィリン量'], 12, 'cancer_urine')).length === 0,
+  ok((await mod.getMeasurementTrend(UID, 'real', ['尿中ポルフィリン量'], 12, 'cancer_urine')).length === 0,
     '旧表記「尿中ポルフィリン量」では引けない (表示名へ畳まれている)');
   ok(s.find((x) => x.label === 'BMI')?.points.map((p) => p.value).join(',') === '22.1,22.4',
     'BMI の値が変わっていない');
@@ -170,13 +169,13 @@ console.log('\n③ 他系列は不変');
 // ── ④ 部分一致で拾わない ────────────────────────────────────────
 console.log('\n④ 完全一致のみ (fuzzy / substring を使わない)');
 {
-  const s = await mod.getMeasurementTrend(UID, ['尿中塩分', '1日の塩分摂取量の目安'], 12, 'cancer_urine');
+  const s = await mod.getMeasurementTrend(UID, 'real', ['尿中塩分', '1日の塩分摂取量の目安'], 12, 'cancer_urine');
   ok(s.length === 2, '「尿中塩分」「1日の塩分摂取量の目安」は別系列のまま', `len=${s.length}`);
-  const merged = await mod.getMeasurementTrend(UID, ['1日の塩分摂取量'], 12, 'cancer_urine');
+  const merged = await mod.getMeasurementTrend(UID, 'real', ['1日の塩分摂取量'], 12, 'cancer_urine');
   ok((merged[0]?.points.length ?? 0) === 4,
     '紛らわしい 4 行を混ぜても塩分系列は 4 点のまま (巻き込んでいない)',
     `n=${merged[0]?.points.length}`);
-  const cands = await mod.getTrendCandidates(UID, 'cancer_urine');
+  const cands = await mod.getTrendCandidates(UID, 'real', 'cancer_urine');
   ok(cands.includes('尿中塩分') && cands.includes('1日の塩分摂取量の目安'),
     '紛らわしい 2 項目は候補に残る (消していない)');
 }
@@ -188,10 +187,10 @@ console.log('\n⑤ canonical_name 優先は不変');
     row('a1', '2023-08-03', 1, '塩分摂取量', '食塩相当量', 8.7, 'g'),
     row('a2', '2024-06-10', 2, '1日の塩分摂取量', '食塩相当量', 8.4, 'g'),
   ]));
-  const s = await mod.getMeasurementTrend(UID, ['食塩相当量'], 12, 'cancer_urine');
+  const s = await mod.getMeasurementTrend(UID, 'real', ['食塩相当量'], 12, 'cancer_urine');
   ok(s.length === 1 && s[0].points.length === 2,
     'canonical_name が付いていればその名前で 1 系列', `len=${s.length} n=${s[0]?.points.length}`);
-  const s2 = await mod.getMeasurementTrend(UID, ['1日の塩分摂取量'], 12, 'cancer_urine');
+  const s2 = await mod.getMeasurementTrend(UID, 'real', ['1日の塩分摂取量'], 12, 'cancer_urine');
   ok(s2.length === 0, 'エイリアスは canonical_name を上書きしない', `len=${s2.length}`);
   stub.__setStub(makeStub(ROWS));
 }

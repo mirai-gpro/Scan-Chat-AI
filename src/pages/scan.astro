@@ -8,6 +8,7 @@ import { testTypeLabel, formatJpDate } from '../lib/dashboard-queries';
 import { qrSvgPath } from '../lib/qr';
 import { publicUrl } from '../lib/public-url';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
+import { viewModeFromRequest } from '../lib/view-mode';
 import { isSpecialAccount } from '../lib/special-accounts';
 import { refreshConfig } from '../lib/app-config';
 import { noStore } from '../lib/http-cache';
@@ -37,6 +38,8 @@ const qr = qrSvgPath(pageUrl, { cell: 4, margin: 4, ec: 'M' });
 const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
+const viewMode = viewModeFromRequest(Astro, viewer);
+
 const diagnosticUserId = viewer.uid;
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
 const linkQuery = viewerLinkQuery(viewer);
@@ -64,7 +67,7 @@ await refreshConfig();
  * 共有閲覧なら**共有リンクの対象者**なので、共有相手が操作しても
  * **対象者の属性（複数年アップの可否）で動く**のが正しい。
  */
-const multiYear = isSpecialAccount(diagnosticUserId);
+const multiYear = viewMode.effectiveMode === 'real' && isSpecialAccount(diagnosticUserId);
 /** 上限 5 年分 (発注者指示 2026-09-15「1年分から最大5年分」)。 */
 const MAX_ROUNDS = 5;
 /*

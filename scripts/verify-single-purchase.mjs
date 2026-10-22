@@ -55,9 +55,16 @@ const dash = read('src/pages/dashboard.astro');
 // ══════════════════════════════════════════════════════════════════════
 console.log('\n① 単品購入モードの判定\n');
 {
-  ok('isSpecialAccount 1 本で決めている',
-    /const singlePurchase = isSpecialAccount\(data\?\.diagnosticUserId\);/.test(dash),
-    '判定はこれだけ。表示中の uid で決まる');
+  /*
+   * **2026-10-22 (PR-C)**: 判定に **Real 表示中か**が加わった
+   * (正本 `docs/specs/special_demo_integration_spec_20261022.md` §4.3)。
+   * Demo を表示している間にスペシャル専用の画面を出すと、
+   * **ダミーの検査結果に「単品購入」の枠が付く**= Demo と Real が混ざる。
+   * **件数も admin も混ぜない**という元の要件はそのまま下で見ている。
+   */
+  ok("Real 表示中の isSpecialAccount で決めている",
+    /const singlePurchase = viewMode\.effectiveMode === 'real' && isSpecialAccount\(data\?\.diagnosticUserId\);/.test(dash),
+    '判定はこれだけ。表示中の uid と表示モードで決まる');
 
   /*
    * **件数を AND しない。** 「キットが 0 件なら単品購入」にすると、実顧客でも
@@ -336,8 +343,9 @@ console.log('\n④-3 複数年アップロード\n');
    * 何枚まとめて送っても `test_artifacts` が 1 件になるのは**正しい**
    * (2026-09-15 発注者確認)。足りないのは**回の区切り**だけ。
    */
-  ok('複数年はスペシャルアカウントに限る',
-    /const multiYear = isSpecialAccount\(diagnosticUserId\);/.test(scan),
+  // 2026-10-22 (PR-C): こちらも **Real 表示中**に限る (Demo の回を年度として数えない)。
+  ok('複数年はスペシャルアカウントの Real 表示に限る',
+    /const multiYear = viewMode\.effectiveMode === 'real' && isSpecialAccount\(diagnosticUserId\);/.test(scan),
     '通常の利用者は「今回の検査」1 回分。画面を変えない');
 
   /*

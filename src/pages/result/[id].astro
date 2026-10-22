@@ -8,6 +8,7 @@ import { renderReportMarkdown } from '../../lib/report-view';
 import { AI_PREVENTION_REPORT_LABEL } from '../../lib/display-names';
 import { derivedBloodSuffix } from '../../lib/blood-subset';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../../lib/viewer';
+import { viewModeFromRequest } from '../../lib/view-mode';
 import { noStore } from '../../lib/http-cache';
 
 export const prerender = false;
@@ -20,6 +21,8 @@ const { id } = Astro.params;
 const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
+const viewMode = viewModeFromRequest(Astro, viewer);
+
 const u = viewer.uid ?? '';
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
 const linkQuery = viewerLinkQuery(viewer);
@@ -33,7 +36,7 @@ const initialPage = (() => {
   return Number.isFinite(p) && p > 0 ? p : 1;
 })();
 
-const result = await loadResult(id ?? '', u);
+const result = await loadResult(id ?? '', u, viewMode.effectiveMode);
 const hasError = 'error' in result;
 const data = hasError ? null : result;
 

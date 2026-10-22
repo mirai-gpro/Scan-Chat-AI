@@ -15,7 +15,8 @@ import { isApprovedRow } from './report-gate';
 import { getOriginalSignedUrl } from './originals-storage';
 import type { TestArtifact, DiagnosisResult } from '../types/supabase';
 import { findSection, type ElithSection } from './elith-parser';
-import { demoArtifacts, demoFallbackEnabled } from './demo-data';
+import { demoArtifacts } from './demo-data';
+import { shouldUseDemoData, type ViewMode } from './view-mode';
 import { AI_PREDICTION_REPORT_LABEL } from './display-names';
 import { derivedBloodEpisodeIndex, orderDerivedSiblings } from './blood-subset';
 
@@ -170,12 +171,19 @@ export async function loadResult(
    * admin の代理表示中は `resolveViewer` が**対象顧客の uid** を返すので
    * (`viewer.ts` の `impersonating` 分岐)、**admin 専用の例外分岐は要らない。**
    */
-  viewerUid?: string | null,
+  viewerUid: string | null | undefined,
+  /**
+   * **いま Real / Demo のどちらを表示しているか** (`resolveViewMode().effectiveMode`)。
+   *
+   * **省略できない** — 渡し忘れたページだけ Demo / Real が食い違うのを型で防ぐ
+   * (正本 `docs/specs/special_demo_integration_spec_20261022.md` §4.3)。
+   */
+  mode: ViewMode,
 ): Promise<ResultData | { error: string }> {
   // デモ層 (demo-data.ts) の検査履歴から来た id。DB には存在しないので
   // ここで組み立てて返す。これが無いと検査履歴のリンクがエラー画面になる。
   // **所有者検証より前**に置く (demo-art-* は DB に無いので条件付き取得に載せられない)。
-  if (artifactId.startsWith('demo-art-')) return demoResult(artifactId, viewerUid);
+  if (artifactId.startsWith('demo-art-')) return demoResult(artifactId, viewerUid, mode);
 
   if (!/^[0-9a-f-]{36}$/i.test(artifactId)) {
     return { error: '不正な検査 ID です。' };
@@ -297,7 +305,7 @@ export async function loadResult(
    * 「実顧客に他人名義のサンプルを見せない」という同じ原則の適用範囲を、
    * ここにも広げる。**原本が無いなら何も出さない** (空の方が誤解より安全)。
    */
-  const samplePdf = demoFallbackEnabled(viewerUid) ? (SAMPLE_PDF_MAP[artifact.test_type] ?? null) : null;
+  const samplePdf = shouldUseDemoData(viewerUid, mode) ? (SAMPLE_PDF_MAP[artifact.test_type] ?? null) : null;
   const pdfUrl = original?.url ?? samplePdf?.url ?? null;
   const pdfLabel = original
     ? original.label
@@ -361,8 +369,8 @@ async function resolveOriginal(
  * デモ層の検査 1 件。原本はまだ無いので検査種別のサンプル PDF を出す。
  * AI 診断レポートは載せない (実データ経路と同じ扱い — /report が正)。
  */
-function demoResult(artifactId: string, viewerUid?: string | null): ResultData | { error: string } {
-  if (!demoFallbackEnabled(viewerUid)) return { error: NOT_FOUND };
+function demoResult(artifactId: string, viewerUid: string | null | undefined, mode: ViewMode): ResultData | { error: string } {
+  if (!shouldUseDemoData(viewerUid, mode)) return { error: NOT_FOUND };
   const artifact = demoArtifacts('').find((a) => a.id === artifactId);
   if (!artifact) return { error: NOT_FOUND };
   const samplePdf = SAMPLE_PDF_MAP[artifact.test_type] ?? null;

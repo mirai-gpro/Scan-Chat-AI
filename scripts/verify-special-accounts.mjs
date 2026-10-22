@@ -50,26 +50,74 @@ const ok = (label, cond, why) => {
 // `demoFallbackEnabled` の**本体をそのまま切り出して動かす**。
 // 「isSpecialAccount と書いてあるか」を見るだけだと、順序を入れ替えたり
 // 条件を反転したりした退行を拾えない。
-console.log('\n① ダミーの止め (demoFallbackEnabled を実際に動かす)\n');
+console.log('\n① ダミーの止め (view-mode.ts を実際に動かす)\n');
 {
-  const src = read('src/lib/demo-data.ts');
-  const i = src.indexOf('export function demoFallbackEnabled');
-  if (i < 0) {
-    fails.push('demo-data.ts: demoFallbackEnabled が見つからない');
+  /*
+   * **2026-10-22 (PR-C)**: 判定は `demo-data.ts` の `demoFallbackEnabled(uid)` から
+   * `view-mode.ts` の **`shouldUseDemoData(uid, mode)` + `resolveViewMode()`** へ移った。
+   *
+   * 【この枠の要件は 1 つも変わっていない】**実データの利用者に他人名義のダミーを
+   * 出さない。** 変わったのは担保の仕方だけ:
+   *   旧 … スペシャル枠なら**無条件で false** (排他)
+   *   新 … **既定が Real** で、Demo になるのは**本人が明示的に切り替えたときだけ**
+   * だから「両方に登録されていても、黙ってダミーが出ることは無い」を
+   * **Cookie 無し (= ログイン直後) で Real になる**ことで見る。
+   */
+  const src = read('src/lib/view-mode.ts');
+  const cut = (name) => {
+    const i = src.indexOf(`export function ${name}`);
+    if (i < 0) return null;
+    return js(src.slice(i, src.indexOf('\n}', i) + 2).replace('export function', 'function'));
+  };
+  const should = cut('shouldUseDemoData');
+  const resolve = cut('resolveViewMode');
+  const detect = cut('parseMode');
+  if (!should || !resolve || !detect) {
+    fails.push('view-mode.ts: shouldUseDemoData / resolveViewMode / parseMode が見つからない');
   } else {
-    const end = src.indexOf('\n}', i) + 2;
-    const body = js(src.slice(i, end).replace('export function', 'function'));
     const make = new Function('demoDisabledGlobally', 'isDemoAccount', 'isSpecialAccount',
-      `${body}\nreturn demoFallbackEnabled;`);
-    const gate = (globalOff, demo, special) =>
-      make(() => globalOff, () => demo, () => special)('11111111-1111-1111-1111-111111111111');
+      `${should}\n${resolve}\n${detect}\nreturn { shouldUseDemoData, resolveViewMode, parseMode };`);
+    const UID = '11111111-1111-1111-1111-111111111111';
+    const mod = (globalOff, demo, special) =>
+      make(() => globalOff, () => demo, () => special);
+    /** その人が「いま」ダミーを見るか (= ログイン直後の既定の状態)。 */
+    const gate = (globalOff, demo, special, requested = null) => {
+      const m = mod(globalOff, demo, special);
+      const st = m.resolveViewMode({ kind: 'self', uid: UID }, requested);
+      return m.shouldUseDemoData(UID, st.effectiveMode);
+    };
 
-    eq('デモ枠だけ → ダミーを出す', gate(false, true, false), true);
-    eq('スペシャル枠だけ → ダミーを出さない', gate(false, false, true), false);
+    eq('デモ枠だけ → ダミーを出す (既定が demo・PR-C 前と同じ)', gate(false, true, false), true);
+    eq('  明示的に real へ切り替えれば出ない', gate(false, true, false, 'real'), false);
+    eq('スペシャル枠だけ → 切り替えようとしても出ない', gate(false, false, true, 'demo'), false);
     // **両方に登録された事故。ここが本命。**
-    eq('**両方に登録されていてもダミーを出さない**', gate(false, true, true), false);
-    eq('どちらでもない (一般顧客) → 出さない', gate(false, false, false), false);
-    eq('全停止スイッチはデモ側にだけ効く', gate(true, true, false), false);
+    eq('**両方に登録されていても、黙ってダミーは出ない** (既定は Real)',
+      gate(false, true, true), false);
+    eq('  Dual が自分で切り替えたときだけ出る (正常な Dual)', gate(false, true, true, 'demo'), true);
+    eq('どちらでもない (一般顧客) → 切り替えようとしても出ない', gate(false, false, false, 'demo'), false);
+    eq('全停止スイッチはデモ側にだけ効く', gate(true, true, false, 'demo'), false);
+    /*
+     * **壊れた Cookie でダミーにしない** / **代理表示・共有では切り替えさせない**
+     * (ここを緩めると Cookie が権限の根拠になる)。
+     */
+    /*
+     * **壊れた Cookie を `demo` と解釈しない。** デモ専用枠は既定が demo なので、
+     * ここは**スペシャル枠も持つ Dual** で見る (既定 real のまま動かないこと)。
+     */
+    eq('知らない Cookie 値は無視する (Dual は real のまま)',
+      gate(false, true, true, mod(false, true, true).parseMode('DEMO!')), false);
+    /*
+     * **代理表示・共有・緊急入場では Cookie を見ない** (`switchable:false`)。
+     * 既定は**表示対象の資格**に従うので、**スペシャル枠 (実データ) を代理表示・
+     * 共有しているときは `real`** = ダミーが混ざらない。ここがこの枠の要件。
+     * (デモ専用アカウントを代理表示したときに `demo` になるのは PR-C 前と同じ挙動。)
+     */
+    for (const kind of ['admin_impersonation', 'admin_impersonation_legacy', 'share', 'uid_entry']) {
+      const dual = mod(false, true, true).resolveViewMode({ kind, uid: UID }, 'demo');
+      eq(`${kind}: スペシャル枠は Demo にならない`, [dual.effectiveMode, dual.switchable], ['real', false]);
+      const demoOnly = mod(false, true, false).resolveViewMode({ kind, uid: UID }, 'demo');
+      eq(`${kind}: 切り替えは与えない`, demoOnly.switchable, false);
+    }
   }
 }
 

@@ -10,6 +10,7 @@ import { WELLNESS_AGE_LABEL } from '../lib/wellness-age';
 import { countUnreadImportant } from '../lib/notice-queries';
 import { refreshConfig, cfg } from '../lib/app-config';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
+import { viewModeFromRequest } from '../lib/view-mode';
 import { noStore } from '../lib/http-cache';
 
 /**
@@ -35,6 +36,8 @@ const MAX_ITEMS = 8;
 const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
+const viewMode = viewModeFromRequest(Astro, viewer);
+
 /**
  * デモ表示の可否は**閲覧している本人が admin か**で決まる (spec §4.6)。
  * **代理表示中 (`?u=` で他人を見ている) は渡さない** — 相手の実データを見せるため。
@@ -55,7 +58,7 @@ const needsSignIn = authEnabled && !u;
  * 後ろに置くと初回リクエストで admin の登録が効かない (コード既定に落ちる)。
  */
 await refreshConfig();
-const result = needsSignIn ? null : await loadDashboard(u, viewer.origin);
+const result = needsSignIn ? null : await loadDashboard(u, viewMode.effectiveMode, viewer.origin);
 const hasError = result ? 'error' in result : false;
 const data = !result || hasError ? null : (result as Exclude<typeof result, { error: string }>);
 
@@ -67,7 +70,8 @@ const data = !result || hasError ? null : (result as Exclude<typeof result, { er
  */
 const isWellness = type === 'wellness';
 
-const candidates = data && !isWellness ? await getTrendCandidates(data.resultUid, type ?? undefined) : [];
+const candidates = data && !isWellness
+  ? await getTrendCandidates(data.resultUid, viewMode.effectiveMode, type ?? undefined) : [];
 
 // 既定の選択: 従来出していた項目のうち実在するもの → 足りなければ候補の先頭から補う。
 const preferred = candidates.filter((n) => (DEFAULT_TREND_ITEMS as readonly string[]).includes(n));
@@ -76,12 +80,13 @@ const defaults = (preferred.length > 0 ? preferred : candidates).slice(0, MAX_IT
 let series: Awaited<ReturnType<typeof getMeasurementTrend>> = [];
 if (data) {
   if (isWellness) {
-    const ha = await getHealthAge(data.diagnosticUserId);
+    const ha = await getHealthAge(data.diagnosticUserId, viewMode.effectiveMode);
     series = ha.trend ? [ha.trend] : [];
   } else {
     // カードは候補を全部描く (出し分けはクライアント)。候補が無ければ従来どおり既定で引く。
     series = await getMeasurementTrend(
       data.resultUid,
+      viewMode.effectiveMode,
       candidates.length > 0 ? candidates : undefined,
       12,
       type ?? undefined,
@@ -89,7 +94,7 @@ if (data) {
   }
 }
 
-const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId) : 0;
+const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId, viewMode.effectiveMode) : 0;
 const supportContact = cfg('ui.support_contact');
 
 const typeName = isWellness ? WELLNESS_AGE_LABEL : type ? testTypeLabel(type).name : null;

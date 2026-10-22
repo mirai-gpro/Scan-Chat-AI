@@ -7,6 +7,7 @@ import { loadNotices } from '../lib/notice-queries';
 import { formatJpDate, DEFAULT_USER } from '../lib/dashboard-queries';
 import { refreshConfig, cfg } from '../lib/app-config';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
+import { viewModeFromRequest } from '../lib/view-mode';
 import { noStore } from '../lib/http-cache';
 
 export const prerender = false;
@@ -17,6 +18,8 @@ noStore(Astro.response);
 const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
+const viewMode = viewModeFromRequest(Astro, viewer);
+
 /** デモ表示は**閲覧している本人が admin か**で決まる。代理表示中は渡さない (spec §4.6)。 */
 const u = viewer.uid;
 /** リンクに引き継ぐクエリ ('' か '?u=<uid>')。一般ユーザーは '' = URL に uid を出さない。 */
@@ -47,7 +50,7 @@ const canMarkRead = viewer.kind !== 'share';
 
 const result = !effectiveUid
   ? null
-  : await loadNotices(effectiveUid, { expandImportant, expandGeneral, expandNews });
+  : await loadNotices(effectiveUid, viewMode.effectiveMode, { expandImportant, expandGeneral, expandNews });
 
 const hasError = result ? 'error' in result : false;
 const data = !result || hasError ? null : (result as Exclude<typeof result, { error: string }>);

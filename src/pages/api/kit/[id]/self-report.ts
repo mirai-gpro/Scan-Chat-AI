@@ -3,7 +3,8 @@ import { resolveViewer } from '../../../../lib/viewer';
 import { denyReadOnlyWrite, denyForShare, denyAnonymous } from '../../../../lib/write-guard';
 import { getServerSupabase } from '../../../../lib/supabase';
 import { isHpEdgeConfigured, submitKitSelfReport } from '../../../../lib/hp-edge';
-import { demoFallbackEnabled, isDemoShipmentId } from '../../../../lib/demo-data';
+import { isDemoShipmentId } from '../../../../lib/demo-data';
+import { viewModeFromRequest } from '../../../../lib/view-mode';
 
 export const prerender = false;
 
@@ -52,6 +53,12 @@ export const POST: APIRoute = async (ctx) => {
    * 以前はこの値をそのまま信じて所有確認していたので、**他人の uid を書けば
    * その人の配送状態を変えられた**。対象は resolver が決める。
    */
+  /*
+   * **デモの判定は「資格」ではなく「いま Demo を表示中か」で決める** (PR-C・§4.3)。
+   * PR-A は `demoFallbackEnabled(uid)` (= 資格) を見ていたので、**Dual の人が
+   * Real を表示していても読取テスト扱いになり本物の登録ができなかった**。
+   */
+  const viewMode = viewModeFromRequest(ctx, viewer);
   const diagnosticUserId = viewer.writeTargetUid;
 
   if (action !== 'received' && action !== 'returned') {
@@ -77,7 +84,7 @@ export const POST: APIRoute = async (ctx) => {
    * 成功とは言わず `demo: true` を返し、**画面側が「記録されません」と出す**
    * （黙って成功を装わない）。
    */
-  if (demoFallbackEnabled(diagnosticUserId) && isDemoShipmentId(id)) {
+  if (viewMode.effectiveMode === 'demo' && isDemoShipmentId(id)) {
     return json({ ok: true, action, demo: true });
   }
 

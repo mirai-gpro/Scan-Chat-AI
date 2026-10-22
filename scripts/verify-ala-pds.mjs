@@ -139,8 +139,7 @@ export function __setStub(s) { _stub = s; }
 export function getServerSupabase() { return _stub; }
 export function getBrowserSupabase() { return null; }
 `);
-writeFileSync(`${CACHE}/ala-demo-stub.mjs`, `export function demoFallbackEnabled() { return false; }
-export function demoMetricTrend() { return []; }
+writeFileSync(`${CACHE}/ala-demo-stub.mjs`, `export function demoMetricTrend() { return []; }
 export function demoArtifacts() { return []; }
 `);
 await build({
@@ -188,7 +187,7 @@ sbStub.__setStub(makeStub(ROWS, ARTIFACTS));
 
 console.log('\n③ 推移グラフは ALA の最新 2 件だけ');
 {
-  const s = await q.getMeasurementTrend(UID, ['尿中のポルフィリン量', 'インデックス値'], 12, 'cancer_urine');
+  const s = await q.getMeasurementTrend(UID, 'real', ['尿中のポルフィリン量', 'インデックス値'], 12, 'cancer_urine');
   ok(s.length === 2, '系列は 2 本 (ポルフィリン / インデックス値)', `len=${s.length}`);
   const p = s.find((x) => x.label === '尿中のポルフィリン量');
   const i = s.find((x) => x.label === 'インデックス値');
@@ -212,7 +211,7 @@ console.log('\n③ 推移グラフは ALA の最新 2 件だけ');
 
 console.log('\n④ Noah4 を混ぜない');
 {
-  const c = await q.getTrendCandidates(UID, 'cancer_urine');
+  const c = await q.getTrendCandidates(UID, 'real', 'cancer_urine');
   ok(c.includes('尿中のポルフィリン量'), '候補に 尿中のポルフィリン量');
   ok(c.includes('インデックス値'), '候補に インデックス値');
   for (const n of ['BMI', '1日の塩分摂取量', '塩分摂取量', '1日の食塩摂取量', '尿糖', '尿蛋白', '尿潜血']) {
@@ -220,7 +219,7 @@ console.log('\n④ Noah4 を混ぜない');
   }
   ok(!c.includes('リスクランク'), 'リスクランクは候補に出ない (value_num が無い = グラフ化しない)');
   ok(c.length === 2, '候補はちょうど 2 件', JSON.stringify(c));
-  const noah = await q.getMeasurementTrend(UID, ['BMI', '1日の塩分摂取量'], 12, 'cancer_urine');
+  const noah = await q.getMeasurementTrend(UID, 'real', ['BMI', '1日の塩分摂取量'], 12, 'cancer_urine');
   ok(noah.length === 0, 'Noah4 の項目を名指しで引いても系列が出ない', `len=${noah.length}`);
 }
 
@@ -229,20 +228,20 @@ console.log('\n⑤ 巻き込み防止 (ALA が無い人・他の検査種別)');
   // ALA が 1 件も無い人 → 絞らない (従来どおり Noah4 の推移が出る)
   sbStub.__setStub(makeStub(ROWS.filter((r) => ![A.a1, A.a2, A.a3].includes(r.artifact_id)),
     ARTIFACTS.filter((a) => ![A.a1, A.a2, A.a3].includes(a.id))));
-  const only = await q.getMeasurementTrend(UID, ['BMI'], 12, 'cancer_urine');
+  const only = await q.getMeasurementTrend(UID, 'real', ['BMI'], 12, 'cancer_urine');
   ok(only.length === 1 && only[0].points.length === 3,
     'ALA が 1 件も無い人は絞らない (BMI 3 点)', `n=${only[0]?.points.length}`);
 
   // test_type を指定しない呼び出しは絞らない (横断集計の挙動を変えない)
   sbStub.__setStub(makeStub(ROWS, ARTIFACTS));
-  const all = await q.getMeasurementTrend(UID, ['BMI'], 12);
+  const all = await q.getMeasurementTrend(UID, 'real', ['BMI'], 12);
   ok(all.length === 1 && all[0].points.length === 3,
     'testType 未指定では絞らない (BMI 3 点のまま)', `n=${all[0]?.points.length}`);
 
   // 別種別のデータは ALA 判定の影響を受けない
   const blood = ROWS.map((r) => ({ ...r, test_type: 'blood' }));
   sbStub.__setStub(makeStub(blood, ARTIFACTS));
-  const b = await q.getMeasurementTrend(UID, ['BMI'], 12, 'blood');
+  const b = await q.getMeasurementTrend(UID, 'real', ['BMI'], 12, 'blood');
   ok(b.length === 1 && b[0].points.length === 3, '血液の推移は絞られない', `n=${b[0]?.points.length}`);
   sbStub.__setStub(makeStub(ROWS, ARTIFACTS));
 }

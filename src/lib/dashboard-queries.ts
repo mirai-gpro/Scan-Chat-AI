@@ -9,7 +9,8 @@
 import type { AppIconName } from '../components/AppIcon.astro';
 import { getServerSupabase, isBridgeConfigured, type BridgeOrigin } from './supabase';
 import { loadBridgeBundle, type CustomerBundle } from './bridge-queries';
-import { buildDemoDashboard, demoFallbackEnabled, demoMetricTrend } from './demo-data';
+import { buildDemoDashboard, demoMetricTrend } from './demo-data';
+import { shouldUseDemoData, type ViewMode } from './view-mode';
 import { isPubliclyVisibleRow } from './report-gate';
 import type {
   AppUser,
@@ -112,7 +113,14 @@ function normalizeDiagnosticUserId(raw: string): string | null {
 
 /** dashboard.astro から呼ぶ。 */
 export async function loadDashboard(
-  diagnosticUserId?: string | null,
+  diagnosticUserId: string | null | undefined,
+  /**
+   * **いま Real / Demo のどちらを表示しているか** (`resolveViewMode().effectiveMode`)。
+   *
+   * **省略できない** — 渡し忘れたページだけ Demo / Real が食い違うのを型で防ぐ
+   * (正本 `docs/specs/special_demo_integration_spec_20261022.md` §4.3)。
+   */
+  mode: ViewMode,
   /**
    * **どの HP/EC 環境の `app_bridge` を読むか** (`viewer.origin` をそのまま渡す)。
    * 既定 production。**production が空でも staging へ落とさない** — 無条件
@@ -136,7 +144,7 @@ export async function loadDashboard(
     const sb = getServerSupabase();
     if (!sb) {
       // Supabase 未設定でもテストフェーズはダミーを見せる (500 にしない)
-      if (demoFallbackEnabled(uid)) return buildDemoDashboard(uid, null);
+      if (shouldUseDemoData(uid, mode)) return buildDemoDashboard(uid, null);
       return { error: 'Supabase が未設定です。.env.local を確認してください。' };
     }
 
@@ -162,7 +170,7 @@ export async function loadDashboard(
 
     // クエリエラー時もテストフェーズはダミーへ (テーブル未適用等で 500 にしない)
     if (appUserErr || artErr || resErr) {
-      if (demoFallbackEnabled(uid)) return buildDemoDashboard(uid, appUser?.display_name_cache ?? null);
+      if (shouldUseDemoData(uid, mode)) return buildDemoDashboard(uid, appUser?.display_name_cache ?? null);
       if (appUserErr) return { error: `app_users: ${appUserErr.message}` };
       if (artErr)     return { error: `test_artifacts: ${artErr.message}` };
       return { error: `diagnosis_results: ${resErr!.message}` };
@@ -189,7 +197,7 @@ export async function loadDashboard(
      *
      * 一般顧客・未サインインには影響しない (`demoFallbackEnabled` の内側・仕様書 §2)。
      */
-    if (demoFallbackEnabled(uid)) {
+    if (shouldUseDemoData(uid, mode)) {
       return buildDemoDashboard(uid, appUser?.display_name_cache ?? null);
     }
 
@@ -263,7 +271,7 @@ export async function loadDashboard(
     };
   } catch (e) {
     // 想定外の例外でも 500 にせず、テストフェーズはダミー／それ以外はエラー表示
-    if (demoFallbackEnabled(uid)) return buildDemoDashboard(uid, null);
+    if (shouldUseDemoData(uid, mode)) return buildDemoDashboard(uid, null);
     return { error: e instanceof Error ? e.message : String(e) };
   }
 }
@@ -324,10 +332,11 @@ async function loadMockCustomerBundle(
  */
 export async function getMetricTrend(
   diagnosticUserId: string,
+  mode: ViewMode,
   limit = 6,
 ): Promise<MetricTrendSeries[]> {
   // デモ用アカウントは DB を見ない (仕様書 §2)。
-  if (demoFallbackEnabled(diagnosticUserId)) return demoMetricTrend();
+  if (shouldUseDemoData(diagnosticUserId, mode)) return demoMetricTrend();
   const sb = getServerSupabase();
   if (!sb) return [];
 
@@ -400,9 +409,9 @@ export interface HealthAgeSummary {
  * diagnosis.health_age_scores からウェルネス年齢 (旧称: 健康年齢) の最新値と時系列を取得。
  * getMetricTrend と同じくスタンドアロン (diagnosis_results が無くても表示できる)。
  */
-export async function getHealthAge(diagnosticUserId: string): Promise<HealthAgeSummary> {
+export async function getHealthAge(diagnosticUserId: string, mode: ViewMode): Promise<HealthAgeSummary> {
   const sb = getServerSupabase();
-  if (!sb) return demoHealthAge(diagnosticUserId);
+  if (!sb) return demoHealthAge(diagnosticUserId, mode);
   try {
     // 型未生成テーブルのため any 経由。
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -412,7 +421,7 @@ export async function getHealthAge(diagnosticUserId: string): Promise<HealthAgeS
       .eq('diagnostic_user_id', diagnosticUserId)
       .order('test_date', { ascending: true })
       .limit(24);
-    if (error || !data || data.length === 0) return demoHealthAge(diagnosticUserId);
+    if (error || !data || data.length === 0) return demoHealthAge(diagnosticUserId, mode);
 
     const points: MetricTrendPoint[] = [];
     for (const r of data) {
@@ -444,7 +453,7 @@ export async function getHealthAge(diagnosticUserId: string): Promise<HealthAgeS
       points.length > 0 ? { label: 'ウェルネス年齢', unit: '歳', points } : null;
     return { latest, trend };
   } catch {
-    return demoHealthAge(diagnosticUserId);
+    return demoHealthAge(diagnosticUserId, mode);
   }
 }
 
@@ -456,8 +465,8 @@ export async function getHealthAge(diagnosticUserId: string): Promise<HealthAgeS
  * demo-data.ts の他のダミーと同じ扱いで、`PUBLIC_DEMO_FALLBACK=false` で切れる。
  * **値は CABA で算出したものではなく固定のダミー**。DB に実データが入れば自動で消える。
  */
-function demoHealthAge(diagnosticUserId?: string | null): HealthAgeSummary {
-  if (!demoFallbackEnabled(diagnosticUserId)) return { latest: null, trend: null };
+function demoHealthAge(diagnosticUserId: string | null | undefined, mode: ViewMode): HealthAgeSummary {
+  if (!shouldUseDemoData(diagnosticUserId, mode)) return { latest: null, trend: null };
   const points: MetricTrendPoint[] = [
     { date: '2026-03-13', value: 60.8, raw: '60.8歳' },
     { date: '2026-05-02', value: 60.1, raw: '60.1歳' },

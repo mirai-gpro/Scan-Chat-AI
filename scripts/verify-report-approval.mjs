@@ -608,8 +608,14 @@ console.log('\n⑧ ユーザー向け取得経路の承認ゲート\n');
   const rep = code('src/pages/report.astro');
   ok('/report が未承認を見せるのは admin のときだけ',
     /includeUnapproved: viewer\.isAdmin/.test(rep));
+  /*
+   * **2026-10-22 (PR-C)**: `loadDashboard` の引数に `mode` が入った
+   * (`loadDashboard(u, viewMode.effectiveMode, viewer.origin, viewer.isAdmin)`)。
+   * **見る約束は同じ** — 未承認を載せる条件が `viewer.isAdmin` であること。
+   */
   ok('  ダッシュボードも同じ条件で latestResult を渡している',
-    /loadDashboard\(u, viewer\.origin, viewer\.isAdmin\)/.test(code('src/pages/dashboard.astro')));
+    /loadDashboard\(u, viewMode\.effectiveMode, viewer\.origin, viewer\.isAdmin\)/
+      .test(code('src/pages/dashboard.astro')));
   ok('**CSS / JS で隠していない** (display:none で未承認を隠す実装を作らない)',
     !/pending[\s\S]{0,40}display:\s*none/i.test(read('src/pages/report.astro')));
 

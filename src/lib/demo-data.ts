@@ -5,7 +5,8 @@
  *   材料が要る機能 (推移グラフ = 2 回目の検査から / 過去データの切替) まで含めて
  *   **全部の表示機能を通す**。正本 `docs/operations/デモ用アカウント_仕様書.md` §1。
  *
- * 切替条件: **表示中の uid がデモ用アカウントか。それだけ** (`demoFallbackEnabled`)。
+ * 切替条件: **表示中の uid がデモ用アカウントか ＋ いま Demo を表示中か**
+ * (`view-mode.ts` の `shouldUseDemoData(uid, mode)`)。
  *   仕様書 §2 の表 —「デモ用アカウント … ダミー=出す / 実データ=—」。
  *   **実データの有無は条件ではない。**
  * 無効化: env `PUBLIC_DEMO_FALLBACK=false` で完全に切る。
@@ -20,8 +21,6 @@
  * ※ これは表示用フォールバックであり DB には書き込まない。
  */
 
-import { demoDisabledGlobally, isDemoAccount } from './demo-accounts';
-import { isSpecialAccount } from './special-accounts';
 import type { ElithSection } from './elith-parser';
 import type { DashboardData, MetricTrendSeries } from './dashboard-queries';
 import type { NoticesData } from './notice-queries';
@@ -34,48 +33,18 @@ import type {
   UserNotice,
 } from '../types/supabase';
 
-/**
- * ダミーフォールバックが有効か。
+/*
+ * **`demoFallbackEnabled(uid)` は PR-C で撤去した** (2026-10-22)。
  *
- * ══════════════════════════════════════════════════════════════════════
- * 【判定】**表示中の uid がデモ用アカウントか。それだけ。**
- * ══════════════════════════════════════════════════════════════════════
+ * 置き換えは `view-mode.ts` の **`shouldUseDemoData(uid, mode)`**。
+ * 正本 `docs/specs/special_demo_integration_spec_20261022.md` §4.3。
  *
- * 資格の判定そのものは `demo-accounts.ts` が持つ (`isDemoAccount`)。
- * ここはダミーデータ側の入口で、**資格の規則をここに書かない**。
- *
- * **admin かどうかは見ない。** デモ用アカウントと管理者アカウントは別物で、
- * **PR 用のアカウントは社外に渡る**ので同じ枠に置けない。
- * admin がダミーを見たいなら、その uid をデモ用アカウントに登録する
- * (`docs/operations/デモ用アカウント_仕様書.md` §5・admin から即時・再デプロイ不要)。
- *
- * 【admin を混ぜてはいけない理由 — 実際に踏んだ失敗】
- *   `viewerIsAdmin` は **Cookie の署名 → HP Edge の `resolve-customer` →
- *   Wellfort 側 `admin_users`** という 3 段の外部依存で決まる。どこか 1 つが落ちても
- *   結果は同じ `false` で、**画面は黙って空になる** (2026-08-30 に本番で
- *   `edge.is_admin: false` を実測。原因の切り分けに何往復も費やした)。
- *   さらに、混ぜると**管理者を 1 人増やすたびにダミーの閲覧者が増える**。
- *
- * **uid を渡さない呼び出しは false** (＝ダミーを出さない)。fail-safe をこちらへ倒す。
- *
- * **代理表示 (`?u=`) 中は渡る uid が相手のもの**になるので、相手が
- * デモ用アカウントでなければ自動的にデモは出ない (相手の実データが見える)。
- * 呼び出し側で場合分けする必要は無い。
- *
- * @param uid 表示中の diagnostic_user_id。
+ * 【なぜ残さないか】**資格だけでダミーを出すかを決める関数が在ると、
+ * モードを渡し忘れた経路でそれが使われ、ページごとに Demo / Real が食い違う。**
+ * 旧実装が持っていた「スペシャル枠なら無条件で false」の排他も、Dual が正常な状態に
+ * なったので**モードで分ける**形へ移した (排他を別の場所へ移植しない)。
+ * `verify:view-mode` が**この名前が live コードへ戻らないこと**を見張る。
  */
-export function demoFallbackEnabled(uid?: string | null): boolean {
-  if (demoDisabledGlobally()) return false;
-  /*
-   * **スペシャルアカウントにダミーは出さない** (`docs/operations/スペシャルアカウント_仕様書.md` §7)。
-   *
-   * あちらは**本人の実データ**を扱う枠で、目的がデモと逆。両方に登録される事故は起き得るので、
-   * そのとき**実データの利用者に他人名義のダミー検査結果が出る**のを 1 行で確実に止める。
-   * `verify:special-accounts` がこの 1 行を固定している。
-   */
-  if (isSpecialAccount(uid)) return false;
-  return isDemoAccount(uid);
-}
 
 const now = () => new Date();
 const daysAgo = (d: number) => new Date(Date.now() - d * 86400_000).toISOString();

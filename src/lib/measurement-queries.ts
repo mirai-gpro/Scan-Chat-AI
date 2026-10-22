@@ -16,7 +16,8 @@
 
 import { getServerSupabase } from './supabase';
 import { DERIVED_HC_BLOOD_IMPORTED_BY, derivedBloodEpisodeIndex } from './blood-subset';
-import { demoFallbackEnabled, demoMetricTrend } from './demo-data';
+import { demoMetricTrend } from './demo-data';
+import { shouldUseDemoData, type ViewMode } from './view-mode';
 import { ALA_PORPHYRIN_LABEL, restrictToLatestAla } from './ala-pds';
 import type { MetricTrendPoint, MetricTrendSeries } from './dashboard-queries';
 
@@ -197,9 +198,10 @@ async function activeArtifactIds(
 /** 直近 1 回分の検査値を取得する。無ければ null (テストフェーズはデモへ)。 */
 export async function getLatestMeasurements(
   diagnosticUserId: string,
+  mode: ViewMode,
 ): Promise<LatestMeasurements | null> {
   // デモ用アカウントは DB を見ない (仕様書 §2 — 実データの有無は条件ではない)。
-  if (demoFallbackEnabled(diagnosticUserId)) return demoLatest();
+  if (shouldUseDemoData(diagnosticUserId, mode)) return demoLatest();
   const sb = getServerSupabase();
   if (!sb) return null;
   try {
@@ -361,11 +363,12 @@ function seriesKey(r: { canonical_name: string | null; item_name?: string | null
  */
 export async function getTrendCandidates(
   diagnosticUserId: string,
+  mode: ViewMode,
   testType?: string,
 ): Promise<string[]> {
   const sb = getServerSupabase();
   // 実データ層が無いテストフェーズでは、デモの系列名をそのまま候補にする。
-  if (demoFallbackEnabled(diagnosticUserId)) return demoMetricTrend(testType).map((x) => x.label);
+  if (shouldUseDemoData(diagnosticUserId, mode)) return demoMetricTrend(testType).map((x) => x.label);
   if (!sb) return [];
   try {
     // superseded / withdrawn の回は候補に出さない (消したはずの項目が選択肢に残らないように)。
@@ -429,6 +432,7 @@ export async function getTrendCandidates(
  */
 export async function getMeasurementTrend(
   diagnosticUserId: string,
+  mode: ViewMode,
   canonicalNames: readonly string[] = DEFAULT_TREND_ITEMS,
   maxPoints = 12,
   testType?: string,
@@ -436,7 +440,7 @@ export async function getMeasurementTrend(
   const sb = getServerSupabase();
   // 旧 getMetricTrend が持っていたデモフォールバックを踏襲する
   // (テストフェーズでクライアントに推移グラフを見てもらうために必要)。
-  if (demoFallbackEnabled(diagnosticUserId)) return demoMetricTrend(testType);
+  if (shouldUseDemoData(diagnosticUserId, mode)) return demoMetricTrend(testType);
   if (!sb || canonicalNames.length === 0) return [];
   try {
     // superseded / withdrawn の回は点として打たない

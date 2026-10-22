@@ -22,7 +22,7 @@ import type { APIRoute } from 'astro';
 import { VIEWER_COOKIE, resolveViewer, uidEntryAllowed, verifyViewer } from '../../../lib/viewer';
 import { publicOrigin } from '../../../lib/public-url';
 import { isHpEdgeConfigured, resolveCustomerWithAdmin } from '../../../lib/hp-edge';
-import { demoFallbackEnabled } from '../../../lib/demo-data';
+import { shouldUseDemoData, viewModeFromRequest, type ViewMode } from '../../../lib/view-mode';
 import { demoAccountStats } from '../../../lib/demo-accounts';
 import { isSpecialAccount, specialAccountStats } from '../../../lib/special-accounts';
 import { experienceCapabilities } from '../../../lib/experience-accounts';
@@ -53,6 +53,11 @@ export const GET: APIRoute = async (ctx) => {
   const raw = ctx.cookies.get(VIEWER_COOKIE)?.value ?? null;
   const verified = await verifyViewer(raw);
   const viewer = await resolveViewer(ctx);
+  /*
+   * **画面と同じモードで診断する** (PR-C)。ここで `real` 決め打ちにすると
+   * Demo 表示中の人を調べたときに**画面と違う答え**が出る (この口の意味が無くなる)。
+   */
+  const viewMode = viewModeFromRequest(ctx, viewer);
 
   /*
    * `?email=` があれば **HP Edge を実際に叩く**。
@@ -97,13 +102,22 @@ export const GET: APIRoute = async (ctx) => {
    *   ③ 現行形式の実データが在る → **モックとは違って当然** (モックは 2026-08-26 検体の紙面)
    * 行の有無だけを見て「データは在る」と判断しない、が 2026-08-30 の教訓。
    */
-  const report = await inspectReport(viewer.uid, viewer.origin);
+  const report = await inspectReport(viewer.uid, viewer.origin, viewMode.effectiveMode);
+  // 切り替えの可否は viewer の種別で決まるので**ここで**出す (inspectReport は uid しか知らない)。
+  const mode = {
+    effective: viewMode.effectiveMode,
+    requested: viewMode.requested,
+    switchable: viewMode.switchable,
+    can_demo: viewMode.canDemo,
+    can_real: viewMode.canReal,
+    dual: viewMode.dual,
+  };
   /*
    * 「この検査だけ画面に出ない」の切り分け用。**カードは種別ごとに常に描かれる**
    * (`TestResultsSection.astro`) ので、空に見えるのは行が無いときだけ。
    * 種別と件数しか出さない (PII を載せない)。
    */
-  const artifacts = await inspectArtifacts(viewer.uid, viewer.origin);
+  const artifacts = await inspectArtifacts(viewer.uid, viewer.origin, viewMode.effectiveMode);
   /*
    * 「キットの進捗が空」の切り分け。`loadDashboard` は bridge の失敗を空へ畳むので、
    * 画面だけでは「顧客が居ない」と「呼び出しが失敗した」を区別できない。
@@ -144,6 +158,7 @@ export const GET: APIRoute = async (ctx) => {
       x_forwarded_proto: ctx.request.headers.get('x-forwarded-proto') ?? '(なし)',
       host: ctx.request.headers.get('host') ?? '(なし)',
     },
+    mode,
     report,
     artifacts,
     health_checkup_years: healthCheckupYears,
@@ -252,7 +267,7 @@ async function inspectBridge(viewerUid: string | null, origin: BridgeOrigin): Pr
   return out;
 }
 
-async function inspectReport(viewerUid: string | null, origin: BridgeOrigin): Promise<Record<string, unknown>> {
+async function inspectReport(viewerUid: string | null, origin: BridgeOrigin, mode: ViewMode): Promise<Record<string, unknown>> {
   await refreshConfig();
 
   /*
@@ -263,7 +278,7 @@ async function inspectReport(viewerUid: string | null, origin: BridgeOrigin): Pr
   let uid = viewerUid;
   try {
     const { loadDashboard } = await import('../../../lib/dashboard-queries');
-    const r = await loadDashboard(viewerUid, origin);
+    const r = await loadDashboard(viewerUid, mode, origin);
     if (r && !('error' in r)) uid = r.diagnosticUserId;
   } catch { /* 解決できなければ Cookie の uid のまま見る */ }
 
@@ -271,7 +286,7 @@ async function inspectReport(viewerUid: string | null, origin: BridgeOrigin): Pr
    * **デモの資格は uid だけで決まる** (`demo-accounts.ts`)。admin は見ない。
    * 出ない場合の直し方が 1 つしかないので、理由も 1 通りで済む。
    */
-  const demo = demoFallbackEnabled(uid);
+  const demo = shouldUseDemoData(uid, mode);
 
   /*
    * **スペシャルアカウント (EC 購入を伴わない招待・本人の実データ)。**
@@ -293,6 +308,12 @@ async function inspectReport(viewerUid: string | null, origin: BridgeOrigin): Pr
 
   const out: Record<string, unknown> = {
     effective_uid: uid,
+    /*
+     * **表示モード** (PR-C)。`can_demo` は資格・`view_mode` は**いまどちらを
+     * 表示しているか**で、**別物**。`can_demo:true` なのに `demo_enabled:false` は
+     * 「資格はあるが Real を表示中」= 正常 (Dual の既定)。
+     */
+    view_mode: mode,
     can_demo: caps.canDemo,
     can_real: caps.canReal,
     dual_capability: caps.dual,
@@ -373,6 +394,7 @@ async function inspectReport(viewerUid: string | null, origin: BridgeOrigin): Pr
       ourWellnessAge: null,
       hasCancerRisk: false,
       cycleSeq: null,
+      mode,
     });
     out.sheet = {
       is_sample: vm.isSample,
@@ -406,11 +428,11 @@ function json(data: unknown, status = 200): Response {
  * **画面と違う答えを出す診断**になる (inspectReport と同じ理由)。
  * 出すのは **種別と件数と日付だけ** (PII を載せない)。
  */
-async function inspectArtifacts(viewerUid: string | null, origin: BridgeOrigin): Promise<Record<string, unknown>> {
+async function inspectArtifacts(viewerUid: string | null, origin: BridgeOrigin, mode: ViewMode): Promise<Record<string, unknown>> {
   const KINDS = ['health_checkup', 'blood', 'cancer_urine', 'ai_prediction', 'genetics'];
   try {
     const { loadDashboard } = await import('../../../lib/dashboard-queries');
-    const r = await loadDashboard(viewerUid, origin);
+    const r = await loadDashboard(viewerUid, mode, origin);
     if (!r || 'error' in r) return { error: r && 'error' in r ? r.error : '取得できず' };
 
     const rows = r.artifacts ?? [];

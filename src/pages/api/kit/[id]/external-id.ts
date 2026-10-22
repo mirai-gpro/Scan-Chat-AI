@@ -16,7 +16,8 @@ import { persistExternalIdCapture, expectedTestType } from '../../../../lib/exte
  * **デモの読取テストを本番の台帳へ書かないため**だけに引く（§8.2・PR-A）。
  * 判定は 2 つとも要る（片方だけにしない）ので、両方をここで使う。
  */
-import { demoFallbackEnabled, isDemoShipmentId } from '../../../../lib/demo-data';
+import { isDemoShipmentId } from '../../../../lib/demo-data';
+import { viewModeFromRequest } from '../../../../lib/view-mode';
 import { rememberRead, recallRead } from '../../../../lib/external-id-read-cache';
 
 export const prerender = false;
@@ -65,6 +66,12 @@ export const POST: APIRoute = async (ctx) => {
     return json({ ok: false, error: 'invalid_shipment_id' }, 400);
   }
 
+  /*
+   * **デモの判定は「資格」ではなく「いま Demo を表示中か」で決める** (PR-C・§4.3)。
+   * PR-A は `demoFallbackEnabled(uid)` (= 資格) を見ていたので、**Dual の人が
+   * Real を表示していても読取テスト扱いになり本物の登録ができなかった**。
+   */
+  const viewMode = viewModeFromRequest(ctx, viewer);
   const uid = viewer.writeTargetUid;
   if (!uid || !/^[0-9a-f-]{36}$/i.test(uid)) {
     return json({ ok: false, error: 'missing_or_invalid_target' }, 400);
@@ -341,7 +348,7 @@ export const POST: APIRoute = async (ctx) => {
      * 【返すもの】`demo: true` と**マスクだけ**。**外部IDの全文は返さない**
      * （本番の register と同じ約束・仕様 §6.1）。
      */
-    if (demoFallbackEnabled(uid) && isDemoShipmentId(shipmentRef)) {
+    if (viewMode.effectiveMode === 'demo' && isDemoShipmentId(shipmentRef)) {
       return json({
         ok: true, mode, demo: true,
         masked: maskExternalId(ev.value),

@@ -350,7 +350,14 @@ console.log('\n⑧ /result/[id] 所有者検証 (T-13〜T-18)');
   src = `
 const getServerSupabase = () => globalThis.__sb;
 const getOriginalSignedUrl = async () => { globalThis.__signed = (globalThis.__signed ?? 0) + 1; return 'https://signed'; };
-const demoFallbackEnabled = () => globalThis.__demo === true;
+/*
+ * **2026-10-22 (PR-C)**: demoFallbackEnabled(uid) は撤去され、判定は
+ * view-mode.ts の shouldUseDemoData(uid, mode) になった。
+ * **この検査が見るのは所有者の分離だけ**なので、スタブはモードを無視して
+ * 従来と同じ __demo で切り替える (検査の意味は 1 件も変わらない)。
+ * (※ ここはテンプレートリテラルの中なので、バッククォートを書くと文字列が閉じる)
+ */
+const shouldUseDemoData = () => globalThis.__demo === true;
 const demoArtifacts = () => globalThis.__demoArts ?? [];
 const findSection = () => null;
 const AI_PREDICTION_REPORT_LABEL = 'AI疾病予測報告書';
@@ -375,7 +382,7 @@ const derivedBloodEpisodeIndex = (x) => {
 
   // T-13 本人
   calls.length = 0; globalThis.__signed = 0;
-  const a = await mod.loadResult(ART, UID_SELF);
+  const a = await mod.loadResult(ART, UID_SELF, 'demo');
   ok('T-13', '本人の artifact_id → 閲覧できる', !('error' in a), 'error' in a ? a.error : '');
   const f = calls.find((c) => c.table === 'test_artifacts')?.filters ?? {};
   ok('T-13b', '取得条件に id と diagnostic_user_id の両方がある',
@@ -385,42 +392,42 @@ const derivedBloodEpisodeIndex = (x) => {
 
   // T-14 他人
   calls.length = 0;
-  const b = await mod.loadResult(ART, UID_OTHER);
+  const b = await mod.loadResult(ART, UID_OTHER, 'demo');
   ok('T-14', '他人の artifact_id → 閲覧できない', 'error' in b);
-  const c2 = await mod.loadResult('00000000-0000-4000-8000-000000000000', UID_SELF);
+  const c2 = await mod.loadResult('00000000-0000-4000-8000-000000000000', UID_SELF, 'demo');
   ok('T-14b', '他人所有と不存在が同じ文言', b.error === c2.error, `${b.error} / ${c2.error}`);
   eq('T-14c', '文言は「検査結果が見つかりません。」', b.error, '検査結果が見つかりません。');
 
   // T-15 未ログイン
   for (const [label, uid] of [['null', null], ['undefined', undefined], ['空文字', '']]) {
-    const r = await mod.loadResult(ART, uid);
+    const r = await mod.loadResult(ART, uid, 'demo');
     ok('T-15', `未ログイン (${label}) → 閲覧できない`, 'error' in r && r.error === '検査結果が見つかりません。');
   }
   calls.length = 0;
-  await mod.loadResult(ART, null);
+  await mod.loadResult(ART, null, 'demo');
   ok('T-15b', '未ログインでは test_artifacts を引かない', calls.length === 0, `${calls.length} 回`);
 
   // T-16 admin 代理表示 (viewer.uid が対象顧客になる)
-  const d = await mod.loadResult(ART, UID_SELF);
+  const d = await mod.loadResult(ART, UID_SELF, 'demo');
   ok('T-16', 'admin 代理表示 + 対象 artifact → 閲覧できる', !('error' in d));
   ok('T-16b', 'admin 専用の例外分岐を足していない',
     !/isAdmin|impersonating/.test(code('src/lib/result-queries.ts')));
 
   // T-17 所有者 NG で署名 URL を発行しない
   globalThis.__signed = 0;
-  await mod.loadResult(ART, UID_OTHER);
-  await mod.loadResult(ART, null);
-  await mod.loadResult('00000000-0000-4000-8000-000000000000', UID_SELF);
+  await mod.loadResult(ART, UID_OTHER, 'demo');
+  await mod.loadResult(ART, null, 'demo');
+  await mod.loadResult('00000000-0000-4000-8000-000000000000', UID_SELF, 'demo');
   eq('T-17', '所有確認 NG では getOriginalSignedUrl が 1 度も呼ばれない', globalThis.__signed, 0);
 
   // T-18 demo-art-* の既存経路
   globalThis.__demo = false;
-  const e1 = await mod.loadResult('demo-art-0004', UID_SELF);
+  const e1 = await mod.loadResult('demo-art-0004', UID_SELF, 'demo');
   ok('T-18a', '非デモの demo-art-* → 従来どおり見つかりません', 'error' in e1);
   globalThis.__demo = true;
   globalThis.__demoArts = [{ id: 'demo-art-0004', test_type: 'health_checkup', test_date: '2026-03-29', display_mode: 'single' }];
   calls.length = 0;
-  const e2 = await mod.loadResult('demo-art-0004', UID_SELF);
+  const e2 = await mod.loadResult('demo-art-0004', UID_SELF, 'demo');
   ok('T-18b', 'デモ用アカウントの demo-art-* → 開ける', !('error' in e2), 'error' in e2 ? e2.error : '');
   ok('T-18c', 'demo-art-* は DB を引かない (所有者検証より前)', calls.length === 0, `${calls.length} 回`);
 }
