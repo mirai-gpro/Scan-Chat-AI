@@ -500,3 +500,17 @@ const reportHref = manualPdfReport
     </>
   )}
 </BaseLayout>
+
+<script>
+  /*
+   * 催促の帯（`ExternalIdReminder.astro`）の「撮影して登録する」から
+   * **着いた先（`/kit`）でカメラが開く**ようにするための合図だけを付ける（仕様 §4.4.9）。
+   *
+   * **`external-id-capture.ts` をここで読み込まない** — あちらは `camera-scan` を
+   * 静的に引くので、撮影ブロックの無いダッシュボードにカメラの処理が入ってしまう。
+   * **この import が無いと帯はただのリンクに戻る**（押しても合図が残らず、
+   * `/kit` でもう一度ボタンを押させることになる・2026-10-22 の実機報告）。
+   */
+  import { initExternalIdStartLinks } from '../scripts/external-id-start';
+  initExternalIdStartLinks();
+</script>

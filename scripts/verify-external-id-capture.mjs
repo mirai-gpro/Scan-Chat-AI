@@ -1126,14 +1126,46 @@ console.log('\n⑬ UI の契約\n');
     })();
     ok('load で開くのは合図がある回だけ',
       /const id = takeStart\(\);\s*\n\s*if \(!id\) return;/.test(resume), resume.slice(0, 120));
+    /*
+     * 【§4.4.9・実機報告 2026-10-22「ダッシュボードの『撮影して登録する』から
+     * 即カメラが起動しない」】**真因 = ダッシュボードがこのスクリプトを読んでいなかった**
+     * （`initExternalIdCapture()` は `/kit` だけ）。合図を書く click ハンドラが
+     * 動かないので、着いた先の `resumeStart` は何も受け取れず**ただのリンク**になる。
+     * **画面は普通に動くので目視では気づけない**（押せば `/kit` へは飛ぶ）。
+     *
+     * 合図の定義は **`external-id-start.ts` の 1 か所**にして、
+     * ダッシュボードは**そちらだけ**を読む（カメラの処理を持ち込まない）。
+     */
+    const startScr = code('src/scripts/external-id-start.ts');
+    ok('合図の定義は 1 か所（`external-id-start.ts`）',
+      /const START_KEY/.test(startScr) && !/const START_KEY/.test(scr)
+      && /from '\.\/external-id-start'/.test(scr));
     ok('合図は**一度きり**（読んだら消す）',
-      /removeItem\(START_KEY\)/.test(scr) && /sessionStorage/.test(scr));
+      /removeItem\(START_KEY\)/.test(startScr) && /sessionStorage/.test(startScr));
     ok('合図に期限がある（古いタップで開かない）',
-      /START_TTL_MS/.test(scr) && /age >= 0 && age <= START_TTL_MS/.test(scr));
+      /START_TTL_MS/.test(startScr) && /age >= 0 && age <= START_TTL_MS/.test(startScr));
     ok('合図に uid も番号も入れない（受取 ID と時刻だけ）',
-      /JSON\.stringify\(\{ id, ts: Date\.now\(\) \}\)/.test(scr));
+      /JSON\.stringify\(\{ id, ts: Date\.now\(\) \}\)/.test(startScr));
     ok('**URL には足さない**（受取 ID をクエリに出さない）',
-      !/searchParams\.set/.test(scr) && !/\?extid=/.test(scr));
+      !/searchParams\.set/.test(scr) && !/\?extid=/.test(scr)
+      && !/searchParams\.set/.test(startScr));
+    /*
+     * **ダッシュボードが合図を書けること**を見る。ここが抜けると帯はただのリンクへ戻る。
+     * あわせて**撮影のスクリプトを読み込んでいないこと**（カメラの処理を
+     * 撮影ブロックの無いページへ持ち込まない）。
+     */
+    const dashUi = code('src/pages/dashboard.astro');
+    ok('**ダッシュボードが合図のモジュールを読み込む**（帯をただのリンクにしない）',
+      /from '\.\.\/scripts\/external-id-start'/.test(dashUi)
+      && /initExternalIdStartLinks\(\)/.test(dashUi));
+    ok('ダッシュボードに撮影のスクリプトを持ち込まない（カメラを読まない）',
+      !/external-id-capture/.test(dashUi));
+    ok('合図のモジュールはカメラを引かない（ページを重くしない）',
+      !/camera-scan|initCameraScan|getUserMedia/.test(startScr));
+    ok('合図を書くだけでリンクは止めない', /data-extid-start/.test(startScr)
+      && !/preventDefault/.test(startScr));
+    ok('`/kit` は撮影のスクリプトを読む（その場で開く）',
+      /initExternalIdCapture\(\)/.test(code('src/pages/kit.astro')));
     ok('別ページでも登録済みなら開かない',
       /formEl\?\.classList\.contains\('hidden'\)\) return;/.test(resume));
     ok('別ページでもカメラを使えない端末では開かない', /if \(!cameraAvailable\(\)\) return;/.test(resume));

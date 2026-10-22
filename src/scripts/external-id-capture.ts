@@ -57,6 +57,11 @@
  */
 
 import { initCameraScan, type CameraScanController } from './camera-scan';
+/*
+ * **合図の定義は `external-id-start.ts` が唯一**（§4.4.9）。ダッシュボードは
+ * カメラを持ち込まないよう**あちらだけ**を読み込むので、ここで書き写さない。
+ */
+import { rememberStart, takeStart } from './external-id-start';
 import { decodeBarcodeInBrowser } from './external-id-barcode';
 /*
  * **正規化の規則を 2 か所に置かない**（`external-test-id.ts:153-178` が唯一の本体）。
@@ -564,48 +569,6 @@ async function register(c: Ctx, value: string, method: 'camera'): Promise<void> 
   } catch (err) {
     say(c, `登録できませんでした: ${err instanceof Error ? err.message : String(err)}`);
     c.busy = false;
-  }
-}
-
-/**
- * 「直前に帯のボタンを押した」ことだけを残す合図（§4.4.7）。
- *
- * **一度きり・60 秒。** これが無い回は**絶対に開かない**ので、
- * 「別ページを開いたらカメラが起動した」は起きない。
- * **uid も番号も入れない**（受取 ID だけ・`sessionStorage` なのでタブを閉じれば消える）。
- */
-const START_KEY = 'welltect.extid.start';
-const START_TTL_MS = 60_000;
-
-function rememberStart(id: string): void {
-  if (!id) return;
-  try {
-    sessionStorage.setItem(START_KEY, JSON.stringify({ id, ts: Date.now() }));
-  } catch {
-    /* 使えない環境では従来どおり（着いた先でボタンを押してもらう） */
-  }
-}
-
-/** 控えを**取り出して消す**（読んだ時点で使い切る）。期限切れ・壊れていれば null。 */
-function takeStart(): string | null {
-  let raw: string | null = null;
-  try {
-    raw = sessionStorage.getItem(START_KEY);
-    if (raw !== null) sessionStorage.removeItem(START_KEY);
-  } catch {
-    return null;
-  }
-  if (!raw) return null;
-  try {
-    const v = JSON.parse(raw) as { id?: unknown; ts?: unknown };
-    const id = typeof v.id === 'string' ? v.id : '';
-    const ts = typeof v.ts === 'number' ? v.ts : 0;
-    if (!id || !Number.isFinite(ts)) return null;
-    // **未来の時刻も期限切れ扱い**（時計のずれで無期限に残らないように）。
-    const age = Date.now() - ts;
-    return age >= 0 && age <= START_TTL_MS ? id : null;
-  } catch {
-    return null;
   }
 }
 
