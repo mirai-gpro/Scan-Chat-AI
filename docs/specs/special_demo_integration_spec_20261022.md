@@ -119,20 +119,69 @@ Cookie 発行の**すべてより前**。admin API の競合は **`setConfig` �
 **未確認（本番で 1 回通すこと）**: Demo 登録済みの人を Real へ足して uid が写ること /
 競合を人為的に作った回に 409 で何も書かないこと（この環境に Supabase も app_config も無い）。
 
-### 4.2 表示モード（PR-C）
+### 4.2 表示モード（PR-C・**2026-10-22 実装済み**）
 
-- Cookie `welltect_mode`（`real` / `demo`・HttpOnly・SameSite=Lax・本番 Secure）
+- Cookie `welltect_mode`（`real` / `demo`・HttpOnly・SameSite=Lax・本番 Secure・30 日）
 - **Cookie は権限根拠にしない。** サーバで毎回資格を再検証して `effectiveMode` を決める
 - `POST /api/session/view-mode`。**admin 代理表示・share・anonymous・Demo 資格なしは 403**
 - Dual のログイン直後は **`real`**
 - `welltect_v` の構造・署名・30 日・admin 判定・origin 判定は**変えない**
 
-### 4.3 Demo データ読込の明示化（PR-C）
+#### 4.2.1 Cookie が無いときの既定（実装で確定）
 
-`demoFallbackEnabled()`（**本番コードに 19 call site**）を `shouldUseDemoData(uid, mode)` 等へ
-**全件**置換し、`demo-data.ts` の**スペシャル排他 1 行を撤廃**する。
-**一部だけ旧判定を残さない**（ページごとに Demo / Real が食い違う）。
-置換後、旧い暗黙判定の再導入を grep ベースの verify で落とす。
+裁定は Dual についてのものなので、**他の枠は PR-C 前の挙動を変えない**ことにした。
+
+| 資格 | 既定 | 理由 |
+|---|---|---|
+| **Dual（両資格）** | **`real`** | 絶対条件。実データを持つ人にダミーを先に見せない |
+| Demo の資格だけ | `demo` | **実データを 1 件も持たない枠**。`real` にすると**記者が空の画面に着く**（お披露目の導線が壊れる） |
+| Real の資格だけ / 一般顧客 | `real` | 従来どおり |
+| 未サインイン | `demo` | 資格が引けない。**ダミーの可否は `shouldUseDemoData` が「表示する uid」で判定する**ので一般顧客にダミーは出ない（本番はサインイン画面で止まる） |
+
+**代理表示・共有・緊急入場は切り替え不可**（`switchable:false` = Cookie を見ない）だが、
+**既定は表示対象の資格に従う** — スペシャル枠を代理表示・共有しているときは `real` で
+ダミーが混ざらない。デモ専用アカウントを代理表示して `demo` になるのは PR-C 前と同じ。
+
+#### 4.2.2 実装（PR-C）
+
+| 置き場所 | 中身 |
+|---|---|
+| **新規** `src/lib/view-mode.ts`（leaf） | `MODE_COOKIE` / `parseMode` / `modeCookieOptions` / `resolveViewMode` / `shouldUseDemoData` / `viewModeFromRequest` |
+| **新規** `src/pages/api/session/view-mode.ts` | Cookie を書く唯一の口。403 は `state.switchable` 1 本（条件を書き写さない） |
+| **新規** `src/components/dashboard/ViewModeSwitch.astro` | `switchable` の人にだけ出る。既存の同格の淡色ペアだけを使う |
+| 画面 7 本 | `viewModeFromRequest(Astro, viewer)` を 1 回通して `effectiveMode` を全部の問い合わせへ渡す |
+| `api/debug/viewer.ts` | `mode`（effective / requested / switchable / can_demo / can_real / dual）を追加 |
+| **新規** `scripts/verify-view-mode.mjs` | 147 件（CI の A 層） |
+
+**モジュール変数にモードを置かない** — SSR は 1 つの isolate で同時リクエストを捌くので、
+置くと**他人のモードが漏れる**。常に引数で渡す。
+
+### 4.3 Demo データ読込の明示化（PR-C・**2026-10-22 実装済み**）
+
+`demoFallbackEnabled()`（**本番コードに 20 call site**）を `shouldUseDemoData(uid, mode)` へ
+**全件**置換し、**`demo-data.ts` から関数ごと撤去**した（資格だけで決める関数が残ると
+モードを渡し忘れた経路で使われる）。あわせて**スペシャル排他 1 行も撤廃**し、
+**排他ではなくモードで分ける**形へ移した（**別の場所へ移植していない**）。
+
+- **`mode` は必須の引数**。9 関数（`loadDashboard` / `getHealthAge` /
+  `getLatestMeasurements` / `getTrendCandidates` / `getMeasurementTrend` /
+  `loadNotices` / `countUnreadImportant` / `loadResult`）＋ `ReportContext` に足し、
+  **既定値を置かない** → 渡し忘れは `astro check` が落とす（§4.3「一部だけ旧判定を残さない」を型で担保）
+- **Special 専用 UI** は `effectiveMode === 'real' && isSpecialAccount(uid)`
+  （`dashboard.astro` の `singlePurchase` / `scan.astro` の `multiYear`）
+- **PR-A の暫定ゲート**は `viewMode.effectiveMode === 'demo' && isDemoShipmentId(...)` へ。
+  資格で見ていたので **Dual が Real を表示していても読取テスト扱い**だった
+- **admin のバッチ・監査は Real 固定**（閲覧者の Cookie に左右されない）。
+  ただし `elith-report/audit` だけ `'demo'` = **従来の挙動**（デモ用アカウントならサンプルを組む）
+- **既存 verify 8 本は弱めずに書き直した**: `special-accounts` ①（排他 →「既定が Real」で
+  同じ要件を担保）/ `demo-gate` / `experience-accounts` ⑧ / `single-purchase` /
+  `external-id-capture` / `report-approval` / `report-model` / `url-uid-privacy` ＋ stub 3 本
+- **退行注入 15 種**とも名指しで落ちる。**うち 1 件は注入して初めて検査の穴が見つかり直した**
+  — `demoFallbackEnabled` の不在だけを見ていたので、**`isDemoAccount(uid)` の直呼びで
+  旧判定が戻る**のを拾えていなかった（資格の関数の直呼びを落とす検査を追加）
+
+**未確認（本番で 1 回通すこと）**: Dual のアカウントで ①ログイン直後が Real ②切り替えて
+Demo のダミーが出る ③戻すと実データに戻る ④Demo 表示中に単品購入の枠・複数年の枠が出ない。
 
 ### 4.4 書込み監査（PR-D）
 
