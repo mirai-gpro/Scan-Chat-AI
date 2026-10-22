@@ -1883,5 +1883,129 @@ console.log('\n⑰ 読み取り結果の控え (§12.2 の案 (c))\n');
   ok('**読み取りの生値を画面に持たない**', !/read: \{ barcode/.test(scr));
 }
 
+// ══════════════════════════════════════════════════════════════════════
+// ⑱ 読み取りの待ち時間 (発注者指摘「撮影から表示まで 30 秒近く」・2026-10-22)
+//
+// 【要点】`thinkingBudget: 0` は 3.x で**思考オフにならない** —
+// `gemini.ts` の `thinkingBudgetToLevel` が 0 を `'low'` に写すので、
+// 既定の `gemini-3.1-flash-lite` は**毎回 low で考えていた**。
+// しかも**思考トークンは `maxOutputTokens` に含まれる**ので、512 だと
+// 切れて `unparsable` → 撮り直し = 待ち時間が 2 倍になる
+// (`voice-choice-llm.ts` が同じ罠で実障害を出している)。
+// ここでは
+//   ①読み取りが `thinkingLevel: 'minimal'` を**明示**していること
+//   ②`thinkingBudgetToLevel` は**触っていない**こと (スキャン本経路と共用)
+//   ③`minimal` を受けないモデルでも**読めること** (400 のときだけ外して 1 回)
+//   ④区間ごとの実測が応答に乗り、**PII を含まない**こと
+//   ⑤画面が待ちの経過を出し、**どの出口でも止める**こと
+// を見る。
+// ══════════════════════════════════════════════════════════════════════
+console.log('\n⑱ 読み取りの待ち時間 (thinking / 実測)\n');
+{
+  const rd = code('src/lib/external-id-read.ts');
+  const gm = code('src/lib/gemini.ts');
+  const api = code('src/pages/api/kit/[id]/external-id.ts');
+  const scr = code('src/scripts/external-id-capture.ts');
+
+  // ── ① 思考は最小を明示する ──
+  ok('`thinkingLevel: \'minimal\'` を明示している',
+    /thinkingConfig: \{ thinkingLevel: 'minimal' \}/.test(rd), rd.slice(0, 0));
+  ok('**`thinkingBudget` に戻っていない** (3.x で 0 は low になる)',
+    !/thinkingBudget/.test(rd));
+  {
+    const m = rd.match(/maxOutputTokens: (\d+)/);
+    ok('maxOutputTokens が在る', !!m);
+    ok('**思考ぶんの余裕がある** (>=1024・切れると撮り直しで待ちが 2 倍)',
+      !!m && Number(m[1]) >= 1024, m ? m[1] : '');
+  }
+
+  // ── ② 共用の写像は触らない ──
+  ok('`thinkingBudgetToLevel` の戻り値は low|high のまま (スキャン本経路と共用)',
+    /function thinkingBudgetToLevel\(budget\?: number\): 'low' \| 'high'/.test(gm));
+  ok('`thinkingBudgetToLevel` の中身を変えていない',
+    /budget != null && budget > 8192 \? 'high' : 'low'/.test(gm));
+  ok('明示した `thinkingLevel` が写像より優先される (この 1 行で済む根拠)',
+    /if \(thinkingConfig\?\.thinkingLevel\) \{\s*out\.thinkingConfig = \{ thinkingLevel: thinkingConfig\.thinkingLevel \};/.test(gm));
+  ok('型が `minimal` を受ける', /thinkingLevel\?: 'minimal' \| 'low' \| 'medium' \| 'high'/.test(gm));
+
+  // ── ③ 受け付けないモデルでも読める ──
+  ok('400 のときだけ thinking を外してやり直す関数が在る',
+    /async function callWithMinimalThinking\(/.test(rd));
+  ok('読み取りはその関数を通る', /await callWithMinimalThinking\(input\.apiKey, req\)/.test(rd));
+  {
+    const i = rd.indexOf('async function callWithMinimalThinking(');
+    const fb = i >= 0 ? rd.slice(i, i + 900) : '';
+    ok('**400 以外は再試行しない** (503 は callGemini の仕事)',
+      /e\.status === 400/.test(fb), fb);
+    ok('やり直しでは `thinkingConfig` を外す',
+      /thinkingConfig: _unsupported, \.\.\.rest/.test(fb));
+    ok('やり直しは 1 回だけ (入れ子で呼ばない)',
+      (fb.match(/callGemini\(/g) || []).length === 2, fb);
+  }
+
+  // ── ④ 区間ごとの実測。PII を載せない ──
+  {
+    const i = api.indexOf("if (mode === 'read')");
+    const j = api.indexOf("if (mode === 'register')");
+    const rb = i >= 0 && j > i ? api.slice(i, j) : '';
+    ok('read ブロックが在る', rb.length > 0);
+    ok('S3 の取得を実測する', /const s3Ms = Date\.now\(\) - tRead0;/.test(rb));
+    ok('控えの保存を実測する', /const cacheMs = Date\.now\(\) - tCache0;/.test(rb));
+    ok('推論の実測は読み取り側から受け取る', /gemini_ms: read\.geminiMs/.test(rb));
+    const i2 = rb.indexOf('timing: {');
+    const tb = i2 >= 0 ? rb.slice(i2, rb.indexOf('},', i2)) : '';
+    ok('応答に `timing` が在る', tb.length > 0);
+    {
+      /*
+       * **省略記法 (`uid,`) も鍵として数える。** `/\w+:/` だけで見ていたら
+       * `timing: { uid, s3_ms: ... }` という退行を注入しても**素通りした**
+       * (コロンが無いので鍵に見えない)。PII が 1 つ混ざれば終わりなので、
+       * 「行に出てくる識別子」を全部拾う。
+       */
+      const keys = (tb.match(/^\s*(\w+)\s*[:,]/gm) || [])
+        .map((k) => k.trim().replace(/[:,]$/, ''));
+      const allowed = new Set(['timing', 's3_ms', 'gemini_ms', 'cache_ms', 'total_ms', 'bytes']);
+      const extra = keys.filter((k) => !allowed.has(k));
+      ok('**ms とバイト数だけ** (番号・鍵・uid を載せない)', extra.length === 0, extra.join(','));
+    }
+    ok('読み取り側が推論時間を返す (成功)', /return \{ ok: true, \.\.\.parsed, geminiMs \};/.test(rd));
+    ok('読み取り側が推論時間を返す (失敗も・遅い回の切り分けに要る)',
+      /error: 'gemini_failed',[\s\S]{0,200}?geminiMs: Date\.now\(\) - t0,/.test(rd));
+  }
+
+  // ── ⑤ 画面: 経過を出し、どの出口でも止める ──
+  ok('待ちの経過を出す関数が在る', /function waiting\(c: Ctx, text: string\): \(\) => void/.test(scr));
+  ok('**数字は 5 秒たってから** (速い回に秒数を見せない)', /if \(sec >= 5\)/.test(scr));
+  ok('止める手段を返す (呼び出し側が消せる)', /return \(\) => window\.clearInterval\(timer\);/.test(scr));
+  {
+    const i = scr.indexOf('async function captureAndRead(');
+    const j = scr.indexOf('\nasync function', i + 10);
+    const cb = i >= 0 ? scr.slice(i, j > i ? j : undefined) : '';
+    ok('captureAndRead が在る', cb.length > 0);
+    ok('送信の区間で出す', /tick = waiting\(c, '写真を送っています'\)/.test(cb));
+    ok('読取の区間で出す', /tick = waiting\(c, '番号を読み取っています'\)/.test(cb));
+    /*
+     * **出口は 4 つ**: 送信の失敗 / 送信の完了 / 読取の成功 / 読取の失敗。
+     * 1 つでも止め忘れると、**1 秒ごとに経過秒で上書きされて
+     * エラーメッセージも候補の案内も読めなくなる**（画面は動いているので気づかない）。
+     */
+    ok('出口 4 つとも止める', (cb.match(/\btick\(\);/g) || []).length === 4,
+      String((cb.match(/\btick\(\);/g) || []).length));
+    ok('送信が落ちたら止めてから案内を出す',
+      /\} catch \(err\) \{\s*tick\(\);[\s\S]{0,400}?写真を送れませんでした/.test(cb));
+    ok('読取が落ちたら止めてから案内を出す',
+      /\} catch \(err\) \{\s*tick\(\);\s*const msg = err instanceof Error/.test(cb));
+    ok('読取の成功で止めてから実測を残す',
+      /tick\(\);\s*reportTiming\(c, uploadMs, Date\.now\(\) - tRead0, r\.timing\);/.test(cb));
+  }
+  {
+    const i = scr.indexOf('function reportTiming(');
+    const rt = i >= 0 ? scr.slice(i, scr.indexOf('\n}', i)) : '';
+    ok('実測の控えが在る', rt.length > 0);
+    ok('**番号を控えに入れない**', !/candidate|evidenceKey|c\.idLabel/.test(rt), rt);
+    ok('画面の文言にしない (status へ書かない)', !/say\(/.test(rt));
+  }
+}
+
 console.log(`\n${fails.length === 0 ? `✓ ${pass} / ${pass} passed` : `✗ ${fails.length} 件 FAIL (${pass} passed)`}`);
 if (fails.length) { console.error('\n落ちた検査:\n  - ' + fails.join('\n  - ')); process.exit(1); }

@@ -242,9 +242,59 @@ async function openCamera(c: Ctx): Promise<void> {
   await c.camera.start();
 }
 
+/**
+ * 区間ごとの実測を**画面には出さずに**残す（切り分け用）。
+ *
+ * 置き場所は 2 つ:
+ *   - `console.info` … 実機を PC に繋いだときに読む
+ *   - `data-extid-timing` … 画面を見ながら要素を見れば読める（控えは 1 件だけ）
+ *
+ * **利用者向けの表示にしない** — 番号が出たあとに ms を並べても読む人がいない。
+ * **PII は入らない**（ms とバイト数だけ。番号も鍵も入れない）。
+ */
+function reportTiming(c: Ctx, uploadMs: number, readMs: number, server: unknown): void {
+  const t = {
+    upload_ms: uploadMs,
+    read_ms: readMs,
+    total_ms: uploadMs + readMs,
+    server: server && typeof server === 'object' ? server : null,
+  };
+  try {
+    c.root.dataset.extidTiming = JSON.stringify(t);
+  } catch {
+    /* 属性に入らなくても処理は続ける */
+  }
+  // eslint-disable-next-line no-console
+  console.info('[extid] timing', t);
+}
+
+/**
+ * 待っているあいだ**経過秒を出す**（発注者指摘「撮影から表示まで 30 秒近く」・2026-10-22）。
+ *
+ * **これは待ち時間を短くするものではない。** それでも入れる理由が 2 つある:
+ *   1. **無言で 30 秒止まると壊れたように見える**。利用者は 50〜65 代で、
+ *      反応が無ければもう一度押す（二重送信＝さらに遅くなる）。
+ *   2. **どちらの区間が長いかが画面で分かる** — 「写真を送っています」と
+ *      「番号を読み取っています」は別の原因（回線の上り / 推論と S3 の往復）なので、
+ *      これだけで切り分けの半分が終わる。
+ *
+ * **数字は 5 秒たってから出す** — 速い回に秒数を見せても意味が無く、
+ * 短い待ちに数字が出ると逆に遅く感じる。
+ */
+function waiting(c: Ctx, text: string): () => void {
+  const t0 = Date.now();
+  say(c, `${text}…`);
+  const timer = window.setInterval(() => {
+    const sec = Math.round((Date.now() - t0) / 1000);
+    if (sec >= 5) say(c, `${text}…（${sec}秒）`);
+  }, 1000);
+  return () => window.clearInterval(timer);
+}
+
 async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
   clearWrong(c);
-  say(c, '写真を送っています…');
+  const tUpload0 = Date.now();
+  let tick = waiting(c, '写真を送っています');
   let key: string;
   try {
     const t = await post(c, { mode: 'ticket', contentType: file.type, bytes: file.size });
@@ -255,6 +305,7 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
     const put = await fetch(url, { method: 'PUT', headers, body: file });
     if (!put.ok) throw new Error(`アップロードに失敗しました (${put.status})`);
   } catch (err) {
+    tick();
     /*
      * S3 未設定 / CORS 未設定 / 回線断 は**区別できない**ので原因を断定しない。
      * **手入力へ落とさない** — 通信が不調なだけの回に、打ち間違いの余地を作ってしまう。
@@ -265,10 +316,16 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
     return false;
   }
 
+  tick();
+  const uploadMs = Date.now() - tUpload0;
+
   c.evidenceKey = key;
-  say(c, '番号を読み取っています…');
+  const tRead0 = Date.now();
+  tick = waiting(c, '番号を読み取っています');
   try {
     const r = await post(c, { mode: 'read', evidenceKey: key });
+    tick();
+    reportTiming(c, uploadMs, Date.now() - tRead0, r.timing);
     const candidate = String(r.candidate ?? '');
     /*
      * サーバは採った値だけを返す。**登録時に送り返さない** —
@@ -306,6 +363,7 @@ async function captureAndRead(c: Ctx, file: File): Promise<boolean> {
     say(c, '');
     return true;
   } catch (err) {
+    tick();
     const msg = err instanceof Error ? err.message : String(err);
     say(c, `${msg}`);
     show(c.confirmEl, false);

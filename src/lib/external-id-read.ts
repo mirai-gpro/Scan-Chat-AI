@@ -24,7 +24,7 @@
  * プロンプトで明示的に除外し、スキーマにも QR のフィールドを作らない。
  */
 
-import { callGemini, MODELS, type GeminiRequest } from './gemini';
+import { callGemini, GeminiError, MODELS, type GeminiRequest } from './gemini';
 import { refreshConfig } from './app-config';
 import {
   EXTERNAL_ID_PROVIDERS, type ExternalIdProvider,
@@ -41,6 +41,15 @@ export interface ExternalIdReadResult {
   note: string | null;
   error?: 'gemini_unavailable' | 'gemini_failed' | 'unparsable';
   detail?: string;
+  /**
+   * Gemini の呼び出しにかかった時間（ms）。**計測のためだけに返す**。
+   * 撮影から表示まで 30 秒という実測（発注者 2026-10-22）の切り分けに使う:
+   * S3 の往復・関数の起動・推論のどれが効いているのかは、**推測ではなく
+   * 区間ごとの実測**で分ける（CLAUDE.md R1/R4）。`callGemini` は 503/429 を
+   * 黙って再試行する（`gemini.ts` の指数バックオフ 1,2,4,8s）ので、
+   * **この値が大きいときは推論が遅いのか再試行が挟まったのかを次に見る**。
+   */
+  geminiMs?: number;
 }
 
 /** 返させる形。**QR のフィールドを作らない**のが仕様上の要点。 */
@@ -126,18 +135,47 @@ export async function readExternalIdFromImage(input: {
       ],
     }],
     generationConfig: {
-      // 2.x 形式で書けば callGemini が 3.x へ自動変換する (gemini.ts:144-148)。
+      // 2.x 形式で書けば callGemini が 3.x へ自動変換する (gemini.ts:82-95)。
       temperature: 0,
-      thinkingConfig: { thinkingBudget: 0 },
+      /*
+       * **`thinkingLevel` を明示する**（発注者指摘「30 秒は長すぎない？」・2026-10-22）。
+       *
+       * ここは元々 `thinkingBudget: 0`（2.x で思考オフ）だけを渡していたが、
+       * **3.x では `thinkingBudgetToLevel` が 0 を `'low'` に写すので思考はオンのまま**
+       * （`gemini.ts:71-73`。`voice-choice-llm.ts:111-122` が同じ罠で実障害を出している）。
+       * 既定モデルは `gemini-3.1-flash-lite` なので、**この経路は毎回 low で考えていた**。
+       *
+       * 公式 (ai.google.dev/gemini-api/docs/thinking):
+       *   - 3.x の flash / flash-lite は `thinking_level` に **`minimal`** を取る
+       *     （3.5-flash-lite は既定が "On (minimal)"）。
+       *   - 「コストや待ち時間を下げたいときは `thinking_level` を下げる。
+       *     `max_output_tokens` で絞るのは**応答が切れる**のでよくない」
+       * → 読み取るのは**バーコード 1 本と数字 1 つ**（公式の言う fact retrieval）なので
+       *   最小で足りる。**`off` / `none` / `0` は 3.x に無い**（同ページに記載なし）。
+       *
+       * **`thinkingBudgetToLevel` 自体は触らない** — スキャン本経路と共用で、
+       * `voice-choice-llm.ts:119` が「ここでは触らない」と決めている。
+       * `normalizeGenerationConfigForModel` は `thinkingLevel` が在れば
+       * そちらを優先するので（`gemini.ts:89-90`）、**この 1 行で済む**。
+       */
+      thinkingConfig: { thinkingLevel: 'minimal' },
       responseMimeType: 'application/json',
       responseSchema: READ_SCHEMA,
-      maxOutputTokens: 512,
+      /*
+       * **思考トークンも `maxOutputTokens` に含まれる**（公式・同ページ。
+       * `voice-choice-llm.ts:101-121` が 64 で**空応答**を出した実障害）。
+       * 返す JSON は 50 トークン程度だが、思考ぶんの余裕を持たせる
+       * （`minimal` でも 0 ではない）。**切れると `unparsable` → 撮り直し**になり、
+       * 待ち時間が 2 倍になるのが最も悪い。
+       */
+      maxOutputTokens: 1024,
     },
   };
 
   let text: string;
+  const t0 = Date.now();
   try {
-    const res = await callGemini(input.apiKey, req, MODELS.scan);
+    const res = await callWithMinimalThinking(input.apiKey, req);
     text = (res.candidates?.[0]?.content?.parts ?? [])
       .map((p) => p.text ?? '')
       .join('')
@@ -146,12 +184,40 @@ export async function readExternalIdFromImage(input: {
     return {
       ok: false, ...empty, error: 'gemini_failed',
       detail: e instanceof Error ? e.message : String(e),
+      geminiMs: Date.now() - t0,
     };
   }
+  const geminiMs = Date.now() - t0;
 
   const parsed = parseReadJson(text);
-  if (!parsed) return { ok: false, ...empty, error: 'unparsable', detail: 'JSON を読めませんでした' };
-  return { ok: true, ...parsed };
+  if (!parsed) return { ok: false, ...empty, error: 'unparsable', detail: 'JSON を読めませんでした', geminiMs };
+  return { ok: true, ...parsed, geminiMs };
+}
+
+/**
+ * `thinkingLevel: 'minimal'` で呼び、**モデルがその値を受け付けないときだけ**
+ * thinking の指定を外して 1 回だけやり直す。
+ *
+ * **なぜ保険が要るか**: 公式の対応表に載っているのは `gemini-3.5-flash-lite` /
+ * `gemini-3-flash-preview` などで、**既定の `gemini-3.1-flash-lite` はその表に
+ * 名前が無い**（2026-10-22 時点）。`minimal` を受けないモデルだと 400 になり、
+ * `callGemini` は 4xx を再試行しないので**読み取りが丸ごと落ちる**。
+ * `scan.model` は admin から変えられる（app_config）ので、**将来どのモデルを
+ * 指されても読めること**を優先する。
+ *
+ * **指定を外すと `thinkingLevel` 無しになる = モデルの既定で考える**（遅いが読める）。
+ * 遅さより「読めない」が重いので、こちらへ倒す。
+ */
+async function callWithMinimalThinking(apiKey: string, req: GeminiRequest) {
+  try {
+    return await callGemini(apiKey, req, MODELS.scan);
+  } catch (e) {
+    const rejected = e instanceof GeminiError && e.status === 400
+      && /thinking/i.test(`${e.body ?? ''}${e.message}`);
+    if (!rejected) throw e;
+    const { thinkingConfig: _unsupported, ...rest } = req.generationConfig ?? {};
+    return await callGemini(apiKey, { ...req, generationConfig: rest }, MODELS.scan);
+  }
 }
 
 /**
