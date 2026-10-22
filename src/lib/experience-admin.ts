@@ -103,6 +103,13 @@ export interface ExperienceAccountList {
   };
   /** `PUBLIC_DEMO_FALLBACK=false` でダミー表示が全停止しているか。 */
   demoDisabledGlobally: boolean;
+  /**
+   * **管理者リストからの初回登録を済ませたか** (空なら未実施)。
+   * デモ枠だけの仕組み (発注者指示 2026-08-30)。目印が入ったら**二度と走らせない** —
+   * 毎回走らせると、画面から外した人が次のアクセスで黙って戻り「外す」が効かなくなる。
+   * **PII ではない** (日付などの目印の文字列だけ)。
+   */
+  seededFromAdmins: string;
 }
 
 /**
@@ -214,5 +221,6 @@ export function listExperienceAccounts(): ExperienceAccountList {
       conflicts: rows.filter((r) => r.conflict).length,
     },
     demoDisabledGlobally: demoDisabledGlobally(),
+    seededFromAdmins: demo.seededFromAdmins,
   };
 }
