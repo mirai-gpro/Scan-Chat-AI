@@ -19,7 +19,7 @@
  *   **画面は黙って空になる** (本番で `edge.is_admin:false` を実測)。
  *   さらに**管理者を 1 人増やすたびにダミーの閲覧者が増える**。
  *
- * 判定の実体は `src/lib/demo-data.ts` の `demoFallbackEnabled`。
+ * 判定の実体は `src/lib/view-mode.ts` の `shouldUseDemoData(uid, mode)` (PR-C)。
  * ここでは同じ規則を**独立に**書き下して突き合わせる (実装をそのまま読むと
  * 「実装が実装どおり」を確認するだけになる)。
  */
@@ -102,16 +102,37 @@ const cases = [
 // 2. デモの資格に admin が混ざっていないこと (**この再設計の要**)
 // ══════════════════════════════════════════════════════════════════════
 {
-  const fn = src.slice(src.indexOf('export function demoFallbackEnabled'));
+  /*
+   * **2026-10-22 (PR-C)**: 判定の実体は `view-mode.ts` の
+   * `shouldUseDemoData(uid, mode)` へ移った (`demoFallbackEnabled` は撤去)。
+   * **この節の要件は同じ** — 資格は `isDemoAccount` だけで決まり、全停止スイッチが効き、
+   * **admin はどこにも現れない**。
+   */
+  const vm = read('src/lib/view-mode.ts');
+  const fn = vm.slice(vm.indexOf('export function shouldUseDemoData'));
   const body = fn.slice(fn.indexOf('{') + 1, fn.indexOf('\n}'));
 
-  if (!/isDemoAccount/.test(body)) fails.push('demoFallbackEnabled が isDemoAccount を使っていない');
-  if (!/demoDisabledGlobally/.test(body)) fails.push('demoFallbackEnabled に全停止スイッチが無い');
+  if (!/isDemoAccount/.test(body)) fails.push('shouldUseDemoData が isDemoAccount を使っていない');
+  if (!/demoDisabledGlobally/.test(body)) fails.push('shouldUseDemoData に全停止スイッチが無い');
 
-  // **引数は uid 1 つだけ。** 任意の第 2 引数は渡し忘れても型で落ちず、静かに挙動が変わる。
-  if (!/export function demoFallbackEnabled\(uid\?: string \| null\): boolean/.test(src)) {
-    fails.push('demoFallbackEnabled の引数が uid 1 つではない'
-      + ' — admin を受け取る形に戻すと、デモの資格が権限の仕組みに再び結合する');
+  /*
+   * **引数は uid と mode の 2 つ。どちらも省略できない。**
+   * `mode` を任意にすると**渡し忘れたページだけ挙動が違う**ので型で落ちなくなる
+   * (§4.3「一部だけ旧判定を残さない」)。admin を受け取る形にも戻さない。
+   */
+  if (!/export function shouldUseDemoData\(uid: string \| null \| undefined, mode: ViewMode\): boolean/.test(vm)) {
+    fails.push('shouldUseDemoData の引数が (uid, mode) ではない'
+      + ' — mode を任意にすると渡し忘れが型で落ちず、admin を受け取る形に戻すと'
+      + 'デモの資格が権限の仕組みに再び結合する');
+  }
+  // **撤去した名前が live コードへ戻っていないこと** (旧い暗黙判定の再導入を落とす・§4.3)。
+  for (const f of ['src/lib/demo-data.ts', 'src/lib/dashboard-queries.ts', 'src/lib/notice-queries.ts',
+                   'src/lib/measurement-queries.ts', 'src/lib/result-queries.ts',
+                   'src/lib/elith-report-queries.ts', 'src/pages/dashboard.astro']) {
+    if (/demoFallbackEnabled\s*\(/.test(code(f))) {
+      fails.push(`${f}: 撤去した demoFallbackEnabled() が戻っている`
+        + ' — ダミーを出すかの判定は shouldUseDemoData(uid, mode) だけ');
+    }
   }
 
   /*
@@ -164,7 +185,7 @@ const cases = [
         else if (body[i] === ')') depth--;
       }
       const cond = body.slice(m.index + m[0].length, i - 1);
-      if (!cond.includes('demoFallbackEnabled')) continue;
+      if (!cond.includes('shouldUseDemoData')) continue;
       if (/\.length|\bcount\b|rows\b/.test(cond)) {
         fails.push(`${f}: デモの判定に件数が AND されている → if (${cond.trim()})`
           + ' — 実データの有無は条件ではない (仕様書 §2)。'
@@ -269,9 +290,9 @@ const cases = [
 // ══════════════════════════════════════════════════════════════════════
 // 5. 旧形式 seed 行の回避が、必ずデモの内側にあること
 // ══════════════════════════════════════════════════════════════════════
-if (!/Array\.isArray\(row\.report\)\s*&&\s*demoFallbackEnabled\(/.test(read('src/lib/elith-report-queries.ts'))) {
+if (!/Array\.isArray\(row\.report\)\s*&&\s*shouldUseDemoData\(/.test(read('src/lib/elith-report-queries.ts'))) {
   fails.push('elith-report-queries.ts: 旧形式 seed 行の回避が無い、または'
-    + ' demoFallbackEnabled の外に出ている — 実顧客の実データを隠す危険');
+    + ' shouldUseDemoData の外に出ている — 実顧客の実データを隠す危険');
 }
 
 // ══════════════════════════════════════════════════════════════════════

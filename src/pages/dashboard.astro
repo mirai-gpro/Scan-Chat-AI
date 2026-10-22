@@ -23,11 +23,13 @@ import { loadRegisteredCaptures } from '../lib/external-id-persist';
 import { barcodeReminders } from '../lib/external-id-reminder';
 import { PROVIDER_ID_LABEL } from '../lib/external-test-id';
 import ExternalIdReminder from '../components/dashboard/ExternalIdReminder.astro';
-import { demoFallbackEnabled } from '../lib/demo-data';
+import { shouldUseDemoData } from '../lib/view-mode';
 import { isSpecialAccount } from '../lib/special-accounts';
 import { getLatestInterviewCompletion } from '../lib/interview-completion';
 import { isBridgeConfigured, getServerSupabase } from '../lib/supabase';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
+import { viewModeFromRequest } from '../lib/view-mode';
+import ViewModeSwitch from '../components/dashboard/ViewModeSwitch.astro';
 import {
   extractUrgentAlert,
   extractDailyQuests,
@@ -43,6 +45,13 @@ noStore(Astro.response);
 const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
+/*
+ * **表示モード (Real / Demo)。** 毎リクエストで資格を引き直して決める
+ * (正本 `docs/specs/special_demo_integration_spec_20261022.md` §4.2)。
+ * Cookie は希望でしかないので、ここで決めた `effectiveMode` を**全部の問い合わせへ渡す**。
+ */
+const viewMode = viewModeFromRequest(Astro, viewer);
+
 /*
  * 表示中のユーザー。`?u=` は admin の代理表示のときだけ効く。
  * **デモ表示の可否はこの uid だけで決まる** (`demo-accounts.ts`)。
@@ -106,7 +115,8 @@ await refreshConfig();
  * 管理者が確認するときだけ true (`docs/elith/AI疾病予防報告書_承認と再作成_仕様書.md` §8)。
  * 一般利用者・外部共有リンクには渡らないので、未承認は**サーバで返らない**。
  */
-const result = needsSignIn ? null : await loadDashboard(u, viewer.origin, viewer.isAdmin);
+const result = needsSignIn ? null
+  : await loadDashboard(u, viewMode.effectiveMode, viewer.origin, viewer.isAdmin);
 
 const hasError = result ? 'error' in result : false;
 const data = !result || hasError ? null : (result as Exclude<typeof result, { error: string }>);
@@ -115,16 +125,16 @@ const data = !result || hasError ? null : (result as Exclude<typeof result, { er
  * デバッグ欄の表示用。**判定そのものは各クエリの中で同じ関数が使われている**ので、
  * ここは「表示中の uid でデモが出るか」を見せているだけ (二重管理にならない)。
  */
-const demoShown = demoFallbackEnabled(data?.diagnosticUserId);
+const demoShown = shouldUseDemoData(data?.diagnosticUserId, viewMode.effectiveMode);
 
 // ── 実データ (STEP 1/2 で作った diagnosis.measurement_values から読む) ──
 // 判定・助言はアプリで作らない。検査票の値・基準値と、検査機関が付けた flag のみを渡す。
-const latest = data ? await getLatestMeasurements(data.resultUid) : null;
+const latest = data ? await getLatestMeasurements(data.resultUid, viewMode.effectiveMode) : null;
 
 // ウェルネス年齢 (選択ユーザー本人の diagnostic_user_id で取得)
-const healthAge = data ? await getHealthAge(data.diagnosticUserId) : null;
+const healthAge = data ? await getHealthAge(data.diagnosticUserId, viewMode.effectiveMode) : null;
 
-const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId) : 0;
+const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId, viewMode.effectiveMode) : 0;
 
 /*
  * ══════════════════════════════════════════════════════════════════════
@@ -142,7 +152,7 @@ const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId) :
  * **判定は `isSpecialAccount(uid)` 1 本。** 「キットが 0 件なら」で判定しない —
  * 実顧客でも連携前は 0 件になり、コースプランの人の画面が黙って変わってしまう。
  */
-const singlePurchase = isSpecialAccount(data?.diagnosticUserId);
+const singlePurchase = viewMode.effectiveMode === 'real' && isSpecialAccount(data?.diagnosticUserId);
 
 /*
  * 単品購入で出す検査種別 = **人間ドック ∪ 実際にデータがある種別** (2026-09-28)。
@@ -375,6 +385,13 @@ const reportHref = manualPdfReport
       </header>
 
       <main class="flex flex-1 flex-col gap-5 px-5 pb-12 pt-5">
+
+        {/*
+          ⓪ 表示モードの切り替え (Real / Demo・PR-C)。
+          **`switchable` の人にだけ出る** = 本人のセッションで Demo の資格を持つ人。
+          一般の利用者・代理表示・共有・未サインインには 1 px も出ない。
+        */}
+        {viewMode.switchable && <ViewModeSwitch mode={viewMode.effectiveMode} dual={viewMode.dual} />}
 
         {/* ① 注意項目 — 非表示 (緊急受診勧告 URGENT ALERT): {urgentAlert && <UrgentAlertBanner alert={urgentAlert} />} */}
 

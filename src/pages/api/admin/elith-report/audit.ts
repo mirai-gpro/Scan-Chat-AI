@@ -46,6 +46,13 @@ export const GET: APIRoute = async ({ request }) => {
      * ここで承認済だけに絞ると**承認前の確認ができない**。
      */
     includeUnapproved: true,
+    /*
+     * **`'demo'` を渡すのは従来の挙動を変えないため** (PR-C)。
+     * 旧実装は `demoFallbackEnabled(uid)` を見ていたので、**デモ用アカウントなら
+     * サンプルを組む**のが元の仕様 (上のコメントどおり)。`shouldUseDemoData` も
+     * `isDemoAccount(uid)` を併せて見るので、**一般利用者の uid でサンプルは出ない**。
+     */
+    mode: 'demo',
   });
 
   const shown = new Set(vm.chapters.map((c) => c.key));

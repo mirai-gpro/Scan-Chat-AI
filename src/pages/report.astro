@@ -16,6 +16,7 @@ import { loadDashboard, getHealthAge, withHonorific, formatJpDate } from '../lib
 import { AI_PREVENTION_REPORT_LABEL } from '../lib/display-names';
 import { WELLNESS_AGE_LABEL } from '../lib/wellness-age';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
+import { viewModeFromRequest } from '../lib/view-mode';
 import { noStore } from '../lib/http-cache';
 
 /**
@@ -44,6 +45,8 @@ noStore(Astro.response);
 const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
+const viewMode = viewModeFromRequest(Astro, viewer);
+
 /**
  * デモ表示の可否は**閲覧している本人が admin か**で決まる (spec §4.6)。
  * **代理表示中 (`?u=` で他人を見ている) は渡さない** — 相手の実データを見せるため。
@@ -85,9 +88,10 @@ await refreshConfig();
  * 管理者が確認するときだけ true (`docs/elith/AI疾病予防報告書_承認と再作成_仕様書.md` §8)。
  * 一般利用者・外部共有リンクには渡らないので、未承認は**サーバで返らない**。
  */
-const result = needsSignIn ? null : await loadDashboard(u, viewer.origin, viewer.isAdmin);
+const result = needsSignIn ? null
+  : await loadDashboard(u, viewMode.effectiveMode, viewer.origin, viewer.isAdmin);
 const data = !result || 'error' in result ? null : result;
-const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId) : 0;
+const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId, viewMode.effectiveMode) : 0;
 
 const supportContact = cfg('ui.support_contact');
 /**
@@ -102,7 +106,7 @@ const saveGuides = applySaveStepOverrides(cfg('ui.save_steps') ?? '');
 const cssStr = (v: string): string =>
   '"' + v.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\s+/g, ' ').trim() + '"';
 
-const healthAge = data ? await getHealthAge(data.diagnosticUserId) : null;
+const healthAge = data ? await getHealthAge(data.diagnosticUserId, viewMode.effectiveMode) : null;
 
 /**
  * その回の入力にがんリスク検査があったか (spec §1.0.3)。**アプリが判定する。**
@@ -156,6 +160,8 @@ const reportCtx = {
    * **承認済しか返らない**。
    */
   includeUnapproved: viewer.isAdmin,
+  /** Real / Demo のどちら向けの紙面か (サンプルを出すかの判定・§4.3)。 */
+  mode: viewMode.effectiveMode,
 };
 
 const vm = localInput != null

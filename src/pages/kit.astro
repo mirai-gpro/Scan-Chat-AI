@@ -22,6 +22,7 @@ import { getServerSupabase } from '../lib/supabase';
 import { qrSvgPath } from '../lib/qr';
 import { publicOrigin } from '../lib/public-url';
 import { resolveViewer, viewerLinkQuery, viewerPathPrefix } from '../lib/viewer';
+import { viewModeFromRequest } from '../lib/view-mode';
 import { noStore } from '../lib/http-cache';
 
 /**
@@ -42,6 +43,8 @@ noStore(Astro.response);
 const url = new URL(Astro.request.url);
 // 入場は Cookie で本人を判定する (`src/lib/viewer.ts`)。`?u=` は admin の代理表示のみ。
 const viewer = await resolveViewer(Astro);
+const viewMode = viewModeFromRequest(Astro, viewer);
+
 /**
  * デモ表示の可否は**閲覧している本人が admin か**で決まる (spec §4.6)。
  * **代理表示中 (`?u=` で他人を見ている) は渡さない** — 相手の実データを見せるため。
@@ -67,11 +70,11 @@ const needsSignIn = authEnabled && !u;
  * 後ろに置くと初回リクエストで admin の登録が効かない (コード既定に落ちる)。
  */
 await refreshConfig();
-const result = needsSignIn ? null : await loadDashboard(u, viewer.origin);
+const result = needsSignIn ? null : await loadDashboard(u, viewMode.effectiveMode, viewer.origin);
 const hasError = result ? 'error' in result : false;
 const data = !result || hasError ? null : (result as Exclude<typeof result, { error: string }>);
 
-const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId) : 0;
+const unreadNotices = data ? await countUnreadImportant(data.diagnosticUserId, viewMode.effectiveMode) : 0;
 
 // 画面文言 (app_config)。未設定なら空文字が返り、UI 側で非表示になる。
 const supportContact = cfg('ui.support_contact');

@@ -79,6 +79,7 @@ jobs:
       - run: npm run verify:demo-gate
       - run: npm run verify:special-accounts
       - run: npm run verify:experience-accounts
+      - run: npm run verify:view-mode
       # 登録メールの差し替え。**uid が変わる退行が一番まずい** (検査データの紐付けが全部外れる)。
       - run: npm run verify:special-email-replace
       - run: npm run verify:transcosmos-reports

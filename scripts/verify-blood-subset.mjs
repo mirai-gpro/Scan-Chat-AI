@@ -190,8 +190,7 @@ export function listObjects(prefix) {
 export function getObjectText(key) { return Promise.resolve(_store.has(key) ? _store.get(key) : null); }
 export function makeS3Client() { return null; }
 `);
-writeFileSync(`${CACHE}/bs-demo-stub.mjs`, `export function demoFallbackEnabled() { return false; }
-export function demoMetricTrend() { return []; }
+writeFileSync(`${CACHE}/bs-demo-stub.mjs`, `export function demoMetricTrend() { return []; }
 export function demoLatest() { return null; }
 export function demoArtifacts() { return []; }
 export function demoReport() { return null; }
@@ -646,9 +645,9 @@ const mvRow = (artifact_id, test_date, seq, item_name, value_num, ref_high_num =
     ],
   });
   sbStub.__setStub(db);
-  const cand = await QUERIES.getTrendCandidates(UID, 'blood');
+  const cand = await QUERIES.getTrendCandidates(UID, 'real', 'blood');
   ok(cand.includes('尿酸'), '候補に 尿酸 が出る (4 回ぶん = 線が引ける)', JSON.stringify(cand));
-  const s = await QUERIES.getMeasurementTrend(UID, ['尿酸'], 12, 'blood');
+  const s = await QUERIES.getMeasurementTrend(UID, 'real', ['尿酸'], 12, 'blood');
   ok(s.length === 1 && s[0].points.length === 4, '1 系列 4 点', `len=${s.length} pts=${s[0]?.points.length}`);
   ok(s[0].points.map((p) => p.value).join(',') === '6.1,6.5,7,7.8', '値が日付昇順', s[0].points.map((p) => p.value).join(','));
   const derivedPts = s[0].points.filter((p) => p.source === 'health_checkup_scan');
@@ -667,7 +666,7 @@ const mvRow = (artifact_id, test_date, seq, item_name, value_num, ref_high_num =
     measurement_values: [mvRow('d1', '2025-09-24', 0, '尿酸', 7.2, 7.0, 3.7), mvRow('d2', DATE, 0, '尿酸', 7.8, 7.0, 3.7)],
   });
   sbStub.__setStub(db2);
-  const s2 = await QUERIES.getMeasurementTrend(UID, ['尿酸'], 12, 'blood');
+  const s2 = await QUERIES.getMeasurementTrend(UID, 'real', ['尿酸'], 12, 'blood');
   ok(s2[0]?.referenceUpper === 7.0, '派生だけの系列は基準線を出す (従来どおり)', String(s2[0]?.referenceUpper));
   ok(s2[0]?.points.every((p) => p.source === 'health_checkup_scan'), '2 点とも派生の印が付く');
 
@@ -680,7 +679,7 @@ const mvRow = (artifact_id, test_date, seq, item_name, value_num, ref_high_num =
     measurement_values: [mvRow('n1', '2026-01-10', 0, '尿酸', 6.1), mvRow('d1', DATE, 0, '尿酸', 7.8, 7.0)],
   });
   sbStub.__setStub(db3);
-  const s3 = await QUERIES.getMeasurementTrend(UID, ['尿酸'], 12, 'blood');
+  const s3 = await QUERIES.getMeasurementTrend(UID, 'real', ['尿酸'], 12, 'blood');
   ok((s3[0]?.points.length ?? 0) === 1, 'superseded の派生は点にならない', String(s3[0]?.points.length));
 
   // health_checkup 側のグラフは派生に汚染されない
@@ -697,7 +696,7 @@ const mvRow = (artifact_id, test_date, seq, item_name, value_num, ref_high_num =
     ],
   });
   sbStub.__setStub(db4);
-  const hcS = await QUERIES.getMeasurementTrend(UID, ['空腹時中性脂肪', '中性脂肪'], 12, 'health_checkup');
+  const hcS = await QUERIES.getMeasurementTrend(UID, 'real', ['空腹時中性脂肪', '中性脂肪'], 12, 'health_checkup');
   ok(hcS.length === 1 && hcS[0].label === '空腹時中性脂肪' && hcS[0].points.length === 2,
     '**health_checkup のグラフは 空腹時中性脂肪 のまま 2 点** (派生が混ざらない)',
     JSON.stringify(hcS.map((x) => [x.label, x.points.length])));
@@ -736,11 +735,11 @@ console.log('\n⑦ マスタ追加で既存系列が割れないこと (塩分�
       ],
     });
     sbStub.__setStub(db);
-    const sr = await QUERIES.getMeasurementTrend(UID, [target], 12, 'health_checkup');
+    const sr = await QUERIES.getMeasurementTrend(UID, 'real', [target], 12, 'health_checkup');
     ok(sr.length === 1 && sr[0].points.length === 2,
       `${oldName} (旧) と ${target} (新) が **1 系列 2 点**になる`,
       `系列=${sr.length} 点=${sr[0]?.points.length ?? 0}`);
-    const cand = await QUERIES.getTrendCandidates(UID, 'health_checkup');
+    const cand = await QUERIES.getTrendCandidates(UID, 'real', 'health_checkup');
     ok(cand.length === 1 && cand[0] === target, `   候補も 1 件 (${target})`, JSON.stringify(cand));
   }
   // 空腹時/随時 は寄せない (裁定 Q-3)
@@ -755,7 +754,7 @@ console.log('\n⑦ マスタ追加で既存系列が割れないこと (塩分�
     ],
   });
   sbStub.__setStub(db2);
-  const mixed = await QUERIES.getMeasurementTrend(UID, ['中性脂肪', '空腹時中性脂肪', '随時中性脂肪'], 12, 'health_checkup');
+  const mixed = await QUERIES.getMeasurementTrend(UID, 'real', ['中性脂肪', '空腹時中性脂肪', '随時中性脂肪'], 12, 'health_checkup');
   ok(!mixed.some((x) => x.label === '中性脂肪'),
     '**空腹時/随時 を読み出しで 中性脂肪 に潰していない** (裁定 Q-3)',
     JSON.stringify(mixed.map((x) => x.label)));
@@ -1149,9 +1148,9 @@ console.log('\n⑨-1 既存の派生は **Dashboard では従来どおり取得�
   // 検査カードの「グラフ」ボタン (TestResultsSection の canGraph = 件数 >= 2)
   ok(blood.length >= 2, '   グラフのボタンが出る件数 (>=2) を満たす');
 
-  const cand = await QUERIES.getTrendCandidates(UID, 'blood');
+  const cand = await QUERIES.getTrendCandidates(UID, 'real', 'blood');
   ok(cand.length > 0, '**推移グラフの候補に出る**', JSON.stringify(cand.slice(0, 4)));
-  const series = await QUERIES.getMeasurementTrend(UID, ['尿酸', 'eGFR'], 12, 'blood');
+  const series = await QUERIES.getMeasurementTrend(UID, 'real', ['尿酸', 'eGFR'], 12, 'blood');
   ok(series.length === 2, '尿酸 / eGFR の 2 系列が返る', String(series.length));
   const pts = series.flatMap((x) => x.points);
   ok(pts.length === 4, '   点は 4 つ (2 回 × 2 項目)', String(pts.length));
@@ -1373,7 +1372,7 @@ console.log('\n⑨-7 同日に派生が在っても **通常 blood の登録は�
     '**通常 blood が入ったので ready:true** (= Elith 対象)', JSON.stringify(r[UID]?.ready));
 
   // ④ グラフは通常の値に差し替わる (派生は superseded なので点にならない)
-  const series = await QUERIES.getMeasurementTrend(UID, ['尿酸'], 12, 'blood');
+  const series = await QUERIES.getMeasurementTrend(UID, 'real', ['尿酸'], 12, 'blood');
   const onDate = (series[0]?.points ?? []).filter((pt) => pt.date === DATE);
   ok(onDate.length === 1 && onDate[0].value === 6.4,
     `   ${DATE} の点は通常 blood の値 (6.4)`, JSON.stringify(onDate));
@@ -2185,7 +2184,7 @@ console.log('\n⑫-② 同日 sibling は同じ系列に 2 点。表示名だけ
     ],
   });
   sbStub.__setStub(db);
-  const series = await QUERIES.getMeasurementTrend(UID, ['LDLコレステロール'], 12, 'blood');
+  const series = await QUERIES.getMeasurementTrend(UID, 'real', ['LDLコレステロール'], 12, 'blood');
   ok(series.length === 1, '**系列は 1 本** (別系列に分けない)', String(series.length));
   const pts = series[0]?.points ?? [];
   ok(pts.length === 3, '**点は 3 つ** (平均しない・捨てない)', JSON.stringify(pts.map((p) => p.value)));
@@ -2208,7 +2207,7 @@ console.log('\n⑫-② 同日 sibling は同じ系列に 2 点。表示名だけ
     ],
   });
   sbStub.__setStub(dbRev);
-  const rev = await QUERIES.getMeasurementTrend(UID, ['LDLコレステロール'], 12, 'blood');
+  const rev = await QUERIES.getMeasurementTrend(UID, 'real', ['LDLコレステロール'], 12, 'blood');
   ok((rev[0]?.points ?? []).map((p) => p.value).join(',') === '96,102,116',
     '**seed の順を入れ替えても同じ並び** (決定的)', (rev[0]?.points ?? []).map((p) => p.value).join(','));
 
@@ -2650,7 +2649,7 @@ console.log('\n⑬-H グラフのボタンは「異なる受診日が 2 日以�
     measurement_values: [mv('d-g1', PROD_DATE_0917, 96), mv('d-g2', PROD_DATE_0917, 102)],
   });
   sbStub.__setStub(sameDay);
-  const candSame = await QUERIES.getTrendCandidates(UID, 'blood');
+  const candSame = await QUERIES.getTrendCandidates(UID, 'real', 'blood');
   ok(candSame.length === 0,
     '**9/17① + 9/17② だけ → 候補 0 (グラフ無効)**', JSON.stringify(candSame));
   const d1 = new Set(sameDay.tables.test_artifacts.map((a) => a.test_date));
@@ -2668,7 +2667,7 @@ console.log('\n⑬-H グラフのボタンは「異なる受診日が 2 日以�
     ],
   });
   sbStub.__setStub(twoDays);
-  const candTwo = await QUERIES.getTrendCandidates(UID, 'blood');
+  const candTwo = await QUERIES.getTrendCandidates(UID, 'real', 'blood');
   ok(candTwo.includes('LDLコレステロール'),
     '**9/17① + 9/17② + 9/24 → 候補あり (グラフ有効)**', JSON.stringify(candTwo));
   const d2 = new Set(twoDays.tables.test_artifacts.map((a) => a.test_date));

@@ -508,7 +508,11 @@ async function readBack(
 
   // (d) **Dashboard が実際に取得する artifacts** (loadDashboard を本番と同じに通す)
   try {
-    const d = await loadDashboard(uid);
+    /*
+     * **admin の処理は常に `'real'`** (PR-C)。閲覧者の Cookie に左右されず、
+     * **ダミーを実データとして扱わない**ため固定する。
+     */
+    const d = await loadDashboard(uid, 'real');
     if ('error' in d) out.dashboard = { error: d.error };
     else {
       const blood = d.artifacts.filter((a) => a.test_type === 'blood');
@@ -526,8 +530,8 @@ async function readBack(
 
   // (e) **推移グラフ** — /trend?type=blood が呼ぶ 2 関数そのまま
   try {
-    const candidates = await getTrendCandidates(uid, 'blood');
-    const series = await getMeasurementTrend(uid, candidates, 12, 'blood');
+    const candidates = await getTrendCandidates(uid, 'real', 'blood');
+    const series = await getMeasurementTrend(uid, 'real', candidates, 12, 'blood');
     out.trend = {
       candidates,
       series: series.map((s) => ({

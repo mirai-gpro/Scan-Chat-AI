@@ -12,7 +12,8 @@
 import { getServerSupabase } from './supabase';
 import { withHonorific } from './dashboard-queries';
 import type { UserNotice, Announcement } from '../types/supabase';
-import { buildDemoNotices, demoFallbackEnabled, demoUnreadImportant } from './demo-data';
+import { buildDemoNotices, demoUnreadImportant } from './demo-data';
+import { shouldUseDemoData, type ViewMode } from './view-mode';
 
 /** 一般のお知らせ / ニュースで初期表示する件数。 */
 export const ANNOUNCEMENT_PREVIEW_LIMIT = 3;
@@ -41,6 +42,7 @@ export interface LoadNoticesOptions {
 /** notices.astro から呼ぶ。 */
 export async function loadNotices(
   diagnosticUserId: string,
+  mode: ViewMode,
   opts: LoadNoticesOptions = {},
 ): Promise<NoticesData | { error: string }> {
   /*
@@ -51,7 +53,7 @@ export async function loadNotices(
    * 氏名はダミーなので `お客様` 固定 (DB を引かない以上ここでは分からない)。
    */
   const sb = getServerSupabase();
-  if (demoFallbackEnabled(diagnosticUserId) && !sb) {
+  if (shouldUseDemoData(diagnosticUserId, mode) && !sb) {
     return buildDemoNotices(diagnosticUserId, 'お客様');
   }
   if (!sb) return { error: 'Supabase が未設定です。.env.local を確認してください。' };
@@ -114,7 +116,7 @@ export async function loadNotices(
    * 「実データが空のときだけダミーへ」に沿った条件で、**実データが 1 件でもあると
    * デモの画面が歯抜けになる** (ダッシュボード側と同じ誤り・2026-09-05 修正)。
    */
-  if (demoFallbackEnabled(diagnosticUserId)) {
+  if (shouldUseDemoData(diagnosticUserId, mode)) {
     return buildDemoNotices(diagnosticUserId, userName);
   }
 
@@ -138,9 +140,9 @@ export async function loadNotices(
  * ヘッダーのバッジ用 — 未読の重要なお知らせ件数。
  * Supabase 未設定や該当なしは 0 を返す (画面側でバッジ非表示)。
  */
-export async function countUnreadImportant(diagnosticUserId: string): Promise<number> {
+export async function countUnreadImportant(diagnosticUserId: string, mode: ViewMode): Promise<number> {
   // デモ用アカウントはバッジも DB を見ない (本文と件数が食い違わないように)。
-  if (demoFallbackEnabled(diagnosticUserId)) return demoUnreadImportant();
+  if (shouldUseDemoData(diagnosticUserId, mode)) return demoUnreadImportant();
   const sb = getServerSupabase();
   if (!sb) return 0;
   const { count, error } = await sb

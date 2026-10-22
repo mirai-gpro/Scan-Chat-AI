@@ -15,7 +15,7 @@
  */
 
 import { getServerSupabase } from './supabase';
-import { demoFallbackEnabled } from './demo-data';
+import { shouldUseDemoData, type ViewMode } from './view-mode';
 import {
   ELITH_REPORT_SAMPLE_TEXT, ELITH_REPORT_SAMPLE_CHECKUP, ELITH_SAMPLE_ISSUED_ON,
   ELITH_REPORT_SAMPLE_TEXT_TYPE1, ELITH_REPORT_SAMPLE_LAB_TYPE1, ELITH_SAMPLE_ISSUED_ON_TYPE1,
@@ -45,6 +45,13 @@ export interface ReportContext {
    * 渡さない。**フロントで隠すのではなくここで返さない。**
    */
   includeUnapproved?: boolean;
+  /**
+   * **いま Real / Demo のどちらを表示しているか** (`resolveViewMode().effectiveMode`)。
+   *
+   * **省略できない** — サンプル紙面を出すかの判定に使う
+   * (正本 `docs/specs/special_demo_integration_spec_20261022.md` §4.3)。
+   */
+  mode: ViewMode;
 }
 
 type CheckupValues = Record<string, { date?: string; value?: unknown }[]>;
@@ -79,7 +86,7 @@ function common(ctx: ReportContext): Omit<BuildInput, 'reportText' | 'checkup' |
 export type SampleType = 1 | 2;
 
 function sample(ctx: ReportContext, type: SampleType = 1): ReportVM {
-  if (!demoFallbackEnabled(ctx.diagnosticUserId)) return emptyVM(ctx);
+  if (!shouldUseDemoData(ctx.diagnosticUserId, ctx.mode)) return emptyVM(ctx);
   /*
    * **タイプは材料と同じ回のもので決める (2026-08-30・実測で確定)。**
    *
@@ -196,7 +203,7 @@ export async function loadReportVM(ctx: ReportContext): Promise<ReportVM> {
      *   - **現行形式 (dict) の実データが入れば、この分岐は通らない** = 本物が勝つ
      *   - 旧形式の行を消したり書き換えたりはしない (監査のため残す)
      */
-    if (Array.isArray(row.report) && demoFallbackEnabled(ctx.diagnosticUserId)) {
+    if (Array.isArray(row.report) && shouldUseDemoData(ctx.diagnosticUserId, ctx.mode)) {
       return sample(ctx);
     }
 

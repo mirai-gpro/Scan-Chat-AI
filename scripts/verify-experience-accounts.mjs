@@ -215,9 +215,9 @@ console.log('\n④ 資格 (experienceCapabilities)\n');
   ok('資格の判定に admin が混ざっていない',
     !/isAdmin|viewerIsAdmin|admin_users/.test(code('src/lib/experience-accounts.ts')),
     'admin を増やしても体験アカウントの利用者は増えない、が設計');
-  ok('表示モードをここで決めていない (PR-C の仕事)',
+  ok('表示モードをここで決めていない (`view-mode.ts` の仕事)',
     !/welltect_mode|effectiveMode|shouldUseDemoData/.test(code('src/lib/experience-accounts.ts')),
-    '資格と表示モードを混ぜると、現行の排他がどちらの話か分からなくなる');
+    '資格と表示モードを混ぜると、どちらの話で分岐しているのか追えなくなる');
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -366,16 +366,24 @@ console.log('\n⑦ admin API の POST を実走 (競合 → 何も保存しな�
 // ══════════════════════════════════════════════════════════════════════
 // ⑧ 既存の検査・既存の約束を弱めていないこと
 // ══════════════════════════════════════════════════════════════════════
-console.log('\n⑧ 既存の約束 (PR-B では表示モードに入らない)\n');
+console.log('\n⑧ 既存の約束 (資格の層は表示モードを知らない)\n');
 {
-  ok('`demoFallbackEnabled` の Special 排他はまだ在る (PR-C で移す)',
-    /isSpecialAccount/.test(code('src/lib/demo-data.ts')),
-    'PR-B で外すと実データの利用者に他人名義のダミーが出る');
-  ok('`demoFallbackEnabled` の引数は uid 1 つのまま',
-    /export function demoFallbackEnabled\(uid\?: string \| null\)/.test(read('src/lib/demo-data.ts')));
-  ok('`welltect_mode` Cookie を足していない (PR-C)',
-    !/welltect_mode/.test(code('src/lib/experience-accounts.ts'))
-    && !/welltect_mode/.test(code('src/pages/api/auth/resolve.ts')));
+  /*
+   * **2026-10-22 (PR-C で更新)**: Special 排他は `demo-data.ts` から
+   * `view-mode.ts` へ**移した** (排他ではなくモードで分ける形へ)。
+   * 検査する約束は変わらない — **資格の層 (`experience-accounts.ts`) は
+   * 表示モードを知らない**・**`resolve.ts` は Cookie を書かない**。
+   */
+  ok('`demoFallbackEnabled` は撤去されている (PR-C)',
+    !/demoFallbackEnabled/.test(code('src/lib/demo-data.ts')),
+    '資格だけでダミーを出すかを決める関数が残ると、モードを渡し忘れた経路で使われる');
+  ok('ダミーの判定は `shouldUseDemoData(uid, mode)` 1 本',
+    /export function shouldUseDemoData\(uid: string \| null \| undefined, mode: ViewMode\)/
+      .test(read('src/lib/view-mode.ts')));
+  ok('`welltect_mode` Cookie を資格の層・サインイン経路に持ち込んでいない',
+    !/welltect_mode|MODE_COOKIE/.test(code('src/lib/experience-accounts.ts'))
+    && !/welltect_mode|MODE_COOKIE/.test(code('src/pages/api/auth/resolve.ts')),
+    'サインインで Cookie を書くと「ログイン直後は必ず Real」が崩れる');
   ok('migration を 1 本も足していない',
     !readdirSync(resolve(ROOT, 'supabase/migrations')).some((f) => /2026102[2-9]/.test(f)), 'この領域は app_config だけで足りる (仕様書の絶対条件)');
   ok('app_config のキーを増やしていない',

@@ -1507,10 +1507,18 @@ console.log('\n⑬ UI の契約\n');
      * デモは記者やパートナーにも見せるので、押すとエラーになるボタンを残さない。
      */
     const sr = code('src/pages/api/kit/[id]/self-report.ts');
+    /*
+     * **2026-10-22 (PR-C)**: 判定は「デモ資格か」から
+     * **「いま Demo を表示中か」** (`viewMode.effectiveMode === 'demo'`) へ変わった。
+     * **要件は同じ** — デモの出荷を外部の Edge へ出さない・**条件は 2 つとも見る**。
+     */
     ok('デモの出荷は自己申告で外部へ出さない',
-      /demoFallbackEnabled\(diagnosticUserId\) && isDemoShipmentId\(id\)/.test(sr));
-    ok('**条件は 2 つとも見る**（uid だけ・ID だけにしない）',
-      /demoFallbackEnabled\([^)]*\) && isDemoShipmentId\(/.test(sr));
+      /viewMode\.effectiveMode === 'demo' && isDemoShipmentId\(id\)/.test(sr));
+    ok('**条件は 2 つとも見る**（モードだけ・ID だけにしない）',
+      /effectiveMode === 'demo' && isDemoShipmentId\(/.test(sr));
+    ok('モードは資格ではなくリクエストから決めている',
+      /viewModeFromRequest\(ctx, viewer\)/.test(sr),
+      'デモ資格だけで見ると Dual の人が Real を表示していても読取テスト扱いになる');
     {
       const iDemo = sr.indexOf('isDemoShipmentId(id)');
       const iEdge = sr.indexOf('isHpEdgeConfigured()');
@@ -2830,11 +2838,18 @@ console.log('\n㉑ デモの読取テスト (本番の台帳へ書かない・PR
     ok('読み取りの控え (`recallRead`) より後ろ', iDemo > iRecall && iRecall > 0);
     ok('判定 (`evaluateExternalId`) より後ろ', iDemo > iEval && iEval > 0);
     ok('画面との突き合わせ (`confirmedValue`) より後ろ', iDemo > iConfirm && iConfirm > 0);
-    ok('**条件は 2 つとも見る** (資格だけ・ID だけにしない)',
-      /demoFallbackEnabled\(uid\) && isDemoShipmentId\(shipmentRef\)/.test(api));
+    /*
+     * **2026-10-22 (PR-C)**: 条件の片方が「デモ資格」から**「いま Demo を表示中か」**へ。
+     * **2 つとも見ることは変わらない** (モードだけ → 本物の出荷まで読取テストになる /
+     * ID だけ → 本物の利用者が偽の成功を受け取る)。
+     */
+    ok('**条件は 2 つとも見る** (モードだけ・ID だけにしない)',
+      /viewMode\.effectiveMode === 'demo' && isDemoShipmentId\(shipmentRef\)/.test(api));
+    ok('モードはリクエストから決めている (資格で代用しない)',
+      /viewModeFromRequest\(ctx, viewer\)/.test(api));
     // **全文を返さない** = 本番の register と同じ約束 (§6.1)
     const demoRet = (() => {
-      const j = api.indexOf('demoFallbackEnabled(uid) && isDemoShipmentId(shipmentRef)');
+      const j = api.indexOf("viewMode.effectiveMode === 'demo' && isDemoShipmentId(shipmentRef)");
       const k = api.indexOf('\n    }', j);
       return j > 0 && k > j ? api.slice(j, k) : '';
     })();
@@ -2896,9 +2911,17 @@ console.log('\n㉑ デモの読取テスト (本番の台帳へ書かない・PR
       'const persistExternalIdCapture = async () => { globalThis.__persist(); '
       + 'return { ok: true, record: { masked: "*****0123", status: "confirmed", reviewReasons: [],'
       + ' labTestLinkStatus: "linked" } }; };\nconst expectedTestType = () => "cancer_urine";'],
-    [/^import \{ demoFallbackEnabled, isDemoShipmentId \} from '[^']+';$/m,
-      'const demoFallbackEnabled = () => globalThis.__isDemoUid;\n'
-      + 'const isDemoShipmentId = (id) => globalThis.__demoIds.includes(id);'],
+    [/^import \{ isDemoShipmentId \} from '[^']+';$/m,
+      'const isDemoShipmentId = (id) => globalThis.__demoIds.includes(id);'],
+    /*
+     * 2026-10-22 (PR-C): モードは view-mode.ts が決める。
+     * 従来の __isDemoUid を**そのまま**モードの素にするので、この節の検査は意味が変わらない
+     * (「デモ資格を持つ人が Demo を表示している」= 旧実装と同じ状態を再現する)。
+     */
+    [/^import \{ viewModeFromRequest \} from '[^']+';$/m,
+      "const viewModeFromRequest = () => ({ effectiveMode: globalThis.__isDemoUid ? 'demo' : 'real',"
+      + ' canDemo: !!globalThis.__isDemoUid, canReal: false, dual: false,'
+      + ' switchable: !!globalThis.__isDemoUid, requested: null });'],
     [/^import \{ rememberRead, recallRead \} from '[^']+';$/m,
       'const rememberRead = async () => ({ ok: true });\n'
       + 'const recallRead = async () => globalThis.__recall();'],
