@@ -176,17 +176,24 @@ console.log('\n② 競合 (uid 食い違い)\n');
     'この層は読むだけ。書くと裁定 7 の「UID 分裂の経路」が増える');
 }
 {
-  // 競合の行は一覧の先頭 (人が見るべき行を埋めない)。
+  /*
+   * 競合の行は一覧の先頭 (人が見るべき行を埋めない)。
+   *
+   * **競合の行の鍵を、普通の行より「後ろ」にする。** 同順位の並びは鍵順なので、
+   * 競合の行の鍵を先にすると**並び替えを外しても偶然先頭に来て検査が通る**
+   * (退行注入で実際に素通りした)。
+   */
   const list = listWith({
     'special.account_emails': [
-      `${HASH_B} b***@example.com ${UID_Z} # 普通の人`,
-      `${HASH_A} a***@example.com ${UID_X} # 競合の人`,
+      `${HASH_A} a***@example.com ${UID_Z} # 普通の人`,
+      `${HASH_B} b***@example.com ${UID_X} # 競合の人`,
     ].join('\n'),
-    'demo.account_emails': `${HASH_A} a***@example.com ${UID_Y} # 競合の人`,
+    'demo.account_emails': `${HASH_B} b***@example.com ${UID_Y} # 競合の人`,
     'special.account_uids': [`${UID_Z} 普通`, `${UID_X} 競合`].join('\n'),
     'demo.account_uids': `${UID_Y} 競合`,
   });
-  eq('競合の行が先頭に来る', list.rows[0]?.key, HASH_A);
+  ok('verify: 競合の鍵は普通の行より後ろ (偶然で通らないように)', HASH_B > HASH_A);
+  eq('競合の行が先頭に来る', list.rows[0]?.key, HASH_B);
 }
 
 // ══════════════════════════════════════════════════════════════════════
@@ -294,7 +301,12 @@ console.log('\n⑤ PII (現物を返さない)\n');
 console.log('\n⑥ 読むだけ (裁定 7)\n');
 {
   const api = 'src/pages/api/admin/experience-accounts.ts';
-  const src = code(api);
+  /*
+   * **import 行を落としてから位置を見る。** 落とさないと `isAdminAuthorized` が
+   * 冒頭の import 行に当たり、**認可を後ろへ動かしても index 比較が通る**
+   * (退行注入で実際に素通りした。`verify:external-id-capture` が踏んだのと同じ穴)。
+   */
+  const src = code(api).split('\n').filter((ln) => !/^\s*import\b/.test(ln)).join('\n');
   ok('GET だけを公開している', /export const GET/.test(src));
   ok('**POST を作っていない**', !/export const (POST|PUT|PATCH|DELETE)/.test(src),
     '書き込みを足すと uid を決める口が 2 つになる');
