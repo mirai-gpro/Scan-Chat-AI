@@ -467,10 +467,17 @@ if (!/Array\.isArray\(row\.report\)\s*&&\s*shouldUseDemoData\(/.test(read('src/l
     fails.push('api/admin/demo-accounts.ts: 初回登録の目印を上書きしている'
       + ' — 管理者リストからの自動登録が繰り返され、外した人が黙って戻る');
   }
-  const page = '../wellfort-site/src/pages/admin/demo-accounts.astro';
+  /*
+   * 画面は **2026-10-22 (PR-E) で `/admin/experience-accounts` へ統合した**
+   * (デモ／スペシャルを 1 枚・1 人 1 行。旧 2 URL は redirect)。
+   * **読む先を直さないと、空のリダイレクトを検査して落ちる。**
+   * 「管理者リストからの初回登録はデモ枠だけ」という約束は変わっていない。
+   */
+  const page = '../wellfort-site/src/pages/admin/experience-accounts.astro';
   try {
     const pg = readFileSync(resolve(ROOT, page), 'utf8');
-    if (!/!j\.seededFromAdmins/.test(pg)) {
+    // 統合画面は一覧を 2 本引くので、目印は統合一覧 (`ex`) から読む。
+    if (!/![a-z]+\.seededFromAdmins/.test(pg)) {
       fails.push(`${page}: 自動登録が目印を見ていない — 毎回走ると「外す」が効かなくなる`);
     }
     /*
