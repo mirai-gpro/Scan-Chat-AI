@@ -7,8 +7,9 @@
 （2026-10-22）**を 1 本にまとめたもの。**以後はこの文書が正本**で、2 文書の記述と
 食い違う箇所は本書（＝裁定）が勝つ。
 
-> **実装状況: PR-A（§3）だけが実装済み。** §4 以降は未実装。
-> **PR-A 以外の変更を PR-A へ混ぜない**（発注者指示 10）。
+> **実装状況: PR-A（§3）・PR-B（§4.1）・PR-C（§4.2 / §4.3）・PR-D（§4.4）が実装済み。**
+> 残りは PR-E（§4.5 統合管理画面）。
+> **PR ごとに他の変更を混ぜない**（発注者指示 10）。
 
 ---
 
@@ -183,11 +184,102 @@ Cookie 発行の**すべてより前**。admin API の競合は **`setConfig` �
 **未確認（本番で 1 回通すこと）**: Dual のアカウントで ①ログイン直後が Real ②切り替えて
 Demo のダミーが出る ③戻すと実データに戻る ④Demo 表示中に単品購入の枠・複数年の枠が出ない。
 
-### 4.4 書込み監査（PR-D）
+### 4.4 書込み監査（PR-D・**2026-10-22 実装済み**）
 
 `viewer.writeTargetUid` を使う **7 本**（`external-id` / `self-report` / `scan/save` /
-`scan/jobs` / `scan/export` / `interview/export` / `notices/[id]/read`）を分類に従って塞ぐ。
-裁定 4 のとおり、**AI問診・AIスキャンに擬似成功を足さない**。
+`scan/jobs` / `scan/export` / `interview/export` / `notices/[id]/read`）を分類に従って塞いだ。
+裁定 4 のとおり、**AI問診・AIスキャンに擬似成功を足していない**。
+
+#### 4.4.1 棚卸しで分かったこと
+
+PR-A / PR-C で塞いだのは **2 本だけ**（`external-id` / `self-report`）で、
+**残り 5 本はデモを表示している最中でもそのまま本番へ届いていた**。
+デモの画面は `shouldUseDemoData()` が**ダミーを出す**ので、書いた行は**本人にも
+見えない** = 誰にも見えない本物の行だけが増える。
+
+**もう 1 つ fail-open が在った。** `external-id` / `self-report` は
+`viewModeFromRequest()` を **`refreshConfig()` より前**で呼んでいた。
+`isDemoAccount()` は app_config（`demo.account_uids`）を読むので、**冷えた isolate で
+未取得のまま判定すると資格が無いと見えてゲートが開く**。組み込みの 4 件
+（`BUILTIN_DEMO_UIDS`）は config 無しでも当たるので、**app_config で登録した
+デモ用アカウントだけが黙って本番へ書く**という見つけにくい形だった。
+→ 7 本とも **`refreshConfig()` → モード** の順に揃え、`verify:write-audit` が見張る。
+
+#### 4.4.2 分類
+
+| 口 | 分類 | 挙動 |
+|---|---|---|
+| `kit/[id]/external-id` | **A: Demo-safe no-op** | PR-A 済（順序だけ直した） |
+| `kit/[id]/self-report` | **A** | PR-A 済（順序だけ直した） |
+| `notices/[id]/read` | **A（PR-D で追加）** | デモのお知らせ → どこにも書かず `demo: true` |
+| `scan/save` | **B: Demo では 403** | `test_artifacts` / `measurements` / `measurement_values` |
+| `scan/jobs` | **B** | `scan_jobs`（cron ワーカーが後から本番として読む） |
+| `scan/export` | **B** | Elith の source JSON を S3 へ |
+| `interview/export` | **B** | Elith 納品 ＋ `interview_completions` |
+
+- **A = デモの作り物に対する操作。** そのまま下へ流すと `Order not found` /
+  `notice not found` になり、**押すとエラーになるボタン**が記者やパートナーの前に残る。
+  どこにも書かず `demo: true` を返し、**画面が「記録されません」と出す**。
+- **B = 本番のデータ・納品物を作る口。** `ok: true` を返さず **403
+  `demo_mode_write_blocked`** で止める（裁定 4「AI問診・AIスキャンは今回 Demo 書込み
+  対応しない」「擬似成功を足さない」）。実データで試す必要がある人には
+  **Real（スペシャル）資格を付けて Real 表示で使ってもらう**。
+
+#### 4.4.3 番人は 1 本
+
+`denyDemoWrite(viewer, mode)`（`src/lib/write-guard.ts`）。判定は
+**`shouldUseDemoData()`（PR-C の唯一の口）**を通し、資格の関数を直に呼ばない。
+
+- **`viewer.uid`（表示中）と `writeTargetUid`（書く相手）の 2 つとも見る。**
+  現行の `kind` では必ず一致するが、片方だけだと**将来 kind を足したときに静かに抜ける**
+  （`isReadOnlyViewer` が 2 つとも見るのと同じ規律）。
+- **一般顧客は Demo 表示でも止まらない**（資格が無いので `shouldUseDemoData` が false）。
+  ゲートが広がると**利用者が保存できなくなるのに、デモで試している側には何も起きない**
+  ので、ここは実走で見張る。
+- **文言は 1 か所**（`write-guard.ts` の `message`）。符号だけを画面に出さないため、
+  `scan.astro` の 2 か所と `notices.astro` が**サーバの `message` を優先**する。
+
+#### 4.4.4 デモのお知らせ ID を UUID の形へ
+
+既読 API は `/^[0-9a-f-]{36}$/i` で ID の形を見るので、`demo-un-0001` では
+**押した瞬間に 400 `invalid notice id`** になり「更新に失敗しました: invalid notice id」が
+出ていた（デモの出荷 ID を UUID 形へ直したのと同じ理由）。
+`DEMO_NOTICE_IDS` を唯一の定義にし、`buildDemoNotices()` もそこから引く。
+**API 側の形の検査は緩めない**（本番の `user_notices.id` を守るもの）。
+**Demo fixture を足したのではなく、既にある 2 件の ID の形を直しただけ**（裁定 1）。
+
+#### 4.4.5 変えていないもの
+
+migration 0 本 ・ app_config キー 0 件 ・ Demo 専用 flag なし ・
+`isDemoAccount` / `isSpecialAccount` / `shouldUseDemoData` の中身 ・
+`resolveViewMode` の既定 ・ `welltect_mode` の扱い ・ 共有と代理表示の判定 ・
+**AI問診・AIスキャンの画面の流れ**（擬似成功も進捗の作り物も足していない）
+
+#### 4.4.6 検証
+
+- 新規 `npm run verify:write-audit` **96 件**（CI の A 層）。番人は**実物を動かし**、
+  `notices/[id]/read` と `scan/save` の POST を実走させて**書き込み関数の呼び出し
+  回数を数える**（デモで 0 回・一般顧客で 1 回）
+- `verify:view-mode` は 147 → **161 件**（書き込みの 5 本も LIVE に入れた）
+- `verify:viewer-origin` が `write-guard.ts` の新しい実行時 import を繋ぐようになった
+  （繋がないと `ERR_MODULE_NOT_FOUND` で**実行すらできない**。2026-10-02 と同じ形の
+  事故なので同じやり方で閉じた）。**番人は実物のまま**
+- **退行注入 20 種**とも名指しで落ちる。**うち 1 件は注入して初めて検査の穴が見つかり
+  直した** — 「資格の関数を直に呼ぶ形に戻す」注入で `data:` URL から相対 import が
+  解決できず**スクリプトごと落ち**、名指しの失敗が 1 件も出なかった（`load()` が
+  差し替え漏れを検査の失敗として出してから止めるようにした）
+
+#### 4.4.7 残っていること（発注者の判断待ち）
+
+- **分類 B の入口は、まだ操作を誘う。** `/scan`・`/chat` は Demo 表示でも開けるので、
+  デモの利用者は**スキャンし終えてから 403 を受け取る**（Gemini の呼び出しは
+  その手前で走る）。裁定 4 が「Demo では使わない」と決めているので、
+  **入口に「デモ表示では利用できません」を出すかは UI の判断**として残した。
+  サーバ側は止まっているので実害は無い。
+- **AI問診の完了画面は、止まったことを出さない。** `interview/export` の呼び出しは
+  元から fire-and-forget で失敗を握りつぶすので、デモで完走すると画面は「完了」に
+  見える（端末の控えだけが残り、本番には何も無い）。**AI問診の画面に手を入れるのは
+  いちばん慎重にすべき領域**なので、文言を足すかは判断を仰ぐ。
 
 ### 4.5 管理画面（PR-E）
 
