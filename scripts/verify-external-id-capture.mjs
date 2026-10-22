@@ -1956,7 +1956,14 @@ console.log('\n⑱ 読み取りの待ち時間 (thinking / 実測)\n');
     const tb = i2 >= 0 ? rb.slice(i2, rb.indexOf('},', i2)) : '';
     ok('応答に `timing` が在る', tb.length > 0);
     {
-      const keys = (tb.match(/^\s*(\w+):/gm) || []).map((k) => k.trim().replace(':', ''));
+      /*
+       * **省略記法 (`uid,`) も鍵として数える。** `/\w+:/` だけで見ていたら
+       * `timing: { uid, s3_ms: ... }` という退行を注入しても**素通りした**
+       * (コロンが無いので鍵に見えない)。PII が 1 つ混ざれば終わりなので、
+       * 「行に出てくる識別子」を全部拾う。
+       */
+      const keys = (tb.match(/^\s*(\w+)\s*[:,]/gm) || [])
+        .map((k) => k.trim().replace(/[:,]$/, ''));
       const allowed = new Set(['timing', 's3_ms', 'gemini_ms', 'cache_ms', 'total_ms', 'bytes']);
       const extra = keys.filter((k) => !allowed.has(k));
       ok('**ms とバイト数だけ** (番号・鍵・uid を載せない)', extra.length === 0, extra.join(','));
