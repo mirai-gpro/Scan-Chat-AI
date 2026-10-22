@@ -76,6 +76,26 @@ const linkDemoEmail = async () => { globalThis.__linkDemo = (globalThis.__linkDe
 const resolveDemoUidByEmail = async (e, u) => globalThis.__demoUid?.(e, u) ?? null;
 const linkSpecialEmail = async () => { globalThis.__linkSpecial = (globalThis.__linkSpecial ?? 0) + 1; };
 const resolveSpecialUidByEmail = async (e, u) => globalThis.__specialUid?.(e, u) ?? null;
+/*
+ * **2026-10-22 (PR-B)**: resolve.ts は 2 つの名簿を**同時に**引く canonical 層を呼ぶ。
+ * スタブは**本物と同じ優先順** (Real → Demo → 既存 uid) を再現するので、
+ * 既存シナリオの __specialUid / __demoUid はそのまま効く
+ * (※ ここはテンプレートリテラルの中なので、バッククォートを書くと文字列が閉じる)
+ * (= この検査の 150 件は 1 件も意味が変わらない)。
+ *   __canonFails    → 名簿を引けなかった (fail-closed の検査用)
+ *   __canonConflict → Demo と Real で uid が食い違う (自動統合しないことの検査用)
+ */
+const resolveCanonicalUidByEmail = async (e, u) => {
+  if (globalThis.__canonFails) return { ok: false, reason: 'lookup_failed', detail: 'stub failure' };
+  if (globalThis.__canonConflict) {
+    return { ok: false, reason: 'uid_conflict', conflict: globalThis.__canonConflict };
+  }
+  const sp = globalThis.__specialUid?.(e, u) ?? null;
+  if (sp) return { ok: true, uid: sp, side: 'special', dual: false };
+  const dm = globalThis.__demoUid?.(e, u) ?? null;
+  if (dm) return { ok: true, uid: dm, side: 'demo', dual: false };
+  return { ok: true, uid: null, side: null, dual: false };
+};
 const specialPreassignedUidByEmail = async (e) => globalThis.__preassigned?.(e)
   ?? { ok: true, uid: null };
 ` + src;
@@ -197,6 +217,9 @@ async function post(opts) {
     ? () => ({ ok: false, reason: 'stub failure' })
     : () => ({ ok: true, uid: opts.preassigned ?? null });
   globalThis.__demoUid = demoUid ? () => demoUid : () => null;
+  // **毎回明示で戻す** (前のシナリオの競合・照会失敗が次へ漏れないように)。
+  globalThis.__canonFails = !!opts.canonFails;
+  globalThis.__canonConflict = opts.canonConflict ?? null;
   globalThis.__signed = 0;
   globalThis.__adminCred = 0;
   globalThis.__linkSpecial = 0;
@@ -401,11 +424,20 @@ console.log('\n⑩ 禁止事項の番人');
       '確認メールを送信しました。メールが届かない場合は、以前利用したログイン方法もお試しください。'));
 
   const rs = code('src/pages/api/auth/resolve.ts');
-  const order = ['production', 'staging', 'special', 'demo'].map((k) => rs.indexOf(`resolvedFrom = '${k}'`));
-  ok('S-06', '**本人解決の順序を変えていない** (production → staging → special → demo)',
-    order.every((i) => i >= 0) && order[0] < order[1] && order[1] < order[2] && order[2] < order[3],
-    JSON.stringify(order));
-  for (const fn of ['findLinkedUid', 'resolveSpecialUidByEmail', 'linkSpecialEmail']) {
+  /*
+   * **2026-10-22 (PR-B)**: special / demo の 2 行は canonical 層の 1 呼び出しへ畳まれた。
+   * **順序の要件は変わっていない** — 実顧客 → staging → 体験アカウント (Real → Demo)。
+   * 後半 2 つは canonical 層の中で決まるので、そちらを見る。
+   */
+  const order = ['production', 'staging'].map((k) => rs.indexOf(`resolvedFrom = '${k}'`));
+  const iCanon = rs.indexOf('resolveCanonicalUidByEmail(');
+  ok('S-06', '**本人解決の順序を変えていない** (production → staging → 体験アカウント)',
+    order.every((i) => i >= 0) && order[0] < order[1] && iCanon > order[1],
+    JSON.stringify([...order, iCanon]));
+  ok('S-06b', '  体験アカウントの中は Real → Demo の順のまま',
+    /uid = look\.special\.uid \|\| look\.demo\.uid/.test(read('src/lib/experience-accounts.ts')),
+    '両方に登録された人に、実データ側ではなくダミー側の uid を与えてはいけない');
+  for (const fn of ['findLinkedUid', 'resolveCanonicalUidByEmail', 'linkSpecialEmail']) {
     ok(`S-07:${fn}`, `  ${fn} をそのまま使っている（再設計していない）`, rs.includes(`${fn}(`));
   }
   ok('S-08', '**ガードは upsert / detach / issueAdminCred より前**',
@@ -749,6 +781,39 @@ console.log('\n⑫ 事前発行 special uid の保護 (9〜13)');
       [r.status, r.body.diagnosticUserId], [200, UID_CUST]);
     ok('P-15b', '  旧束縛の detach も従来どおり走る',
       r.writes.some((w) => w.op === 'update' && w.values?.auth_user_id === null));
+  }
+
+  /*
+   * ── 17. **Demo / Real の uid 食い違い (PR-B)** ──
+   * 正本 `docs/specs/special_demo_integration_spec_20261022.md`。
+   * **自動統合しない** = 名簿も `app_users` も Cookie も admin credential も
+   * **1 つも触らずに** 409。ここは P-04 (Google × パスワード) と同じ形の約束。
+   */
+  {
+    const r = await post({
+      user: googleUser, claims: AMR_OAUTH,
+      canonConflict: { demoUid: OTHER, specialUid: PRE },
+    });
+    eq('P-17', '**uid 食い違い → 409**', r.status, 409);
+    eq('P-17b', '  DB 書き込み 0 件', r.writes.length, 0);
+    eq('P-17c', '  Cookie 0 枚', [r.cookieSets, r.signed], [0, 0]);
+    eq('P-17d', '  admin credential も 0 回', r.adminCred, 0);
+    eq('P-17e', '  名簿も書かない (linkSpecial / linkDemo とも 0)', [r.linkSpecial, r.linkDemo], [0, 0]);
+    ok('P-17f', '  どちらの uid も応答へ出さない (内部情報を返さない)',
+      !JSON.stringify(r.body).includes(OTHER) && !JSON.stringify(r.body).includes(PRE));
+  }
+
+  /*
+   * ── 18. **名簿を引けなかった回 (PR-B)** ──
+   * 「引けなかった」を「登録なし」と同一視しない。同一視すると**新しい uid を
+   * 採番して**未連携ではなく別人格を作りに行く。何も書かずに 503。
+   */
+  {
+    const r = await post({ user: googleUser, claims: AMR_OAUTH, canonFails: true });
+    eq('P-18', '**名簿の照会失敗 → 503 (fail-closed)**', r.status, 503);
+    eq('P-18b', '  DB 書き込み 0 件', r.writes.length, 0);
+    eq('P-18c', '  Cookie 0 枚', [r.cookieSets, r.signed], [0, 0]);
+    eq('P-18d', '  admin credential も 0 回', r.adminCred, 0);
   }
 
   /* ── 16. メールの現物をログ・応答へ出していない ── */

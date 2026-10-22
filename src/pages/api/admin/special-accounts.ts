@@ -43,9 +43,10 @@ import {
   parseEmailEntries, parseEntries, serializeEmailEntries,
 } from '../../../lib/demo-accounts';
 import {
-  listSpecialAccounts, serializeUidEntries, mintSpecialUid,
+  listSpecialAccounts, serializeUidEntries,
   parseDobEntries, serializeDobEntries, normSexToken,
 } from '../../../lib/special-accounts';
+import { canonicalUidForRegistration } from '../../../lib/experience-accounts';
 import { getAccountProgress } from '../../../lib/account-progress';
 
 export const prerender = false;
@@ -418,6 +419,13 @@ export const POST: APIRoute = async ({ request }) => {
     ...entries.map((e) => e.uid),
     ...emails.map((e) => e.uid).filter((u): u is string => !!u),
   ]);
+  /*
+   * **もう片方の名簿 (Demo) も読む。** uid を決めるのは
+   * `canonicalUidForRegistration` だけで、そこへ「Demo 側に記録済みの uid」を
+   * 渡すために要る。**これが無いと Demo に uid が在る人を足したときに
+   * 別の uid を採番してしまう** (UID 分裂の原因だった経路・PR-B)。
+   */
+  const demoEmails = demoEmailEntries();
   for (const raw of addEmail) {
     const addr = String((raw as { email?: unknown })?.email ?? raw ?? '').trim().toLowerCase();
     const label = String((raw as { label?: unknown })?.label ?? '').replace(/[\r\n#]/g, ' ').trim().slice(0, 80);
@@ -437,22 +445,60 @@ export const POST: APIRoute = async ({ request }) => {
        * ただし新仕様より前に作られた **uid 空の行はここで 1 度だけ発行**して移行する
        * (一括 migration は行わない = 再登録したときに移る・仕様書 §4.1.1)。
        */
-      const kept = emails[at].uid || mintSpecialUid(takenUids);
       /*
-       * **採番に失敗したら何も保存せず中止する** (2026-10-05 hardening)。
-       * `mintSpecialUid` は既存 uid と衝突し続けた回に `null` を返す。
-       * ここで続けると **uid 無しの行** か **別人の uid への相乗り** を作るので、
-       * `setConfig` に 1 度も到達させない — `special.account_emails` /
-       * `special.account_uids` のどちらも変更せずに 503 で返す。
+       * **uid は canonical 層が決める** (PR-B)。順は
+       * ① この行に記録済み → ② **Demo 側に記録済みならそれを写す** → ③ 新規発行。
+       * ② が要点 — 以前はここで `mintSpecialUid()` を直接呼んでいたため、
+       * Demo で uid が決まっている人に**別の uid** を与えていた。
        */
+      const decided = canonicalUidForRegistration({
+        side: 'special',
+        ownUid: emails[at].uid || null,
+        otherUid: demoEmails.find((e) => e.hash === h)?.uid || null,
+        taken: takenUids,
+      });
+      /*
+       * **止めたら何も保存しない** (`setConfig` に 1 度も到達させない)。
+       *   `uid_conflict` … 両方の名簿に**違う uid** が在る。どちらが本物かを
+       *     機械が決めてよい場面ではないので 409 (人が判断する)。
+       *     **同じ uid が両方に在るのは正常な Dual** なのでここには来ない。
+       *   `mint_failed`  … 既存 uid と衝突し続けた (ありえないので要調査)。
+       *     続けると **uid 無しの行** か **別人の uid への相乗り** を作る。
+       */
+      if (!decided.ok && decided.reason === 'uid_conflict') {
+        return json({
+          ok: false, error: 'uid_conflict',
+          detail: 'Demo 側と Real 側で uid が食い違っています。統合は自動で行いません。',
+          rejected,
+        }, 409);
+      }
+      if (!decided.ok) return json({ ok: false, error: 'uid_generation_failed', rejected }, 503);
+      const kept = decided.uid;
       if (!kept) return json({ ok: false, error: 'uid_generation_failed', rejected }, 503);
       takenUids.add(kept);
       emails[at] = { ...emails[at], uid: kept, label: label || emails[at].label };
       ensureUidEntry(entries, kept, emails[at].label || emails[at].masked);
     } else {
-      // **新規。その場で uid を発行し、メール行と資格一覧の両方へ入れる。**
-      const uid = mintSpecialUid(takenUids);
-      // 同上。**発行できないまま行を作らない** (保存へ進ませない)。
+      /*
+       * **新規。uid は canonical 層が決める** (Demo 側に在ればそれを写し、
+       * 無ければその場で発行する)。メール行と資格一覧の両方へ入れる。
+       */
+      const decided = canonicalUidForRegistration({
+        side: 'special',
+        ownUid: null,
+        otherUid: demoEmails.find((e) => e.hash === h)?.uid || null,
+        taken: takenUids,
+      });
+      if (!decided.ok && decided.reason === 'uid_conflict') {
+        return json({
+          ok: false, error: 'uid_conflict',
+          detail: 'Demo 側と Real 側で uid が食い違っています。統合は自動で行いません。',
+          rejected,
+        }, 409);
+      }
+      // **発行できないまま行を作らない** (保存へ進ませない)。
+      if (!decided.ok) return json({ ok: false, error: 'uid_generation_failed', rejected }, 503);
+      const uid = decided.uid;
       if (!uid) return json({ ok: false, error: 'uid_generation_failed', rejected }, 503);
       takenUids.add(uid);
       emails.push({ hash: h, masked: maskEmail(addr), uid, label });

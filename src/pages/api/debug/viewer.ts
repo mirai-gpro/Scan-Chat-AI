@@ -25,6 +25,7 @@ import { isHpEdgeConfigured, resolveCustomerWithAdmin } from '../../../lib/hp-ed
 import { demoFallbackEnabled } from '../../../lib/demo-data';
 import { demoAccountStats } from '../../../lib/demo-accounts';
 import { isSpecialAccount, specialAccountStats } from '../../../lib/special-accounts';
+import { experienceCapabilities } from '../../../lib/experience-accounts';
 import { loadReportVM } from '../../../lib/elith-report-queries';
 import { refreshConfig } from '../../../lib/app-config';
 import { getServerSupabase, isBridgeConfigured, type BridgeOrigin } from '../../../lib/supabase';
@@ -280,8 +281,21 @@ async function inspectReport(viewerUid: string | null, origin: BridgeOrigin): Pr
    */
   const special = isSpecialAccount(uid);
 
+  /*
+   * **資格 (capability) を表示モードと分けて出す** (PR-B・正本
+   * `docs/specs/special_demo_integration_spec_20261022.md`)。
+   *   can_demo / can_real  … その uid が持つ**資格**。**両方 true は正常な Dual**
+   *   demo_enabled         … いま**ダミーを出すか** (現行の排他込み・表示の決定)
+   * この 2 つは別物。`can_demo:true` なのに `demo_enabled:false` は、
+   * Real の資格も持っているので現行の排他 (PR-C で表示モードへ移す) が効いた形。
+   */
+  const caps = experienceCapabilities(uid);
+
   const out: Record<string, unknown> = {
     effective_uid: uid,
+    can_demo: caps.canDemo,
+    can_real: caps.canReal,
+    dual_capability: caps.dual,
     is_special: special,
     special_accounts: specialAccountStats(),
     special_reason: special

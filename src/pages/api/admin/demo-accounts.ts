@@ -33,6 +33,8 @@ import {
   hashEmail, isUuid, listDemoAccounts, maskEmail,
   parseEmailEntries, parseEntries, serializeEmailEntries,
 } from '../../../lib/demo-accounts';
+import { specialEmailEntries } from '../../../lib/special-accounts';
+import { canonicalUidForRegistration } from '../../../lib/experience-accounts';
 
 export const prerender = false;
 
@@ -143,6 +145,14 @@ export const POST: APIRoute = async ({ request }) => {
     else entries.splice(at, 1);
   }
 
+  /*
+   * **もう片方の名簿 (Real/Special) も読む** (PR-B)。
+   * 既に Real 側で `diagnostic_user_id` が確定している人を Demo へ足すときは、
+   * **その uid をそのまま写す** — 1 人につき uid は 1 つという絶対条件。
+   * **ここで新しい uid を発行はしない** (デモ枠は従来どおりサインイン時に決まる)。
+   */
+  const specialEmails = specialEmailEntries();
+
   for (const raw of addEmail) {
     const addr = String((raw as { email?: unknown })?.email ?? raw ?? '').trim().toLowerCase();
     const label = String((raw as { label?: unknown })?.label ?? '').replace(/[\r\n#]/g, ' ').trim().slice(0, 80);
@@ -153,8 +163,35 @@ export const POST: APIRoute = async ({ request }) => {
     }
     const h = await hashEmail(addr);
     const at = emails.findIndex((e) => e.hash === h);
-    if (at >= 0) emails[at] = { ...emails[at], label: label || emails[at].label };
-    else emails.push({ hash: h, masked: maskEmail(addr), uid: '', label });
+    const decided = canonicalUidForRegistration({
+      side: 'demo',
+      ownUid: (at >= 0 ? emails[at].uid : '') || null,
+      otherUid: specialEmails.find((e) => e.hash === h)?.uid || null,
+    });
+    /*
+     * **両方の名簿に違う uid が在ったら何も保存せず 409。**
+     * どちらが本物かを機械が決めてよい場面ではない (人が判断する)。
+     * **同じ uid が両方に在るのは正常な Dual** なのでここには来ない。
+     */
+    if (!decided.ok) {
+      return json({
+        ok: false, error: 'uid_conflict',
+        detail: 'Demo 側と Real 側で uid が食い違っています。統合は自動で行いません。',
+        rejected,
+      }, 409);
+    }
+    // `null` = まだ決めない (従来どおりサインイン時に `linkDemoEmail` が埋める)。
+    const uid = decided.uid ?? '';
+    if (at >= 0) emails[at] = { ...emails[at], uid: emails[at].uid || uid, label: label || emails[at].label };
+    else emails.push({ hash: h, masked: maskEmail(addr), uid, label });
+    /*
+     * **uid が決まっているなら資格一覧にも足す** (Special 側の「両方へ書く」と同じ)。
+     * 片方だけだと `isDemoAccount(uid)` が立たず、画面上は登録済みなのに
+     * **デモが出ない**状態になる。`updates` は下で 1 回の `setConfig` にまとめる。
+     */
+    if (uid && !entries.some((e) => e.uid === uid)) {
+      entries.push({ uid, label: label || maskEmail(addr) });
+    }
   }
   for (const key of removeEmail) {
     // 画面からは hash を渡す (現物のアドレスを往復させない)。
