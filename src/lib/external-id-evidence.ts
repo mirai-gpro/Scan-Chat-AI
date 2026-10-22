@@ -130,6 +130,43 @@ export async function createEvidenceTicket(input: {
   return { ok: true, url, key, expiresIn: PRESIGN_EXPIRES_SEC, headers: { 'content-type': contentType } };
 }
 
+/** admin が証跡画像を**見る**ための署名 URL の有効期限 (秒)。短くする。 */
+export const VIEW_EXPIRES_SEC = 300;
+
+export type EvidenceViewResult =
+  | { ok: true; url: string; expiresIn: number }
+  | { ok: false; status: number; error: string };
+
+/**
+ * admin が証跡画像を見るための **presigned GET** を発行する（§12.1 の確認・訂正経路）。
+ *
+ * **公開 URL は作らない。** migration のコメントが指定しているとおり
+ * (`20261011000010:93-94`)「表示が必要なら短時間の署名 URL を都度発行する」。
+ *
+ * **画像の本体を関数に通さない** — `fetchEvidence` は Gemini へ渡すために base64 で
+ * 取り込むが、admin の表示でそれをやると**毎回 12MB までが Vercel 関数を往復する**。
+ * ブラウザ → S3 で直接取らせる（`/scan` の S3 直アップロードと同じ考え方）。
+ *
+ * **キーの形は `isEvidenceKey` で完全一致**。ここが緩むと**同じバケットの Elith 納品
+ * JSON を admin の画面から読み出せる**（`scan-upload-ticket.ts` と同じ罠）。
+ */
+export async function createEvidenceViewUrl(key: unknown): Promise<EvidenceViewResult> {
+  const cfg = getS3Config();
+  if (!cfg) return { ok: false, status: 503, error: 's3_not_configured' };
+  if (!isEvidenceKey(key, cfg)) return { ok: false, status: 400, error: 'invalid_key' };
+  try {
+    const client = makeS3Client(cfg);
+    const url = await getSignedUrl(
+      client,
+      new GetObjectCommand({ Bucket: cfg.bucket, Key: key }),
+      { expiresIn: VIEW_EXPIRES_SEC },
+    );
+    return { ok: true, url, expiresIn: VIEW_EXPIRES_SEC };
+  } catch (err) {
+    return { ok: false, status: 503, error: `presign_failed:${String(err).slice(0, 80)}` };
+  }
+}
+
 export type EvidenceFetchResult =
   | { ok: true; mime: string; base64: string; bytes: number }
   | { ok: false; status: number; error: string };

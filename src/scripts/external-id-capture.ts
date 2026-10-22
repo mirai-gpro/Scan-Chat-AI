@@ -31,6 +31,14 @@
  *     （既存の台帳行と DB の check 制約）。
  *   - **登録済みでも「登録し直す」から撮り直せる**ようにした（仕様 §8.3）。
  *     API は以前から撮り直しに対応しているので、**ここで足したのは面の出し入れだけ**。
+ *
+ * 【2026-10-22 の変更（発注者指示）】
+ *   - **催促の帯の「撮影して登録する」で即カメラを開く**（§4.4.5）。
+ *     「『カメラで撮影』ボタンのフローを省略して、『撮影して登録する』ボタンだけで
+ *     即、カメラを起動して」。帯は撮影ブロックの**外**に在るので、click の
+ *     ハンドラは `[data-extid-capture]` のガードより**前**で受ける。
+ *     **勝手には開かない** — 同じページにブロックが在る・スマホ・未登録の 3 つが
+ *     揃ったときだけ。別ページへ移った先での自動起動はしない。
  */
 
 import { initCameraScan, type CameraScanController } from './camera-scan';
@@ -536,6 +544,35 @@ export function initExternalIdCapture(): void {
 
   document.addEventListener('click', (e) => {
     const t = e.target as Element | null;
+
+    /*
+     * 【催促の帯から 1 タップでカメラへ】発注者指示 2026-10-22
+     * 「『カメラで撮影』ボタンのフローを省略して、『撮影して登録する』ボタンだけで
+     * 即、カメラを起動して」。
+     *
+     * 帯（`ExternalIdReminder.astro`）は撮影ブロックの**外**に在るので、
+     * 下の `[data-extid-capture]` では拾えない。**ここで先に受ける**。
+     *
+     * **3 つの場合は何もしない**（`href` の既定の動作＝撮影ブロックへ移動に任せる）:
+     *   ① 撮影ブロックがこのページに無い（ダッシュボード → `/kit` へ移動する回）。
+     *      **移った先で自動起動はしない** — カメラは「押したときだけ」開く。
+     *   ② カメラを使えない端末（PC）。下の QR でスマートフォンへ送るのが出口。
+     *   ③ 既に登録済みの回。**上書きの確認（§8.3）を飛ばさない**。
+     */
+    const starter = t?.closest?.('[data-extid-start]') as HTMLElement | null;
+    if (starter) {
+      const id = starter.getAttribute('data-extid-start') ?? '';
+      const block = id ? document.getElementById(`extid-${id}`) : null;
+      if (!block || !block.matches('[data-extid-capture]')) return; // ①
+      if (!cameraAvailable()) return; // ②
+      const sc = ctx(block);
+      if (sc.formEl?.classList.contains('hidden')) return; // ③
+      e.preventDefault();
+      block.scrollIntoView({ block: 'start', behavior: 'smooth' });
+      void openCamera(sc);
+      return;
+    }
+
     const root = t?.closest?.('[data-extid-capture]') as HTMLElement | null;
     if (!root) return;
 
