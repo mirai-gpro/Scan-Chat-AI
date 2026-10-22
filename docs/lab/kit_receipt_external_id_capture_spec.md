@@ -1649,13 +1649,21 @@ Gemini が落ちたら決定論の値も捨てる / スイッチを既定 on に
 
 #### 検証
 
-- Scan-Chat-AI `npm run verify:external-id-capture` **702 件**（⑳ で 100 件追加）。
+- Scan-Chat-AI `npm run verify:external-id-capture` **702 件**
+  （⑳ で 104 件・§4.4.5 の ⑯ で 9 件・⑬ の文言 1 件を追加）。
   **実物を本物の依存で動かす** — `evaluateExternalId` と
   `checkPreventQuestionnaireGate` は文字列化せず **data: URL 経由で import** し、
   差し替えるのは S3 だけ（鍵が無いので署名 URL は作れない）。
 - wellfort-site `npm run verify:external-id-admin-ui` **64 件**（新設）。
   **画面の inline script を切り出して実際に描かせる／押させる** ので、
   「一覧に全文が出る」「理由を取らずに送る」「通らない回を通過と表示する」を機械で止める。
+- **退行注入 26 種**（Scan 18 ＋ wellfort 8）とも名指しで落ちることを確認済み。
+  **うち 2 件は注入して初めて検査の穴が見つかり直した**:
+  ①認可の位置の検査が **import 行**に当たっていて、`isAdminAuthorized` を
+  `getServerSupabase()` の後ろへ動かしても通った → **呼び出し元で比べる**
+  ②署名 GET のキー検証の検査が lazy な `[\s\S]*?` で**後ろの `fetchEvidence`** に
+  当たっていて、`createEvidenceViewUrl` から `isEvidenceKey` を外しても通った
+  → **関数の本体だけを切り出して見る**。
 
 #### 未確認（本番で 1 回通すのが完了条件）
 
