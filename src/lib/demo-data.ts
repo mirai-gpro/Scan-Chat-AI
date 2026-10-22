@@ -301,6 +301,29 @@ export function isDemoShipmentId(id: unknown): boolean {
   return typeof id === 'string' && DEMO_SHIPMENT_IDS.includes(id);
 }
 
+/**
+ * デモの「重要なお知らせ」ID。**ここが唯一の定義**で、`buildDemoNotices()` も
+ * この並びから作る（並びが食い違うと、API がデモと見分けられない行ができる）。
+ *
+ * **UUID の形にしてある。** 既読 API (`api/notices/[id]/read.ts`) は
+ * `/^[0-9a-f-]{36}$/i` で ID の形を見るので、以前の `demo-un-0001` では
+ * **押した瞬間に 400 `invalid notice id`** になり、画面に
+ * 「更新に失敗しました: invalid notice id」が出ていた（デモの出荷 ID を
+ * UUID 形へ直したのと同じ理由・`DEMO_SHIPMENT_IDS` の注記）。
+ *
+ * **API 側の形の検査を緩めない** — あれは本番の `user_notices.id` を守るための
+ * ものなので、直すのはデモ側。
+ */
+export const DEMO_NOTICE_IDS: readonly string[] = [
+  'd0000000-0000-4000-8001-000000000001',
+  'd0000000-0000-4000-8001-000000000002',
+];
+
+/** そのお知らせ ID はデモのものか。 */
+export function isDemoNoticeId(id: unknown): boolean {
+  return typeof id === 'string' && DEMO_NOTICE_IDS.includes(id);
+}
+
 export function demoShipments(uid: string): (KitShipment & { lab_name: string | null })[] {
   /**
    * 進捗の 6 段階 (SHIPMENT_STAGES) を一通り見せる。
@@ -579,13 +602,13 @@ export function demoMetricTrend(testType?: string): MetricTrendSeries[] {
 export function buildDemoNotices(uid: string, userName: string): NoticesData {
   const important: UserNotice[] = [
     {
-      id: 'demo-un-0001', diagnostic_user_id: uid,
+      id: DEMO_NOTICE_IDS[0], diagnostic_user_id: uid,
       title: '尿酸値が基準を超えました',
       body: '直近の血液検査で尿酸値が 7.8 mg/dL となり基準値 (7.0) を超えました。生活習慣の見直しと、必要に応じて医療機関の受診をご検討ください。',
       link_url: null, published_at: daysAgo(2), read_at: null, created_at: daysAgo(2),
     } as UserNotice,
     {
-      id: 'demo-un-0002', diagnostic_user_id: uid,
+      id: DEMO_NOTICE_IDS[1], diagnostic_user_id: uid,
       title: '次回検査キットの発送予定について',
       body: '次回の検査キットの発送準備を開始しました。お届け先住所に変更がある場合はご確認ください。',
       link_url: null, published_at: daysAgo(6), read_at: null, created_at: daysAgo(6),

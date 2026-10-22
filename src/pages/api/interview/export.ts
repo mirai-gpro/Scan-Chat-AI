@@ -26,9 +26,11 @@ import type { APIRoute } from 'astro';
 import { buildElithInterviewBundle } from '../../../lib/interview-export';
 import { recordInterviewCompletion } from '../../../lib/interview-completion';
 import { resolveViewer } from '../../../lib/viewer';
-import { denyReadOnlyWrite, denyUnlessShareScope } from '../../../lib/write-guard';
+import { denyReadOnlyWrite, denyUnlessShareScope, denyDemoWrite } from '../../../lib/write-guard';
 import { resolveTargetSubject } from '../../../lib/target-subject';
 import { logShareApiEvent } from '../../../lib/share-access';
+import { refreshConfig } from '../../../lib/app-config';
+import { viewModeFromRequest } from '../../../lib/view-mode';
 import type { AnswerValue } from '../../../scripts/chat/interview-script';
 import { getS3Config, isS3Configured, putFiles } from '../../../lib/s3';
 
@@ -84,6 +86,22 @@ export const POST: APIRoute = async (ctx) => {
    * self なら本人、share なら共有リンクの対象、代理表示は上で 403 済み。
    */
   const targetUid = viewer.writeTargetUid;
+
+  /*
+   * ── デモ表示中は本番へ記録しない（PR-D・§4.4 / 裁定 4）─────────────
+   *
+   * ここは **`interview_completions`（本番の完了記録）と S3 の Elith 納品**の
+   * 両方へ書く。完了記録はダッシュボードの進捗と **Elith 自動納品の発火条件**を
+   * 動かすので、デモの操作で入ると**本物の回が進んだことになる**。
+   *
+   * **擬似成功を足さない**（裁定 4「AI問診・AIスキャンは今回 Demo 書込み対応しない」）
+   * ので 403 で止める。**body を読む前**に置く（回答は PII を含む）。
+   *
+   * **app_config を読んでから判定する**（未取得のままだと資格が無いと見えてゲートが開く）。
+   */
+  await refreshConfig().catch(() => undefined);
+  const demoBlocked = denyDemoWrite(viewer, viewModeFromRequest(ctx, viewer).effectiveMode);
+  if (demoBlocked) return demoBlocked;
 
   let body: ExportBody;
   try {

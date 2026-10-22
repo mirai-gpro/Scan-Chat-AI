@@ -274,7 +274,17 @@ const importantTitle = data ? `${data.userName}への重要なお知らせ` : '�
         body: JSON.stringify({ read }),
       });
       const payload = await res.json().catch(() => ({}));
-      if (!res.ok || !payload.ok) throw new Error(payload.error || `HTTP ${res.status}`);
+      if (!res.ok || !payload.ok) throw new Error(payload.message || payload.error || `HTTP ${res.status}`);
+      /*
+       * **デモ表示では記録されない**（PR-D・§4.4）。サーバはどこにも書かずに
+       * `demo: true` を返すので、**再読込しない** — 読み直してもダミーは
+       * 未読のままで、「押しても何も起きない」ように見えるため。
+       * **黙って成功を装わない**ので、その場で理由を出す。
+       */
+      if (payload.demo) {
+        btn.textContent = 'デモ表示では記録されません';
+        return;
+      }
       // 状態変更に成功 → 再読込 (未読のみ表示なら既読化で一覧から消える)
       window.location.reload();
     } catch (err) {

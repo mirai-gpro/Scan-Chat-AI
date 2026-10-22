@@ -2,6 +2,9 @@ import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../../lib/viewer';
 import { denyReadOnlyWrite, denyForShare, denyAnonymous } from '../../../../lib/write-guard';
 import { getServerSupabase } from '../../../../lib/supabase';
+import { isDemoNoticeId } from '../../../../lib/demo-data';
+import { viewModeFromRequest } from '../../../../lib/view-mode';
+import { refreshConfig } from '../../../../lib/app-config';
 
 export const prerender = false;
 
@@ -52,6 +55,33 @@ export const POST: APIRoute = async (ctx) => {
 
   if (!diagnosticUserId || !/^[0-9a-f-]{36}$/i.test(diagnosticUserId)) {
     return json({ error: 'missing or invalid diagnosticUserId' }, 400);
+  }
+
+  /*
+   * ── デモのお知らせは、どこにも書かずに「記録されない」と返す（PR-D・§4.4）──
+   *
+   * デモのお知らせは `demo-data.ts` の**作り物**で、本番の `user_notices` に行が無い。
+   * そのまま下へ流すと **404 `notice not found`** になり、画面には
+   * 「更新に失敗しました: notice not found」が出る。デモは記者やパートナーにも
+   * 見せる枠なので、**押すとエラーになるボタン**を残さない
+   * （`api/kit/[id]/self-report.ts` のデモ分岐と同じ形）。
+   *
+   * **条件は 2 つとも見る。** 片方だけだと
+   *   - モードだけ → デモ用アカウントが**本物のお知らせ**を既読にできなくなる
+   *   - ID だけ   → 本物の利用者がデモの ID を送れば**偽の成功**を受け取れる
+   *
+   * **DB の呼び出しより前**に置く（後ろだと 404 のあとに届いて意味がない）。
+   * 成功とは言わず `demo: true` を返し、**画面側が「記録されません」と出す**
+   * （黙って成功を装わない）。既読は作り物なので、**再読込もしない**
+   * （読み直してもダミーは未読のままで、押しても変わらないように見える）。
+   *
+   * `refreshConfig()` を先に呼ぶのは `isDemoAccount()` が app_config を読むため
+   * （冷えた isolate で未取得だと資格が無いと見え、ゲートが開く）。
+   */
+  await refreshConfig().catch(() => undefined);
+  const viewMode = viewModeFromRequest(ctx, viewer);
+  if (viewMode.effectiveMode === 'demo' && isDemoNoticeId(id)) {
+    return json({ ok: true, read: markRead, demo: true });
   }
 
   const sb = getServerSupabase();

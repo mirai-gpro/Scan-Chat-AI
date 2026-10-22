@@ -27,6 +27,7 @@
  * だけを見ているので、share を足すときにここは変えなくてよい。
  */
 
+import { shouldUseDemoData, type ViewMode } from './view-mode';
 import type { Viewer } from './viewer';
 
 /** 代理表示・共有など「読めるが書けない」主体か。 */
@@ -120,4 +121,55 @@ export function denyUnlessShareScope(
   if (v.kind !== 'share') return null;
   if (v.shareScope?.[need] === true) return null;
   return deny('share_scope', 'この共有リンクではこの機能をご利用いただけません。');
+}
+
+/* ══════════════════════════════════════════════════════════════════════
+ * デモ表示中の書き込み（PR-D・§4.4）
+ * ════════════════════════════════════════════════════════════════════ */
+
+/**
+ * **デモを表示している間は本番のデータへ書かせない**（正本
+ * `docs/specs/special_demo_integration_spec_20261022.md` §4.4 / 裁定 4）。
+ *
+ * 【なぜ要るか（PR-D の棚卸しで実測）】`viewer.writeTargetUid` を使う書き込みは
+ * **7 本**あるが、PR-A / PR-C で塞いだのは `kit/[id]/external-id` と
+ * `kit/[id]/self-report` の 2 本だけだった。残りはデモを表示している最中でも
+ * そのまま本番へ届く:
+ *   - `scan/save`       … `test_artifacts` / `measurements` / `measurement_values`
+ *   - `scan/jobs`       … `scan_jobs`（cron ワーカーが後から本番として読む）
+ *   - `scan/export`     … Elith の source JSON を S3 へ
+ *   - `interview/export`… Elith 納品 ＋ `interview_completions`
+ * デモの画面は `shouldUseDemoData()` が**ダミーを出す**ので、書いた行は本人にも
+ * 見えない = **誰にも見えない本物の行だけが増える**。
+ *
+ * 【擬似成功を足さない（裁定 4）】ここは `ok: true` を返さない。
+ * 「AI問診・AIスキャンは今回 Demo 書込み対応しない」が裁定なので、
+ * **403 で止めて理由を返す**。実データで試す必要がある人には
+ * Real（スペシャル）資格を付けて Real 表示で使ってもらう。
+ *
+ * 【2 つとも見る】`viewer.uid`（いま表示している相手）と `writeTargetUid`
+ * （これから書く相手）の両方を `shouldUseDemoData()` に通す。現行の `kind` では
+ * 必ず一致するが、片方だけを見ると**将来 kind を足したときに静かに抜ける**
+ * （`isReadOnlyViewer` が 2 つとも見るのと同じ理由）。
+ *
+ * 【呼ぶ位置】**最初の書き込み・課金・ログより前**。そして `mode` を作る前に
+ * `await refreshConfig()` を済ませること — `isDemoAccount()` は app_config を
+ * 読むので、**冷えた isolate で未取得のまま判定すると資格が無いと見えて
+ * ゲートが開く**（fail-open）。`verify:write-audit` がこの順序を見張る。
+ */
+export function denyDemoWrite(
+  v: Pick<Viewer, 'uid' | 'writeTargetUid'>,
+  mode: ViewMode,
+): Response | null {
+  const demo = shouldUseDemoData(v.uid, mode) || shouldUseDemoData(v.writeTargetUid, mode);
+  if (!demo) return null;
+  return new Response(
+    JSON.stringify({
+      ok: false,
+      error: 'demo_mode_write_blocked',
+      // **文言はここ 1 か所**。変えるときはこの行だけを直す。
+      message: 'デモ表示中は本番のデータに保存しません。実データとして記録するには、表示を「実データ」へ切り替えてください。',
+    }),
+    { status: 403, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store' } },
+  );
 }

@@ -13,12 +13,13 @@
  */
 import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../lib/viewer';
-import { denyReadOnlyWrite, denyUnlessShareScope } from '../../../lib/write-guard';
+import { denyReadOnlyWrite, denyUnlessShareScope, denyDemoWrite } from '../../../lib/write-guard';
 import { logShareApiEvent } from '../../../lib/share-access';
 import { getServerSupabase } from '../../../lib/supabase';
 import { saveScanResult } from '../../../lib/scan-persist';
 import { isSpecialAccount } from '../../../lib/special-accounts';
 import { refreshConfig } from '../../../lib/app-config';
+import { viewModeFromRequest } from '../../../lib/view-mode';
 
 export const prerender = false;
 
@@ -57,6 +58,24 @@ export const POST: APIRoute = async (ctx) => {
   if (!uid) return json({ ok: false, error: 'not_signed_in' }, 401);
 
   /*
+   * ── デモ表示中は本番へ保存しない（PR-D・§4.4 / 裁定 4）─────────────
+   *
+   * ここは `test_artifacts` / `measurements` / `measurement_values` を書く。
+   * デモの画面は `shouldUseDemoData()` が**ダミーを出す**ので、書いた行は
+   * **本人にも見えない本物の行**として増えるだけになる。
+   *
+   * **擬似成功を足さない**（裁定 4）— `ok: true` を返さず 403 で止める。
+   * 実データで試す必要がある人には Real（スペシャル）資格を付けて Real 表示で使う。
+   *
+   * **app_config を読んでから判定する**（`isDemoAccount()` が
+   * `demo.account_uids` を読むので、未取得のままだと資格が無いと見えてゲートが開く）。
+   * 下の `isSpecialAccount()` もこの 1 回で足りる。
+   */
+  await refreshConfig();
+  const demoBlocked = denyDemoWrite(viewer, viewModeFromRequest(ctx, viewer).effectiveMode);
+  if (demoBlocked) return demoBlocked;
+
+  /*
    * **「AI スキャンを利用した」の記録はここ**（§26.1 の `scan_use`）。
    * `/scan` を開いただけでは記録しない — **利用と閲覧は意味が違う**。
    * 紐付けは `locals.share`（middleware しか書かない）から取るので、
@@ -83,7 +102,7 @@ export const POST: APIRoute = async (ctx) => {
    * 1 年に潰れる (§4.3-1 / §9)。**保存する前に**受診日の読み取り可否で差し戻す。
    * 通常の利用者 (単発の 1 回) には効かせない。
    */
-  await refreshConfig();
+  // app_config は上のデモ判定の前に読んである（1 リクエストで 2 回読まない）。
   const requireReadableDate = isSpecialAccount(uid);
 
   try {

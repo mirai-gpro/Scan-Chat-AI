@@ -5,6 +5,7 @@ import { getServerSupabase } from '../../../../lib/supabase';
 import { isHpEdgeConfigured, submitKitSelfReport } from '../../../../lib/hp-edge';
 import { isDemoShipmentId } from '../../../../lib/demo-data';
 import { viewModeFromRequest } from '../../../../lib/view-mode';
+import { refreshConfig } from '../../../../lib/app-config';
 
 export const prerender = false;
 
@@ -57,7 +58,15 @@ export const POST: APIRoute = async (ctx) => {
    * **デモの判定は「資格」ではなく「いま Demo を表示中か」で決める** (PR-C・§4.3)。
    * PR-A は `demoFallbackEnabled(uid)` (= 資格) を見ていたので、**Dual の人が
    * Real を表示していても読取テスト扱いになり本物の登録ができなかった**。
+   *
+   * 【**app_config を読んでから判定する**（PR-D・§4.4）】`isDemoAccount()` は
+   * `demo.account_uids` を読むので、**冷えた isolate で未取得のまま判定すると
+   * 資格が無いと見えて Demo 判定が立たない** = デモの出荷をそのまま HP の
+   * Edge Function へ渡し、画面に `Order not found` が出る（PR-A が直した形が
+   * fail-open で戻る）。組み込みの 4 件は config 無しでも当たるので、
+   * **app_config で登録したデモ用アカウントだけが黙って落ちる**。
    */
+  await refreshConfig().catch(() => undefined);
   const viewMode = viewModeFromRequest(ctx, viewer);
   const diagnosticUserId = viewer.writeTargetUid;
 

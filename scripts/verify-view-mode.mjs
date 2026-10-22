@@ -184,6 +184,15 @@ console.log('\n⑤ 判定の口は 1 つだけ\n');
     'src/pages/scan.astro', 'src/pages/result/[id].astro',
     'src/pages/api/kit/[id]/external-id.ts', 'src/pages/api/kit/[id]/self-report.ts',
     'src/pages/api/debug/viewer.ts',
+    /*
+     * **書き込みの口も同じ層を通す** (PR-D・§4.4)。モードを見ずに資格で
+     * 止めると、**Dual が Real を表示しているのに保存できない**という形で壊れる
+     * (PR-A が踏んだのと同じ取り違え)。どれが分類 A / B かは
+     * `verify:write-audit` が見ている。
+     */
+    'src/pages/api/notices/[id]/read.ts', 'src/pages/api/scan/save.ts',
+    'src/pages/api/scan/jobs.ts', 'src/pages/api/scan/export.ts',
+    'src/pages/api/interview/export.ts',
   ];
   for (const f of LIVE) {
     ok(`${f.split('/').pop()} に demoFallbackEnabled が無い`,
@@ -228,6 +237,12 @@ console.log('\n⑤ 判定の口は 1 つだけ\n');
     ...CAPS_ALLOW,
     'src/pages/dashboard.astro': 'スペシャル専用 UI (⑦ が real との AND を見る)',
     'src/pages/scan.astro': 'スペシャル専用 UI (⑦ が real との AND を見る)',
+    /*
+     * `api/scan/save.ts` の `isSpecialAccount` は**排他ではない** —
+     * 複数年取り込みで受診日を読めなかった回を差し戻すための判定
+     * (§4.3-1)。`verify:scan-persist` が中身を見ている。
+     */
+    'src/pages/api/scan/save.ts': '複数年の受診日ガード (排他ではない)',
   };
   for (const f of LIVE) {
     if (!(f in CAPS_ALLOW)) {
