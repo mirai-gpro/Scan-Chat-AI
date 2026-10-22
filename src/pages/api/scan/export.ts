@@ -21,8 +21,10 @@
 import type { APIRoute } from 'astro';
 import { putScanExport } from '../../../lib/scan-export-put';
 import { resolveViewer } from '../../../lib/viewer';
-import { denyReadOnlyWrite, denyUnlessShareScope, denyAnonymous } from '../../../lib/write-guard';
+import { denyReadOnlyWrite, denyUnlessShareScope, denyAnonymous, denyDemoWrite } from '../../../lib/write-guard';
 import { logShareApiEvent } from '../../../lib/share-access';
+import { refreshConfig } from '../../../lib/app-config';
+import { viewModeFromRequest } from '../../../lib/view-mode';
 
 export const prerender = false;
 
@@ -61,6 +63,18 @@ export const POST: APIRoute = async (ctx) => {
    */
   const unauth = denyAnonymous(viewer);
   if (unauth) return unauth;
+  /*
+   * ── デモ表示中は Elith の source を書き出さない（PR-D・§4.4 / 裁定 4）───
+   *
+   * ここは **S3 の納品フォルダ** (`{prefix}user/{client_id}/…`) へ書く。
+   * デモの操作で納品物が増えると、**Elith 側は本物と見分けられない**。
+   * **擬似成功を足さない**ので 403 で止める。
+   *
+   * **app_config を読んでから判定する**（未取得のままだと資格が無いと見えてゲートが開く）。
+   */
+  await refreshConfig().catch(() => undefined);
+  const demoBlocked = denyDemoWrite(viewer, viewModeFromRequest(ctx, viewer).effectiveMode);
+  if (demoBlocked) return demoBlocked;
 
   let body: ExportBody;
   try {

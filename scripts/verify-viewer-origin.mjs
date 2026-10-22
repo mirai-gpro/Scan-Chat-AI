@@ -100,10 +100,44 @@ const identPath = emit('verify-viewer-origin-admin-identity.mjs', identSrc);
  * 【スタブにしない】`viewer.ts` / `admin-identity.ts` と同じ規律。
  * `denyForShare` を「常に null」のスタブにすると、**refresh-admin が共有閲覧から
  * 叩けるようになっても検査が気づかない**。
- * `write-guard.ts` の import は `import type { Viewer }` の **型だけ**なので、
- * transpile すれば単体で読み込める（env も実行時 import も無い）。
+ * 【2026-10-22・PR-D】`write-guard.ts` に **`denyDemoWrite`**（デモ表示中の
+ * 書き込み禁止・§4.4）が入り、`./view-mode` を**実行時 import** するようになった。
+ * 型だけではなくなったので、`view-mode.ts` も一緒に emit して繋ぐ
+ * （繋がないと `ERR_MODULE_NOT_FOUND: .cache/view-mode` で**実行すらできない**。
+ *  上の 2026-10-02 と同じ形の事故なので、同じやり方で閉じる）。
+ *
+ * **番人は実物のまま。** スタブにするのは `view-mode.ts` が引く**資格の 2 関数**
+ * （`isDemoAccount` / `demoDisabledGlobally`）と `isSpecialAccount` だけで、
+ * これはこの検査が見ている挙動（origin の引き継ぎ・共有からの遮断）とは無関係。
+ * デモ判定そのものの中身は `verify:write-audit` が実物で動かして見ている。
  */
-const guardPath = emit('verify-viewer-origin-write-guard.mjs', read('src/lib/write-guard.ts'));
+const capsPath = emit(
+  'verify-viewer-origin-caps.mjs',
+  `
+export const demoDisabledGlobally = () => false;
+export const isDemoAccount = () => false;
+export const isSpecialAccount = () => false;
+`,
+);
+const viewModePath = emit(
+  'verify-viewer-origin-view-mode.mjs',
+  read('src/lib/view-mode.ts')
+    .replace(/from '\.\/demo-accounts'/, `from ${JSON.stringify(capsPath)}`)
+    .replace(/from '\.\/special-accounts'/, `from ${JSON.stringify(capsPath)}`)
+    .replace(/import\.meta\.env/g, 'globalThis.__env'),
+);
+const guardPath = emit(
+  'verify-viewer-origin-write-guard.mjs',
+  read('src/lib/write-guard.ts').replace(/from '\.\/view-mode'/, `from ${JSON.stringify(viewModePath)}`),
+);
+/*
+ * **差し替え漏れをここで必ず見る**（上の 2026-10-02 と同じ理由）。
+ * `write-guard.ts` に相対 import が 1 本増えただけで実行できなくなるので、
+ * **足した人がここで気づけるようにしておく**。
+ */
+if (!read('src/lib/write-guard.ts').includes("from './view-mode'")) {
+  bad('verify 自体: write-guard.ts の `./view-mode` import が見つからない (差し替えの前提が変わった)');
+}
 
 // Supabase と admin 判定はスタブ。**この口は「admin フラグだけ更新」なので、
 // 差し替えても検査したい挙動 (origin の引き継ぎ) は 1 ミリも変わらない。**

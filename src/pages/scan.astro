@@ -993,7 +993,7 @@ const dashUrl = `${linkPrefix}/dashboard${linkQuery}`;
           body: JSON.stringify({ markdownClean, pageCount: r.pageCount ?? 1 }),
         });
         const data = (await res.json().catch(() => ({}))) as {
-          ok?: boolean; error?: string; test_date?: string; date_source?: string;
+          ok?: boolean; error?: string; message?: string; test_date?: string; date_source?: string;
         };
         /*
          * スペシャルアカウントの複数年取り込みで、受診日を読めなかった回は
@@ -1004,8 +1004,14 @@ const dashUrl = `${linkPrefix}/dashboard${linkQuery}`;
           return { blocked: true, testDate: data.test_date ?? null, dateSource: data.date_source ?? null };
         }
         if (!res.ok || !data.ok) {
-          // 黙って落とさない。書き出し状況の行に併記する。
-          exportStatus.textContent = `検査結果の保存に失敗しました (${data.error ?? res.status})`;
+          /*
+           * 黙って落とさない。書き出し状況の行に併記する。
+           * **サーバが日本語の `message` を返した回はそれを出す** — デモ表示の
+           * 書き込み禁止 (§4.4) のように、理由を利用者に伝えないと
+           * `demo_mode_write_blocked` のような符号だけが画面に出る。
+           */
+          exportStatus.textContent =
+            data.message ?? `検査結果の保存に失敗しました (${data.error ?? res.status})`;
           return { blocked: false, testDate: null, dateSource: null };
         }
         return { blocked: false, testDate: data.test_date ?? null, dateSource: data.date_source ?? null };
@@ -1065,7 +1071,8 @@ const dashUrl = `${linkPrefix}/dashboard${linkQuery}`;
         } else if (data.configured === false) {
           exportStatus.textContent = `ⓘ S3未設定のため変換のみ実行 (フォルダ: ${data.folder})。サーバ環境変数 AWS_REGION を設定すると自動アップロードします。`;
         } else {
-          exportStatus.textContent = ` 失敗: ${data.error ?? '不明なエラー'}`;
+          // こちらも日本語の `message` があればそれを出す (同上)。
+          exportStatus.textContent = data.message ?? ` 失敗: ${data.error ?? '不明なエラー'}`;
         }
       } catch (e) {
         exportStatus.textContent = ` 通信エラー: ${e instanceof Error ? e.message : String(e)}`;

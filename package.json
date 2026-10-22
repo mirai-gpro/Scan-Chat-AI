@@ -31,6 +31,7 @@
     "verify:special-accounts": "node scripts/verify-special-accounts.mjs",
     "verify:experience-accounts": "node scripts/verify-experience-accounts.mjs",
     "verify:view-mode": "node scripts/verify-view-mode.mjs",
+    "verify:write-audit": "node scripts/verify-write-audit.mjs",
     "verify:transcosmos-reports": "node scripts/verify-transcosmos-reports.mjs",
     "verify:single-purchase": "node scripts/verify-single-purchase.mjs",
     "verify:interview-speech": "node scripts/verify-interview-speech.mjs",

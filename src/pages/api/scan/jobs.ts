@@ -15,11 +15,13 @@
  */
 import type { APIRoute } from 'astro';
 import { resolveViewer } from '../../../lib/viewer';
-import { denyReadOnlyWrite, denyUnlessShareScope } from '../../../lib/write-guard';
+import { denyReadOnlyWrite, denyUnlessShareScope, denyDemoWrite } from '../../../lib/write-guard';
 import { logShareApiEvent } from '../../../lib/share-access';
 import { getS3Config } from '../../../lib/s3';
 import { isScanUploadKey } from '../../../lib/scan-upload-ticket';
 import { enqueueScanJob } from '../../../lib/scan-jobs';
+import { refreshConfig } from '../../../lib/app-config';
+import { viewModeFromRequest } from '../../../lib/view-mode';
 
 export const prerender = false;
 
@@ -54,6 +56,20 @@ export const POST: APIRoute = async (ctx) => {
    */
   const uid = viewer.writeTargetUid;
   if (!uid) return json({ ok: false, error: 'not_signed_in' }, 401);
+
+  /*
+   * ── デモ表示中はジョブを積まない（PR-D・§4.4 / 裁定 4）─────────────
+   *
+   * 積んだジョブは **cron ワーカーが後から本物として読み**、
+   * `scan_jobs` → `test_artifacts` → S3 の Elith source まで通る
+   * （しかも**送信した本人は結果を見られない** — デモの画面はダミーを出すので）。
+   * **擬似成功を足さない**ので 403 で止める。
+   *
+   * **app_config を読んでから判定する**（未取得のままだと資格が無いと見えてゲートが開く）。
+   */
+  await refreshConfig().catch(() => undefined);
+  const demoBlocked = denyDemoWrite(viewer, viewModeFromRequest(ctx, viewer).effectiveMode);
+  if (demoBlocked) return demoBlocked;
 
   /*
    * **「AI スキャンを利用した」の記録はここ**（§26.1 の `scan_use`）。

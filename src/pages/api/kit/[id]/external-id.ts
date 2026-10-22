@@ -66,12 +66,6 @@ export const POST: APIRoute = async (ctx) => {
     return json({ ok: false, error: 'invalid_shipment_id' }, 400);
   }
 
-  /*
-   * **デモの判定は「資格」ではなく「いま Demo を表示中か」で決める** (PR-C・§4.3)。
-   * PR-A は `demoFallbackEnabled(uid)` (= 資格) を見ていたので、**Dual の人が
-   * Real を表示していても読取テスト扱いになり本物の登録ができなかった**。
-   */
-  const viewMode = viewModeFromRequest(ctx, viewer);
   const uid = viewer.writeTargetUid;
   if (!uid || !/^[0-9a-f-]{36}$/i.test(uid)) {
     return json({ ok: false, error: 'missing_or_invalid_target' }, 400);
@@ -88,6 +82,20 @@ export const POST: APIRoute = async (ctx) => {
 
   // app_config を**処理の前に**読む（CLAUDE.md: 各 API は処理前に refreshConfig を呼ぶ）。
   await refreshConfig().catch(() => undefined);
+
+  /*
+   * **デモの判定は「資格」ではなく「いま Demo を表示中か」で決める** (PR-C・§4.3)。
+   * PR-A は `demoFallbackEnabled(uid)` (= 資格) を見ていたので、**Dual の人が
+   * Real を表示していても読取テスト扱いになり本物の登録ができなかった**。
+   *
+   * 【**`refreshConfig()` より後で作る**（PR-D・§4.4）】`isDemoAccount()` は
+   * app_config (`demo.account_uids`) を読むので、**冷えた isolate で未取得のまま
+   * 判定すると資格が無いと見えて Demo 判定が立たない** = デモの読取テストが
+   * 本番の台帳へ入る（PR-A が塞いだはずの形が fail-open で戻る）。
+   * 組み込みの 4 件は config を読まなくても当たるので、**app_config で登録した
+   * デモ用アカウントだけが黙って本番へ書く**という見つけにくい形になっていた。
+   */
+  const viewMode = viewModeFromRequest(ctx, viewer);
 
   // **この検査の撮影が有効化されているか。** 既定 off なので、実物の書面を確認するまで
   // 誰にも出ない（UI だけ隠して API を開けたままにしない）。
