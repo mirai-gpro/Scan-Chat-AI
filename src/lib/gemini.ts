@@ -61,10 +61,21 @@ export interface GeminiGenerationConfig {
   /**
    * Thinking 制御。
    *  - Gemini 2.x: `thinkingBudget` (token 数。0 で thinking 停止)。
-   *  - Gemini 3.x: `thinkingLevel` ('low' | 'high')。thinkingBudget は非対応。
+   *  - Gemini 3.x: `thinkingLevel`。thinkingBudget は非対応。
    * 呼び出し側は 2.x 形式 (thinkingBudget) で書けば、callGemini がモデルに応じ自動変換する。
+   *
+   * **`thinkingLevel` を直に渡すと変換より優先される** (`normalizeGenerationConfigForModel`)。
+   * 3.x で**思考を最小にしたい経路はこちらを使う** — `thinkingBudget: 0` は
+   * `thinkingBudgetToLevel` が `'low'` に写すので**思考オフにならない**
+   * (`voice-choice-llm.ts:111-122` / `external-id-read.ts` の実例)。
+   * 取る値はモデルによって違う (公式 ai.google.dev/gemini-api/docs/thinking の対応表。
+   * flash / flash-lite 系は `minimal` を取り、pro 系は `low` から)。
+   * **3.x に「オフ」は無い** (同ページに `none` / `off` / `0` の記載なし)。
    */
-  thinkingConfig?: { thinkingBudget?: number; thinkingLevel?: 'low' | 'high' };
+  thinkingConfig?: {
+    thinkingBudget?: number;
+    thinkingLevel?: 'minimal' | 'low' | 'medium' | 'high';
+  };
 }
 
 /** thinkingBudget(token) を Gemini 3 の thinkingLevel へ写像。低予算→low / 大予算→high。 */

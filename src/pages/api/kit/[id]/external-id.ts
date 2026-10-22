@@ -96,8 +96,18 @@ export const POST: APIRoute = async (ctx) => {
   }
 
   if (mode === 'read') {
+    /*
+     * **区間ごとに実測する**（発注者指摘「撮影から表示まで 30 秒近く」・2026-10-22）。
+     * この経路は **S3 の取得 → Gemini → 控えの保存** が直列で、どれも
+     * **関数(iad1=米国東部) と バケット(ap-northeast-1=東京) のあいだ**を跨ぐ。
+     * どこが効いているかは**推測で決めない**（CLAUDE.md R1/R4）ので、
+     * 応答に ms を載せて画面のコンソールから読めるようにする。
+     * **PII は 1 つも含まない**（バイト数と ms だけ）。
+     */
+    const tRead0 = Date.now();
     const got = await fetchEvidence(body.evidenceKey);
     if (!got.ok) return json({ ok: false, error: got.error }, got.status);
+    const s3Ms = Date.now() - tRead0;
 
     const read = await readExternalIdFromImage({
       provider,
@@ -140,6 +150,7 @@ export const POST: APIRoute = async (ctx) => {
      * 控えるのは `barcode` / `printed` の生値だけで、判定は控えない
      * （`register` が `evaluateExternalId` を呼び直す＝判定を 2 か所に置かない）。
      */
+    const tCache0 = Date.now();
     const kept = await rememberRead({
       evidenceKey: body.evidenceKey,
       diagnosticUserId: uid,
@@ -148,6 +159,7 @@ export const POST: APIRoute = async (ctx) => {
       barcode: read.barcode,
       printed: read.printed,
     });
+    const cacheMs = Date.now() - tCache0;
     if (!kept.ok) {
       return json({
         ok: false, error: kept.error,
@@ -171,6 +183,21 @@ export const POST: APIRoute = async (ctx) => {
        */
       org_prefix: orgPrefixFor(provider),
       note: read.note,
+      /**
+       * **切り分け用の実測値。画面には出さない**（コンソールと `data-` 属性だけ）。
+       *   `s3_ms`     … 東京のバケットから証跡画像を取るまで
+       *   `gemini_ms` … 推論（`callGemini` の 503 再試行もここに含まれる）
+       *   `cache_ms`  … 読み取り結果の控え（`<evidenceKey>.read.json`）の保存
+       *   `bytes`     … 読ませた画像の大きさ
+       * これと**画面側の 2 区間**（送信・読取）を合わせると、30 秒の内訳が出る。
+       */
+      timing: {
+        s3_ms: s3Ms,
+        gemini_ms: read.geminiMs ?? null,
+        cache_ms: cacheMs,
+        total_ms: Date.now() - tRead0,
+        bytes: got.bytes,
+      },
     });
   }
 
