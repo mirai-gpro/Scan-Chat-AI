@@ -1106,14 +1106,14 @@ console.log('\n⑬ UI の契約\n');
      * のを防ぐのが元の規律（CLAUDE.md）。§4.4.7 で**押す回数を 2 つ**にしたので、
      * 押されたとき以外に 2 つだけ開く経路がある:
      *
-     * 出現は **6 回**: 定義 1 ／ card のボタン 1 ／ 催促の帯 1（§4.4.5）
-     * ／「登録し直す」1（§4.4.6）／**撮った写真が読めなかった回 1**
+     * 出現は **7 回**: 定義 1 ／ card のボタン 1 ／ 催促の帯 1（§4.4.5）
+     * ／「登録し直す」1（§4.4.6）／「撮り直す」1 ／**撮った写真が読めなかった回 1**
      * ／**別ページの帯から来た回 1**（`resumeStart`・合図があるときだけ）。
      * 増えていたら**勝手に開く経路が足された**ということ。
      */
     const callers = [...scr.matchAll(/openCamera\(/g)];
-    ok('`openCamera` の呼び出しは 6 か所だけ（定義/ボタン/帯/登録し直す/読めなかった回/別ページ）',
-      callers.length === 6, `出現 ${callers.length} 回`);
+    ok('`openCamera` の呼び出しは 7 か所だけ（定義/ボタン/帯/登録し直す/撮り直す/読めなかった回/別ページ）',
+      callers.length === 7, `出現 ${callers.length} 回`);
     /*
      * **load で開くのは「直前に帯を押した」合図がある回だけ。**
      * `resumeStart` が**最初に合図を取り出し**、無ければ即 return することを見る。
@@ -1176,16 +1176,21 @@ console.log('\n⑬ UI の契約\n');
       /cameraAvailable\(\)\) \{[\s\S]{0,400}スマートフォン/.test(scr2));
   }
   /*
-   * 【§4.4.7・発注者指示 2026-10-22】**どんな場合でも操作は ①カメラを起動 ②撮影 の 2 つ。**
-   * 「この番号で登録する」「撮り直す」は**置かない** — 読めたらそのまま登録し、
-   * 読めなかったらカメラへ戻る。ここが戻ると**押す回数が 3 つ以上**に増える
-   * （画面は普通に動くので目視では気づけない）。
+   * 【§4.4.8・発注者裁定 2026-10-22】**書き込み（登録）の前の確認は外さない。**
+   *   「撮影までが 2 アクション！登録する際の確認は必要でしょ？どう考えても！
+   *    書き込みや登録の際に、確認が無いなんて UX が、この世にありえる？？
+   *    それこそチェックデジットもないのに？？」
+   * §4.4.7 の「①カメラを起動 ②撮影」は**撮影まで**にかかる規則で、登録には及ばない。
+   * **この番号にはチェックディジットが無い**ので、誤読を機械で見分けられるのは
+   * 先頭 `704` と桁数だけ＝**本人が番号を見て確定する段が最後の網**。
+   * ここが消えると、`704` で始まる 9 桁の誤読が**誰も見ないまま**台帳へ入る。
    */
-  ok('確認のボタンを置かない（読めたらそのまま登録する）',
-    !/data-extid-register/.test(comp) && !/この番号で登録する/.test(comp));
-  ok('「撮り直す」のボタンも置かない（読めなければカメラへ戻す）',
-    !/data-extid-retake/.test(comp));
-  ok('読み取った番号は見せる（何が登録されたか分かる）',
+  ok('**登録の確認ボタンが在る**（書き込みの前に押してもらう）',
+    /data-extid-register\b/.test(comp) && /この番号で登録する/.test(comp));
+  ok('**上書きになる回は文言で言う**（「上書きして登録する」）',
+    /registeredMask \? '上書きして登録する' : 'この番号で登録する'/.test(comp));
+  ok('撮り直す口が在る（違っていたら撮り直せる）', /data-extid-retake/.test(comp));
+  ok('読み取った番号は**全桁**見せる（確認のための表示）',
     /data-extid-candidate/.test(comp) && /data-extid-confirm/.test(comp));
 
   const script = code('src/scripts/external-id-capture.ts');
@@ -1393,12 +1398,13 @@ console.log('\n⑬ UI の契約\n');
       && /class=\{registeredMask \? 'hidden' : ''\} data-extid-form/.test(comp));
     ok('登録し直す口がある', /data-extid-redo-open/.test(comp));
     /*
-     * 【§4.4.7】**確認を挟まない。** §4.4.3 で入れた「はい／やめる」は
-     * 発注者裁定（2026-10-22）で外した — 押す回数を ①カメラを起動 ②撮影 の 2 つに
-     * するため。上書きしても**前の番号は台帳に残る**ので取り返しはつく。
-     * **確認の面を戻さない**（戻すと 3 押しに増える）。
+     * 【§4.4.7 / §4.4.8】**押す前の確認は挟まない。** §4.4.3 で入れた「はい／やめる」は
+     * 発注者裁定（2026-10-22）で外した — 撮影までを 2 アクションにするため。
+     * ここを押しても**まだ何も書かない**ので、確認は**登録のボタンのほうへ移してある**
+     * （§4.4.8・上書きになる回は「上書きして登録する」と出る）。
+     * **撮影の前の確認の面を戻さない**（戻すと撮るまでに 3 押しに増える）。
      */
-    ok('上書きの確認を挟まない', !/data-extid-redo-confirm/.test(comp)
+    ok('撮影の前に上書きの確認を挟まない', !/data-extid-redo-confirm/.test(comp)
       && !/data-extid-redo-yes/.test(comp) && !/data-extid-redo-no/.test(comp));
     ok('上書きになることと、前の番号が残ることは**常時**伝える',
       /上書きします/.test(comp) && /記録として残ります/.test(comp));
@@ -1855,15 +1861,25 @@ console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
     };
     ok('「登録し直す」でその場でカメラを開く', /openCamera\(c\)/.test(handler('redo-open')));
     /*
-     * 【§4.4.7】**読めたらそのまま登録・読めなければカメラへ戻す。**
-     * `captureAndRead` の末尾がこの 2 つになっていること（押させない）。
+     * 【§4.4.8】**読み取りは自動で進むが、登録は押してもらう。**
+     *   - `captureAndRead` は**登録を呼ばない**（確認の面で止まる）
+     *   - **登録を呼ぶのは `[data-extid-register]` のハンドラだけ**
+     *   - **読めなかった回だけ**押させずにカメラへ戻す（ここでは何も書かない）
+     * ここが緩むと、番号を見ないまま台帳へ書く実装に戻る。
      */
-    const after = (() => {
-      const i = scr.indexOf('if (ok) {');
-      return i > 0 ? scr.slice(i, i + 220) : '';
+    const capRead = (() => {
+      const i = scr.indexOf('async function captureAndRead(');
+      const j = scr.indexOf('async function uploadAndRead(', i);
+      return i >= 0 && j > i ? scr.slice(i, j) : '';
     })();
-    ok('読めたら確認を挟まず登録する', /register\(c,/.test(after), after.slice(0, 100));
-    ok('読めなかったら押させずにカメラへ戻す', /\} else \{\s*\n\s*await openCamera\(c\);/.test(after));
+    ok('撮影の処理が在る', capRead.length > 0);
+    ok('**読めても自動で登録しない**（確認の面で止まる）',
+      !/register\(c,/.test(capRead), capRead.replace(/\s+/g, ' ').slice(-120));
+    ok('読めなかったら押させずにカメラへ戻す', /if \(!ok\) await openCamera\(c\);/.test(capRead));
+    const regCalls = [...scr.matchAll(/void register\(c,|await register\(c,/g)];
+    ok('**登録を呼ぶのは確認のボタンのハンドラ 1 か所だけ**',
+      regCalls.length === 1 && /data-extid-register\][\s\S]{0,260}void register\(c,/.test(scr),
+      `呼び出し ${regCalls.length} 回`);
     ok('登録済みから入った面ではボタンを出さない',
       /registeredMask \? ' hidden' : ''/.test(cap), '（サーバが hidden を付ける）');
     // **開けなかった回に出す**のは 2 経路 (カメラ非対応・起動エラー) の両方。
