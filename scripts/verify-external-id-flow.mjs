@@ -38,7 +38,14 @@ const ok = (label, cond, extra = '') => {
   console.log(`${cond ? '  ✓' : '  ✗'} ${label}${cond || !extra ? '' : ` — ${extra}`}`);
   if (!cond) fails++;
 };
-const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8');
+/**
+ * **コメント行を落としてから見る。** 落とさないと `// initExternalIdCapture();` のように
+ * **コメントアウトしただけ**の退行が素通りする（実測・退行注入 3）。
+ */
+const read = (p) => fs.readFileSync(path.join(ROOT, p), 'utf8')
+  .split('\n')
+  .filter((l) => !/^\s*(?:\/\/|\/\*|\*)/.test(l))
+  .join('\n');
 
 /* ── ページが読むスクリプトを**実物から**決める ───────────────── */
 const dashUi = read('src/pages/dashboard.astro');
