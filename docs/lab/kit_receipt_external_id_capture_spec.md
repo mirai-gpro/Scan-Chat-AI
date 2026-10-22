@@ -1085,7 +1085,7 @@ v1.1 でゲートが 3 条件になり `review_required` / `deferred` / `conflic
 | 例外系 | いまの状態 | 利用者・運用から見えること |
 |---|---|---|
 | バーコードと印字IDが食い違う（`barcode_ocr_mismatch`） | `review_required` | **撮影はできたが先へ進めない** |
-| 片方しか読めない（`single_source`） | `review_required` | 同上 |
+| ~~片方しか読めない（`single_source`）~~ | **`confirmed`** | **2026-10-22 の裁定で例外系から外れた（§12.4.2）**。確定するので先へ進める |
 | 期待パターン外（`pattern_mismatch` / `pattern_unknown`） | `review_required` | **実物の形式が既定と違う間は全件がこれ** |
 | 手入力で入れた（`manual_entry`） | `review_required` | **利用者の手入力は 2026-10-21 に撤去（§4.4.2）**・**画面が候補を送り返す不具合も 2026-10-22 に解消（§12.2）**。この理由が付くのは **admin 訂正**と、それ以前に登録された行だけ |
 | `lab_tests` を作れなかった（材料欠落） | `deferred` | 同上 |
@@ -1119,7 +1119,7 @@ v1.1 でゲートが 3 条件になり `review_required` / `deferred` / `conflic
 
 | 利用者の撮り直しで直るか | |
 |---|---|
-| 直り得る | 手ブレ・影・別の数字を撮った（`barcode_ocr_mismatch` / `single_source`） |
+| 直り得る | 手ブレ・影・別の数字を撮った（`barcode_ocr_mismatch`。`single_source` は §12.4.2 で確定するようになったので、もう出口を要しない） |
 | **直らない** | **実物の形式が既定と違う**（`pattern_mismatch` は撮り直しても毎回同じ）／ `deferred`（材料欠落）／ `conflict`（他の検査に同じID） |
 
 **`conflict` は利用者に撮り直させてはいけない**（他人の検査の存在を当てに行かせることになる）。
@@ -1381,15 +1381,14 @@ body の値を評価へ渡す / 400 を外す / 控えを引かない / 結び�
      「機械が読んだバーコード × OCR した印字」になる（LLM が読んだ 2 つより強い）。
   2. **Gemini が落ちた回でも読み取りが続く** — 従来は `422` で撮り直しだった。
   3. `labid.decode_skip_llm` を on にすれば **Gemini を呼ばない**（待ち時間が消える）。
-- **`labid.decode_skip_llm` は既定 off。これは発注者の裁定事項で、実装で答えを出さない。**
-  on にすると印字IDの OCR が無くなるので `evaluateExternalId` が `single_source` を積み、
-  **全件 `review_required`** になって**問診CSV の fail-closed ゲート（§7.1）が全員を止める**。
-  on にするには
-  - 「**決定論デコードで読めた回は `single_source` でも `confirmed` とする**」という裁定
-  - §12.1 の **admin 確認・訂正経路**
-  の 2 つが要る。判断の材料: symbology のデコードは start/stop とバーのパターンが
+- **`labid.decode_skip_llm` は 2026-10-22 に既定 on（§12.4.1）**、さらに同日
+  **「`single_source` でも確定とする」裁定（§12.4.2）**が出たので、
+  **正常系は `confirmed` になり問診CSV のゲートも通る**。
+  （この節を書いた時点では既定 off で、「全件 `review_required` になるので
+  裁定が要る」と書いていた。その裁定が §12.4.2。）
+  判断の材料だった事実は変わらない: symbology のデコードは start/stop とバーのパターンが
   合わないと値を返さないので**幻覚しない**。ただし **Codabar にチェックディジットは
-  必須でない**ので、`704` 接頭辞（§2.1.3）と桁パターンの 2 つは引き続き検査に使う。
+  必須でない**ので、`704` 接頭辞（§2.1.3）と桁パターンの 2 つが**残る検査すべて**になる。
 - **QR は読まない・返さない**（§2.1）。zbar は QR も読むので
   **1 次元の allow-list で弾いてから `decode()` する**（文字にしてから捨てない）。
   画面側はライブラリが別で名前も別なので、**両方の集合が同じであることを検査で見張る**。
@@ -1457,25 +1456,21 @@ Gemini が落ちたら決定論の値も捨てる / スイッチを既定 on に
 
 ##### on にしたことの帰結（隠さずここに書く）
 
-決定論デコードで読めた回は **印字ID の OCR が無い** ので、`evaluateExternalId` が
-`single_source` を積む → **`review_required`**。したがって
+決定論デコードで読めた回は **印字ID の OCR が無い** ので `evaluateExternalId` が
+`single_source` を積む。**この帰結は同日の裁定（§12.4.2）で解決した** —
+`single_source` は自動確定を妨げないので、**正常系は `confirmed`**・画面に注意も出ない・
+**問診CSV のゲートも通る**。
 
-- 画面の案内は毎回 **「片方しか読み取れていません。番号をお確かめください。」**（`reasonText`）。
-  **登録はできる**（候補は出るし押せる）。
-- 台帳は `status='review_required'` で残る。`lab_test_link_status` は従来どおり `linked`。
-- **プリベント問診CSV の fail-closed ゲートはこれを通さない**（`confirmed` を要求するため）。
-  CSV 生成そのものが未実装なので**今日の本番で止まるものは無い**が、
-  **ON 運用に入るときはここが詰まる**。
+（§12.4.2 の前はこうなっていた: 画面に毎回「片方しか読み取れていません」・
+台帳は `status='review_required'`・**ゲートが全員を止める**。）
 
 ##### まだ裁定が出ていないこと（実装で答えを出さない）
 
-1. **「決定論デコードで読めた回は `single_source` でも `confirmed` とする」か。**
-   通せば待ち時間も詰まりも消える。判断の材料は §12.4 のとおり
-   （symbology のデコードは幻覚しない / ただし Codabar にチェックディジットは必須でないので
-   `704` 接頭辞と桁パターンは引き続き検査に使う）。
-   **こちらの判断でゲートを緩めない**（§7.1 は「値だけを見て通さない」設計）。
-2. **§12.1 の admin 確認・訂正経路**（ON の必須条件）。`review_required` が増えるので
-   なおさら要る。
+1. ~~**「決定論デコードで読めた回は `single_source` でも `confirmed` とする」か。**~~
+   → **2026-10-22 に裁定済み（§12.4.2）。**
+2. **§12.1 の admin 確認・訂正経路**（ON の必須条件）。**これは残っている** —
+   `single_source` は出口を要しなくなったが、`pattern_mismatch` / `pattern_unknown` /
+   `barcode_ocr_mismatch` / `deferred` / `conflict` の回は**依然として先へ進めない**。
 
 ##### 反映と戻し方
 
@@ -1488,3 +1483,66 @@ Gemini が落ちたら決定論の値も捨てる / スイッチを既定 on に
   **`llm_called: false` ＋ `decode_source: 'barcode'`** なら Gemini を呼んでいない。
   `decode_source: 'gemini'` ばかりなら**実写で決定論デコードが効いていない**ので、
   速くならないし `single_source` にもならない（＝撮り方か前処理の問題）。
+
+---
+
+#### 12.4.2 【裁定 2026-10-22・発注者指示】最初に読めた状態で確定にする（`single_source` は確定を妨げない）
+
+> 発注者指示: **「裁定待ち 2 件 ： 片方しか、、、、 の表示を止めて、最初に読めた状態で確定にして。
+> 桁数と、冒頭の3桁は確認できてるよね？」**
+
+§12.4.1 で `labid.decode_skip_llm` を on にしたので、**正常系は毎回**
+「バーコードは機械が読めた / 印字ID の OCR は無い」＝ `single_source` になる。
+これを `review_required` のままにすると**全件が問診CSV のゲートで止まる**。
+→ **`single_source` は自動確定を妨げない**ことにした（§12.4.1 の「未裁定 ①」がこれで閉じた）。
+
+##### 変えたのは 2 か所だけ
+
+| | 変更 |
+|---|---|
+| 判定 | `external-test-id.ts` に **`NON_BLOCKING_REASONS = ['single_source']`** を置き、`status` を **allow-list** で決める（`reasons.some(blocksAutoConfirm) ? 'review_required' : 'confirmed'`）。**理由コードは消さない**（台帳と監査に残る） |
+| 画面 | `reasonText` から **「片方しか読み取れていません」を撤去** |
+
+**ゲート（`checkPreventQuestionnaireGate`）は 1 行も触っていない** — 3 条件
+（`confirmed` ∧ `linked` ∧ `lab_test_id` 非 null）のまま。通るようになったのは
+`status` が `confirmed` になったからで、**ゲートを緩めたのではない**。
+
+**allow-list にしたのが要点。** 将来 `ReviewReason` を足した人が何もしなくても
+**既定でブロック側**になる（deny-list だと新しい理由が黙って自動確定を通る）。
+
+##### 「桁数と冒頭の 3 桁」の確認状況（発注者の問いへの回答）
+
+| | 検査しているか | その基準の出どころ |
+|---|---|---|
+| **冒頭 3 桁 `704`** | **している**（`matchesOrgPrefix` / `labid.prevent_org_prefix` 既定 `704`）。外れたら `org_prefix_mismatch` → `review_required` | **先方の説明（2026-10-21）= 事実として確認済み**。「`704` は Wellfort 法人を表す」（§2.1.3） |
+| **桁数** | **している**（`matchesExpectedPattern` / `labid.prevent_pattern` 既定 **`^704000[0-9]{3}$` = 9 桁**）。外れたら `pattern_mismatch` → `review_required` | **業務上の形式例 `704000xxx` が出どころで、実物の同梱書面では未確認**（§2.3）。実物が違う桁数なら `labid.prevent_pattern` を直す（admin から即時）。**接頭辞は緩めない** |
+| **チェックディジット** | **無い**（§4.4.2）。この番号は 1 桁違っても「正しい形の別の番号」になり得る | — |
+
+→ **冒頭 3 桁は確認済み。桁数は「設定した形に合っているか」までで、その形が実物と
+一致することは未確認**。ここは実物 1 枚で確定できる（ON の前提・§12 の申し送り）。
+
+##### 引き換えに失うもの（明示しておく）
+
+**バーコード × 印字の突合が無くなる。** 機械デコードが誤読した値が
+**9 桁で `704` から始まっていれば自動確定する**。残る網は
+
+- **証跡画像**（admin があとから照合できる）
+- 同じ番号が別の検査に在るときの **`conflict`**
+- 接頭辞・桁パターン
+
+**`pattern_unknown`（パターン未設定・壊れている）は確定させない** —
+桁数を検査できない回は上の前提が崩れるので **fail-closed**（従来どおり `review_required`）。
+`barcode_ocr_mismatch`（両方読めて食い違う）・`manual_entry`・`org_prefix_mismatch` も
+**従来どおりブロック**。
+
+##### 検証（⑤ と ③ に追加）
+
+- `バーコードのみ → confirmed` / `印字のみ → confirmed`（理由コードは残る）
+- `片方だけ + パターン外 / パターン未設定 / 接頭辞外 / 手入力` → **`review_required`**
+- `NON_BLOCKING_REASONS` が `['single_source']` **だけ**であること・
+  **`status` を `reasons.length === 0` に戻していない**こと・**包含で判定している**こと
+- **画面に「片方しか」が無い**こと
+- 片方だけの回が **`checkPreventQuestionnaireGate` を通る**こと（status だけ見て満足しない）
+- **生成物の手順書**（`docs/operations/外部検査ID_読み取り精度テスト手順書.md`）を
+  `npm run dump:external-id-prompt` で焼き直した（判定表の 4 行が `review_required` → `confirmed`）。
+  **手で書き換えない**（⑮ が突き合わせる）。
