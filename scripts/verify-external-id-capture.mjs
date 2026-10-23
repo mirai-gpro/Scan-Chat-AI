@@ -1838,6 +1838,38 @@ console.log('\n⑯ 7 日ワーニング (barcodeReminders)\n');
     /idLabel/.test(remUi) && !/バーコードNo\./.test(remUi));
   ok('撮影へ促す文言が在る', /撮影/.test(remUi));
 
+  /*
+   * 【文言は発注者指定（2026-10-23）】
+   * 「がんリスク検査キットが発送されてますが、お客様の受取確認（バーコードNo.登録）が
+   *  されていません。検査キット同梱の用紙をカメラで撮影して、受取確認をお願いします。」
+   *
+   * ここを見張るのは、**書き換えても画面は正常に見える**から（指定の文に戻す手がかりが
+   * どこにも残らない）。あわせて **指定に無いものを足し戻していないか**も見る —
+   * 以前は経過日数と当社の補足文が出ていた。
+   */
+  {
+    // **生ソースから見る。** `code()` は `*` で始まる行を落とすので、JSX コメントの
+    // 途中の行だけが残って本文に混ざる（ここで実際に踏んだ）。
+    const raw = read('src/components/dashboard/ExternalIdReminder.astro');
+    const para = /<p class="min-w-0 flex-1 text-sm">([\s\S]*?)<\/p>/.exec(raw)?.[1] ?? '';
+    const body = para.replace(/\{\/\*[\s\S]*?\*\/\}/g, '');          // コメントを落とす
+    const flat = body.replace(/\s+/g, '').replace('{idLabel}', 'バーコードNo.');
+    ok('本文が在る', para.length > 0);
+    eq('**指定の文言そのまま**', flat,
+      'がんリスク検査キットが発送されてますが、お客様の受取確認（バーコードNo.登録）がされていません。'
+      + '検査キット同梱の用紙をカメラで撮影して、受取確認をお願いします。');
+    ok('**経過日数を本文に出さない** (指定の文に無い)', !/r\.days/.test(body));
+    ok('日数は `data-days` に残す (催促が出た理由を画面の外から追える)',
+      /data-days=\{String\(r\.days\)\}/.test(remUi));
+    /*
+     * **文の途中で折らない。** JSX のテキストは改行＋字下げが空白 1 つになって出るので、
+     * 文中で折ると和文に空白が入る（従来の「日が たっていますが」）。
+     */
+    ok('折り返しは文の切れ目だけ (和文に空白を入れない)',
+      body.split('\n').map((l) => l.trim()).filter(Boolean)
+        .every((l, i, a) => i === a.length - 1 || /[。]$/.test(l)));
+  }
+
   const cap = code('src/components/dashboard/ExternalIdCapture.astro');
 
   /*
