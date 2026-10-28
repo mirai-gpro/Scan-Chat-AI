@@ -237,11 +237,34 @@ ok('旧 setInputMuted (自動ゲート用の名前) が残っていない',
   const gate = code('src/scripts/chat/mic-gate.ts');
   ok('mic-gate はタイマーを持たない', !/setTimeout|setInterval|requestAnimationFrame/.test(gate));
   ok('mic-gate は自分でイベントを購読しない', !/addEventListener/.test(gate));
-  // 宣言を除いた呼び出しが 2 つ = toggle と resetToOn。ほかから状態を動かさない。
-  const setCalls = (gate.replace(/function set\(/g, 'function _decl(').match(/\bset\(/g) ?? []).length;
-  ok('状態を変える入口は toggle と resetToOn だけ',
-    setCalls === 2 && /toggle:\s*\(\)\s*=>\s*set\(/.test(gate) && /resetToOn:\s*\(\)\s*=>\s*set\(/.test(gate),
-    `set() の呼び出し ${setCalls} 件`);
+  /*
+   * 状態を書く場所を**数えて**固定する。`muted` への代入は
+   * `set()` (タップ) と `reset()` (問診の開始) の 2 つだけで、ほかから動かさない。
+   * 初期値の宣言は代入ではないので別扱い。
+   */
+  const assigns = (gate.match(/^\s*muted = /gm) ?? []).length;
+  ok('muted を書き換えるのは set と reset の 2 か所だけ', assigns === 2, `${assigns} 箇所`);
+  ok('外から呼べる入口は toggle と resetToOff だけ',
+    /toggle:\s*\(\)\s*=>\s*set\(/.test(gate) && /resetToOff:\s*\(\)\s*=>\s*reset\(\)/.test(gate)
+    && !/resetToOn/.test(gate));
+
+  /*
+   * **既定はオフ** (発注者指示 2026-10-28)。音声入力を既定にすると、利用者が
+   * 何もしなくても周囲の音が回答として確定し得る。**静かに戻りやすい一行**なので
+   * ここで固定する (既定が戻っても画面は正常に見え、音を拾うまで気づけない)。
+   */
+  ok('マイクの既定はオフ (muted の初期値が true)',
+    /let muted = true;/.test(gate), 'false に戻すと音声入力が既定に戻る');
+  ok('問診の開始で戻す先もオフ', /micGate\.resetToOff\(\)/.test(ctrl) && !/resetToOn/.test(ctrl));
+  /*
+   * `reset()` は**変化が無くても `onChange` を呼ぶ**こと。呼ばないと
+   * `LiveAudioManager` 側の `userMicMuted` が揃わず、2 回目の問診で
+   * **帯はオフなのに送信は生きている**という食い違いが出る。
+   */
+  const resetBody = spanOf(gate, 'function reset()');
+  ok('resetToOff は音声側へ必ず伝える (変化が無くても onChange)',
+    resetBody.length > 0 && /onChange\(/.test(resetBody) && !/if \(/.test(resetBody),
+    resetBody ? '' : '本体を切り出せなかった');
 }
 ok('silent 分岐 (発話依頼の出し分け) を入れていない',
   !/opts\.silent\s*\?[\s\S]{0,120}(sendModelTurn|sendUserText)/.test(ctrl));

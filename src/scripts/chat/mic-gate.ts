@@ -16,11 +16,21 @@
  * 【切ったときに何が止まるか】**送るのをやめるだけ** (発注者判断 2026-09-17)。
  * 端末のマイクそのものは掴んだままにする = 戻すときに許諾ダイアログが出ない。
  * その代わり **iOS の録音インジケータは点いたまま**になる。
+ *
+ * 【既定はオフ (発注者指示 2026-10-28)】以前は問診を始めるたび「オン」に戻していた。
+ * 音声入力を既定にすると、**利用者が何もしなくても周囲の音が回答として確定し得る**
+ * (`interpretVoiceAnswer` は自由記述を逐語で、スライダーを任意の数字で採る)。
+ * 回答の既定はタップにし、**音声は自分でボタンを押した人だけ**が使う。
+ * ここで `muted` の初期値を `true` にしてあるのがその実体で、
+ * 問診を始めるときに戻す先も `resetToOff()` = オフ。
  */
 
 /** マイクが生きているときの文言。ボタンの意味 (押すと切れる) をここが持つ。 */
 export const MIC_GATE_NOTE_ON = '周囲の音を拾う場合、マイクをオフに';
-/** 切ってあるときの文言。**行き止まりにしない**ので、代わりの回答手段を書く。 */
+/**
+ * 切ってあるときの文言 = **既定の表示** (2026-10-28 以降)。
+ * **行き止まりにしない**ので、代わりの回答手段を書く。
+ */
 export const MIC_GATE_NOTE_OFF = 'マイクはオフです。タップで回答してください';
 
 export interface MicGateRefs {
@@ -36,11 +46,12 @@ export interface MicGate {
   /** **利用者のタップからだけ**呼ぶ。プログラムから状態を動かさない。 */
   toggle(): void;
   /**
-   * 問診を始めるときに「オン」へ戻す。
-   * **持ち越さない** — 静かな部屋と電車では答えが違うので、前回の選択を引き継ぐと
-   * 「話しても反応しない」を黙って起こす。
+   * 問診を始めるときに「オフ」= 既定へ戻す (2026-10-28・発注者指示)。
+   * **持ち越さない** — 静かな部屋と電車では答えが違うので、前回の選択を引き継がない。
+   * **音声側へ必ず 1 回伝える**ので、状態が変わっていなくても `onChange` を呼ぶ
+   * (ここを「変化したときだけ」にすると、2 回目の問診でマイクが開いたままになる)。
    */
-  resetToOn(): void;
+  resetToOff(): void;
   isMuted(): boolean;
 }
 
@@ -48,7 +59,8 @@ export interface MicGate {
  * @param onChange 状態が変わった直後に 1 回だけ呼ばれる。音声側の反映と記録はここで行う。
  */
 export function createMicGate(refs: MicGateRefs, onChange: (muted: boolean) => void): MicGate {
-  let muted = false;
+  // **既定はオフ** (発注者指示 2026-10-28)。音声は押した人だけが使う。
+  let muted = true;
 
   function render(): void {
     refs.gate.classList.toggle('off', muted);
@@ -64,11 +76,22 @@ export function createMicGate(refs: MicGateRefs, onChange: (muted: boolean) => v
     onChange(muted);
   }
 
+  /**
+   * 既定 (オフ) へ戻す。**`set()` と違い、変わっていなくても `onChange` を呼ぶ** —
+   * 音声側 (`LiveAudioManager`) は自分の初期値を持っているので、
+   * 「変化なし」で黙ると**揃っていない状態のまま問診が始まる**。
+   */
+  function reset(): void {
+    muted = true;
+    render();
+    onChange(muted);
+  }
+
   render();
 
   return {
     toggle: () => set(!muted),
-    resetToOn: () => set(false),
+    resetToOff: () => reset(),
     isMuted: () => muted,
   };
 }
