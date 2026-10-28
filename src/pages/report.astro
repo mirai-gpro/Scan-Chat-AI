@@ -8,7 +8,8 @@ import { loadReportVM, previewVM } from '../lib/elith-report-queries';
 import { loadLocalRenderInput } from '../lib/report-local-render';
 import { buildReportVM } from '../lib/report-adapter';
 import { renderReportMarkdown } from '../lib/report-view';
-import { chapterAnchor } from '../lib/report-sections';
+import { chapterAnchor, REFERENCES_CHAPTER_KEY } from '../lib/report-sections';
+import ReportDisclaimer from '../components/ReportDisclaimer.astro';
 import { applySaveStepOverrides } from '../lib/save-steps';
 import { countUnreadImportant } from '../lib/notice-queries';
 import { refreshConfig, cfg } from '../lib/app-config';
@@ -309,6 +310,23 @@ const digestByAxis = (axis: 'a' | 'b') => vm.digest.filter((c) => c.axis === axi
  */
 const leadCard = vm.digest.find((c) => c.lead) ?? null;
 const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis === axis);
+
+/** 「全編」に並べる章。軸 a → b の順 (下の繰り返しと、下の免責の位置決めで同じ列を使う)。 */
+const fullChapters = (['a', 'b'] as const).flatMap((ax) => chaptersByAxis(ax));
+/*
+ * 医療免責の置き場所 (発注者指示 2026-10-28・spec §4.15)。**画面と印刷で違う。**
+ *   画面 … 全編の最後・「手元に残す」の前 (下の `{!isPrint && <ReportDisclaimer />}`)
+ *   印刷 … 本文の最後・**リファレンスの章の前** = 参照元の一覧が紙面の最後に残る
+ *
+ * **リファレンスの章が無い回でも出す**。`report.sections.hidden` で隠した回や、
+ * 受領 JSON に `references` が無い世代があるので、無ければ全編の最後へ落とす
+ * (条件を 1 つにすると、その回だけ免責が黙って消える)。
+ */
+const printDisclaimerBefore = isPrint
+  && fullChapters.some((c) => c.key === REFERENCES_CHAPTER_KEY)
+  ? REFERENCES_CHAPTER_KEY
+  : null;
+const printDisclaimerAtEnd = isPrint && !printDisclaimerBefore;
 ---
 
 {/*
@@ -636,7 +654,10 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
     {!!vm.chapters.length && (
       <section class="mt-4 flex flex-col gap-3">
         <h2 class="border-t border-slate-200 pt-5 text-lg font-bold text-navy-800">全編</h2>
-        {(['a', 'b'] as const).flatMap((ax) => chaptersByAxis(ax)).map((ch) => (
+        {fullChapters.map((ch) => (
+          <Fragment>
+          {/* 印刷ではリファレンスの章の前に医療免責を挟む (spec §4.15)。 */}
+          {ch.key === printDisclaimerBefore && <ReportDisclaimer />}
           <details class="rp-card card" id={chapterAnchor(ch.key)} open={isPrint || !ch.collapsed}>
             <summary class={`cursor-pointer text-base font-bold text-navy-800 ${isPrint ? 'list-none' : ''}`}>
               {ch.title}
@@ -677,9 +698,21 @@ const chaptersByAxis = (axis: 'a' | 'b') => vm.chapters.filter((c) => c.axis ===
               )}
             </div>
           </details>
+          </Fragment>
         ))}
+        {/* リファレンスの章が無い回は、印刷でも全編の最後に出す。 */}
+        {printDisclaimerAtEnd && <ReportDisclaimer />}
       </section>
     )}
+
+    {/* ══════════ 医療免責 (画面) ══════════
+        発注者指示 2026-10-28・spec §4.15。**全編の最後・「手元に残す」の前**。
+        印刷は上の全編の中 (リファレンスの前) に出るので、ここは画面だけ。
+        **全編が 1 章も無い回でも出す** — 免責は中身の多少で出し分けるものではない。 */}
+    {!isPrint && <ReportDisclaimer />}
+
+    {/* 印刷で全編そのものが無い回。上の 2 つに当たらないのはここだけ。 */}
+    {isPrint && !vm.chapters.length && <ReportDisclaimer />}
 
 
     {/* ══════════ 手元に残す (spec §4.4 手段 A) ══════════
