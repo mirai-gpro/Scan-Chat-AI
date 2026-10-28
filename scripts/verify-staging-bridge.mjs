@@ -47,22 +47,43 @@ const emit = (name, src) => {
 // (Vite の定数畳み込みで `return false` が焼き付く事故があったため、両読みの形も別途検査する)。
 let supaSrc = read('src/lib/supabase.ts')
   .replace(/import \{ createClient[^}]*\} from '@supabase\/supabase-js';/, `
-export const __clientCalls = [];
-export const __queries = [];
+/*
+ * **記録先は globalThis。** この verify は supabase.ts をキャッシュ破り付きで
+ * import する一方、bridge-queries.ts からの import は素のパスなので、
+ * **モジュールの実体が 2 つ**できる。モジュール変数に記録すると
+ * bridge-queries 経由の呼び出しが別の配列へ入り、
+ * clientCalls.length === 0 のような検査が**空振りで通る**（実際に
+ * kit_schedule の問い合わせを数えようとして気づいた）。
+ * （この注釈はテンプレートリテラルの中なのでバッククォートを書けない。）
+ */
+globalThis.__rec = globalThis.__rec || { clientCalls: [], queries: [], orders: [] };
+export const __clientCalls = globalThis.__rec.clientCalls;
+export const __queries = globalThis.__rec.queries;
+export const __orders = globalThis.__rec.orders;
 /**
  * production 経路の Supabase クライアントのスタブ。
  * **throw しない** — staging から流れ込んだ場合も検査を最後まで走らせ、
  * 「クライアントを作った / 表を引いた」という事実を記録して assert させる
  * (throw すると 1 件目で落ちて残りの退行が見えなくなる)。
  */
+/**
+ * 表ごとの応答は globalThis.__tableData[table] から採る。
+ * **既定は従来どおり data: null / error: null** なので、
+ * 差し替えない既存の検査（⑦ など）の挙動は 1 つも変わらない。
+ * order() の引数も控える（どちらの供給元をどう並べたかを測るため）。
+ * （この注釈はテンプレートリテラルの中なのでバッククォートを書けない。）
+ */
 const chain = (table) => {
-  const c = { then: (r) => r({ data: null, error: null }) };
-  for (const m of ['select', 'eq', 'order', 'limit']) c[m] = () => c;
-  c.maybeSingle = async () => ({ data: null, error: null });
-  __queries.push(table);
+  const res = () => (globalThis.__tableData && globalThis.__tableData[table])
+    || { data: null, error: null };
+  const c = { then: (r) => r(res()) };
+  for (const m of ['select', 'eq', 'limit']) c[m] = () => c;
+  c.order = (col, opts) => { globalThis.__rec.orders.push({ table, col, opts }); return c; };
+  c.maybeSingle = async () => res();
+  globalThis.__rec.queries.push(table);
   return c;
 };
-const createClient = (url, key, opts) => { __clientCalls.push({ url, key, opts }); return { from: chain }; };
+const createClient = (url, key, opts) => { globalThis.__rec.clientCalls.push({ url, key, opts }); return { from: chain }; };
 `)
   .replace(/import type \{ Database \}[^\n]*\n/, '')
   .replace(/import type \{ BridgeDatabase \}[^\n]*\n/, '')
@@ -217,6 +238,102 @@ SUPA.__clientCalls.length = 0;
   eq('⑨ タイムアウトのログにシークレットを出さない', logs.some((l) => l.includes(SECRET)), false);
 }
 
+// ── ⑩ 検査キットの行の供給元 (production・2026-10-28) ────────────────────────
+// ① `kit_schedule`（契約 × 回 × キット）があれば ① だけ。
+// ② `kit_shipment`（1 注文 = 1 行の注文ミラー）は ① が無いときの代替。
+// **ここが取り違わると「進行中のキットはありません」のまま誰も気づけない。**
+setEnv({ HP_BRIDGE_SUPABASE_URL: 'https://prod.example.com', HP_BRIDGE_READONLY_KEY: 'prod-key' });
+
+const SCHED = [
+  { id: 'k2', diagnostic_user_id: UID, subscription_id: 'sub-1', kit_code: 'cancer_urine',
+    kit_name: 'がんリスク検査（尿）', lab_company: 'プリベント', cycle_year: 1, cycle_seq: 2,
+    scheduled_date: '2026-10-10', status: 'planned', instruction_sent_at: null, shipped_at: null,
+    tracking_no: null, carrier: null, user_received_at: null, user_returned_at: null,
+    lab_received_at: null, lab_completed_at: null, synced_at: '2026-10-28T00:00:00Z' },
+  { id: 'k1', diagnostic_user_id: UID, subscription_id: 'sub-1', kit_code: 'genetics',
+    kit_name: '遺伝子検査', lab_company: 'Genoplan', cycle_year: 1, cycle_seq: 1,
+    scheduled_date: '2026-04-10', status: 'planned', instruction_sent_at: null, shipped_at: null,
+    tracking_no: null, carrier: null, user_received_at: null, user_returned_at: null,
+    lab_received_at: null, lab_completed_at: null, synced_at: '2026-10-28T00:00:00Z' },
+];
+const prodBag = (over) => { globalThis.__tableData = { customer_account: { data: ACCOUNT, error: null }, subscription: { data: SUB, error: null }, kit_shipment: { data: SHIPS, error: null }, kit_schedule: { data: [], error: null }, ...over }; };
+
+console.log('\n検査キットの行の供給元 (production)\n');
+
+prodBag({ kit_schedule: { data: SCHED, error: null } });
+SUPA.__queries.length = 0; SUPA.__orders.length = 0;
+{
+  const r = await BQ.loadBridgeBundle(UID, 'production');
+  const got = 'error' in r ? { error: r.error } : r.shipments.map((x) => x.test_type);
+  eq('⑩ kit_schedule があれば ① だけを使う（注文ミラーを混ぜない）', got, ['genetics', 'cancer_urine']);
+  eq('⑩ scheduled_date の昇順に並べる（近い回が先）', got, ['genetics', 'cancer_urine']);
+  eq('⑩ kit_schedule も問い合わせている', SUPA.__queries.includes('kit_schedule'), true);
+  eq('⑩ kit_schedule は scheduled_date の昇順で引く',
+    SUPA.__orders.find((o) => o.table === 'kit_schedule'),
+    { table: 'kit_schedule', col: 'scheduled_date', opts: { ascending: true } });
+  if (!('error' in r)) {
+    const g = r.shipments[0];
+    eq('⑩ test_type は kit_code（testTypeLabel の語彙）', g.test_type, 'genetics');
+    eq('⑩ lab_name に検査会社が入る（注文ミラーは null 固定だった）', g.lab_name, 'Genoplan');
+    eq('⑩ 予定だけの行は日時列が 1 つも埋まらない（段階 1「出荷準備」になる）',
+      [g.shipped_at, g.user_received_at, g.user_returned_at, g.lab_received_at, g.lab_completed_at],
+      [null, null, null, null, null]);
+    eq('⑩ 回の情報を落とさない', [g.subscription_year, g.subscription_seq], [1, 1]);
+    eq('⑩ 予定日は expected_arrival_date に載せる', g.expected_arrival_date, '2026-04-10');
+  }
+}
+
+prodBag({ kit_schedule: { data: [], error: null } });
+{
+  const r = await BQ.loadBridgeBundle(UID, 'production');
+  eq('⑩ kit_schedule が 0 件なら従来どおり注文ミラー（単品・がんチェッカー）',
+    'error' in r ? { error: r.error } : r.shipments.map((x) => x.id), ['s1', 's2']);
+}
+
+// **migration 未適用の環境**: PostgREST は表が無いと 404 / PGRST205 を返す。
+// ここで error を返すとダッシュボードが丸ごと落ちる。
+prodBag({ kit_schedule: { data: null, error: { message: 'relation "kit_schedule" does not exist', code: 'PGRST205' } } });
+logs.length = 0;
+console.error = (...a) => { logs.push(a.map(String).join(' ')); };
+{
+  const r = await BQ.loadBridgeBundle(UID, 'production');
+  eq('⑩ kit_schedule が無い環境でもダッシュボードを落とさない', 'error' in r, false);
+  eq('⑩ その回は注文ミラーで成立させる',
+    'error' in r ? { error: r.error } : r.shipments.map((x) => x.id), ['s1', 's2']);
+  eq('⑩ 黙らせない（理由をログへ残す）', logs.some((l) => l.includes('kit_schedule')), true);
+  eq('⑩ ログに uid を載せない', logs.some((l) => l.includes(UID)), false);
+}
+
+// subscription / kit_shipment の失敗は**従来どおり** error（こちらは握り潰さない）。
+prodBag({ kit_shipment: { data: null, error: { message: 'boom' } } });
+{
+  const r = await BQ.loadBridgeBundle(UID, 'production');
+  eq('⑩ kit_shipment の失敗は従来どおり error', 'error' in r && r.error.includes('kit_shipment'), true);
+}
+prodBag({ subscription: { data: null, error: { message: 'boom' } } });
+{
+  const r = await BQ.loadBridgeBundle(UID, 'production');
+  eq('⑩ subscription の失敗は従来どおり error', 'error' in r && r.error.includes('subscription'), true);
+}
+globalThis.__tableData = undefined;
+
+// ── ⑪ staging は kit_schedule を返さなくても壊れない ────────────────────────
+// `get-bridge-bundle` はこのリポジトリに無く、まだ kit_schedule を返していない。
+stagingEnv();
+seen.length = 0;
+next = { status: 200, body: { success: true, data: { customer: ACCOUNT, subscription: SUB, shipments: SHIPS } } };
+{
+  const r = await BQ.loadBridgeBundle(UID, 'staging');
+  eq('⑪ kit_schedule が応答に無くても従来どおり成立する',
+    'error' in r ? { error: r.error } : r.shipments.map((x) => x.id), ['s1', 's2']);
+}
+next = { status: 200, body: { success: true, data: { customer: ACCOUNT, subscription: SUB, shipments: SHIPS, kit_schedule: SCHED } } };
+{
+  const r = await BQ.loadBridgeBundle(UID, 'staging');
+  eq('⑪ 返るようになったら自動で ① を使う',
+    'error' in r ? { error: r.error } : r.shipments.map((x) => x.test_type), ['genetics', 'cancer_urine']);
+}
+
 console.error = realErr;
 server.close();
 
@@ -245,6 +362,12 @@ console.log('\nソースの約束\n');
   // 失敗を黙って空にしないこと (呼び出し側がログを残す)。
   const dq = read('src/lib/dashboard-queries.ts');
   eq('dashboard-queries が bridge 失敗をログへ残す', /'error' in bundle[\s\S]{0,200}console\.error/.test(dq), true);
+
+  // 供給元の選択は 1 か所だけ (production と staging で規則が分かれない)。
+  eq('供給元の選択は pickShipments 1 か所', (bq.match(/pickShipments\(/g) || []).length, 3);
+  eq('① と ② を連結していない', /\[\s*\.\.\.\s*sched[\s\S]{0,40}\.\.\.\s*ship/.test(bq), false);
+  eq('kit_schedule の失敗で error を返していない',
+    /kit_schedule: \$\{schedErr/.test(bq), false);
 }
 
 console.log('');

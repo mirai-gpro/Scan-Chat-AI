@@ -105,6 +105,79 @@
 3. CSV項目・宛先様式はタカセ様式に準拠（現行CSVを踏襲）。**サブスク解約/停止**時は以降の予定出荷を停止（`gmo_subscription_billing_spec` の契約状態と連動）。
 4. **冪等性**: 同一(契約×回×キット)の二重出荷を防ぐ（出荷済フラグ＝顧客ステータス `instruction_sent` 等）。
 
+#### 2.3.1 実装状況（2026-10-28・1 の「契約時の展開」と Web アプリへの公開まで実装済み）
+
+発注者指示 2026-10-28（「選択された検査プランに含まれる検査キットが、まずデフォルトで表示が
+当たりまえでは？」「今回のテストでは、初回なので遺伝子検査と、がんリスク検査キットが進捗の
+セクションにデフォルト表示では？」）。実装は wellfort-site
+`supabase/migrations/20261028000040_kit_schedule_generation.sql`。
+
+**何が欠けていたか（実測）**: `public.kit_shipment_schedule`（`20260910000020`）は**表が在るだけ**で
+**行を作るコードがリポジトリに 1 件も無かった**。加えて Web アプリが読む
+`app_bridge.kit_shipment` は **1 注文 = 1 行の注文ミラー**で、`test_type` が
+`test_products.category`（「がんリスク検査」等の日本語カテゴリ名）＝**キットの単位を表せない**。
+→ プランを購入してもダッシュボードは「進行中のキットはありません」のままだった。
+
+**実装したもの**
+
+| 対象 | 中身 |
+|---|---|
+| `public.next_business_day(date)` | 非営業日なら翌営業日。**曜日では判定しない**（その規則は仕様に無い）。行が無い日は営業日。14 日先まで非営業日なら元の日付を返す |
+| `public.generate_kit_shipment_schedule(subscription_id, cycle_year)` | 契約 1 件 × 契約年 1 年ぶんを展開。**冪等**（既存行は `DO NOTHING` で触らない＝運用者が動かした予定日と `instruction_sent_at` を壊さない） |
+| `public.generate_missing_kit_schedules()` | active な全契約の取りこぼしを作る。**到達済みの契約年まで**（先の年を前倒しで作らない） |
+| トリガ `subscriptions_generate_kit_schedule` | `status` が `active` になったら初年度ぶんを作る |
+| `app_bridge.kit_schedule` | Web アプリへの公開ミラー（**回ごと・キットごと**） |
+| `app_bridge.refresh_kit_schedule(p_since, p_schedule_id)` ＋ トリガ 2 本 | 正本（`kit_shipment_schedule` / `kit_lifecycle`）が動いたらミラーも動く |
+| Edge Function `sync-app-bridge` ＋ `app-bridge-sync-cron.yml` | 日次の受け皿（① 取りこぼしの生成 → ② `app_bridge.refresh_all`。**順序に意味がある**） |
+
+**発送回数の正本は `ship_rule`**（`qty_per_year` は年間本数の控え。食い違ったら `ship_rule` が勝つ）。
+`every` = その年の全回 / `annual` = その年の 1 回目だけ / `first_only` = 初年度の 1 回目だけ（生涯 1 回）/
+`none` = 予定を作らない。
+
+**守った線**
+
+- **個人購入の本線（`create-order` / `gmo-return` / `amazon-pay/complete`）を 1 バイトも変えていない。**
+  3 つの入口はいずれも決済成立時に `status` を `active` へ昇格させるので、トリガ 1 本で全経路を拾える
+  （法人契約の `active` 直挿入も同じ）。
+- **`app_bridge.kit_shipment` を触らない。** あちらは注文ミラーで個人購入の本線が読んでいる。
+- **トリガは例外を外へ出さない。** 決済確定の UPDATE と同じトランザクションで走るので、
+  ここで `RAISE` すると**決済が通ったのに注文が確定しない**。`WARNING` に落として進め、
+  取りこぼしは日次バッチが拾う（`generated` が毎日 0 でなければ兆候）。
+- **pin を書き戻さない。** `plan_composition_id` が無い契約は現行版で代替するだけ
+  （`subscriptions` を UPDATE するとトリガが再帰する）。取りこぼしの pin は
+  `scripts/backfill-subscription-composition.sql`。
+
+**実装で見つけたバグ 1 件（この検査が無ければ本番で静かに壊れていた）**:
+ミラー同期トリガで `CASE TG_TABLE_NAME WHEN 'kit_lifecycle' THEN NEW.schedule_id ELSE NEW.id END`
+と書いたところ、PL/pgSQL は式をまとめて解決するため **`kit_shipment_schedule` のトリガでも
+`NEW.schedule_id` の解決が走り** `record "new" has no field "schedule_id"` で落ちた
+（CASE の分岐は評価されないのに落ちる）。これが上の「例外を外へ出さない」ハンドラに吸われ、
+**決済は通るのに出荷予定が 1 行も作られない**＝画面は「進行中のキットはありません」のまま、
+という元の症状と見分けが付かない状態になっていた。表ごと・`TG_OP` ごとに文を分けて解決。
+
+**Web アプリ側（Scan-Chat-AI）**: `src/lib/bridge-queries.ts` が `kit_schedule` を読む。
+**① が 1 行でもあれば ① だけを使い、② を混ぜない**（両方並べると同じ回について「プラン 1 行」と
+「キット 3 行」が同時に出る）。① が無い契約（単品購入・がんチェッカー・migration 未適用の環境）は
+従来どおり ②。`kit_schedule` が読めない環境ではログだけ残して ② で成立させる
+（**migration 適用前にアプリを配ってもダッシュボードを落とさない**）。
+予定だけの行は日時列が 1 つも埋まらないので `shipmentLabel` が**段階 1「出荷準備」**を返す
+＝発注者の求めた「出荷前（または準備中）」の表示になる。
+
+**検証**: wellfort-site `npm run verify:kit-schedule`（70 件・CI の `kit-schedule` job）/
+Scan-Chat-AI `npm run verify:staging-bridge`（⑩⑪ を追加・CI の A 層）。
+**退行注入 21 種**（DB 15 ＋ Scan 6）とも名指しで落ちることを確認済み。
+**うち 3 件は注入して初めて検査の穴が見つかり直した** — ①`prosrc LIKE '%名前%'` が
+**コメントの中の文字列に当たっていた**（呼び出しをコメントへ置き換える退行が素通り）
+②「読めない」だけでは表の権限を固定できない（`anon`/`authenticated` は
+`app_bridge` スキーマの USAGE を持たないので、表に SELECT を与えても読めないまま通る）
+③`verify-staging-bridge.mjs` がスタブの記録をモジュール変数に置いており、
+**supabase.ts の実体が 2 つできるため既存の `__clientCalls.length === 0` 系が空振りで通っていた**
+（記録先を `globalThis` へ移し、「staging が production へ落ちない」が初めて実際に測れるようになった）。
+
+**まだ 2〜4 は未実装**: 各予定日の出荷指示 CSV 生成（`cron-shipping` のスケジュール参照型への拡張）・
+解約時の予定停止（いまは `status` を `cancelled` にすればミラーから消えるところまで）・
+出荷済フラグによる二重出荷の実運用。
+
 ---
 
 ## 3. 要件② Webアプリ 検査キット・ライフサイクル管理

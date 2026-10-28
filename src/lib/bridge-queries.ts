@@ -6,11 +6,26 @@
  * 旧 customer スキーマ由来の型へアダプトする (欠落カラムは null)。
  *   - 検査結果系 (lab_received_at / lab_completed_at 等) は #1 に存在しない → null。
  *     「検査完了」表示は #2 (test_artifacts) 側で別途扱う。
+ *
+ * ── 検査キットの行は 2 つの供給元がある (2026-10-28) ────────────────────────
+ *   ① `kit_schedule` … **契約 × 回 × キット**の出荷予定
+ *      (wellfort-site migration 20261028000040)。`kit_code` が
+ *      genetics / cancer_urine / blood / ai_prediction なので
+ *      `testTypeLabel` にそのまま当たる。**こちらが本来の「検査キット」。**
+ *   ② `kit_shipment` … **1 注文 = 1 行の注文ミラー**。`test_type` は
+ *      `test_products.category` の日本語ラベル (「がんリスク検査」等) で、
+ *      プランの単位でキットの単位ではない。
+ *
+ *   **① が 1 行でもあれば ① だけを使う。** 両方を並べると、同じ回について
+ *   「プラン 1 行」と「キット 3 行」が同時に出る。① が無い契約
+ *   (単品購入・がんチェッカー・migration 未適用の環境) は従来どおり ②。
  */
 
 import { getBridgeSupabase, getStagingBridgeEndpoint, type BridgeOrigin } from './supabase';
 import type { CustomerProfile, KitShipment, Subscription } from '../types/supabase';
-import type { BridgeCustomerAccount, BridgeKitShipment, BridgeSubscription } from '../types/supabase-bridge';
+import type {
+  BridgeCustomerAccount, BridgeKitSchedule, BridgeKitShipment, BridgeSubscription,
+} from '../types/supabase-bridge';
 
 export interface CustomerBundle {
   customer: CustomerProfile | null;
@@ -99,6 +114,68 @@ function adaptShipment(s: BridgeKitShipment): KitShipment & { lab_name: string |
 }
 
 /**
+ * kit_schedule (bridge) → KitShipment 形 + lab_name。
+ *
+ * `shipmentLabel` は日時列だけを見て段階を決める (`dashboard-queries.ts`)。
+ * 予定だけの行は日時が 1 つも入らないので **段階 1「出荷準備」**になる —
+ * 購入直後にプラン同梱のキットが「出荷準備」で並ぶのが狙いの挙動。
+ * **`status` から段階を作り直さない** (同じ判定を 2 か所に置かない)。
+ */
+function adaptSchedule(s: BridgeKitSchedule): KitShipment & { lab_name: string | null } {
+  return {
+    id: s.id,
+    order_id: '',
+    customer_id: s.diagnostic_user_id,
+    lab_company_id: '',
+    // `testTypeLabel` のキーと同じ語彙。null は type に落とさず空文字を渡す
+    // (`testTypeLabel` は未知のキーをそのまま名前として返すため)。
+    test_type: s.kit_code ?? '',
+    subscription_id: s.subscription_id,
+    subscription_year: s.cycle_year,
+    subscription_seq: s.cycle_seq,
+    warehouse: null,
+    shipped_at: s.shipped_at,
+    tracking_no: s.tracking_no,
+    carrier: s.carrier,
+    carrier_tracking_url: null,
+    expected_arrival_date: s.scheduled_date,
+    requested_arrival_date: null,
+    requested_time_window: null,
+    requested_at: null,
+    requested_lock_at: null,
+    user_received_at: s.user_received_at,
+    user_returned_at: s.user_returned_at,
+    lab_received_at: s.lab_received_at,
+    lab_completed_at: s.lab_completed_at,
+    notes: null,
+    created_at: s.synced_at ?? new Date().toISOString(),
+    // 検査会社名は wellfort-site の `test_kits.lab_company` から来る
+    // (注文ミラー ② は持たないので null 固定だった)。
+    lab_name: s.lab_company,
+  };
+}
+
+/**
+ * 検査キットの行をどちらの供給元から採るか決める (冒頭の ①② の規則)。
+ *
+ * **① が 1 行でもあれば ① だけ。** ② を混ぜない。
+ * ① は `scheduled_date` の昇順 (= 近い回が先) で並べる — ② は `shipped_at` の
+ * 降順で引いているが、予定だけの行は `shipped_at` が null なので
+ * その並びでは順序が決まらない。
+ */
+function pickShipments(
+  schedule: BridgeKitSchedule[],
+  shipments: BridgeKitShipment[],
+): (KitShipment & { lab_name: string | null })[] {
+  if (schedule.length > 0) {
+    return [...schedule]
+      .sort((a, b) => (a.scheduled_date ?? '').localeCompare(b.scheduled_date ?? ''))
+      .map(adaptSchedule);
+  }
+  return shipments.map(adaptShipment);
+}
+
+/**
  * app_bridge から顧客バンドルを取得。bridge 未構成時に呼ばれた場合は error を返す。
  */
 /** `get-bridge-bundle` の応答 (staging)。中身は app_bridge の生の行。 */
@@ -108,6 +185,13 @@ interface StagingBundleResponse {
     customer: BridgeCustomerAccount | null;
     subscription: BridgeSubscription | null;
     shipments: BridgeKitShipment[] | null;
+    /**
+     * **省略可**。staging の `get-bridge-bundle` はこのリポジトリに無く
+     * (wellfort-site 側へ別途デプロイされている関数)、まだ `kit_schedule` を
+     * 返していない。返るようになったら自動で ① が使われる。
+     * **無いことをエラーにしない** — 返らない間は従来どおり ② で成立させる。
+     */
+    kit_schedule?: BridgeKitSchedule[] | null;
   } | null;
   error?: string;
 }
@@ -169,10 +253,11 @@ async function loadStagingBundleViaFunction(uid: string): Promise<CustomerBundle
 
   const sub = payload.data?.subscription ?? null;
   const ships = payload.data?.shipments ?? [];
+  const sched = payload.data?.kit_schedule ?? [];
   return {
     customer: adaptCustomer(account),
     subscription: sub ? adaptSubscription(sub, account.hp_customer_id) : null,
-    shipments: ships.map(adaptShipment),
+    shipments: pickShipments(sched, ships),
   };
 }
 
@@ -201,6 +286,7 @@ export async function loadBridgeBundle(
   const [
     { data: subRaw, error: subErr },
     { data: shipRaw, error: shipErr },
+    { data: schedRaw, error: schedErr },
   ] = await Promise.all([
     bridge
       .from('subscription')
@@ -215,13 +301,31 @@ export async function loadBridgeBundle(
       .eq('diagnostic_user_id', uid)
       .order('shipped_at', { ascending: false })
       .limit(10),
+    bridge
+      .from('kit_schedule')
+      .select('*')
+      .eq('diagnostic_user_id', uid)
+      .order('scheduled_date', { ascending: true })
+      .limit(40),
   ]);
   if (subErr) return { error: `subscription: ${subErr.message}` };
   if (shipErr) return { error: `kit_shipment: ${shipErr.message}` };
 
+  /*
+   * **`kit_schedule` の失敗ではダッシュボードを落とさない。**
+   * この表は wellfort-site の migration 20261028000040 で足したもので、
+   * **未適用の環境では存在しない** (PostgREST は 404 / `PGRST205` を返す)。
+   * そこで error を返すと、migration を当てる前にアプリを配った瞬間に
+   * ダッシュボードが丸ごとエラーになる。②へ落ちれば従来の表示で成立する。
+   * **黙らせはしない** — 理由をサーバログに残す (PII は載せない)。
+   */
+  if (schedErr) {
+    console.error('[bridge] kit_schedule を読めませんでした (kit_shipment で代替):', schedErr.message);
+  }
+
   return {
     customer: adaptCustomer(account),
     subscription: subRaw ? adaptSubscription(subRaw, account.hp_customer_id) : null,
-    shipments: (shipRaw ?? []).map(adaptShipment),
+    shipments: pickShipments(schedRaw ?? [], shipRaw ?? []),
   };
 }
