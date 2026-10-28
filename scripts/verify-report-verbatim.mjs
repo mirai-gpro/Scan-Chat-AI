@@ -67,6 +67,18 @@ const ALLOW = new Map([
   ['第 回 / 全 回', '表紙の台帳。検査サイクルの回数 (当社が持つ事実)'],
   ['端末や OS の版によって、メニューの名前が変わることがあります。 保存した紙面は、この画面を開かなくても読めます。',
     '保存手順の注記。報告書の中身ではなく端末操作の説明'],
+
+  /*
+   * ── 医療免責 (発注者指示 2026-10-28・spec §4.15) ─────────────────
+   * **操作の語ではない唯一の当社文**なので、ここだけ別枠で理由を書く。
+   *
+   * 許してよいと判断した根拠: これは**報告書の中身ではなく、報告書全体の位置づけ**を
+   * 述べた文で、「診断ではない」と**否定**している。この検査が止めたい「当社が
+   * 診断の中身を名乗ること」(判定 / 所見 / 基準値 …) とは向きが逆。
+   * **Elith が書いていない所見・判定・助言をここへ足さないこと。**
+   */
+  ['本アドバイスは一般的な健康情報の提供を目的としたものであり、医師による診断・治療に代わるものではありません。',
+    '医療免責 (発注者指示 2026-10-28)。診断の中身ではなく、報告書全体の位置づけを示す定型文'],
 ]);
 
 /** template だけを取り出し、コメントを落とす。 */
@@ -118,7 +130,38 @@ for (const [path, text] of [
   ['src/pages/report.astro', templateOf('src/pages/report.astro')],
   ['src/lib/report-sections.ts', readFileSync('src/lib/report-sections.ts', 'utf8')
     .replace(/\/\*[\s\S]*?\*\//g, '').replace(/^\s*\/\/[^\n]*$/gm, '')],
+  /*
+   * 医療免責は小さな部品に切り出してある (画面と印刷で同じ文言を使うため)。
+   * **切り出した先もここで読む** — 読まないと、部品へ移すだけでこの検査を
+   * すり抜けられることになる (紙面に出る文は置き場所に関わらず全部数える)。
+   */
+  ['src/components/ReportDisclaimer.astro', templateOf('src/components/ReportDisclaimer.astro')],
 ]) for (const lit of literalsOf(text)) if (!found.has(lit)) found.set(lit, path);
+
+/*
+ * ── 紙面を作るファイルを数え落とさない ────────────────────────────
+ *
+ * **退行注入で見つかった穴 (2026-10-28)**: 文言を部品へ切り出して、この上の
+ * 読み込みリストから外すだけで**検査ごとすり抜けた** (ALLOW も逐語も要らなくなる)。
+ * 文言の置き場所を変えるだけで検査が効かなくなるなら、検査の意味が無い。
+ *
+ * → `report.astro` が読み込む `.astro` 部品を**全部数え**、
+ *   ①上で読んでいる ②「紙面を作らない」と**理由つきで**宣言してある
+ *   のどちらでもなければ落とす。**新しい部品は、どちらかを書くまで通らない。**
+ */
+const NOT_SHEET = new Map([
+  ['src/components/AppIcon.astro', 'アイコンの静的マッピング。紙面の文を持たない'],
+  ['src/components/BackToDashboard.astro', '紙面の外のナビゲーション (ダッシュボードへ戻る導線)'],
+  ['src/components/AppNav.astro', '紙面の外のヘッダ (全画面共通のナビゲーション)'],
+  ['src/components/ImpersonationBanner.astro', '紙面の外の帯。admin の代理表示中だけ出る'],
+  ['src/layouts/BaseLayout.astro', '紙面の外の器 (全画面共通のレイアウト)'],
+]);
+const scanned = new Set(['src/pages/report.astro', 'src/lib/report-sections.ts',
+  'src/components/ReportDisclaimer.astro']);
+const reportRaw = readFileSync('src/pages/report.astro', 'utf8');
+const unchecked = [...reportRaw.matchAll(/^import\s+\w+\s+from\s+'(\.\.\/[^']+\.astro)';/gm)]
+  .map((m) => 'src/' + m[1].replace(/^\.\.\//, ''))
+  .filter((f) => !scanned.has(f) && !NOT_SHEET.has(f));
 
 /*
  * 【短い語に部分文字列一致を使わない・2026-09-18 に実証】
@@ -186,6 +229,12 @@ if (placeholders.length) {
   for (const q of placeholders) console.log(`  ✗ ${q}`);
   console.log('  → 受領 JSON に無い欄を "欄はあるが該当なし" のように見せることになります。');
   console.log('    欄ごと作らないこと (ALLOW では許可できません)。');
+}
+if (unchecked.length) {
+  failed += unchecked.length;
+  console.log(`\n✗ 読み込みリストにも「紙面を作らない」宣言にも無い部品が ${unchecked.length} 件あります:`);
+  for (const f of unchecked) console.log(`  ✗ ${f}`);
+  console.log('  → 紙面の文を持つなら上の読み込みリストへ、持たないなら NOT_SHEET へ理由つきで足すこと。');
 }
 if (!failed) console.log('\n✓ 紙面の文言はすべて受領 JSON の逐語か、理由つきで許可したものです');
 process.exit(failed ? 1 : 0);

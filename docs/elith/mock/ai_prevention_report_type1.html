@@ -166,6 +166,7 @@
   .lead{display:flex;flex-direction:column;gap:.55rem}
   .lead>p{font-size:.92rem;line-height:1.8;max-width:38em}
   .src{font-family:var(--mono);font-size:.68rem;color:var(--faint);margin-top:.15rem}
+  .disclaimer{border-top:1px solid var(--rule);margin-top:1.1rem;padding-top:.9rem;color:var(--faint);font-size:.84rem;line-height:1.8}
   .banner{margin:0 auto 1rem;padding:.7rem 1rem;background:var(--teal-bg);
           border-left:4px solid var(--teal);font-size:.84rem;color:var(--soft)}
 
@@ -415,6 +416,12 @@
       単品購入版は<b>見出し 39 か所</b>、このコースプラン版は<b>74 か所</b>。
       同じレンダラで倍近い分量を扱います。<b>章の順序・表示可否・開閉はコードに埋めず設定に出します</b>（仕様書 §1.3）。
     </div>
+
+    <!-- 医療免責 (発注者指示 2026-10-28)。
+         **画面** = 全編の最後・「手元に残す」の前 / **PDF** = 本文の最後・リファレンスの前。
+         Elith の受領 JSON には無い当社の文で、報告書全体の位置づけを示す定型文。
+         `data-card` を付けないので紙面契約には入らない (契約は中身だけを見る)。 -->
+    <div class="disclaimer">本アドバイスは一般的な健康情報の提供を目的としたものであり、医師による診断・治療に代わるものではありません。</div>
 
   </div>
 </div>

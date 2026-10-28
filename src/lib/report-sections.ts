@@ -109,6 +109,15 @@ export const CHAPTER_REGISTRY: readonly ChapterSpec[] = [
   { key: 'references',     label: '',             sourceKey: 'references',     axis: 'b', collapsed: true },
 ] as const;
 
+/**
+ * リファレンス (Elith が本文の最後に置く参照元の一覧) の章キー。
+ *
+ * **医療免責の置き場所がこれを基準にしている** (発注者指示 2026-10-28・spec §4.15):
+ * 印刷の紙面では免責を**この章の前**に出す = 参照元の一覧が紙面の最後に残る。
+ * 文字列を画面側へ書き写さないため、ここを唯一の定義にする。
+ */
+export const REFERENCES_CHAPTER_KEY = 'references';
+
 const KNOWN_KEYS = new Set(CHAPTER_REGISTRY.map((c) => c.key));
 
 export interface ResolvedChapters {

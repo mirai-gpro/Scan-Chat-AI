@@ -665,6 +665,77 @@ for (const [width, height, label] of SIZES) {
   await ctx.close();
 }
 
+// ── ⑧ 医療免責の置き場所 (発注者指示 2026-10-28・spec §4.15) ──────────
+/*
+ * **画面と印刷で出す場所が違う**のがこの指示の要点なので、両方を実測で固定する。
+ *   画面 … 全編の最後・**「手元に残す」の前**
+ *   印刷 … 本文の最後・**リファレンスの章の前** (参照元の一覧を紙面の最後に残す)
+ *
+ * **ここは静かに壊れる** — 位置がずれても文は画面に出ているので、
+ * 契約の検査 (①) も逐語の検査も緑のまま通る。だから DOM の順番を数える。
+ * 文言は 1 か所 (`ReportDisclaimer.astro`) が持つので、**画面と印刷で同じ文**
+ * であることも見る (違っていたら、保存した控えと画面で別のことを言う)。
+ */
+{
+  const EXPECTED = '本アドバイスは一般的な健康情報の提供を目的としたものであり、医師による診断・治療に代わるものではありません。';
+  const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
+  const page = await ctx.newPage();
+  const read = async (url) => {
+    await page.goto(url, { waitUntil: 'networkidle' });
+    return page.evaluate(() => {
+      /** DOM に現れる順番。**位置そのものを見たいので座標ではなく順番で数える。** */
+      const order = new Map();
+      let n = 0;
+      const w = document.createTreeWalker(document.body, NodeFilter.SHOW_ELEMENT);
+      while (w.nextNode()) order.set(w.currentNode, n++);
+      const at = (el) => (el ? order.get(el) ?? -1 : -1);
+      const all = [...document.querySelectorAll('[data-report-disclaimer]')];
+      const chapters = [...document.querySelectorAll('details.rp-card')];
+      const refs = chapters.find((c) => c.id.endsWith('references')) ?? null;
+      return {
+        count: all.length,
+        text: (all[0]?.textContent ?? '').trim(),
+        px: all[0] ? parseFloat(getComputedStyle(all[0]).fontSize) : 0,
+        disc: at(all[0]),
+        refs: at(refs),
+        lastChapter: at(chapters[chapters.length - 1] ?? null),
+        save: at(document.getElementById('save-section')),
+        chapters: chapters.length,
+      };
+    });
+  };
+
+  const scr = await read(`${BASE}/report?preview=2`);
+  const prn = await read(`${BASE}/report?preview=2&print=1`);
+
+  for (const [label, r] of [['画面', scr], ['印刷', prn]]) {
+    const one = r.count === 1;
+    console.log(`${one ? '✓' : '✗'} ⑧ ${label}: 医療免責が ${r.count} 件`);
+    if (!one) fails.push(`⑧ ${label}: 医療免責が ${r.count} 件 (1 件であること)`);
+    const sameText = r.text === EXPECTED;
+    console.log(`${sameText ? '✓' : '✗'} ⑧ ${label}: 文言が指示どおり`);
+    if (!sameText) fails.push(`⑧ ${label}: 文言が違う「${r.text.slice(0, 40)}」`);
+    /* 禁止事項「12px 以下を作らない」。免責は小さく出したくなるので対で見る。 */
+    const big = r.px >= 13;
+    console.log(`${big ? '✓' : '✗'} ⑧ ${label}: 級数 ${r.px}px`);
+    if (!big) fails.push(`⑧ ${label}: 医療免責が ${r.px}px (12px 以下を作らない)`);
+  }
+
+  /* 画面 = 全編の最後 (= 最後の章より後) かつ「手元に残す」より前。 */
+  const scrOk = scr.disc > scr.lastChapter && scr.save > scr.disc;
+  console.log(`${scrOk ? '✓' : '✗'} ⑧ 画面: 全編の最後 → 医療免責 → 手元に残す`
+    + ` (章 ${scr.lastChapter} / 免責 ${scr.disc} / 手元に残す ${scr.save})`);
+  if (!scrOk) fails.push('⑧ 画面: 医療免責が「全編の最後・手元に残すの前」に無い');
+
+  /* 印刷 = リファレンスの章の直前。**手元に残すは印刷に出ない。** */
+  const prnOk = prn.refs > 0 && prn.disc < prn.refs && prn.refs === prn.lastChapter && prn.save === -1;
+  console.log(`${prnOk ? '✓' : '✗'} ⑧ 印刷: 医療免責 → リファレンス (最後の章)`
+    + ` (免責 ${prn.disc} / リファレンス ${prn.refs} / 最後の章 ${prn.lastChapter})`);
+  if (!prnOk) fails.push('⑧ 印刷: 医療免責がリファレンスの章の前に無い');
+
+  await ctx.close();
+}
+
 await browser.close();
 
 if (fails.length) {
