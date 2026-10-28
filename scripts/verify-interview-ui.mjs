@@ -277,6 +277,9 @@ ok('⑪ 質問が mist の面に乗っている', !!applied?.qbPainted, '');
  * 実機でテレビの音をかなり拾うので、利用者が自分でマイクを切れるようにした。
  * **モジュールを実際に動かして**帯と文言とアイコンが切り替わることを見る
  * (ソース検査だけだと「書いてあるが当たっていない」を見逃す)。
+ *
+ * **既定はオフ** (発注者指示 2026-10-28)。音声入力は押した人だけが使う。
+ * なので作った直後が `off`、1 回押して `on`、もう 1 回で `off` に戻る、で見る。
  */
 const gate = await page.evaluate(async () => {
   const m = await import('/src/scripts/chat/mic-gate.ts');
@@ -302,11 +305,11 @@ const gate = await page.evaluate(async () => {
       icoOff: getComputedStyle(document.querySelector('.mic-gate-ico-off')).display,
     };
   };
-  const on = snap();
+  const off = snap();        // 作った直後 = 既定 (オフ)
   g.toggle();
-  const off = snap();
+  const on = snap();         // 1 回押した = オン
   g.toggle();
-  const back = snap();
+  const back = snap();       // もう 1 回押して既定へ戻る
   // 並び: 質問 → マイクの帯 → 音声ガイダンス
   const after = (a, z) => !!(a.compareDocumentPosition(z) & Node.DOCUMENT_POSITION_FOLLOWING);
   const order = after(document.getElementById('question-text'), gateEl) && after(gateEl, guide);
@@ -315,25 +318,46 @@ const gate = await page.evaluate(async () => {
     && document.querySelectorAll('#speaker-btn').length === 1
     && !document.querySelector('.qb > .flex').contains(btn);
   qa.hidden = wasHidden;
-  return { on, off, back, seen, order, untouched, note: m.MIC_GATE_NOTE_ON, noteOff: m.MIC_GATE_NOTE_OFF };
+  return { on, off, back, seen, order, untouched,
+    note: m.MIC_GATE_NOTE_ON, noteOff: m.MIC_GATE_NOTE_OFF };
 });
-ok('⑫ 帯の文言が「周囲の音を拾う場合、マイクをオフに」', gate.on.note === gate.note, gate.on.note);
-ok('⑫ ボタンは帯の右端・44px 以上', gate.on.w >= 44 && gate.on.h >= 44, `${gate.on.w}x${gate.on.h}`);
-ok('⑫ 点滅は 3 秒周期', gate.on.anim === '3s', gate.on.anim);
+/*
+ * **JS より先に目に入る姿**も見る。`page.content()` は初期化が走ったあとなので
+ * 使えない (`initLiveController` が `createMicGate` で描き直す)。
+ * サーバが返す素の HTML を取り直して、markup の初期値そのものを見る。
+ */
+const rawHtml = await fetch(`${BASE}/chat`).then((r) => r.text());
+const rawGate = /<div[^>]*id="mic-gate"[\s\S]{0,4000}?<\/button>/.exec(rawHtml)?.[0] ?? '';
+/*
+ * **既定はオフ** (発注者指示 2026-10-28)。ここが静かに戻ると、利用者が何もしなくても
+ * 周囲の音が回答として確定し得る (画面は正常に見えるので、音を拾うまで気づけない)。
+ */
+ok('⑫ 既定はオフ — 作った直後の文言が「マイクはオフです…」', gate.off.note === gate.noteOff, gate.off.note);
+ok('⑫ 既定はオフ — 作った直後の aria-label が「マイクをオンにする」',
+  gate.off.label === 'マイクをオンにする', gate.off.label);
+ok('⑫ 既定はオフ — 作った直後は点滅しない', gate.off.anim === '0s', gate.off.anim);
+ok('⑫ JS が走る前の markup もオフの姿 (一瞬だけ録音中に見せない)',
+  rawGate.length > 0
+  && /class="mic-gate off"/.test(rawGate)
+  && rawGate.includes(gate.noteOff)
+  && /aria-label="マイクをオンにする"/.test(rawGate),
+  rawGate ? rawGate.replace(/\s+/g, ' ').slice(0, 160) : '#mic-gate を素の HTML から切り出せなかった');
+ok('⑫ ボタンは帯の右端・44px 以上', gate.off.w >= 44 && gate.off.h >= 44, `${gate.off.w}x${gate.off.h}`);
 ok('⑫ 中止・スピーカーは現状のまま (質問行に足していない)', gate.untouched, '');
 ok('⑫ 質問 → マイクの帯 → 音声ガイダンス の順', gate.order, '');
-// オフ: 文言・ラベル・アイコン・地の色・点滅がすべて変わる
-ok('⑫ オフで文言が変わる', gate.off.note === gate.noteOff, gate.off.note);
-ok('⑫ オフで aria-label が「マイクをオンにする」', gate.off.label === 'マイクをオンにする', gate.off.label);
-ok('⑫ オフで点滅が止まる', gate.off.anim === '0s', gate.off.anim);
-ok('⑫ オフで帯の色が変わる (色だけに頼らないが色も変える)',
-  gate.off.band !== gate.on.band, `${gate.on.band} → ${gate.off.band}`);
+// オン: 文言・ラベル・アイコン・地の色・点滅がすべて変わる
+ok('⑫ オンで文言が「周囲の音を拾う場合、マイクをオフに」', gate.on.note === gate.note, gate.on.note);
+ok('⑫ オンで aria-label が「マイクをオフにする」', gate.on.label === 'マイクをオフにする', gate.on.label);
+ok('⑫ オンで点滅が 3 秒周期になる', gate.on.anim === '3s', gate.on.anim);
+ok('⑫ オンで帯の色が変わる (色だけに頼らないが色も変える)',
+  gate.off.band !== gate.on.band, `${gate.off.band} → ${gate.on.band}`);
 ok('⑫ アイコンが切り替わる (斜線入りになる)',
   gate.on.icoOn !== 'none' && gate.on.icoOff === 'none'
   && gate.off.icoOn === 'none' && gate.off.icoOff !== 'none',
   JSON.stringify([gate.on.icoOn, gate.on.icoOff, gate.off.icoOn, gate.off.icoOff]));
-ok('⑫ もう一度押すと元に戻る', gate.back.note === gate.on.note && gate.back.anim === gate.on.anim, '');
-ok('⑫ 変化のたびに 1 回だけ通知する', JSON.stringify(gate.seen) === '[true,false]', JSON.stringify(gate.seen));
+ok('⑫ もう一度押すと既定 (オフ) に戻る',
+  gate.back.note === gate.off.note && gate.back.anim === gate.off.anim, '');
+ok('⑫ 変化のたびに 1 回だけ通知する', JSON.stringify(gate.seen) === '[false,true]', JSON.stringify(gate.seen));
 
 /*
  * ⑨ 選択画面の中に確認バーが出て、そこから訂正できること (実際に開いて押す)。

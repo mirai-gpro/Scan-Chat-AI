@@ -234,15 +234,22 @@ const linkPrefix = viewerPathPrefix(viewer);
           aria-label が持つ)・**3 秒周期でゆっくり点滅**して「いま録っている」を示す。
           中止・スピーカーは現状のまま触っていない。
         */}
-        <div id="mic-gate" class="mic-gate">
+        {/*
+          **既定はオフ** (発注者指示 2026-10-28)。音声入力は押した人だけが使う。
+          ここの初期表示も**オフの姿**で書いておく — `createMicGate()` が
+          初期描画で同じ状態にするが、**JS が走る前の一瞬だけ「録音中」に見える**のを
+          避けるため。文言は `mic-gate.ts` の `MIC_GATE_NOTE_OFF` と同じにする
+          (ずれたら `verify:interview-ui` が落ちる)。
+        */}
+        <div id="mic-gate" class="mic-gate off">
           <span id="mic-gate-note" class="mic-gate-note" aria-live="polite"
-            >周囲の音を拾う場合、マイクをオフに</span
+            >マイクはオフです。タップで回答してください</span
           >
           <button
             id="mic-gate-btn"
             type="button"
             class="mic-gate-btn"
-            aria-label="マイクをオフにする"
+            aria-label="マイクをオンにする"
           >
             <span class="mic-gate-ico mic-gate-ico-on"><AppIcon name="mic" size={22} /></span>
             <span class="mic-gate-ico mic-gate-ico-off"><AppIcon name="mic-off" size={22} /></span>
