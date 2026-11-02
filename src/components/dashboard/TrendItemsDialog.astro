@@ -76,7 +76,18 @@ const storageKey = `welltect.trend.items.${scope}`;
 
     <footer class="flex flex-shrink-0 flex-wrap items-center gap-3 border-t border-slate-200 px-5 py-4">
       <span id="trend-settings-count" class="tnum text-sm text-slate-600"></span>
-      <button type="button" id="trend-settings-reset" class="min-h-touch text-base font-semibold text-brand-700 hover:underline">既定に戻す</button>
+      <!--
+        **いまの選択が既定と同じときは押せなくする** (発注者報告 2026-11-02)。
+        以前は常に押せたが、**開いた直後はつねに「既定 (か保存済み)」そのもの**なので、
+        何も触らずに押すと**何も起こらない** — 利用者には「反応しない」としか見えない。
+        とくに AI疾病予測・がんリスクは**候補 = 既定**なので、保存済みの選択が無い限り
+        この操作に意味が出る瞬間が無かった。
+      -->
+      <button
+        type="button"
+        id="trend-settings-reset"
+        class="min-h-touch text-base font-semibold text-brand-700 hover:underline disabled:cursor-default disabled:text-slate-400 disabled:hover:no-underline"
+      >既定に戻す</button>
       <button
         type="button"
         id="trend-settings-apply"
@@ -93,6 +104,7 @@ const storageKey = `welltect.trend.items.${scope}`;
     if (!panel || !openBtn) return;
     const boxes = () => [...panel.querySelectorAll('input[name="trend-item"]')];
     const countEl = document.getElementById('trend-settings-count');
+    const resetBtn = document.getElementById('trend-settings-reset');
 
     const read = () => {
       try {
@@ -122,9 +134,26 @@ const storageKey = `welltect.trend.items.${scope}`;
       if (empty) empty.hidden = shown > 0;
     };
 
+    /** いまの選択が既定と同じか (順序は見ない)。 */
+    const sameAsDefaults = () => {
+      const cur = boxes().filter((b) => b.checked).map((b) => b.value);
+      const def = [...new Set(defaults)];
+      return cur.length === def.length && cur.every((v) => def.includes(v));
+    };
+
     const syncCount = () => {
       const n = boxes().filter((b) => b.checked).length;
-      if (countEl) countEl.textContent = `${n} / ${max} 件`;
+      /*
+       * **「既定に戻す」で何が起きるかを、押す前に見せる。**
+       * 戻す先と同じ状態なら押せなくし、件数の横に「既定のまま」と出す
+       * (押せるのに何も起きない、が「反応しない」と報告された原因)。
+       */
+      const same = sameAsDefaults();
+      if (countEl) countEl.textContent = same ? `${n} / ${max} 件・既定のまま` : `${n} / ${max} 件`;
+      if (resetBtn) {
+        resetBtn.disabled = same;
+        resetBtn.title = same ? 'いまの選択が既定と同じです' : '選択を既定に戻します（反映は「この内容で表示」）';
+      }
       // 上限に達したら未選択を押せなくする (減らせば戻る)。
       boxes().forEach((b) => { b.disabled = !b.checked && n >= max; });
     };
@@ -151,7 +180,7 @@ const storageKey = `welltect.trend.items.${scope}`;
     document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && !panel.hidden) close(); });
     panel.addEventListener('change', (e) => { if (e.target?.name === 'trend-item') syncCount(); });
 
-    document.getElementById('trend-settings-reset')?.addEventListener('click', () => setChecks(defaults));
+    resetBtn?.addEventListener('click', () => setChecks(defaults));
     document.getElementById('trend-settings-apply')?.addEventListener('click', () => {
       const list = boxes().filter((b) => b.checked).map((b) => b.value);
       write(list);
