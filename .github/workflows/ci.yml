@@ -133,6 +133,9 @@ jobs:
       # スペシャルが cron に戻っても「納品できている」ようにしか見えず、
       # 逆に契約者が母集団から落ちても画面は正常に見える。どちらも目視では守れない。
       - run: npm run verify:special-account-management
+      # 検査パイプライン進捗管理の事実 API (read-only)。引けなかった表を「無い」と
+      # 返す退行は画面上は正常に見えるので、ここで見張る。
+      - run: npm run verify:pipeline-progress-facts
       - run: npm run verify:blood-csv
       - run: npm run verify:blood-parser
       - run: npm run verify:intake-scope
