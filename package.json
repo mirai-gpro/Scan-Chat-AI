@@ -75,6 +75,7 @@
     "verify:ala-pds": "node scripts/verify-ala-pds.mjs",
     "verify:special-additional-tests": "node scripts/verify-special-additional-tests.mjs",
     "verify:special-account-management": "node scripts/verify-special-account-management.mjs",
+    "verify:pipeline-progress-facts": "node scripts/verify-pipeline-progress-facts.mjs",
     "verify:email-auth": "node scripts/verify-email-auth.mjs",
     "verify:transcosmos-test-data": "node scripts/verify-transcosmos-test-data.mjs",
     "verify:external-id-capture": "node scripts/verify-external-id-capture.mjs",
