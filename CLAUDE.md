@@ -2591,6 +2591,31 @@ Vercel の 4.5 MB は **関数を通るデータにだけ**かかる。**ファ�
   `docs/lab/lab_integration_workflow.md` §1.1)。氏名OCRのみでの顧客割当確定は禁止。
 
 #### DB 権限まわりの既知の宿題 (総合テスト時に必ず潰す・2026-08-20)
+
+> **【2026-11-19・本番で実測 → 是正 migration を用意】下の 2 項目 ([最重要] と `dev_authn_write`) は
+> 宿題のまま本番に残っていた。** `pg_policies` 実測で `dev_read_all` / `dev_authn_write` が
+> **customer 6 表 + diagnosis 11 表 = 17 表**に有効 (= 公開用キーだけで検査値・報告書・ウェルネス年齢・
+> `app_users` の全行が読める)。原因は「表を作るたびに前の表の書き方を写した」こと —
+> 9 表 (scan_jobs / shared_access_* / admin_impersonation_* / elith_delivery_items / elith_delivery_runs /
+> lab_test_id_captures) は個別に閉じたが、**7 表は開発用の書き方を写して作られ**
+> (例 `20260820000010:84-92`)、初期の 10 表は一度も処理されなかった。
+> - **是正 = `20261119000010_close_dev_policies.sql`** (未適用・**要 `db push`**)。customer / diagnosis の
+>   dev_ ポリシーを名指しせず全部 drop / 全表 RLS 有効 / 全表・全シーケンスを anon・authenticated から revoke /
+>   default privileges も revoke / service_role は残す。**冪等・DDL のみ**。
+> - **閉じても壊れない根拠**: アプリのデータ処理は全部 `getServerSupabase()` (service_role)。ブラウザで
+>   公開用キーを使うのは `sb.auth.*` と Storage の署名付き upload だけで、表は 0 件。wellfort-site の
+>   notices-admin・本リポジトリの sync-announcements も service_role。→ **アプリより先に適用してよい**。
+> - **書き込みについての訂正**: `dev_authn_write` は残っているが、リポジトリの migration が
+>   anon / authenticated に付与している表権限は **SELECT だけ**なので、リポジトリどおりなら
+>   **書き込みは表権限で止まる** (ローカル PG16 で全 migration を当てて実測: authenticated の UPDATE は
+>   `permission denied`)。**本番の表権限がリポジトリと一致しているかは未確認**
+>   (`information_schema.role_table_grants` で anon / authenticated の非 SELECT 権限を見る)。
+> - **検証**: `npm run verify:dev-policies-closed` (静的・CI の A 層。閉じる migration の中身 / 後続 migration が
+>   開発用の書き方を写さない / 新しい表に明示 revoke / ブラウザ側が表に触らない。**退行注入 8 種**で名指しに落ちる) /
+>   `npm run verify:anon-db-access` (適用後に本番へ**公開用キーで GET だけ**。中身は表示しない。
+>   200 は 0 行でも FAIL)。ローカル PG16 で「17 表 34 ポリシー再現 → 適用 → 0 本・anon/authenticated 権限 0・
+>   anon 読み取り `permission denied`・service_role は読み書き可・再適用も成功・今後作る表にも付与されない」を確認済み。
+
 Supabase database linter の指摘を棚卸しした結果。**テストフェーズの前提 (admin なら誰でも同じ
 データが見える) を維持するため、今は直さない**。本番相当へ切り替える段で以下を必ず処理する。
 - **[最重要] `customer` スキーマの PII が anon キーで読める**。
