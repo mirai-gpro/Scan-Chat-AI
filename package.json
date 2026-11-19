@@ -59,6 +59,8 @@
     "verify:scan-upload-key": "esbuild scripts/verify-scan-upload-key.ts --bundle --platform=node --format=esm --log-level=error --outfile=node_modules/.cache/verify-scan-upload-key.mjs && node node_modules/.cache/verify-scan-upload-key.mjs",
     "verify:scan-pages": "node scripts/verify-scan-pages.mjs",
     "verify:db-enums": "node scripts/verify-db-enums.mjs",
+    "verify:dev-policies-closed": "node scripts/verify-dev-policies-closed.mjs",
+    "verify:anon-db-access": "node scripts/verify-anon-db-access.mjs",
     "verify:report-batch": "node scripts/verify-report-batch.mjs",
     "verify:measurement-status": "node scripts/verify-measurement-status.mjs",
     "verify:trend-series": "node scripts/verify-trend-series.mjs",

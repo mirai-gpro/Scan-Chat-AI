@@ -111,6 +111,11 @@ jobs:
       # source='admin_batch' が CHECK に無く insert が全件 23514 で失敗していたのに、
       # 応答の dashboard.reason にしか出ず**画面は成功に見えていた**。鍵もサーバも要らない。
       - run: npm run verify:db-enums
+      # customer / diagnosis の表を公開用キーへ開いていないか (2026-11-19 の本番実測の固定)。
+      # 開発用の dev_read_all / dev_authn_write が本番 17 表に残り、公開用キーだけで
+      # 検査値・報告書が読める状態だった。表を足すたびに前の書き方を写すと再発する。
+      # 本番への実地確認は verify:anon-db-access (鍵が要るので CI には入れない)。
+      - run: npm run verify:dev-policies-closed
       # 検査値を読むクエリが active な artifact に絞っているか (2026-09-27)。
       # 絞り忘れると差し替え前・取り下げ後の値が画面に混ざるが、**エラーは出ない**。
       - run: npm run verify:measurement-status
